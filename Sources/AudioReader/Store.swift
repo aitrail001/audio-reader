@@ -79,6 +79,15 @@ final class LibraryStore: @unchecked Sendable {
         return Persistence.loadTranscriptJSON(chapterID: chapterID, audioPath: audioPath)
     }
 
+    func loadAllTranscripts() -> [Transcript] {
+        lock.lock()
+        defer { lock.unlock() }
+        return query("SELECT json FROM transcripts").compactMap { row in
+            guard let data = row["json"]?.data(using: .utf8) else { return nil }
+            return try? JSONDecoder.iso.decode(Transcript.self, from: data)
+        }
+    }
+
     // MARK: - Vocab
 
     func loadVocab() -> [VocabEntry] {
@@ -94,6 +103,10 @@ final class LibraryStore: @unchecked Sendable {
     func upsertVocab(_ entry: VocabEntry) {
         lock.lock()
         defer { lock.unlock() }
+        upsertVocabUnlocked(entry)
+    }
+
+    private func upsertVocabUnlocked(_ entry: VocabEntry) {
         guard let json = try? JSONEncoder.iso.encode(entry),
               let jsonStr = String(data: json, encoding: .utf8)
         else { return }
@@ -127,7 +140,7 @@ final class LibraryStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         exec("DELETE FROM vocab")
-        for item in items { upsertVocab(item) }
+        for item in items { upsertVocabUnlocked(item) }
     }
 
     func deleteVocab(id: String) {

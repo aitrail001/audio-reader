@@ -1,18 +1,49 @@
 import Foundation
 
-enum GrokError: LocalizedError {
-    case noAPIKey
+enum LLMError: LocalizedError {
+    case noAPIKey(LLMProvider)
+    case invalidEndpoint(String)
     case http(Int, String)
     case empty
 
     var errorDescription: String? {
         switch self {
-        case .noAPIKey:
-            "No xAI API key. Add XAI_API_KEY in Settings (console.x.ai)."
+        case .noAPIKey(let provider):
+            "No \(provider.menuLabel) API key. Add \(provider.environmentKey) in Settings."
+        case .invalidEndpoint(let endpoint):
+            "Invalid LLM endpoint: \(endpoint)"
         case .http(let code, let body):
-            "Grok request failed (\(code)): \(body)"
+            "LLM request failed (\(code)): \(body)"
         case .empty:
-            "Grok returned an empty reply."
+            "The LLM returned an empty reply."
+        }
+    }
+}
+
+enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
+    case grok
+    case qwenCloud
+
+    var id: String { rawValue }
+
+    var menuLabel: String {
+        switch self {
+        case .grok: "Grok (xAI)"
+        case .qwenCloud: "QwenCloud"
+        }
+    }
+
+    var environmentKey: String {
+        switch self {
+        case .grok: "XAI_API_KEY"
+        case .qwenCloud: "DASHSCOPE_API_KEY"
+        }
+    }
+
+    var defaultEndpoint: String {
+        switch self {
+        case .grok: "https://api.x.ai/v1"
+        case .qwenCloud: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
         }
     }
 }
@@ -21,7 +52,11 @@ enum APIKeyStore {
     static var fileURL: URL { Persistence.root.appendingPathComponent("xai-api-key") }
 
     static var grokAuthURL: URL {
+#if os(macOS)
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".grok/auth.json")
+#else
+        Persistence.root.appendingPathComponent("grok-auth-unavailable")
+#endif
     }
 
     static func load() -> String? {
@@ -44,6 +79,7 @@ enum APIKeyStore {
 
     /// OAuth access token from `grok login` / Grok Build. Not an API-console key.
     static func grokBuildToken() -> String? {
+#if os(macOS)
         guard let data = try? Data(contentsOf: grokAuthURL),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
@@ -55,16 +91,30 @@ enum APIKeyStore {
             return key
         }
         return nil
+#else
+        return nil
+#endif
     }
 
-    static func save(_ key: String) {
+    @discardableResult
+    static func save(_ key: String) -> Bool {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            try? FileManager.default.removeItem(at: fileURL)
-            return
+            guard FileManager.default.fileExists(atPath: fileURL.path) else { return true }
+            do {
+                try FileManager.default.removeItem(at: fileURL)
+                return true
+            } catch {
+                return false
+            }
         }
-        try? trimmed.data(using: .utf8)?.write(to: fileURL, options: .atomic)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+        do {
+            try Data(trimmed.utf8).write(to: fileURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+            return true
+        } catch {
+            return false
+        }
     }
 
     static var isConfigured: Bool { load() != nil }
@@ -76,6 +126,57 @@ enum APIKeyStore {
         if savedFileKey() != nil { return "Using a saved xAI API key" }
         if grokBuildToken() != nil { return "Signed in via Grok Build — no extra key needed" }
         return "Not signed in"
+    }
+}
+
+enum QwenAPIKeyStore {
+    static var fileURL: URL { Persistence.root.appendingPathComponent("dashscope-api-key") }
+
+    static func load() -> String? {
+        if let env = ProcessInfo.processInfo.environment["DASHSCOPE_API_KEY"], !env.isEmpty {
+            return env
+        }
+        return savedFileKey()
+    }
+
+    static func savedFileKey() -> String? {
+        guard let data = try? Data(contentsOf: fileURL),
+              let key = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !key.isEmpty
+        else { return nil }
+        return key
+    }
+
+    @discardableResult
+    static func save(_ key: String) -> Bool {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            guard FileManager.default.fileExists(atPath: fileURL.path) else { return true }
+            do {
+                try FileManager.default.removeItem(at: fileURL)
+                return true
+            } catch {
+                return false
+            }
+        }
+        do {
+            try Data(trimmed.utf8).write(to: fileURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    static var isConfigured: Bool { load() != nil }
+
+    static var sourceLabel: String {
+        if let env = ProcessInfo.processInfo.environment["DASHSCOPE_API_KEY"], !env.isEmpty {
+            return "Using DASHSCOPE_API_KEY from the environment"
+        }
+        if savedFileKey() != nil { return "Using a saved QwenCloud API key" }
+        return "Not configured"
     }
 }
 
@@ -112,76 +213,184 @@ enum GrokEffort: String, CaseIterable, Identifiable {
     }
 }
 
+enum QwenEffort: String, CaseIterable, Identifiable {
+    case minimal, medium, high
+
+    var id: String { rawValue }
+
+    var menuLabel: String {
+        switch self {
+        case .minimal: "Minimal"
+        case .medium: "Medium"
+        case .high: "High"
+        }
+    }
+}
+
+struct LLMModelInfo: Identifiable, Hashable, Sendable {
+    var id: String
+    var brand: String
+    var capabilities: String
+    var supportsText: Bool
+
+    var menuLabel: String { "\(id) — \(brand)" }
+}
+
+enum QwenModelCatalog {
+    static let fallback: [LLMModelInfo] = [
+        .init(id: "qwen3.8-max", brand: "Qwen", capabilities: "Text Generation, Reasoning Model, Visual Understanding", supportsText: true),
+        .init(id: "qwen3.7-plus", brand: "Qwen", capabilities: "Text Generation, Reasoning Model, Visual Understanding", supportsText: true),
+        .init(id: "qwen3.7-max", brand: "Qwen", capabilities: "Text Generation, Reasoning Model", supportsText: true),
+        .init(id: "qwen3.7-flash", brand: "Qwen", capabilities: "Text Generation, Reasoning Model", supportsText: true),
+        .init(id: "qwen3.6-flash", brand: "Qwen", capabilities: "Text Generation, Reasoning Model, Visual Understanding", supportsText: true),
+        .init(id: "qwen-image-3.0-pro", brand: "Qwen", capabilities: "Image Generation", supportsText: false),
+        .init(id: "qwen-audio-3.0-asr-flash", brand: "Qwen", capabilities: "Speech Recognition", supportsText: false),
+        .init(id: "qwen-audio-3.0-tts-plus", brand: "Qwen", capabilities: "Real-Time Speech Synthesis, Text-to-Speech", supportsText: false),
+        .init(id: "qwen-audio-3.0-realtime-plus", brand: "Qwen", capabilities: "Realtime-Chatting", supportsText: false),
+        .init(id: "wan2.7-image", brand: "Wan", capabilities: "Image Generation", supportsText: false),
+        .init(id: "wan2.7-image-pro", brand: "Wan", capabilities: "Image Generation", supportsText: false),
+        .init(id: "happyhorse-1.1-i2v", brand: "HappyHorse", capabilities: "Video Generation", supportsText: false),
+        .init(id: "happyhorse-1.1-t2v", brand: "HappyHorse", capabilities: "Video Generation", supportsText: false),
+        .init(id: "happyhorse-1.1-r2v", brand: "HappyHorse", capabilities: "Video Generation", supportsText: false),
+        .init(id: "deepseek-v4-pro-0813", brand: "DeepSeek", capabilities: "Text Generation, Reasoning Model", supportsText: true),
+        .init(id: "deepseek-v4-pro", brand: "DeepSeek", capabilities: "Text Generation, Reasoning Model", supportsText: true),
+        .init(id: "deepseek-v4-flash-0731", brand: "DeepSeek", capabilities: "Text Generation, Reasoning Model", supportsText: true),
+        .init(id: "glm-5.2", brand: "Zhipu AI", capabilities: "Text Generation, Reasoning Model", supportsText: true)
+    ]
+
+    static func discovered(_ modelIDs: [String]) -> [LLMModelInfo] {
+        let fallbackByID = Dictionary(uniqueKeysWithValues: fallback.map { ($0.id, $0) })
+        return Set(modelIDs).map { id in
+            fallbackByID[id] ?? .init(
+                id: id,
+                brand: inferredBrand(id),
+                capabilities: "Discovered from QwenCloud",
+                supportsText: inferredTextSupport(id)
+            )
+        }.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+    }
+
+    private static func inferredBrand(_ id: String) -> String {
+        if id.hasPrefix("qwen") { return "Qwen" }
+        if id.hasPrefix("wan") { return "Wan" }
+        if id.hasPrefix("deepseek") { return "DeepSeek" }
+        if id.hasPrefix("glm") { return "Zhipu AI" }
+        if id.hasPrefix("happyhorse") { return "HappyHorse" }
+        return "QwenCloud"
+    }
+
+    private static func inferredTextSupport(_ id: String) -> Bool {
+        let mediaMarkers = ["image", "audio", "tts", "asr", "realtime", "i2v", "t2v", "r2v", "wan"]
+        return !mediaMarkers.contains { id.localizedCaseInsensitiveContains($0) }
+    }
+}
+
 actor GrokClient {
     static let shared = GrokClient()
 
-    func complete(system: String, user: String, model: String, effort: String) async throws -> String {
-        guard let key = APIKeyStore.load() else { throw GrokError.noAPIKey }
-        let useEffort = GrokModel(rawValue: model)?.supportsEffort == true
+    func complete(
+        provider: LLMProvider,
+        system: String,
+        user: String,
+        baseURL: String,
+        model: String,
+        effort: String,
+        enableThinking: Bool
+    ) async throws -> String {
+        let key = provider == .grok ? APIKeyStore.load() : QwenAPIKeyStore.load()
+        guard let key else { throw LLMError.noAPIKey(provider) }
 
         do {
-            return try await postResponses(key: key, system: system, user: user, model: model, effort: useEffort ? effort : nil)
+            let request = try LLMRequestBuilder.responses(
+                provider: provider,
+                apiKey: key,
+                baseURL: baseURL,
+                model: model,
+                system: system,
+                user: user,
+                effort: effort,
+                enableThinking: enableThinking
+            )
+            return try await sendResponses(request)
         } catch {
-            return try await postChat(key: key, system: system, user: user, model: model, effort: useEffort ? effort : nil)
+            let request = try LLMRequestBuilder.chat(
+                provider: provider,
+                apiKey: key,
+                baseURL: baseURL,
+                model: model,
+                system: system,
+                user: user,
+                effort: effort,
+                enableThinking: enableThinking
+            )
+            return try await sendChat(request)
         }
     }
 
-    private func postResponses(key: String, system: String, user: String, model: String, effort: String?) async throws -> String {
-        var request = URLRequest(url: URL(string: "https://api.x.ai/v1/responses")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 90
-        var body: [String: Any] = [
-            "model": model,
-            "input": [
-                ["role": "system", "content": system],
-                ["role": "user", "content": user]
-            ]
-        ]
-        if let effort {
-            body["reasoning"] = ["effort": effort]
+    func qwenModels(baseURL: String, apiKey: String? = nil) async throws -> [String] {
+        let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let key = supplied?.isEmpty == false ? supplied : QwenAPIKeyStore.load() else {
+            throw LLMError.noAPIKey(.qwenCloud)
         }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let trimmed = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let compatibleRange = trimmed.range(of: "/compatible-mode/v1", options: .backwards) else {
+            throw LLMError.invalidEndpoint(baseURL)
+        }
+        let root = String(trimmed[..<compatibleRange.lowerBound])
+        let permissionsURL = root + "/api/v1/models/permissions?authorization_scope=AUTHORIZED&action=INFERENCE&page_no=1&page_size=200"
+        do {
+            let data = try await qwenModelData(urlString: permissionsURL, key: key)
+            let parsed = try JSONDecoder().decode(ModelPermissionsResponse.self, from: data)
+            let models = parsed.output?.permissions.map(\.model) ?? []
+            if !models.isEmpty { return models }
+        } catch {
+            // Some token-plan endpoints expose only the OpenAI-compatible model list.
+        }
+        let data = try await qwenModelData(urlString: trimmed + "/models", key: key)
+        let parsed = try JSONDecoder().decode(ModelListResponse.self, from: data)
+        return parsed.data.map(\.id)
+    }
+
+    private func qwenModelData(urlString: String, key: String) async throws -> Data {
+        guard let url = URL(string: urlString), let scheme = url.scheme, ["http", "https"].contains(scheme) else {
+            throw LLMError.invalidEndpoint(urlString)
+        }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 30
         let (data, response) = try await URLSession.shared.data(for: request)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         if code != 200 {
             let snippet = String(data: data, encoding: .utf8) ?? ""
-            throw GrokError.http(code, String(snippet.prefix(400)))
+            throw LLMError.http(code, String(snippet.prefix(400)))
+        }
+        return data
+    }
+
+    private func sendResponses(_ request: URLRequest) async throws -> String {
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if code != 200 {
+            let snippet = String(data: data, encoding: .utf8) ?? ""
+            throw LLMError.http(code, String(snippet.prefix(400)))
         }
         let parsed = try JSONDecoder().decode(ResponsesAPI.self, from: data)
         let text = parsed.resolved.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.isEmpty { throw GrokError.empty }
+        if text.isEmpty { throw LLMError.empty }
         return text
     }
 
-    private func postChat(key: String, system: String, user: String, model: String, effort: String?) async throws -> String {
-        var request = URLRequest(url: URL(string: "https://api.x.ai/v1/chat/completions")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 90
-        var body: [String: Any] = [
-            "model": model,
-            "messages": [
-                ["role": "system", "content": system],
-                ["role": "user", "content": user]
-            ]
-        ]
-        if let effort {
-            body["reasoning_effort"] = effort
-        }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+    private func sendChat(_ request: URLRequest) async throws -> String {
         let (data, response) = try await URLSession.shared.data(for: request)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         if code != 200 {
             let snippet = String(data: data, encoding: .utf8) ?? ""
-            throw GrokError.http(code, String(snippet.prefix(400)))
+            throw LLMError.http(code, String(snippet.prefix(400)))
         }
         let parsed = try JSONDecoder().decode(ChatResponse.self, from: data)
         let text = parsed.choices.first?.message.content?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if text.isEmpty { throw GrokError.empty }
+        if text.isEmpty { throw LLMError.empty }
         return text
     }
 
@@ -191,6 +400,19 @@ actor GrokClient {
             var message: Message
         }
         var choices: [Choice]
+    }
+
+    private struct ModelListResponse: Decodable {
+        struct Model: Decodable { var id: String }
+        var data: [Model]
+    }
+
+    private struct ModelPermissionsResponse: Decodable {
+        struct Output: Decodable {
+            struct Permission: Decodable { var model: String }
+            var permissions: [Permission]
+        }
+        var output: Output?
     }
 
     private struct ResponsesAPI: Decodable {
@@ -209,6 +431,78 @@ actor GrokClient {
             let parts = output?.flatMap { $0.content ?? [] }.compactMap(\.text) ?? []
             return parts.joined(separator: "\n")
         }
+    }
+}
+
+enum LLMRequestBuilder {
+    static func responses(
+        provider: LLMProvider,
+        apiKey: String,
+        baseURL: String,
+        model: String,
+        system: String,
+        user: String,
+        effort: String,
+        enableThinking: Bool
+    ) throws -> URLRequest {
+        var body: [String: Any] = [
+            "model": model,
+            "input": [
+                ["role": "system", "content": system],
+                ["role": "user", "content": user]
+            ]
+        ]
+        if provider == .qwenCloud {
+            body["enable_thinking"] = enableThinking
+            if enableThinking {
+                body["reasoning"] = ["effort": effort]
+            }
+        } else if GrokModel(rawValue: model)?.supportsEffort == true {
+            body["reasoning"] = ["effort": effort]
+        }
+        return try request(path: "responses", apiKey: apiKey, baseURL: baseURL, body: body)
+    }
+
+    static func chat(
+        provider: LLMProvider,
+        apiKey: String,
+        baseURL: String,
+        model: String,
+        system: String,
+        user: String,
+        effort: String,
+        enableThinking: Bool
+    ) throws -> URLRequest {
+        var body: [String: Any] = [
+            "model": model,
+            "messages": [
+                ["role": "system", "content": system],
+                ["role": "user", "content": user]
+            ]
+        ]
+        if provider == .qwenCloud {
+            body["enable_thinking"] = enableThinking
+            if model.hasPrefix("deepseek") || model.hasPrefix("glm") {
+                body["reasoning_effort"] = effort
+            }
+        } else if GrokModel(rawValue: model)?.supportsEffort == true {
+            body["reasoning_effort"] = effort
+        }
+        return try request(path: "chat/completions", apiKey: apiKey, baseURL: baseURL, body: body)
+    }
+
+    private static func request(path: String, apiKey: String, baseURL: String, body: [String: Any]) throws -> URLRequest {
+        let endpoint = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/" + path
+        guard let url = URL(string: endpoint), let scheme = url.scheme, ["http", "https"].contains(scheme) else {
+            throw LLMError.invalidEndpoint(baseURL)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 300
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return request
     }
 }
 

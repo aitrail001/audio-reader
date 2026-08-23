@@ -1,6 +1,10 @@
 import Foundation
+#if os(macOS)
 import CoreServices
 import AppKit
+#else
+import UIKit
+#endif
 
 struct DictionaryHit: Identifiable, Hashable {
     var id: String { name }
@@ -24,13 +28,20 @@ enum DictionaryLookup {
     }
 
     static func installedNames() -> [String] {
+#if os(macOS)
         dictionaries().map(\.name).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+#else
+        ["iPadOS Dictionary"]
+#endif
     }
 
+#if os(macOS)
     private static let cacheLock = NSLock()
     nonisolated(unsafe) private static var cachedDicts: [InstalledDict]?
+#endif
 
     static func lookup(_ raw: String, preferredName: String?) -> [DictionaryHit] {
+#if os(macOS)
         let word = headword(raw)
         guard !word.isEmpty else { return [] }
         let dicts = dictionaries()
@@ -54,24 +65,54 @@ enum DictionaryLookup {
             }
         }
         return hits
+#else
+        []
+#endif
     }
 
     static func openDictionaryApp() {
+#if os(macOS)
         let app = URL(fileURLWithPath: "/System/Applications/Dictionary.app")
         if FileManager.default.fileExists(atPath: app.path) {
             NSWorkspace.shared.open(app)
             return
         }
         NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Dictionary.app"))
+#endif
     }
 
+    @MainActor
+    static func hasSystemDefinition(_ raw: String) -> Bool {
+#if os(macOS)
+        !lookup(raw, preferredName: nil).isEmpty
+#else
+        let word = headword(raw)
+        return !word.isEmpty && UIReferenceLibraryViewController.dictionaryHasDefinition(forTerm: word)
+#endif
+    }
+
+    @MainActor
     static func lookUpInDictionary(_ raw: String) {
         let word = headword(raw)
+#if os(macOS)
         if let url = URL(string: "dict://\(word.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? word)") {
             NSWorkspace.shared.open(url)
         }
+#else
+        guard UIReferenceLibraryViewController.dictionaryHasDefinition(forTerm: word) else { return }
+        Task { @MainActor in
+            let controller = UIReferenceLibraryViewController(term: word)
+            guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                  let root = scene.keyWindow?.rootViewController
+            else { return }
+            var presenter = root
+            while let presented = presenter.presentedViewController { presenter = presented }
+            presenter.present(controller, animated: true)
+        }
+#endif
     }
 
+#if os(macOS)
     private struct InstalledDict {
         var name: String
         var ref: DCSDictionary
@@ -137,6 +178,7 @@ enum DictionaryLookup {
         }
         return DictionaryHit(name: dict.name, html: html, preview: preview)
     }
+#endif
 
     static func looksLikeMarkup(_ s: String) -> Bool {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -322,6 +364,7 @@ enum DictionaryLookup {
     }
 }
 
+#if os(macOS)
 @_silgen_name("DCSCopyAvailableDictionaries")
 private func DCSCopyAvailableDictionaries() -> Unmanaged<CFSet>?
 @_silgen_name("DCSDictionaryGetName")
@@ -336,3 +379,4 @@ private func DCSRecordCopyData(_ r: CFTypeRef) -> Unmanaged<CFString>?
 private func DCSRecordCopyDefinition(_ r: CFTypeRef) -> Unmanaged<CFString>?
 @_silgen_name("DCSRecordGetHeadword")
 private func DCSRecordGetHeadword(_ r: CFTypeRef) -> Unmanaged<CFString>?
+#endif

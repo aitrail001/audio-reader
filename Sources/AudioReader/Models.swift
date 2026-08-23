@@ -1,6 +1,12 @@
 import Foundation
 import CryptoKit
 
+enum BookSource: String, Codable, Sendable {
+    case localFolder
+    case files
+    case deviceAudiobooks
+}
+
 struct Book: Identifiable, Hashable, Codable, Sendable {
     var id: String
     var title: String
@@ -9,6 +15,7 @@ struct Book: Identifiable, Hashable, Codable, Sendable {
     var coverPath: String?
     var ebookPath: String?
     var chapters: [Chapter]
+    var source: BookSource = .localFolder
 }
 
 struct Chapter: Identifiable, Hashable, Codable, Sendable {
@@ -17,6 +24,9 @@ struct Chapter: Identifiable, Hashable, Codable, Sendable {
     var title: String
     var audioPath: String
     var duration: TimeInterval?
+    var startTime: TimeInterval?
+
+    var audioStart: TimeInterval { startTime ?? 0 }
 }
 
 struct TranscriptWord: Identifiable, Hashable, Codable, Sendable {
@@ -57,6 +67,7 @@ struct TranscriptSegment: Identifiable, Hashable, Codable, Sendable {
 struct Transcript: Codable, Sendable {
     var chapterID: String
     var audioPath: String
+    var chapterStart: TimeInterval? = nil
     var createdAt: Date
     var locale: String
     var segments: [TranscriptSegment]
@@ -68,6 +79,36 @@ struct Transcript: Codable, Sendable {
     var duration: TimeInterval {
         segments.last?.end ?? 0
     }
+
+    func belongs(to chapter: Chapter) -> Bool {
+        guard chapterID == chapter.id else { return false }
+        guard let expectedStart = chapter.startTime else { return true }
+        guard let chapterStart else { return false }
+        return abs(chapterStart - expectedStart) < 0.01
+    }
+}
+
+struct LibraryScanProgress: Equatable, Sendable {
+    var stage: String
+    var detail: String
+    var completed: Int
+    var total: Int
+
+    var fraction: Double? {
+        guard total > 0 else { return nil }
+        return Double(completed) / Double(total)
+    }
+}
+
+struct LLMChatMessage: Identifiable, Hashable, Sendable {
+    enum Role: String, Sendable {
+        case user
+        case assistant
+    }
+
+    var id = UUID()
+    var role: Role
+    var text: String
 }
 
 enum VocabCategory: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -103,6 +144,7 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
     var dictionaryHTML: String?
     var translation: String?
     var translationLanguage: String?
+    var translationModel: String?
     var context: String
     var spokenText: String?
     var ebookText: String?
@@ -119,7 +161,7 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case id, word, category, definition, dictionaryName, dictionaryHTML
-        case translation, translationLanguage, context, spokenText, ebookText
+        case translation, translationLanguage, translationModel, context, spokenText, ebookText
         case bookID, bookTitle, chapterID, chapterTitle, segmentID, wordID
         case timestamp, addedAt, reviewCount, nextReview
     }
@@ -133,6 +175,7 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
         dictionaryHTML: String? = nil,
         translation: String? = nil,
         translationLanguage: String? = nil,
+        translationModel: String? = nil,
         context: String,
         spokenText: String? = nil,
         ebookText: String? = nil,
@@ -155,6 +198,7 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
         self.dictionaryHTML = dictionaryHTML
         self.translation = translation
         self.translationLanguage = translationLanguage
+        self.translationModel = translationModel
         self.context = context
         self.spokenText = spokenText
         self.ebookText = ebookText
@@ -180,6 +224,7 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
         dictionaryHTML = try c.decodeIfPresent(String.self, forKey: .dictionaryHTML)
         translation = try c.decodeIfPresent(String.self, forKey: .translation)
         translationLanguage = try c.decodeIfPresent(String.self, forKey: .translationLanguage)
+        translationModel = try c.decodeIfPresent(String.self, forKey: .translationModel)
         context = try c.decode(String.self, forKey: .context)
         spokenText = try c.decodeIfPresent(String.self, forKey: .spokenText)
         ebookText = try c.decodeIfPresent(String.self, forKey: .ebookText)
@@ -248,6 +293,8 @@ struct GlossEntry: Identifiable, Hashable, Codable, Sendable {
     var timestamp: TimeInterval?
     var createdAt: Date
     var decidedAt: Date?
+    var replacedText: String? = nil
+    var replacedModel: String? = nil
 
     static func makeID(kind: GlossKind, language: String, source: String, context: String?) -> String {
         let raw = "\(kind.rawValue)|\(language)|\(normalize(source))|\(normalize(context ?? ""))"
@@ -258,6 +305,62 @@ struct GlossEntry: Identifiable, Hashable, Codable, Sendable {
         text.lowercased()
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+struct ChapterTranslationResult: Decodable, Equatable, Sendable {
+    struct Phrase: Decodable, Equatable, Sendable {
+        var source: String
+        var explanation: String
+    }
+
+    var id: String
+    var translation: String
+    var phrases: [Phrase]
+
+    var glossText: String {
+        let notes = phrases.isEmpty
+            ? "短语：无"
+            : "短语：\n" + phrases.map { "• \($0.source) — \($0.explanation)" }.joined(separator: "\n")
+        return "译文：\n\(translation)\n\n\(notes)"
+    }
+}
+
+enum ChapterTranslationBatchError: LocalizedError {
+    case invalidResponse
+    case missingSentences
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidResponse:
+            "The LLM returned a chapter block in an unreadable format."
+        case .missingSentences:
+            "The LLM did not return one translation for every sentence in the block."
+        }
+    }
+}
+
+enum ChapterTranslationBatch {
+    static func blocks(_ segments: [TranscriptSegment], size: Int) -> [[TranscriptSegment]] {
+        let blockSize = max(1, size)
+        return stride(from: 0, to: segments.count, by: blockSize).map { start in
+            Array(segments[start..<min(start + blockSize, segments.count)])
+        }
+    }
+
+    static func parse(_ raw: String, expectedIDs: [String]) throws -> [ChapterTranslationResult] {
+        guard let first = raw.firstIndex(of: "["), let last = raw.lastIndex(of: "]"), first <= last,
+              let data = String(raw[first...last]).data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([ChapterTranslationResult].self, from: data)
+        else { throw ChapterTranslationBatchError.invalidResponse }
+
+        let expected = Set(expectedIDs)
+        let returned = Set(decoded.map(\.id))
+        guard expected == returned, decoded.count == expectedIDs.count else {
+            throw ChapterTranslationBatchError.missingSentences
+        }
+        let byID = Dictionary(uniqueKeysWithValues: decoded.map { ($0.id, $0) })
+        return expectedIDs.compactMap { byID[$0] }
     }
 }
 

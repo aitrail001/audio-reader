@@ -17,6 +17,31 @@ enum Persistence {
     static var vocabURL: URL { root.appendingPathComponent("vocab.json") }
     static var settingsURL: URL { root.appendingPathComponent("settings.json") }
     static var glossesURL: URL { root.appendingPathComponent("glosses.json") }
+    static var importedBooksURL: URL {
+#if os(iOS)
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let dir = documents.appendingPathComponent("ImportedBooks", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let legacy = root.appendingPathComponent("ImportedBooks", isDirectory: true)
+        if let entries = try? FileManager.default.contentsOfDirectory(
+            at: legacy,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for entry in entries {
+                let destination = dir.appendingPathComponent(entry.lastPathComponent)
+                guard !FileManager.default.fileExists(atPath: destination.path) else { continue }
+                try? FileManager.default.moveItem(at: entry, to: destination)
+            }
+        }
+        return dir
+#else
+        let dir = root.appendingPathComponent("ImportedBooks", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+#endif
+    }
 
     static func transcriptURL(chapterID: String) -> URL {
         transcriptsDir.appendingPathComponent("\(safeFileName(chapterID)).json")
@@ -43,6 +68,26 @@ enum Persistence {
 
     static func loadTranscript(chapterID: String, audioPath: String? = nil) -> Transcript? {
         LibraryStore.shared.loadTranscript(chapterID: chapterID, audioPath: audioPath)
+    }
+
+    static func loadTranscript(for chapter: Chapter) -> Transcript? {
+        let legacyAudioPath = chapter.startTime == nil ? chapter.audioPath : nil
+        guard let transcript = loadTranscript(chapterID: chapter.id, audioPath: legacyAudioPath),
+              transcript.belongs(to: chapter)
+        else { return nil }
+        return transcript
+    }
+
+    static func loadAllTranscripts() -> [Transcript] {
+        LibraryStore.shared.loadAllTranscripts()
+    }
+
+    static func readyChapterIDs(in books: [Book], transcripts: [Transcript]) -> Set<String> {
+        let byChapter = Dictionary(transcripts.map { ($0.chapterID, $0) }, uniquingKeysWith: { _, newest in newest })
+        return Set(books.flatMap(\.chapters).compactMap { chapter in
+            guard let transcript = byChapter[chapter.id], transcript.belongs(to: chapter) else { return nil }
+            return chapter.id
+        })
     }
 
     static func saveTranscript(_ transcript: Transcript) throws {
@@ -92,9 +137,15 @@ enum Persistence {
         return settings
     }
 
-    static func saveSettings(_ settings: AppSettings) {
-        guard let data = try? JSONEncoder().encode(settings) else { return }
-        try? data.write(to: settingsURL, options: .atomic)
+    @discardableResult
+    static func saveSettings(_ settings: AppSettings) -> Bool {
+        guard let data = try? JSONEncoder().encode(settings) else { return false }
+        do {
+            try data.write(to: settingsURL, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
     }
 
     static func loadGlossesJSON() -> [GlossEntry] {
@@ -121,8 +172,16 @@ struct AppSettings: Codable, Equatable {
     var textSource: String
     var skipSeconds: Double
     var targetLanguage: String
+    var llmProvider: String
     var grokModel: String
     var grokEffort: String
+    var qwenEndpoint: String
+    var qwenModel: String
+    var qwenThinking: Bool
+    var qwenEffort: String
+    var sentenceContextCount: Int
+    var chapterTranslationBlockSize: Int
+    var chatContextCount: Int
     var autoTranslate: Bool
     var playOnSelect: Bool
     var appearance: String
@@ -132,13 +191,21 @@ struct AppSettings: Codable, Equatable {
 
     static var `default`: AppSettings {
         AppSettings(
-            libraryPath: "/Users/johnsonzhang/Documents/books",
+            libraryPath: defaultLibraryPath,
             playbackRate: 1.0,
             textSource: TextSource.spoken.rawValue,
             skipSeconds: 5,
             targetLanguage: StudyLanguage.zhHans.rawValue,
+            llmProvider: LLMProvider.grok.rawValue,
             grokModel: "grok-4.6",
             grokEffort: GrokEffort.low.rawValue,
+            qwenEndpoint: LLMProvider.qwenCloud.defaultEndpoint,
+            qwenModel: "qwen3.7-flash",
+            qwenThinking: true,
+            qwenEffort: QwenEffort.high.rawValue,
+            sentenceContextCount: 2,
+            chapterTranslationBlockSize: 5,
+            chatContextCount: 3,
             autoTranslate: false,
             playOnSelect: true,
             appearance: AppAppearance.dark.rawValue,
@@ -148,14 +215,30 @@ struct AppSettings: Codable, Equatable {
         )
     }
 
+    private static var defaultLibraryPath: String {
+#if os(macOS)
+        "/Users/johnsonzhang/Documents/books"
+#else
+        Persistence.importedBooksURL.path
+#endif
+    }
+
     init(
         libraryPath: String,
         playbackRate: Double,
         textSource: String,
         skipSeconds: Double,
         targetLanguage: String,
+        llmProvider: String,
         grokModel: String,
         grokEffort: String,
+        qwenEndpoint: String,
+        qwenModel: String,
+        qwenThinking: Bool,
+        qwenEffort: String,
+        sentenceContextCount: Int,
+        chapterTranslationBlockSize: Int,
+        chatContextCount: Int,
         autoTranslate: Bool,
         playOnSelect: Bool,
         appearance: String,
@@ -168,8 +251,16 @@ struct AppSettings: Codable, Equatable {
         self.textSource = textSource
         self.skipSeconds = skipSeconds
         self.targetLanguage = targetLanguage
+        self.llmProvider = llmProvider
         self.grokModel = grokModel
         self.grokEffort = grokEffort
+        self.qwenEndpoint = qwenEndpoint
+        self.qwenModel = qwenModel
+        self.qwenThinking = qwenThinking
+        self.qwenEffort = qwenEffort
+        self.sentenceContextCount = sentenceContextCount
+        self.chapterTranslationBlockSize = chapterTranslationBlockSize
+        self.chatContextCount = chatContextCount
         self.autoTranslate = autoTranslate
         self.playOnSelect = playOnSelect
         self.appearance = appearance
@@ -186,8 +277,16 @@ struct AppSettings: Codable, Equatable {
         textSource = try c.decodeIfPresent(String.self, forKey: .textSource) ?? d.textSource
         skipSeconds = try c.decodeIfPresent(Double.self, forKey: .skipSeconds) ?? d.skipSeconds
         targetLanguage = try c.decodeIfPresent(String.self, forKey: .targetLanguage) ?? d.targetLanguage
+        llmProvider = try c.decodeIfPresent(String.self, forKey: .llmProvider) ?? d.llmProvider
         grokModel = try c.decodeIfPresent(String.self, forKey: .grokModel) ?? d.grokModel
         grokEffort = try c.decodeIfPresent(String.self, forKey: .grokEffort) ?? d.grokEffort
+        qwenEndpoint = try c.decodeIfPresent(String.self, forKey: .qwenEndpoint) ?? d.qwenEndpoint
+        qwenModel = try c.decodeIfPresent(String.self, forKey: .qwenModel) ?? d.qwenModel
+        qwenThinking = try c.decodeIfPresent(Bool.self, forKey: .qwenThinking) ?? d.qwenThinking
+        qwenEffort = try c.decodeIfPresent(String.self, forKey: .qwenEffort) ?? d.qwenEffort
+        sentenceContextCount = try c.decodeIfPresent(Int.self, forKey: .sentenceContextCount) ?? d.sentenceContextCount
+        chapterTranslationBlockSize = try c.decodeIfPresent(Int.self, forKey: .chapterTranslationBlockSize) ?? d.chapterTranslationBlockSize
+        chatContextCount = try c.decodeIfPresent(Int.self, forKey: .chatContextCount) ?? d.chatContextCount
         autoTranslate = try c.decodeIfPresent(Bool.self, forKey: .autoTranslate) ?? d.autoTranslate
         playOnSelect = try c.decodeIfPresent(Bool.self, forKey: .playOnSelect) ?? d.playOnSelect
         appearance = try c.decodeIfPresent(String.self, forKey: .appearance) ?? d.appearance

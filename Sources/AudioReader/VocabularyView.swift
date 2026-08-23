@@ -2,9 +2,11 @@ import SwiftUI
 
 struct VocabularyView: View {
     @Bindable var state: AppState
+    var onOpenInText: () -> Void = {}
     @State private var query = ""
     @State private var bookFilter: String = "all"
     @State private var category: VocabCategory? = nil
+    @State private var pendingDelete: VocabEntry?
 
     private var booksInVocab: [(id: String, title: String)] {
         var seen = Set<String>()
@@ -54,9 +56,17 @@ struct VocabularyView: View {
                 List {
                     ForEach(filtered) { entry in
                         VocabCard(entry: entry) {
-                            state.jumpToVocab(entry)
+                            if state.jumpToVocab(entry) {
+                                onOpenInText()
+                            }
                         } onDelete: {
-                            state.removeVocab(entry)
+                            pendingDelete = entry
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            deleteSwipeButton(entry)
+                        }
+                        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                            deleteSwipeButton(entry)
                         }
                         .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                         .listRowBackground(Color.clear)
@@ -68,6 +78,28 @@ struct VocabularyView: View {
             }
         }
         .background(Palette.bg)
+        .alert("Delete vocabulary item?", isPresented: Binding(
+            get: { pendingDelete != nil },
+            set: { if !$0 { pendingDelete = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+            Button("Delete", role: .destructive) {
+                if let entry = pendingDelete {
+                    state.removeVocab(entry)
+                }
+                pendingDelete = nil
+            }
+        } message: {
+            Text("Remove “\(pendingDelete?.word ?? "this item")” from your vocabulary? This cannot be undone.")
+        }
+    }
+
+    private func deleteSwipeButton(_ entry: VocabEntry) -> some View {
+        Button(role: .destructive) {
+            pendingDelete = entry
+        } label: {
+            Label("Delete", systemImage: "trash")
+        }
     }
 
     private var header: some View {
@@ -139,7 +171,7 @@ struct VocabularyView: View {
             Image(systemName: "bookmark")
                 .font(.system(size: 28, weight: .light))
                 .foregroundStyle(Palette.gold)
-            Text("Click a word while listening, then add it here. Accept a Grok translation to keep sentences and phrases, grouped by book.")
+            Text("Click a word while listening, then add it here. Accept an LLM translation to keep sentences and phrases, grouped by book.")
                 .foregroundStyle(Palette.dim)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
@@ -175,10 +207,13 @@ private struct VocabCard: View {
                     Label("Open in text", systemImage: "text.alignleft")
                 }
                 .controlSize(.small)
+                .buttonStyle(.borderless)
                 Button(role: .destructive, action: onDelete) {
                     Image(systemName: "trash")
                 }
                 .controlSize(.small)
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Delete \(entry.word)")
             }
 
             Text("\(entry.bookTitle) · \(entry.chapterTitle) · \(formatClock(entry.timestamp))")
@@ -220,8 +255,13 @@ private struct VocabCard: View {
             }
 
             if let translation = entry.translation, !translation.isEmpty {
-                labeled("Grok") {
+                labeled("LLM translation") {
                     GlossBody(text: translation)
+                    if let model = entry.translationModel, !model.isEmpty {
+                        Text("Model: \(model)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Palette.gold)
+                    }
                 }
             }
         }

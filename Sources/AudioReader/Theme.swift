@@ -1,5 +1,48 @@
 import SwiftUI
+#if os(macOS)
 import AppKit
+#else
+import UIKit
+#endif
+
+#if os(macOS)
+typealias PlatformImage = NSImage
+#else
+typealias PlatformImage = UIImage
+#endif
+
+extension Image {
+    init(platformImage: PlatformImage) {
+#if os(macOS)
+        self.init(nsImage: platformImage)
+#else
+        self.init(uiImage: platformImage)
+#endif
+    }
+}
+
+final class CoverImageCache: @unchecked Sendable {
+    static let shared = CoverImageCache()
+    private let cache = NSCache<NSString, PlatformImage>()
+
+    private init() {
+        cache.countLimit = 200
+    }
+
+    func image(for path: String) -> PlatformImage? {
+        let key = path as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+        guard let image = PlatformImage(contentsOfFile: path) else { return nil }
+        cache.setObject(image, forKey: key)
+        return image
+    }
+
+    func preload(paths: [String]) {
+        for path in paths {
+            _ = image(for: path)
+        }
+    }
+}
 
 enum AppAppearance: String, CaseIterable, Identifiable {
     case system
@@ -45,11 +88,18 @@ private extension Color {
     }
 
     init(light: (Double, Double, Double, Double), dark: (Double, Double, Double, Double)) {
+#if os(macOS)
         self.init(nsColor: NSColor(name: nil, dynamicProvider: { appearance in
             let useDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             let c = useDark ? dark : light
             return NSColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: c.3)
         }))
+#else
+        self.init(uiColor: UIColor { traits in
+            let c = traits.userInterfaceStyle == .dark ? dark : light
+            return UIColor(red: c.0, green: c.1, blue: c.2, alpha: c.3)
+        })
+#endif
     }
 }
 

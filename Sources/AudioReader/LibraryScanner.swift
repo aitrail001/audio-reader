@@ -47,7 +47,9 @@ enum LibraryScanner {
         } else if !chapterMP3s.isEmpty {
             resolvedChapters = chapterMP3s
         } else {
-            resolvedChapters = m4bs
+            resolvedChapters = audio.sorted {
+                $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+            }
         }
 
         let chapters = resolvedChapters.enumerated().map { idx, url in
@@ -67,26 +69,63 @@ enum LibraryScanner {
         let folderName = folder.lastPathComponent
         let title = prettyBookTitle(folderName: folderName, m4b: m4bs.first, epub: epubs.first)
         let author = guessAuthor(from: m4bs.first) ?? guessAuthor(from: epubs.first)
+        let source = sourceMarker(in: folder)
+        let markedTitle = textMarker(named: ".audioreader-title", in: folder)
+        let markedAuthor = textMarker(named: ".audioreader-author", in: folder)
 
         return Book(
             id: stableID(folder.path),
-            title: title,
-            author: author,
+            title: markedTitle ?? title,
+            author: markedAuthor ?? author,
             folderPath: folder.path,
             coverPath: covers.first?.path,
             ebookPath: epubs.first?.path,
-            chapters: chapters
+            chapters: chapters,
+            source: source
         )
     }
 
     static func loadDurations(for book: Book) async -> Book {
         var copy = book
-        for i in copy.chapters.indices {
-            let url = URL(fileURLWithPath: copy.chapters[i].audioPath)
+        let folder = URL(fileURLWithPath: copy.folderPath, isDirectory: true)
+        if copy.coverPath == nil,
+           let audioPath = copy.chapters.first?.audioPath,
+           let artwork = await EmbeddedArtwork.extract(from: URL(fileURLWithPath: audioPath)),
+           let cover = try? EmbeddedArtwork.store(
+               artwork,
+               in: folder
+           ) {
+            copy.coverPath = cover.path
+        }
+        if copy.chapters.count == 1,
+           let audioPath = copy.chapters.first?.audioPath {
+            let persisted = M4BChapterExtractor.load(in: folder)
+            if !persisted.isEmpty {
+                copy.chapters = M4BChapterExtractor.makeChapters(audioPath: audioPath, metadata: persisted)
+                return copy
+            }
+        }
+        var loaded: [Chapter] = []
+        for chapter in copy.chapters {
+            let url = URL(fileURLWithPath: chapter.audioPath)
+            if ["m4a", "m4b"].contains(url.pathExtension.lowercased()) {
+                let embedded = await M4BChapterExtractor.extract(from: url)
+                if !embedded.isEmpty {
+                    loaded.append(contentsOf: M4BChapterExtractor.makeChapters(audioPath: url.path, metadata: embedded))
+                    continue
+                }
+            }
+            var updated = chapter
             let asset = AVURLAsset(url: url)
             if let duration = try? await asset.load(.duration) {
-                copy.chapters[i].duration = duration.seconds
+                updated.duration = duration.seconds
             }
+            loaded.append(updated)
+        }
+        copy.chapters = loaded.enumerated().map { index, chapter in
+            var updated = chapter
+            updated.index = index
+            return updated
         }
         return copy
     }
@@ -147,5 +186,22 @@ enum LibraryScanner {
 
     static func stableID(_ path: String) -> String {
         SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func containsAudio(in folder: URL) -> Bool {
+        allFiles(in: folder).contains { audioExt.contains($0.pathExtension.lowercased()) }
+    }
+
+    private static func sourceMarker(in folder: URL) -> BookSource {
+        guard let raw = textMarker(named: ".audioreader-source", in: folder),
+              let source = BookSource(rawValue: raw)
+        else { return .localFolder }
+        return source
+    }
+
+    private static func textMarker(named name: String, in folder: URL) -> String? {
+        guard let raw = try? String(contentsOf: folder.appendingPathComponent(name), encoding: .utf8) else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 }

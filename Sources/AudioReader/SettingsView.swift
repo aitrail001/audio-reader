@@ -2,117 +2,385 @@ import SwiftUI
 
 struct SettingsView: View {
     @Bindable var state: AppState
+    @State private var draft: AppSettings
+    @State private var xAIKey: String
+    @State private var qwenKey: String
+    @State private var saveFeedback: SaveFeedback?
+
+    private let labelWidth: CGFloat = 156
+
+    init(state: AppState) {
+        self.state = state
+        _draft = State(initialValue: state.settings)
+        _xAIKey = State(initialValue: state.apiKeyDraft)
+        _qwenKey = State(initialValue: state.qwenAPIKeyDraft)
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("Settings")
-                .font(.system(size: 22, weight: .regular, design: .serif))
-
-            GroupBox("Appearance") {
-                Picker("Theme", selection: $state.settings.appearance) {
-                    ForEach(AppAppearance.allCases) { mode in
-                        Text(mode.menuLabel).tag(mode.rawValue)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: state.settings.appearance) { _, _ in state.persistSettings() }
-                Text("Reader type scales with the text panel width. Drag the divider next to Lookup to resize panels. Use A / A in the player to nudge size.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.dim)
-                HStack {
-                    Text("Text size")
-                    Slider(value: $state.settings.readerFontScale, in: 0.75...1.6, step: 0.05)
-                    Text(String(format: "%.0f%%", state.settings.readerFontScale * 100))
-                        .font(.system(size: 11, design: .monospaced))
-                        .frame(width: 44, alignment: .trailing)
-                }
-                .onChange(of: state.settings.readerFontScale) { _, _ in state.persistSettings() }
-            }
-
-            GroupBox("Apple Dictionary") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Lookups query each installed dictionary on this Mac. For English → Chinese, use 牛津英汉汉英词典. 现代汉语规范词典 is Chinese-to-Chinese (it will not define English words).")
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Settings")
+                        .font(.system(size: 22, weight: .semibold))
+                    Text("Reader, dictionary, and language-model preferences")
                         .font(.system(size: 12))
                         .foregroundStyle(Palette.dim)
-                    Picker("Preferred dictionary", selection: $state.settings.preferredDictionary) {
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+
+            Divider().overlay(Palette.line)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    appearanceSection
+#if os(macOS)
+                    dictionarySection
+#endif
+                    languageSection
+                    providerSection
+                }
+                .padding(24)
+            }
+
+            Divider().overlay(Palette.line)
+
+            VStack(alignment: .leading, spacing: 8) {
+                if let saveFeedback {
+                    Label(saveFeedback.message, systemImage: saveFeedback.succeeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(saveFeedback.succeeded ? Palette.gold : Color.red.opacity(0.9))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button("Cancel") { state.showSettings = false }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Save Settings", action: save)
+                        .buttonStyle(.borderedProminent)
+                        .tint(Palette.terracotta)
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+            .background(Palette.panel)
+        }
+        .frame(width: settingsWidth, height: settingsHeight)
+        .background(Palette.bg)
+    }
+
+    private var settingsWidth: CGFloat? {
+#if os(macOS)
+        700
+#else
+        nil
+#endif
+    }
+
+    private var settingsHeight: CGFloat? {
+#if os(macOS)
+        700
+#else
+        nil
+#endif
+    }
+
+    private var appearanceSection: some View {
+        GroupBox("Appearance") {
+            VStack(alignment: .leading, spacing: 12) {
+                settingRow("Theme") {
+                    Picker("Theme", selection: $draft.appearance) {
+                        ForEach(AppAppearance.allCases) { mode in
+                            Text(mode.menuLabel).tag(mode.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
+                settingRow("Text size") {
+                    HStack(spacing: 12) {
+                        Slider(value: $draft.readerFontScale, in: 0.75...1.6, step: 0.05)
+                        Text(String(format: "%.0f%%", draft.readerFontScale * 100))
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(width: 44, alignment: .trailing)
+                    }
+                }
+                helper("Reader type also scales with the text panel width. Drag the divider next to Lookup, or use A / A in the player, for quick adjustments.")
+            }
+            .padding(12)
+        }
+    }
+
+    private var dictionarySection: some View {
+        GroupBox("Apple Dictionary") {
+            VStack(alignment: .leading, spacing: 12) {
+#if os(iOS)
+                helper("Word definitions use the dictionaries installed in iPadOS. Use Look Up in the reader to view all available entries.")
+#else
+                settingRow("Preferred dictionary") {
+                    Picker("Preferred dictionary", selection: $draft.preferredDictionary) {
                         ForEach(DictionaryLookup.installedNames(), id: \.self) { name in
                             Text(name).tag(name)
                         }
                     }
-                    .onChange(of: state.settings.preferredDictionary) { _, name in
-                        state.selectedDictionaryName = name
-                        state.persistSettings()
+                    .labelsHidden()
+                }
+                helper("Lookups query installed dictionaries. For English to Chinese, use 牛津英汉汉英词典; 现代汉语规范词典 is Chinese-to-Chinese.")
+                HStack {
+                    Spacer().frame(width: labelWidth + 16)
+                    Button("Open Dictionary.app") { DictionaryLookup.openDictionaryApp() }
+                }
+#endif
+            }
+            .padding(12)
+        }
+    }
+
+    private var languageSection: some View {
+        GroupBox("Study language") {
+            VStack(alignment: .leading, spacing: 12) {
+                settingRow("Translate into") {
+                    Picker("Translate into", selection: $draft.targetLanguage) {
+                        ForEach(StudyLanguage.allCases) { language in
+                            Text(language.menuLabel).tag(language.rawValue)
+                        }
                     }
-                    HStack {
-                        Button("Open Dictionary.app") { DictionaryLookup.openDictionaryApp() }
-                        Button("Choose books folder…") { state.chooseLibrary() }
+                    .labelsHidden()
+                }
+                settingRow("Auto-translate") {
+                    Toggle("Translate the current sentence with the selected LLM", isOn: $draft.autoTranslate)
+                }
+                settingRow("Play on selection") {
+                    Toggle("Play audio when tapping a sentence or word", isOn: $draft.playOnSelect)
+                }
+                settingRow("Sentence context") {
+                    countStepper(value: $draft.sentenceContextCount, range: 0...10, suffix: "before and after")
+                }
+                settingRow("Chapter block") {
+                    countStepper(value: $draft.chapterTranslationBlockSize, range: 1...20, suffix: "sentences per request")
+                }
+                settingRow("Chat context") {
+                    countStepper(value: $draft.chatContextCount, range: 0...20, suffix: "before and after")
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    private var providerSection: some View {
+        GroupBox("LLM provider") {
+            VStack(alignment: .leading, spacing: 12) {
+                settingRow("Provider") {
+                    Picker("Provider", selection: $draft.llmProvider) {
+                        ForEach(LLMProvider.allCases) { provider in
+                            Text(provider.menuLabel).tag(provider.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
+
+                Divider().overlay(Palette.line)
+
+                if draftProvider == .grok {
+                    grokSettings
+                } else {
+                    qwenSettings
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    private var grokSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            helper("A Grok Build session from `grok login` works without a console API key. A saved key overrides no environment variables.")
+            settingRow("Connection") {
+                Text(APIKeyStore.sourceLabel)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(APIKeyStore.isConfigured ? Palette.gold : Palette.dim)
+            }
+            settingRow("xAI API key") {
+                SecureField("Optional XAI_API_KEY", text: $xAIKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            settingRow("Model") {
+                Picker("Model", selection: $draft.grokModel) {
+                    ForEach(GrokModel.allCases) { model in
+                        Text(model.menuLabel).tag(model.rawValue)
                     }
                 }
-                .padding(6)
+                .labelsHidden()
             }
-
-            GroupBox("Study language") {
-                Picker("Translate into", selection: $state.settings.targetLanguage) {
-                    ForEach(StudyLanguage.allCases) { lang in
-                        Text(lang.menuLabel).tag(lang.rawValue)
+            if GrokModel(rawValue: draft.grokModel)?.supportsEffort == true {
+                settingRow("Reasoning effort") {
+                    Picker("Reasoning effort", selection: $draft.grokEffort) {
+                        ForEach(GrokEffort.allCases) { effort in
+                            Text(effort.menuLabel).tag(effort.rawValue)
+                        }
                     }
+                    .labelsHidden()
                 }
-                .onChange(of: state.settings.targetLanguage) { _, _ in state.persistSettings() }
-                Toggle("Auto-translate the current sentence with Grok", isOn: $state.settings.autoTranslate)
-                    .onChange(of: state.settings.autoTranslate) { _, _ in state.persistSettings() }
-                Toggle("Play audio when tapping a sentence or word", isOn: $state.settings.playOnSelect)
-                    .onChange(of: state.settings.playOnSelect) { _, _ in state.persistSettings() }
-            }
-
-            GroupBox("Grok / Grok Build (xAI)") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("If you are signed in to Grok Build (`grok login`), AudioReader uses that session and does not need a console API key. grok-4.6 is better for literary Chinese; grok-build-0.1 is the Grok Build coding model.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Palette.dim)
-                    Text(APIKeyStore.sourceLabel)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(APIKeyStore.isConfigured ? Palette.gold : Palette.dim)
-                    SecureField("Optional xAI API key (only if not using Grok Build login)", text: $state.apiKeyDraft)
-                        .textFieldStyle(.roundedBorder)
-                    Picker("Model", selection: $state.settings.grokModel) {
-                        ForEach(GrokModel.allCases) { model in
-                            Text(model.menuLabel).tag(model.rawValue)
-                        }
-                    }
-                    .onChange(of: state.settings.grokModel) { _, _ in state.persistSettings() }
-                    if GrokModel(rawValue: state.settings.grokModel)?.supportsEffort == true {
-                        Picker("Effort", selection: $state.settings.grokEffort) {
-                            ForEach(GrokEffort.allCases) { effort in
-                                Text(effort.menuLabel).tag(effort.rawValue)
-                            }
-                        }
-                        .onChange(of: state.settings.grokEffort) { _, _ in state.persistSettings() }
-                    }
-                    HStack {
-                        Button("Save key") {
-                            APIKeyStore.save(state.apiKeyDraft)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Palette.terracotta)
-                        if APIKeyStore.isConfigured {
-                            Text("Key on file")
-                                .font(.system(size: 11))
-                                .foregroundStyle(Palette.gold)
-                        }
-                    }
-                }
-                .padding(6)
-            }
-
-            Spacer()
-            HStack {
-                Spacer()
-                Button("Done") { state.showSettings = false }
-                    .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(24)
-        .frame(width: 580, height: 580)
-        .background(Palette.bg)
     }
+
+    private var qwenSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            helper("QwenCloud uses the OpenAI-compatible Responses API. Thinking can improve complex answers but adds latency and token usage.")
+            settingRow("Connection") {
+                Text(QwenAPIKeyStore.sourceLabel)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(QwenAPIKeyStore.isConfigured ? Palette.gold : Palette.dim)
+            }
+            settingRow("DashScope API key") {
+                SecureField("DASHSCOPE_API_KEY", text: $qwenKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            settingRow("Endpoint") {
+                TextField("QwenCloud endpoint", text: $draft.qwenEndpoint)
+                    .textFieldStyle(.roundedBorder)
+            }
+            settingRow("Text model") {
+                Picker("Text model", selection: $draft.qwenModel) {
+                    ForEach(qwenTextModels) { model in
+                        Text(model.menuLabel).tag(model.id)
+                    }
+                }
+                .labelsHidden()
+            }
+            if let selected = qwenTextModels.first(where: { $0.id == draft.qwenModel }) {
+                alignedHelper(selected.capabilities)
+            }
+            settingRow("Thinking") {
+                Toggle("Enable thinking", isOn: $draft.qwenThinking)
+            }
+            if draft.qwenThinking {
+                settingRow("Reasoning effort") {
+                    Picker("Reasoning effort", selection: $draft.qwenEffort) {
+                        ForEach(QwenEffort.allCases) { effort in
+                            Text(effort.menuLabel).tag(effort.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                }
+            }
+            if state.isLoadingQwenModels {
+                HStack(spacing: 8) {
+                    Spacer().frame(width: labelWidth + 16)
+                    ProgressView().controlSize(.small)
+                    Text("Refreshing the QwenCloud model list…")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Palette.dim)
+                }
+            } else if let message = state.qwenModelsMessage {
+                alignedHelper(message)
+            }
+            HStack {
+                Spacer().frame(width: labelWidth + 16)
+                Button {
+                    Task {
+                        if let models = await state.retrieveQwenModels(baseURL: draft.qwenEndpoint, apiKey: qwenKey) {
+                            let selectable = models.filter(\.supportsText)
+                            if !selectable.contains(where: { $0.id == draft.qwenModel }),
+                               let replacement = selectable.first(where: { $0.id == "qwen3.8-max" }) ?? selectable.first {
+                                draft.qwenModel = replacement.id
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Retrieve Models Again", systemImage: "arrow.clockwise")
+                }
+                .disabled(state.isLoadingQwenModels)
+            }
+            alignedHelper("\(state.qwenModels.count) catalog models. Only text-generation models appear in this picker.", muted: true)
+        }
+    }
+
+    private var draftProvider: LLMProvider {
+        LLMProvider(rawValue: draft.llmProvider) ?? .grok
+    }
+
+    private var qwenTextModels: [LLMModelInfo] {
+        var models = state.qwenModels.filter(\.supportsText)
+        if !models.contains(where: { $0.id == draft.qwenModel }) {
+            models.append(.init(id: draft.qwenModel, brand: "Custom", capabilities: "Custom model ID", supportsText: true))
+        }
+        return models.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+    }
+
+    private func settingRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
+            Text(label)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Palette.ink)
+                .frame(width: labelWidth, alignment: .trailing)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func helper(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12))
+            .foregroundStyle(Palette.dim)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func alignedHelper(_ text: String, muted: Bool = false) -> some View {
+        HStack(alignment: .top, spacing: 16) {
+            Spacer().frame(width: labelWidth)
+            Text(text)
+                .font(.system(size: muted ? 10 : 11))
+                .foregroundStyle(muted ? Palette.mute : Palette.dim)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func countStepper(value: Binding<Int>, range: ClosedRange<Int>, suffix: String) -> some View {
+        HStack {
+            Text("\(value.wrappedValue) \(suffix)")
+                .foregroundStyle(Palette.dim)
+            Spacer()
+            Stepper("", value: value, in: range)
+                .labelsHidden()
+        }
+    }
+
+    private func save() {
+        let settingsSaved = Persistence.saveSettings(draft)
+        let xAIKeySaved = APIKeyStore.save(xAIKey)
+        let qwenKeySaved = QwenAPIKeyStore.save(qwenKey)
+
+        guard settingsSaved else {
+            saveFeedback = .init(message: "Settings could not be written to disk. Your changes were not applied.", succeeded: false)
+            return
+        }
+
+        state.settings = draft
+        state.selectedDictionaryName = draft.preferredDictionary
+        state.apiKeyDraft = xAIKey
+        state.qwenAPIKeyDraft = qwenKey
+
+        if xAIKeySaved && qwenKeySaved {
+            saveFeedback = .init(message: "Settings saved successfully.", succeeded: true)
+        } else {
+            saveFeedback = .init(message: "Settings saved, but one or more API keys could not be stored.", succeeded: false)
+        }
+
+        guard draftProvider == .qwenCloud, qwenKeySaved else { return }
+        Task {
+            await state.refreshQwenModels()
+            draft.qwenModel = state.settings.qwenModel
+        }
+    }
+}
+
+private struct SaveFeedback {
+    let message: String
+    let succeeded: Bool
 }

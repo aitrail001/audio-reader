@@ -54,10 +54,16 @@ actor Transcriber {
 
         let url = URL(fileURLWithPath: chapter.audioPath)
         let audioFile: AVAudioFile
+        let temporaryAudioURL: URL?
         do {
-            audioFile = try AVAudioFile(forReading: url)
+            (audioFile, temporaryAudioURL) = try chapterAudioFile(for: chapter, sourceURL: url)
         } catch {
             throw TranscriptionError.noAudio
+        }
+        defer {
+            if let temporaryAudioURL {
+                try? FileManager.default.removeItem(at: temporaryAudioURL)
+            }
         }
 
         let duration = Double(audioFile.length) / audioFile.processingFormat.sampleRate
@@ -133,6 +139,45 @@ actor Transcriber {
 
     func cancel() async {
         await analyzer?.cancelAndFinishNow()
+    }
+
+    private func chapterAudioFile(for chapter: Chapter, sourceURL: URL) throws -> (AVAudioFile, URL?) {
+        let source = try AVAudioFile(forReading: sourceURL)
+        guard let requestedDuration = chapter.duration, chapter.startTime != nil else {
+            return (source, nil)
+        }
+
+        let sampleRate = source.processingFormat.sampleRate
+        let startFrame = min(source.length, max(0, AVAudioFramePosition(chapter.audioStart * sampleRate)))
+        let requestedFrames = max(0, AVAudioFramePosition(requestedDuration * sampleRate))
+        var remaining = min(source.length - startFrame, requestedFrames)
+        guard remaining > 0 else { throw TranscriptionError.noAudio }
+
+        let temporaryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioReader-chapter-\(UUID().uuidString).caf")
+        source.framePosition = startFrame
+        do {
+            let output = try AVAudioFile(
+                forWriting: temporaryURL,
+                settings: source.processingFormat.settings
+            )
+            while remaining > 0 {
+                try Task.checkCancellation()
+                let requested = AVAudioFrameCount(min(remaining, 32_768))
+                guard let buffer = AVAudioPCMBuffer(
+                    pcmFormat: source.processingFormat,
+                    frameCapacity: requested
+                ) else { throw TranscriptionError.noAudio }
+                try source.read(into: buffer, frameCount: requested)
+                guard buffer.frameLength > 0 else { break }
+                try output.write(from: buffer)
+                remaining -= AVAudioFramePosition(buffer.frameLength)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            throw error
+        }
+        return (try AVAudioFile(forReading: temporaryURL), temporaryURL)
     }
 
     private func words(from result: SpeechTranscriber.Result) -> [TranscriptWord] {

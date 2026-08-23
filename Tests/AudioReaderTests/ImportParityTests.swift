@@ -1,0 +1,448 @@
+import Foundation
+import Testing
+import ZIPFoundation
+@testable import AudioReader
+
+@Suite("Cross-platform import parity")
+struct ImportParityTests {
+    @Test("EPUB text extraction uses the sandbox-safe ZIP implementation")
+    func extractsEPUBText() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let source = fixture.root.appendingPathComponent("epub", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        let html = "<html><body><p>This chapter contains enough meaningful words to verify shared EPUB extraction on every supported platform.</p></body></html>"
+        try Data(html.utf8).write(to: source.appendingPathComponent("chapter.xhtml"))
+        let epub = fixture.root.appendingPathComponent("book.epub")
+        try FileManager.default.zipItem(at: source, to: epub, shouldKeepParent: false, compressionMethod: .deflate)
+
+        let extracted = EPUBParser.extractText(from: epub.path)
+
+        #expect(extracted?.contains("shared EPUB extraction") == true)
+    }
+
+    @Test("File import copies audio and companion ebook with source metadata")
+    func importsFiles() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let incoming = fixture.root.appendingPathComponent("incoming", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+        let audio = incoming.appendingPathComponent("Sample Book.m4b")
+        let ebook = incoming.appendingPathComponent("Sample Book.epub")
+        try Data("audio fixture".utf8).write(to: audio)
+        try Data("ebook fixture".utf8).write(to: ebook)
+
+        try AudiobookImportService.importFiles([audio, ebook], into: library)
+
+        let book = library.appendingPathComponent("Sample Book", isDirectory: true)
+        #expect(FileManager.default.fileExists(atPath: book.appendingPathComponent("Sample Book.m4b").path))
+        #expect(FileManager.default.fileExists(atPath: book.appendingPathComponent("Sample Book.epub").path))
+        let source = try String(contentsOf: book.appendingPathComponent(".audioreader-source"), encoding: .utf8)
+        #expect(source == BookSource.files.rawValue)
+    }
+
+    @Test("Imported device audiobook is discoverable with its source metadata")
+    func discoversImportedDeviceAudiobook() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let book = try AudiobookImportService.newBookFolder(title: "Device Book", in: fixture.root)
+        try AudiobookImportService.writeMarkers(
+            source: .deviceAudiobooks,
+            title: "Device Book",
+            author: "Device Author",
+            to: book
+        )
+        try Data("audio fixture".utf8).write(to: book.appendingPathComponent("audiobook.m4a"))
+
+        let scanned = LibraryScanner.scan(root: fixture.root)
+        let imported = try #require(scanned.first)
+
+        #expect(scanned.count == 1)
+        #expect(imported.title == "Device Book")
+        #expect(imported.author == "Device Author")
+        #expect(imported.source == .deviceAudiobooks)
+    }
+
+    @Test("Folder import produces a discoverable local book")
+    func importsFolder() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let source = fixture.root.appendingPathComponent("incoming", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try Data("audio fixture".utf8).write(to: source.appendingPathComponent("chapter.m4b"))
+
+        try AudiobookImportService.importFolder(source, into: library)
+        let scanned = LibraryScanner.scan(root: library)
+        let imported = try #require(scanned.first)
+
+        #expect(scanned.count == 1)
+        #expect(imported.source == .localFolder)
+        #expect(imported.chapters.count == 1)
+    }
+
+    @Test("Importing the same audio content twice does not duplicate the book")
+    func deduplicatesExactAudioContent() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let first = fixture.root.appendingPathComponent("first", isDirectory: true)
+        let second = fixture.root.appendingPathComponent("second", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: first, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: second, withIntermediateDirectories: true)
+        let bytes = Data("the exact same audiobook bytes".utf8)
+        let firstAudio = first.appendingPathComponent("Original Name.m4b")
+        let secondAudio = second.appendingPathComponent("Completely Different Name.m4b")
+        try bytes.write(to: firstAudio)
+        try bytes.write(to: secondAudio)
+
+        try AudiobookImportService.importFiles([firstAudio], into: library)
+        try AudiobookImportService.importFiles([secondAudio], into: library)
+
+        #expect(LibraryScanner.scan(root: library).count == 1)
+    }
+
+    @Test("Books with the same name but different audio content remain distinct")
+    func doesNotDeduplicateByName() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let first = fixture.root.appendingPathComponent("first", isDirectory: true)
+        let second = fixture.root.appendingPathComponent("second", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: first, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: second, withIntermediateDirectories: true)
+        let firstAudio = first.appendingPathComponent("Same Name.m4b")
+        let secondAudio = second.appendingPathComponent("Same Name.m4b")
+        try Data("first edition audio".utf8).write(to: firstAudio)
+        try Data("different edition audio".utf8).write(to: secondAudio)
+
+        try AudiobookImportService.importFiles([firstAudio], into: library)
+        try AudiobookImportService.importFiles([secondAudio], into: library)
+
+        #expect(LibraryScanner.scan(root: library).count == 2)
+    }
+
+    @Test("Re-importing exact audio can enrich the existing book with an EPUB")
+    func enrichesExistingBookWithEbook() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let incoming = fixture.root.appendingPathComponent("incoming", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+        let audio = incoming.appendingPathComponent("Study Book.m4b")
+        let ebook = incoming.appendingPathComponent("Study Book.epub")
+        try Data("stable audiobook content".utf8).write(to: audio)
+        try Data("later ebook content".utf8).write(to: ebook)
+
+        try AudiobookImportService.importFiles([audio], into: library)
+        try AudiobookImportService.importFiles([audio, ebook], into: library)
+
+        let books = LibraryScanner.scan(root: library)
+        let book = try #require(books.first)
+        #expect(books.count == 1)
+        #expect(book.ebookPath != nil)
+    }
+
+    @Test("Persisted device chapter ranges split exported M4A audio")
+    func loadsPersistedDeviceChapters() async throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let folder = fixture.root.appendingPathComponent("Device Book", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("audio fixture".utf8).write(to: folder.appendingPathComponent("audiobook.m4a"))
+        let sidecar = """
+        [
+          {"title":"Introduction","start":0,"duration":42.5},
+          {"title":"Chapter One","start":42.5,"duration":180.25}
+        ]
+        """
+        try Data(sidecar.utf8).write(to: folder.appendingPathComponent(".audioreader-chapters.json"))
+
+        let scanned = try #require(LibraryScanner.scan(root: fixture.root).first)
+        let loaded = await LibraryScanner.loadDurations(for: scanned)
+        let second = try #require(loaded.chapters.dropFirst().first)
+
+        #expect(loaded.chapters.count == 2)
+        #expect(second.title == "Chapter One")
+        #expect(second.audioStart == 42.5)
+    }
+
+    @Test("iPad playback speeds provide five-percent increments from half to double speed")
+    func providesGranularPlaybackSpeeds() {
+        #expect(PlaybackSpeedCatalog.values.first == 0.5)
+        #expect(PlaybackSpeedCatalog.values.last == 2.0)
+        #expect(PlaybackSpeedCatalog.values.count == 31)
+        #expect(PlaybackSpeedCatalog.values.contains(0.95))
+        #expect(PlaybackSpeedCatalog.values.contains(1.05))
+    }
+
+    @MainActor
+    @Test("Opening a vocabulary entry reports whether reader navigation succeeded")
+    func reportsVocabularyReaderNavigation() {
+        let state = AppState()
+        let chapter = Chapter(
+            id: "chapter-id",
+            index: 0,
+            title: "Chapter One",
+            audioPath: "/tmp/missing-audio.m4b"
+        )
+        state.books = [Book(
+            id: "book-id",
+            title: "Book",
+            author: nil,
+            folderPath: "/tmp",
+            coverPath: nil,
+            ebookPath: nil,
+            chapters: [chapter]
+        )]
+        let entry = VocabEntry(
+            id: "entry-id",
+            word: "example",
+            context: "An example sentence.",
+            bookID: "book-id",
+            bookTitle: "Book",
+            chapterID: "chapter-id",
+            chapterTitle: "Chapter One",
+            timestamp: 1,
+            addedAt: Date()
+        )
+        var missing = entry
+        missing.bookID = "missing-book"
+        missing.bookTitle = "Entirely Absent"
+
+        #expect(state.jumpToVocab(entry))
+        #expect(state.tab == .player)
+        #expect(state.selectedBookID == "book-id")
+        #expect(state.selectedChapterID == "chapter-id")
+        #expect(!state.jumpToVocab(missing))
+    }
+
+    @Test("Book deletion is limited to a direct child of the imported library")
+    func deletesOnlyScopedImportedBook() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        let book = library.appendingPathComponent("Book", isDirectory: true)
+        let outside = fixture.root.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: book, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try Data("audio".utf8).write(to: book.appendingPathComponent("chapter.m4b"))
+
+        try AudiobookImportService.deleteBookFolder(book, in: library)
+
+        #expect(!FileManager.default.fileExists(atPath: book.path))
+        #expect(FileManager.default.fileExists(atPath: outside.path))
+        #expect(throws: AudiobookImportError.self) {
+            try AudiobookImportService.deleteBookFolder(outside, in: library)
+        }
+    }
+
+    @Test("Embedded audiobook artwork is persisted as a discoverable cover")
+    func persistsEmbeddedArtwork() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let book = fixture.root.appendingPathComponent("book", isDirectory: true)
+        try FileManager.default.createDirectory(at: book, withIntermediateDirectories: true)
+        let pngHeader = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+
+        let cover = try EmbeddedArtwork.store(pngHeader, in: book)
+
+        #expect(cover.lastPathComponent == "cover.png")
+        #expect(FileManager.default.fileExists(atPath: cover.path))
+        #expect(try Data(contentsOf: cover) == pngHeader)
+    }
+
+    @Test("Embedded M4B metadata becomes independently ranged chapters")
+    func createsRangedM4BChapters() {
+        let metadata = [
+            EmbeddedM4BChapter(title: "Introduction", start: 0, duration: 42.5),
+            EmbeddedM4BChapter(title: "Chapter One", start: 42.5, duration: 180.25)
+        ]
+
+        let chapters = M4BChapterExtractor.makeChapters(audioPath: "/tmp/book.m4b", metadata: metadata)
+
+        #expect(chapters.count == 2)
+        #expect(chapters[0].title == "Introduction")
+        #expect(chapters[0].audioStart == 0)
+        #expect(chapters[0].duration == 42.5)
+        #expect(chapters[1].title == "Chapter One")
+        #expect(chapters[1].audioStart == 42.5)
+        #expect(chapters[1].duration == 180.25)
+        #expect(chapters[0].id != chapters[1].id)
+    }
+
+    @Test("Embedded M4B transcripts require the matching chapter start")
+    func distinguishesEmbeddedChapterTranscripts() {
+        let chapter = Chapter(
+            id: "chapter-two",
+            index: 1,
+            title: "Chapter Two",
+            audioPath: "/tmp/book.m4b",
+            duration: 120,
+            startTime: 42.5
+        )
+        let legacy = Transcript(
+            chapterID: chapter.id,
+            audioPath: chapter.audioPath,
+            createdAt: Date(),
+            locale: "en-US",
+            segments: [],
+            source: "SpeechAnalyzer",
+            ebookAligned: false
+        )
+        var matching = legacy
+        matching.chapterStart = 42.5
+        var different = legacy
+        different.chapterStart = 0
+
+        #expect(legacy.belongs(to: chapter) == false)
+        #expect(matching.belongs(to: chapter))
+        #expect(different.belongs(to: chapter) == false)
+    }
+
+    @Test("Chapter readiness is computed once from matching transcript identities")
+    func computesChapterReadiness() {
+        let embedded = Chapter(
+            id: "embedded-two",
+            index: 1,
+            title: "Embedded Two",
+            audioPath: "/tmp/book.m4b",
+            duration: 120,
+            startTime: 42.5
+        )
+        let ordinary = Chapter(
+            id: "ordinary",
+            index: 0,
+            title: "Ordinary",
+            audioPath: "/tmp/chapter.mp3",
+            duration: 60,
+            startTime: nil
+        )
+        let book = Book(
+            id: "book",
+            title: "Book",
+            author: nil,
+            folderPath: "/tmp",
+            coverPath: nil,
+            ebookPath: nil,
+            chapters: [embedded, ordinary]
+        )
+        let staleEmbedded = Transcript(
+            chapterID: embedded.id,
+            audioPath: embedded.audioPath,
+            createdAt: Date(),
+            locale: "en-US",
+            segments: [],
+            source: "SpeechAnalyzer",
+            ebookAligned: false
+        )
+        let ordinaryTranscript = Transcript(
+            chapterID: ordinary.id,
+            audioPath: ordinary.audioPath,
+            createdAt: Date(),
+            locale: "en-US",
+            segments: [],
+            source: "SpeechAnalyzer",
+            ebookAligned: false
+        )
+
+        let ready = Persistence.readyChapterIDs(in: [book], transcripts: [staleEmbedded, ordinaryTranscript])
+
+        #expect(ready == [ordinary.id])
+    }
+
+    @Test("Chapter translation groups sentences by the configured block size")
+    func groupsChapterTranslationBlocks() {
+        var segments: [TranscriptSegment] = []
+        for index in 1...7 {
+            segments.append(TranscriptSegment(
+                id: "segment-\(index)",
+                start: Double(index),
+                end: Double(index + 1),
+                words: [.init(id: "word-\(index)", text: "Sentence \(index).", start: Double(index), end: Double(index + 1), confidence: nil)]
+            ))
+        }
+
+        let blocks = ChapterTranslationBatch.blocks(segments, size: 3)
+
+        #expect(blocks.map(\.count) == [3, 3, 1])
+        #expect(blocks.flatMap { $0 }.map(\.id) == segments.map(\.id))
+    }
+
+    @Test("Chapter translation parses one reviewable result per sentence")
+    func parsesChapterTranslationResults() throws {
+        let response = """
+        ```json
+        [
+          {
+            "id": "segment-1",
+            "translation": "第一句。",
+            "phrases": [
+              {"source": "break the ice", "explanation": "打破沉默，缓和气氛"}
+            ]
+          },
+          {
+            "id": "segment-2",
+            "translation": "第二句。",
+            "phrases": []
+          }
+        ]
+        ```
+        """
+
+        let results = try ChapterTranslationBatch.parse(response, expectedIDs: ["segment-1", "segment-2"])
+
+        #expect(results.count == 2)
+        #expect(results[0].id == "segment-1")
+        #expect(results[0].glossText.contains("译文：\n第一句。"))
+        #expect(results[0].glossText.contains("break the ice"))
+        #expect(results[1].glossText.contains("短语：无"))
+    }
+
+    @Test("Legacy settings gain a safe chapter translation block size")
+    func defaultsChapterTranslationBlockSize() throws {
+        let legacy = try JSONEncoder().encode(AppSettings.default)
+        var object = try #require(JSONSerialization.jsonObject(with: legacy) as? [String: Any])
+        object.removeValue(forKey: "chapterTranslationBlockSize")
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONSerialization.data(withJSONObject: object))
+
+        #expect(decoded.chapterTranslationBlockSize == 5)
+    }
+
+    @Test("Vocabulary preserves the translation model attribution")
+    func preservesVocabularyTranslationModel() throws {
+        let entry = VocabEntry(
+            id: "entry",
+            word: "example",
+            translation: "示例",
+            translationLanguage: "zh-Hans",
+            translationModel: "deepseek-v4-flash-0731",
+            context: "An example.",
+            bookID: "book",
+            bookTitle: "Book",
+            chapterID: "chapter",
+            chapterTitle: "Chapter",
+            timestamp: 0,
+            addedAt: Date()
+        )
+
+        let decoded = try JSONDecoder.iso.decode(VocabEntry.self, from: JSONEncoder.iso.encode(entry))
+
+        #expect(decoded.translationModel == "deepseek-v4-flash-0731")
+    }
+}
+
+private struct TemporaryFixture {
+    let root: URL
+
+    init() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioReaderTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+
+    func remove() {
+        try? FileManager.default.removeItem(at: root)
+    }
+}

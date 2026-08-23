@@ -1,6 +1,6 @@
 # AudioReader
 
-A macOS audiobook reader for English study: spoken words highlight like lyrics while the audio plays, the page auto-scrolls, and you can save words back to the original sentence.
+A macOS and iPadOS audiobook reader for English study: spoken words highlight like lyrics while the audio plays, the page auto-scrolls, and you can save words back to the original sentence.
 
 ## Why speech-to-text, not ebook-only
 
@@ -33,15 +33,46 @@ This is the same idea as karaoke apps (timestamps from audio) plus a language-le
 - Play / pause, ±5s, previous/next sentence, replay sentence, sentence loop, 0.7–1.6× speed
 - Click a word to look it up in the macOS dictionary
 - Save a word with its sentence, book, chapter, and timestamp; jump back later
-- Transcripts, vocabulary, and Grok translations stored in SQLite (`~/Library/Application Support/AudioReader/library.sqlite`)
-- Vocabulary grouped by book and category (words, phrases, sentences). Each card keeps the Apple Dictionary entry, the original sentence, and any accepted Grok translation. **Open in text** selects the sentence or highlights the word.
+- Transcripts, vocabulary, and LLM translations stored in SQLite (`~/Library/Application Support/AudioReader/library.sqlite`)
+- Select Grok or QwenCloud for word and sentence translations. QwenCloud defaults to `qwen3.7-flash`, discovers models authorized for the configured workspace, falls back to a built-in catalog, and supports thinking and reasoning-effort controls.
+- Sentence translation prompts include the book, author, chapter, and a configurable number of preceding and following sentences.
+- **Chapter AI** can translate or summarise the complete transcribed chapter and provides a side-panel chat grounded in the book metadata and nearby reading context.
+- Vocabulary grouped by book and category (words, phrases, sentences). Each card keeps the Apple Dictionary entry, the original sentence, and any accepted LLM translation. **Open in text** selects the sentence or highlights the word.
+- Both apps import individual MP3/M4A/M4B files and audiobook folders, retain companion EPUBs and covers, and use the same EPUB alignment implementation.
+- M4B files are inspected for embedded chapter tracks. Chapter titles and time ranges become separate playable and transcribable chapters instead of one full-book chapter.
+
+## Platform parity
+
+| Capability | macOS | iPadOS |
+|---|---|---|
+| Playback, transcription, highlighting, vocabulary, LLM translation, Chapter AI, and chat | Yes | Yes |
+| Import audio/EPUB/cover files | Finder import | Files/iCloud Drive import |
+| Import one book folder or a folder containing multiple books | Yes | Yes |
+| EPUB extraction and printed-text alignment | Yes | Yes |
+| Apple Books/device audiobook discovery | Discovers downloaded MP3/M4A/M4B files in Apple Books’ local audiobook store, with refresh, import, and Open in Books | Direct device-library discovery through `MPMediaQuery` |
+| Protected Apple Books titles | Downloaded protected files are shown but disabled; cloud-only titles are not visible until downloaded | Shown but disabled; they cannot be copied or transcribed |
+| Dictionary lookup | Installed macOS dictionaries | iPadOS system dictionary sheet |
+
+Platform-specific code should only represent an Apple API or interaction difference; reading and study features remain shared.
 
 ## Requirements
 
 - macOS 26+
+- iPadOS 26+ for the iPad build
 - English speech assets (the app downloads them on first transcribe)
 
 ## Build & run
+
+### Xcode and physical iPad
+
+Open `AudioReader.xcodeproj` and choose one of the shared schemes:
+
+- `AudioReader-iOS` for a physical iPad or iPad Simulator.
+- `AudioReader-macOS` for the native Mac app.
+
+Both targets use `com.johnsonzhang.AudioReader`. Automatic signing is enabled for the iOS target. Before the first physical-device build, open **AudioReader-iOS → Signing & Capabilities**, select your Apple developer team, connect the iPad, and choose it as the run destination. Xcode will create or download the required development profile.
+
+The existing standalone package builds remain available:
 
 ```bash
 cd /Users/johnsonzhang/Documents/AI/Dataiku/src/audio-reader
@@ -51,6 +82,17 @@ open AudioReader.app
 ```
 
 First chapter you play: click **Transcribe**. A 30-minute chapter typically takes a few minutes on Apple Silicon. After that, highlighting is instant.
+
+### iPad Simulator
+
+```bash
+cd /Users/johnsonzhang/Documents/AI/Dataiku/src/audio-reader
+./scripts/package_ipad_simulator.sh
+xcrun simctl install booted AudioReader-iPad.app
+xcrun simctl launch booted com.johnsonzhang.AudioReader
+```
+
+The Simulator can validate the app and Files/folder import UI, but it has no real Apple Books media library. Validate Apple Books discovery, media permission, and asset accessibility on a physical iPad.
 
 ## Keyboard
 

@@ -6,6 +6,7 @@ struct AudioReaderApp: App {
     @State private var state = AppState()
 
     init() {
+#if os(macOS)
         let args = CommandLine.arguments
         if args.contains("--scan") {
             Cli.scan()
@@ -17,9 +18,11 @@ struct AudioReaderApp: App {
             Cli.transcribe(audioPath: audio, ebookPath: ebook)
             Foundation.exit(0)
         }
+#endif
     }
 
     var body: some Scene {
+#if os(macOS)
         WindowGroup {
             RootView(state: state)
                 .frame(minWidth: 980, minHeight: 640)
@@ -58,5 +61,11 @@ struct AudioReaderApp: App {
                     .keyboardShortcut("t", modifiers: [.command])
             }
         }
+#else
+        WindowGroup {
+            IPadRootView(state: state)
+                .preferredColorScheme(AppAppearance(rawValue: state.settings.appearance)?.colorScheme)
+        }
+#endif
     }
 }

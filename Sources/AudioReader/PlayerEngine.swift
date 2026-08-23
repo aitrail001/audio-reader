@@ -2,6 +2,19 @@ import Foundation
 import AVFoundation
 import CoreMedia
 
+enum PlaybackSpeedCatalog {
+    static let values: [Double] = (0...30).map { step in
+        (0.5 + Double(step) * 0.05).rounded(toPlaces: 2)
+    }
+}
+
+private extension Double {
+    func rounded(toPlaces places: Int) -> Double {
+        let power = pow(10, Double(places))
+        return (self * power).rounded() / power
+    }
+}
+
 @MainActor
 @Observable
 final class PlayerEngine {
@@ -12,6 +25,7 @@ final class PlayerEngine {
     var currentTime: TimeInterval = 0
     var duration: TimeInterval = 0
     var isPlaying: Bool = false
+    var playbackError: String?
     var rate: Float = 1.0 {
         didSet {
             if isPlaying { player?.rate = rate }
@@ -19,20 +33,31 @@ final class PlayerEngine {
     }
     var loop: PlaybackLoop = .off
     var loadedPath: String?
+    private var mediaStart: TimeInterval = 0
+    private var chapterDuration: TimeInterval?
 
-    func load(path: String) {
-        if loadedPath == path, player != nil { return }
+    func load(path: String, startTime: TimeInterval = 0, duration: TimeInterval? = nil) {
+        if loadedPath == path, player != nil, abs(mediaStart - startTime) < 0.001 {
+            chapterDuration = duration
+            seek(0)
+            return
+        }
         tearDown()
         let item = AVPlayerItem(url: URL(fileURLWithPath: path))
         let p = AVPlayer(playerItem: item)
         p.actionAtItemEnd = .pause
         self.player = p
         self.loadedPath = path
+        self.mediaStart = max(0, startTime)
+        self.chapterDuration = duration
         self.currentTime = 0
-        self.duration = 0
+        self.duration = duration ?? 0
+        if mediaStart > 0 {
+            p.seek(to: CMTime(seconds: mediaStart, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        }
         Task { @MainActor in
             if let d = try? await item.asset.load(.duration), d.seconds.isFinite {
-                self.duration = d.seconds
+                self.duration = duration ?? max(0, d.seconds - self.mediaStart)
             }
         }
 
@@ -42,7 +67,12 @@ final class PlayerEngine {
         ) { [weak self] time in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                let seconds = time.seconds
+                let seconds = max(0, time.seconds - self.mediaStart)
+                if let limit = self.chapterDuration, seconds >= limit - 0.02 {
+                    self.currentTime = limit
+                    self.pause()
+                    return
+                }
                 if abs(self.currentTime - seconds) < 0.05 { return }
                 self.currentTime = seconds
                 self.applyLoopIfNeeded()
@@ -62,6 +92,17 @@ final class PlayerEngine {
 
     func play() {
         guard let player else { return }
+#if os(iOS)
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .spokenAudio)
+            try session.setActive(true)
+            playbackError = nil
+        } catch {
+            playbackError = "Audio output could not be activated: \(error.localizedDescription)"
+            return
+        }
+#endif
         player.rate = rate
         isPlaying = true
     }
@@ -78,7 +119,7 @@ final class PlayerEngine {
     func seek(_ time: TimeInterval) {
         let t = max(0, min(time, duration > 0 ? duration : time))
         player?.seek(
-            to: CMTime(seconds: t, preferredTimescale: 600),
+            to: CMTime(seconds: mediaStart + t, preferredTimescale: 600),
             toleranceBefore: .zero,
             toleranceAfter: .zero
         )
@@ -102,6 +143,9 @@ final class PlayerEngine {
         endObserver = nil
         isPlaying = false
         loadedPath = nil
+        mediaStart = 0
+        chapterDuration = nil
+        playbackError = nil
     }
 
     private func applyLoopIfNeeded() {

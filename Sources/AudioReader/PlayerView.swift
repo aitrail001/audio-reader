@@ -1,20 +1,33 @@
 import SwiftUI
+#if os(macOS)
 import AppKit
+#endif
 
 struct PlayerView: View {
     @Bindable var state: AppState
     @State private var autoScroll = true
     @State private var lookupWidth: CGFloat = 0
     @State private var lookupDragStart: CGFloat?
+#if os(iOS)
+    @State private var showReaderToolbar = false
+    @State private var showSpeedPicker = false
+#endif
 
     var body: some View {
         VStack(spacing: 0) {
+#if os(iOS)
+            if showReaderToolbar {
+                header
+                Divider().overlay(Palette.line)
+            }
+#else
             header
             Divider().overlay(Palette.line)
+#endif
             if state.isTranscribing {
                 transcribeBanner
             }
-            if let err = state.errorMessage ?? state.translationError {
+            if let err = state.errorMessage ?? state.translationError ?? state.player.playbackError {
                 Text(err)
                     .font(.system(size: 12))
                     .foregroundStyle(.red.opacity(0.9))
@@ -22,10 +35,45 @@ struct PlayerView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.red.opacity(0.12))
             }
+            if let notice = state.vocabularyNotice {
+                HStack(spacing: 8) {
+                    Label(notice, systemImage: notice.contains("already") ? "bookmark.fill" : "checkmark.circle.fill")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                    Spacer()
+                    Button {
+                        state.vocabularyNotice = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Dismiss")
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Palette.goldSoft)
+            }
             lyricPane
             controls
         }
         .background(Palette.bg)
+#if os(iOS)
+        .navigationTitle(readerNavigationTitle)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .secondaryAction) {
+                Button {
+                    showReaderToolbar.toggle()
+                } label: {
+                    Label(
+                        showReaderToolbar ? "Hide Reader Controls" : "Show Reader Controls",
+                        systemImage: showReaderToolbar ? "chevron.up" : "slider.horizontal.3"
+                    )
+                }
+                .accessibilityLabel(showReaderToolbar ? "Hide reader controls" : "Show reader controls")
+            }
+        }
+#endif
         .onChange(of: state.player.currentTime) { _, _ in
             state.tickLoop()
         }
@@ -35,12 +83,20 @@ struct PlayerView: View {
     }
 
     private var header: some View {
+#if os(iOS)
+        iPadHeader
+#else
+        desktopHeader
+#endif
+    }
+
+    private var desktopHeader: some View {
         HStack(spacing: 14) {
-            if let path = state.selectedBook?.coverPath, let img = NSImage(contentsOfFile: path) {
-                Image(nsImage: img)
+            if let path = state.selectedBook?.coverPath, let img = CoverImageCache.shared.image(for: path) {
+                Image(platformImage: img)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: 44, height: 44)
+                    .frame(width: 36, height: 44)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -61,22 +117,58 @@ struct PlayerView: View {
             .frame(maxWidth: 220)
             .onChange(of: state.textSource) { _, _ in state.persistSettings() }
 
-            Picker("Model", selection: $state.settings.grokModel) {
-                ForEach(GrokModel.allCases) { model in
-                    Text(model.rawValue).tag(model.rawValue)
+            Picker("Provider", selection: $state.settings.llmProvider) {
+                ForEach(LLMProvider.allCases) { provider in
+                    Text(provider.menuLabel).tag(provider.rawValue)
                 }
             }
-            .frame(maxWidth: 140)
-            .onChange(of: state.settings.grokModel) { _, _ in state.persistSettings() }
+            .frame(maxWidth: 130)
+            .onChange(of: state.settings.llmProvider) { _, provider in
+                state.persistSettings()
+                if provider == LLMProvider.qwenCloud.rawValue {
+                    Task { await state.refreshQwenModels() }
+                }
+            }
 
-            if GrokModel(rawValue: state.settings.grokModel)?.supportsEffort == true {
-                Picker("Effort", selection: $state.settings.grokEffort) {
-                    ForEach(GrokEffort.allCases) { effort in
-                        Text(effort.rawValue).tag(effort.rawValue)
+            if state.llmProvider == .grok {
+                Picker("Model", selection: $state.settings.grokModel) {
+                    ForEach(GrokModel.allCases) { model in
+                        Text(model.rawValue).tag(model.rawValue)
                     }
                 }
-                .frame(maxWidth: 110)
-                .onChange(of: state.settings.grokEffort) { _, _ in state.persistSettings() }
+                .frame(maxWidth: 140)
+                .onChange(of: state.settings.grokModel) { _, _ in state.persistSettings() }
+
+                if GrokModel(rawValue: state.settings.grokModel)?.supportsEffort == true {
+                    Picker("Effort", selection: $state.settings.grokEffort) {
+                        ForEach(GrokEffort.allCases) { effort in
+                            Text(effort.rawValue).tag(effort.rawValue)
+                        }
+                    }
+                    .frame(maxWidth: 110)
+                    .onChange(of: state.settings.grokEffort) { _, _ in state.persistSettings() }
+                }
+            } else {
+                Picker("Model", selection: $state.settings.qwenModel) {
+                    ForEach(state.qwenTextModels) { model in
+                        Text(model.id).tag(model.id)
+                    }
+                }
+                .frame(maxWidth: 180)
+                .onChange(of: state.settings.qwenModel) { _, _ in state.persistSettings() }
+                Toggle("Thinking", isOn: $state.settings.qwenThinking)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .onChange(of: state.settings.qwenThinking) { _, _ in state.persistSettings() }
+                if state.settings.qwenThinking {
+                    Picker("Effort", selection: $state.settings.qwenEffort) {
+                        ForEach(QwenEffort.allCases) { effort in
+                            Text(effort.rawValue).tag(effort.rawValue)
+                        }
+                    }
+                    .frame(maxWidth: 105)
+                    .onChange(of: state.settings.qwenEffort) { _, _ in state.persistSettings() }
+                }
             }
 
             Toggle("Auto-scroll", isOn: $autoScroll)
@@ -111,6 +203,14 @@ struct PlayerView: View {
             .foregroundStyle(Palette.dim)
 
             Button {
+                state.showChapterAssistant.toggle()
+            } label: {
+                Label("Chapter AI", systemImage: "sparkles")
+            }
+            .foregroundStyle(state.showChapterAssistant ? Palette.gold : Palette.ink)
+            .disabled(state.selectedChapter == nil)
+
+            Button {
                 state.transcribeSelected(force: state.transcript != nil)
             } label: {
                 Label(state.transcript == nil ? "Transcribe" : "Re-transcribe", systemImage: "waveform")
@@ -121,6 +221,173 @@ struct PlayerView: View {
         .padding(.vertical, 12)
         .background(Palette.panel)
     }
+
+#if os(iOS)
+    private var readerNavigationTitle: String {
+        [state.selectedBook?.title, state.selectedChapter?.title]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+    }
+
+    private var iPadHeader: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                iPadTextSourcePicker
+                    .frame(minWidth: 180, idealWidth: 240, maxWidth: 300)
+                Spacer(minLength: 0)
+                iPadLLMMenu
+                iPadReadingMenu
+                Button {
+                    state.showChapterAssistant.toggle()
+                } label: {
+                    Image(systemName: "sparkles")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .tint(state.showChapterAssistant ? Palette.gold : Palette.terracotta)
+                .disabled(state.selectedChapter == nil)
+                .accessibilityLabel("Chapter AI")
+                .help("Chapter AI")
+
+                Button {
+                    state.transcribeSelected(force: state.transcript != nil)
+                } label: {
+                    Image(systemName: "waveform")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(Palette.terracotta)
+                .disabled(state.selectedChapter == nil || state.isTranscribing)
+                .accessibilityLabel(state.transcript == nil ? "Transcribe" : "Re-transcribe")
+                .help(state.transcript == nil ? "Transcribe chapter" : "Re-transcribe chapter")
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                iPadTextSourcePicker
+                    .frame(maxWidth: .infinity)
+                HStack(spacing: 12) {
+                    iPadLLMMenu
+                    iPadReadingMenu
+                    Spacer(minLength: 0)
+                    Button {
+                        state.showChapterAssistant.toggle()
+                    } label: {
+                        Image(systemName: "sparkles")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .tint(state.showChapterAssistant ? Palette.gold : Palette.terracotta)
+                    .disabled(state.selectedChapter == nil)
+                    .accessibilityLabel("Chapter AI")
+
+                    Button {
+                        state.transcribeSelected(force: state.transcript != nil)
+                    } label: {
+                        Image(systemName: "waveform")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .tint(Palette.terracotta)
+                    .disabled(state.selectedChapter == nil || state.isTranscribing)
+                    .accessibilityLabel(state.transcript == nil ? "Transcribe" : "Re-transcribe")
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(Palette.panel)
+    }
+
+    private var iPadTextSourcePicker: some View {
+        Picker("Text", selection: $state.textSource) {
+            ForEach(TextSource.allCases) { source in
+                Text(source.rawValue).tag(source)
+            }
+        }
+        .pickerStyle(.segmented)
+        .onChange(of: state.textSource) { _, _ in state.persistSettings() }
+    }
+
+    private var iPadLLMMenu: some View {
+        Menu {
+            Picker("Provider", selection: $state.settings.llmProvider) {
+                ForEach(LLMProvider.allCases) { provider in
+                    Text(provider.menuLabel).tag(provider.rawValue)
+                }
+            }
+            .onChange(of: state.settings.llmProvider) { _, provider in
+                state.persistSettings()
+                if provider == LLMProvider.qwenCloud.rawValue {
+                    Task { await state.refreshQwenModels() }
+                }
+            }
+
+            if state.llmProvider == .grok {
+                Picker("Model", selection: $state.settings.grokModel) {
+                    ForEach(GrokModel.allCases) { model in
+                        Text(model.rawValue).tag(model.rawValue)
+                    }
+                }
+                .onChange(of: state.settings.grokModel) { _, _ in state.persistSettings() }
+
+                if GrokModel(rawValue: state.settings.grokModel)?.supportsEffort == true {
+                    Picker("Effort", selection: $state.settings.grokEffort) {
+                        ForEach(GrokEffort.allCases) { effort in
+                            Text(effort.rawValue).tag(effort.rawValue)
+                        }
+                    }
+                    .onChange(of: state.settings.grokEffort) { _, _ in state.persistSettings() }
+                }
+            } else {
+                Picker("Model", selection: $state.settings.qwenModel) {
+                    ForEach(state.qwenTextModels) { model in
+                        Text(model.id).tag(model.id)
+                    }
+                }
+                .onChange(of: state.settings.qwenModel) { _, _ in state.persistSettings() }
+
+                Toggle("Thinking", isOn: $state.settings.qwenThinking)
+                    .onChange(of: state.settings.qwenThinking) { _, _ in state.persistSettings() }
+                if state.settings.qwenThinking {
+                    Picker("Effort", selection: $state.settings.qwenEffort) {
+                        ForEach(QwenEffort.allCases) { effort in
+                            Text(effort.rawValue).tag(effort.rawValue)
+                        }
+                    }
+                    .onChange(of: state.settings.qwenEffort) { _, _ in state.persistSettings() }
+                }
+            }
+        } label: {
+            Label(state.llmProvider.menuLabel, systemImage: "brain.head.profile")
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityLabel("AI settings")
+    }
+
+    private var iPadReadingMenu: some View {
+        Menu {
+            Toggle("Auto-scroll", isOn: $autoScroll)
+            Toggle("Play on tap", isOn: $state.settings.playOnSelect)
+                .onChange(of: state.settings.playOnSelect) { _, _ in state.persistSettings() }
+            Divider()
+            Button {
+                state.settings.readerFontScale = max(0.75, (state.settings.readerFontScale * 10 - 1).rounded() / 10)
+                state.persistSettings()
+            } label: {
+                Label("Smaller Text", systemImage: "textformat.size.smaller")
+            }
+            Button {
+                state.settings.readerFontScale = min(1.6, (state.settings.readerFontScale * 10 + 1).rounded() / 10)
+                state.persistSettings()
+            } label: {
+                Label("Larger Text", systemImage: "textformat.size.larger")
+            }
+        } label: {
+            Label("Reading", systemImage: "textformat")
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityLabel("Reading settings")
+    }
+#endif
 
     private var transcribeBanner: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -146,7 +413,7 @@ struct PlayerView: View {
 
     private var lyricPane: some View {
         GeometryReader { geo in
-            let lookupOpen = state.selectedWord != nil
+            let lookupOpen = state.selectedWord != nil || state.showChapterAssistant
             let split = min(max(effectiveLookupWidth, 280), max(280, geo.size.width - 320))
             let textWidth = lookupOpen ? geo.size.width - split - 8 : geo.size.width
             let type = ReaderType.metrics(columnWidth: textWidth, scale: state.settings.readerFontScale)
@@ -155,9 +422,16 @@ struct PlayerView: View {
                     .frame(width: textWidth)
                 if lookupOpen {
                     lookupSplitter(maxWidth: geo.size.width)
-                    WordInspector(state: state, type: type)
-                        .frame(width: split)
-                        .transition(.move(edge: .trailing))
+                    Group {
+                        if state.showChapterAssistant {
+                            ChapterAssistantView(state: state)
+                                .frame(width: split)
+                        } else {
+                            WordInspector(state: state, type: type)
+                                .frame(width: split)
+                        }
+                    }
+                    .transition(.move(edge: .trailing))
                 }
             }
         }
@@ -192,13 +466,15 @@ struct PlayerView: View {
                         state.persistSettings()
                     }
             )
-            .onHover { hovering in
-                if hovering {
-                    NSCursor.resizeLeftRight.push()
-                } else {
-                    NSCursor.pop()
+                .onHover { hovering in
+#if os(macOS)
+                    if hovering {
+                        NSCursor.resizeLeftRight.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+#endif
                 }
-            }
     }
 
     private func textColumn(proxyWidth: CGFloat, type: ReaderType) -> some View {
@@ -214,7 +490,7 @@ struct PlayerView: View {
                                 focusedSegmentID: state.focusedSegmentID,
                                 focusedWordID: state.focusedWordID,
                                 textSource: state.textSource,
-                                gloss: segment.id == state.currentSegment?.id ? state.currentSentenceGloss : nil,
+                                gloss: state.sentenceGloss(for: segment),
                                 isTranslating: state.isTranslating && segment.id == state.currentSegment?.id,
                                 languageLabel: state.studyLanguage.menuLabel,
                                 onSeek: { time in
@@ -237,8 +513,9 @@ struct PlayerView: View {
                                 },
                                 onSave: { word in state.addVocab(word: word, segment: segment) },
                                 onTranslate: { state.translateCurrentSentence() },
-                                onAccept: { if let g = state.currentSentenceGloss { state.acceptGloss(g) } },
-                                onReject: { if let g = state.currentSentenceGloss { state.rejectGloss(g) } },
+                                onAccept: { if let g = state.sentenceGloss(for: segment) { state.acceptGloss(g) } },
+                                onReject: { if let g = state.sentenceGloss(for: segment) { state.rejectGloss(g) } },
+                                onRetry: { state.retranslateSentence(segment) },
                                 type: type
                             )
                             .id(segment.id)
@@ -316,6 +593,33 @@ struct PlayerView: View {
                     .frame(width: 54, alignment: .trailing)
             }
 
+#if os(iOS)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    iPadTransportControls
+                    Divider().frame(height: 22)
+                    iPadReplayControls
+                    Spacer(minLength: 4)
+                    iPadSpeedMenu
+                    iPadChapterNavigator
+                }
+                .fixedSize(horizontal: true, vertical: false)
+
+                VStack(spacing: 6) {
+                    HStack(spacing: 16) {
+                        iPadTransportControls
+                    }
+                    .frame(maxWidth: .infinity)
+                    HStack(spacing: 10) {
+                        iPadReplayControls
+                        iPadSpeedMenu
+                        Spacer(minLength: 4)
+                        iPadChapterNavigator
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+#else
             HStack(spacing: 18) {
                 Button { state.player.skip(seconds: -state.settings.skipSeconds) } label: {
                     Image(systemName: "gobackward.5")
@@ -381,6 +685,13 @@ struct PlayerView: View {
                     .frame(width: 44)
 
                 if let chapters = state.selectedBook?.chapters, chapters.count > 1 {
+                    Button { state.openPreviousChapter() } label: {
+                        Image(systemName: "chevron.left")
+                    }
+                    .help("Previous chapter")
+                    .accessibilityLabel("Previous chapter")
+                    .disabled(!state.canOpenPreviousChapter)
+
                     Picker("Chapter", selection: Binding(
                         get: { state.selectedChapterID ?? "" },
                         set: { id in
@@ -394,15 +705,398 @@ struct PlayerView: View {
                         }
                     }
                     .frame(maxWidth: 200)
+
+                    Button { state.openNextChapter() } label: {
+                        Image(systemName: "chevron.right")
+                    }
+                    .help("Next chapter")
+                    .accessibilityLabel("Next chapter")
+                    .disabled(!state.canOpenNextChapter)
                 }
             }
             .buttonStyle(.plain)
             .foregroundStyle(Palette.ink)
             .font(.system(size: 16))
+#endif
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 14)
         .background(Palette.panel)
+    }
+
+#if os(iOS)
+    private var iPadTransportControls: some View {
+        HStack(spacing: 10) {
+            Button { state.player.skip(seconds: -state.settings.skipSeconds) } label: {
+                Image(systemName: "gobackward.5")
+                    .frame(width: 36, height: 44)
+            }
+            Button { state.skipSentence(direction: -1) } label: {
+                Image(systemName: "backward.end.fill")
+                    .frame(width: 40, height: 44)
+            }
+            Button { state.togglePlay() } label: {
+                Image(systemName: state.player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                    .font(.system(size: 34))
+                    .foregroundStyle(Palette.gold)
+                    .frame(width: 36, height: 44)
+            }
+            Button { state.skipSentence(direction: 1) } label: {
+                Image(systemName: "forward.end.fill")
+                    .frame(width: 36, height: 44)
+            }
+            Button { state.player.skip(seconds: state.settings.skipSeconds) } label: {
+                Image(systemName: "goforward.5")
+                    .frame(width: 36, height: 44)
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Palette.ink)
+        .font(.system(size: 16))
+        .frame(minHeight: 44)
+    }
+
+    private var iPadReplayControls: some View {
+        HStack(spacing: 8) {
+            Button { state.replaySentence() } label: {
+                Image(systemName: "repeat.1")
+                    .frame(width: 36, height: 44)
+            }
+            Toggle(isOn: $state.loopSentence) {
+                Image(systemName: "repeat")
+                    .frame(width: 44, height: 44)
+            }
+            .toggleStyle(.button)
+            .foregroundStyle(state.loopSentence ? Palette.gold : Palette.ink)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Palette.ink)
+        .font(.system(size: 16))
+        .frame(minHeight: 44)
+    }
+
+    private var iPadSpeedMenu: some View {
+        Button {
+            showSpeedPicker.toggle()
+        } label: {
+            Label(String(format: "%.2fx", state.player.rate), systemImage: "speedometer")
+                .lineLimit(1)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Palette.terracotta)
+                .padding(.horizontal, 10)
+                .frame(minHeight: 44)
+                .background(Palette.goldSoft, in: Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityLabel("Playback speed")
+        .accessibilityValue(String(format: "%.2f times", state.player.rate))
+        .popover(isPresented: $showSpeedPicker, arrowEdge: .bottom) {
+            IPadPlaybackSpeedPicker(state: state) {
+                showSpeedPicker = false
+            }
+            .presentationCompactAdaptation(.popover)
+        }
+    }
+
+    @ViewBuilder
+    private var iPadChapterNavigator: some View {
+        if let chapters = state.selectedBook?.chapters, chapters.count > 1 {
+            HStack(spacing: 2) {
+                Button { state.openPreviousChapter() } label: {
+                    Image(systemName: "chevron.left")
+                        .frame(width: 36, height: 44)
+                }
+                .disabled(!state.canOpenPreviousChapter)
+                .accessibilityLabel("Previous chapter")
+
+                Menu {
+                    Picker("Chapter", selection: Binding(
+                        get: { state.selectedChapterID ?? "" },
+                        set: { id in
+                            if let book = state.selectedBook,
+                               let chapter = book.chapters.first(where: { $0.id == id }) {
+                                state.open(chapter: chapter, in: book, autoplay: state.player.isPlaying)
+                            }
+                        }
+                    )) {
+                        ForEach(chapters) { chapter in
+                            Text(chapter.title).tag(chapter.id)
+                        }
+                    }
+                } label: {
+                    Label(chapterPositionLabel(in: chapters), systemImage: "list.bullet")
+                        .lineLimit(1)
+                }
+                .fixedSize()
+                .frame(minHeight: 44)
+
+                Button { state.openNextChapter() } label: {
+                    Image(systemName: "chevron.right")
+                        .frame(width: 36, height: 44)
+                }
+                .disabled(!state.canOpenNextChapter)
+                .accessibilityLabel("Next chapter")
+            }
+            .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+
+    private func chapterPositionLabel(in chapters: [Chapter]) -> String {
+        let index = chapters.firstIndex { $0.id == state.selectedChapterID } ?? 0
+        return "Chapter \(index + 1) of \(chapters.count)"
+    }
+#endif
+}
+
+#if os(iOS)
+private struct IPadPlaybackSpeedPicker: View {
+    @Bindable var state: AppState
+    let onDismiss: () -> Void
+
+    private var selectedSpeed: Double {
+        Double(state.player.rate)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Playback Speed")
+                    .font(.headline)
+                Spacer()
+                Text(String(format: "%.2fx", state.player.rate))
+                    .font(.subheadline.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(Palette.terracotta)
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 52)
+
+            Divider()
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(PlaybackSpeedCatalog.values, id: \.self) { speed in
+                            speedRow(speed)
+                                .id(speed)
+                            if speed != PlaybackSpeedCatalog.values.last {
+                                Divider().padding(.leading, 16)
+                            }
+                        }
+                    }
+                }
+                .onAppear {
+                    proxy.scrollTo(nearestCatalogSpeed, anchor: .center)
+                }
+            }
+        }
+        .frame(width: 250, height: 430)
+        .background(Color(uiColor: .systemBackground))
+    }
+
+    private func speedRow(_ speed: Double) -> some View {
+        let selected = abs(selectedSpeed - speed) < 0.001
+        return Button {
+            state.player.rate = Float(speed)
+            state.persistSettings()
+            onDismiss()
+        } label: {
+            HStack {
+                Text(String(format: "%.2fx", speed))
+                    .font(.body.monospacedDigit())
+                Spacer()
+                if selected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.body.weight(.semibold))
+                }
+            }
+            .foregroundStyle(selected ? Color.white : Color.primary)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+            .background(selected ? Palette.terracotta : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(String(format: "%.2f times", speed))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private var nearestCatalogSpeed: Double {
+        PlaybackSpeedCatalog.values.min(by: {
+            abs($0 - selectedSpeed) < abs($1 - selectedSpeed)
+        }) ?? 1.0
+    }
+}
+#endif
+
+private struct ChapterAssistantView: View {
+    @Bindable var state: AppState
+    @State private var chatDraft = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Chapter AI")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Palette.mute)
+                        .textCase(.uppercase)
+                        .tracking(0.8)
+                    Text(state.selectedLLMModel)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Palette.gold)
+                }
+                Spacer()
+                Button {
+                    state.showChapterAssistant = false
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(Palette.dim)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(state.selectedBook?.title ?? "Unknown book")
+                            .font(.system(size: 17, weight: .semibold, design: .serif))
+                        Text([state.selectedBook?.author, state.selectedChapter?.title].compactMap { $0 }.joined(separator: " · "))
+                            .font(.system(size: 11))
+                            .foregroundStyle(Palette.dim)
+                    }
+
+                    HStack {
+                        Button {
+                            state.translateChapter()
+                        } label: {
+                            Label("Translate chapter", systemImage: "globe")
+                        }
+                        Button {
+                            state.summarizeChapter()
+                        } label: {
+                            Label("Summarise", systemImage: "text.alignleft")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(state.isChapterAssistantWorking || state.transcript == nil)
+
+                    if state.isChapterAssistantWorking {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Asking \(state.selectedLLMModel)…")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Palette.dim)
+                        }
+                    }
+
+                    if let progress = state.chapterTranslationProgress {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ProgressView(value: progress.fraction)
+                            Text(progress.detail)
+                                .font(.system(size: 12))
+                                .foregroundStyle(Palette.dim)
+                        }
+                    }
+
+                    if let error = state.chapterAssistantError {
+                        Text(error)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.red.opacity(0.9))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if let summary = state.chapterSummary {
+                        assistantCard(title: "Chapter summary") {
+                            GlossBody(text: summary, size: 14)
+                        }
+                    }
+
+                    if let translation = state.chapterTranslation {
+                        assistantCard(title: "Chapter translation") {
+                            Text(translation)
+                                .font(.system(size: 13))
+                                .foregroundStyle(Palette.ink)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if !state.pendingChapterSentenceGlosses.isEmpty {
+                                Button("Accept all \(state.pendingChapterSentenceGlosses.count) sentence drafts") {
+                                    state.acceptAllChapterTranslations()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(Palette.terracotta)
+                            }
+                        }
+                    }
+
+                    assistantCard(title: "Ask about this passage") {
+                        if state.chapterChat.isEmpty {
+                            Text("Questions include the book, author, chapter, and \(state.settings.chatContextCount) nearby sentences on each side.")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Palette.dim)
+                        }
+                        ForEach(state.chapterChat) { message in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(message.role == .user ? "You" : state.selectedLLMModel)
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(message.role == .user ? Palette.mute : Palette.gold)
+                                Text(message.text)
+                                    .font(.system(size: 13, design: .serif))
+                                    .foregroundStyle(Palette.ink)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                            }
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(message.role == .user ? Palette.panel : Palette.goldSoft)
+                            .clipShape(RoundedRectangle(cornerRadius: 9))
+                        }
+                        HStack(alignment: .bottom) {
+                            TextField("Ask about the chapter…", text: $chatDraft, axis: .vertical)
+                                .textFieldStyle(.roundedBorder)
+                                .lineLimit(1...5)
+                                .onSubmit { sendChat() }
+                            Button(action: sendChat) {
+                                Image(systemName: "arrow.up.circle.fill")
+                                    .font(.system(size: 22))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Palette.gold)
+                            .disabled(chatDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.isChapterAssistantWorking)
+                        }
+                    }
+                }
+                .padding(.horizontal, 18)
+                .padding(.bottom, 28)
+            }
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Palette.panel)
+        .overlay(Rectangle().fill(Palette.line).frame(width: 1), alignment: .leading)
+    }
+
+    private func sendChat() {
+        let question = chatDraft
+        chatDraft = ""
+        state.sendChapterChat(question)
+    }
+
+    private func assistantCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Palette.mute)
+                .textCase(.uppercase)
+                .tracking(0.6)
+            content()
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.panel2)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }
 
@@ -423,6 +1117,7 @@ private struct SentenceRow: View {
     let onTranslate: () -> Void
     let onAccept: () -> Void
     let onReject: () -> Void
+    let onRetry: () -> Void
     let type: ReaderType
 
     private var isCurrent: Bool { segment.id == currentID }
@@ -501,7 +1196,7 @@ private struct SentenceRow: View {
             if isTranslating && gloss == nil {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("Grok is translating…")
+                    Text("The LLM is translating…")
                         .font(.system(size: 12))
                         .foregroundStyle(Palette.dim)
                 }
@@ -509,7 +1204,7 @@ private struct SentenceRow: View {
                 GlossBody(text: gloss.text, size: type.gloss)
                 HStack(spacing: 8) {
                     if gloss.status == .pending {
-                        Text("Draft · \(gloss.model)")
+                        Text("Draft · Model: \(gloss.model)")
                             .font(.system(size: 10))
                             .foregroundStyle(Palette.gold)
                         Button("Accept", action: onAccept)
@@ -518,10 +1213,14 @@ private struct SentenceRow: View {
                             .controlSize(.small)
                         Button("Reject", action: onReject)
                             .controlSize(.small)
+                        Button("Retranslate", action: onRetry)
+                            .controlSize(.small)
                     } else if gloss.status == .accepted {
-                        Text("Saved in library")
+                        Text("Saved · Model: \(gloss.model)")
                             .font(.system(size: 10))
                             .foregroundStyle(Palette.gold)
+                        Button("Retranslate", action: onRetry)
+                            .controlSize(.small)
                     }
                 }
             } else {
@@ -614,6 +1313,33 @@ private struct WordInspector: View {
                         }
 
                         inspectorCard(title: "Apple Dictionary") {
+#if os(iOS)
+                            if DictionaryLookup.hasSystemDefinition(word.text) {
+                                SystemDictionaryView(term: word.text)
+                                    .id(DictionaryLookup.headword(word.text))
+                                    .frame(minHeight: 360, idealHeight: 480)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                                Text("iPadOS shows entries from its installed dictionaries. Dictionary ordering and selection are managed by iPadOS.")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Palette.dim)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                Text("No definition is currently available from the dictionaries installed in iPadOS.")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Palette.dim)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+
+                            Button {
+                                DictionaryLookup.lookUpInDictionary(word.text)
+                            } label: {
+                                Label("Open Dictionary Full Screen", systemImage: "book")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Palette.terracotta)
+#else
                             if state.dictionaryHits.isEmpty {
                                 Text("No entries in the installed dictionaries.")
                                     .font(.system(size: 13))
@@ -645,6 +1371,7 @@ private struct WordInspector: View {
                                 Label("Open in Dictionary.app", systemImage: "book")
                                     .frame(maxWidth: .infinity)
                             }
+#endif
                         }
 
                         inspectorCard(title: "In this sentence") {
@@ -662,14 +1389,16 @@ private struct WordInspector: View {
                                         Button("Reject") { state.rejectGloss(gloss) }
                                     }
                                 } else if gloss.status == .accepted {
-                                    Text("Saved — this word will not be sent to Grok again.")
+                                    Text("Saved · Model: \(gloss.model)")
                                         .font(.system(size: 12))
                                         .foregroundStyle(Palette.gold)
                                 }
+                                Button("Retranslate") { state.retranslateSelectedWord() }
+                                    .buttonStyle(.bordered)
                             } else if state.isTranslating {
                                 HStack(spacing: 10) {
                                     ProgressView().controlSize(.small)
-                                    Text("Asking \(state.settings.grokModel)…")
+                                    Text("Asking \(state.selectedLLMModel)…")
                                         .font(.system(size: 13))
                                         .foregroundStyle(Palette.dim)
                                 }
@@ -678,7 +1407,7 @@ private struct WordInspector: View {
                                 Button {
                                     state.translateSelectedWord()
                                 } label: {
-                                    Label("This-sentence meaning (\(state.settings.grokModel))", systemImage: "globe")
+                                    Label("This-sentence meaning (\(state.selectedLLMModel))", systemImage: "globe")
                                         .frame(maxWidth: .infinity)
                                 }
                                 .buttonStyle(.bordered)
@@ -692,16 +1421,18 @@ private struct WordInspector: View {
                         }
 
                         if let seg = contextSegment {
+                            let isSaved = state.isInVocabulary(word: word)
                             Button {
                                 state.addVocab(word: word, segment: seg)
                             } label: {
-                                Label("Add to vocabulary", systemImage: "bookmark")
+                                Label(isSaved ? "Already in vocabulary" : "Add to vocabulary", systemImage: isSaved ? "checkmark.circle.fill" : "bookmark")
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 5)
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(Palette.terracotta)
                             .controlSize(.large)
+                            .disabled(isSaved)
                         }
                     }
                     .padding(.horizontal, 22)

@@ -1,4 +1,5 @@
 import Foundation
+import ZIPFoundation
 
 enum EPUBParser {
     static func extractText(from epubPath: String) -> String? {
@@ -10,18 +11,7 @@ enum EPUBParser {
         defer { try? FileManager.default.removeItem(at: tmp) }
         try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
 
-        let unzip = Process()
-        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        unzip.arguments = ["-qq", "-o", epub.path, "-d", tmp.path]
-        unzip.standardOutput = FileHandle.nullDevice
-        unzip.standardError = FileHandle.nullDevice
-        do {
-            try unzip.run()
-            unzip.waitUntilExit()
-        } catch {
-            return nil
-        }
-        guard unzip.terminationStatus == 0 else { return nil }
+        guard (try? FileManager.default.unzipItem(at: epub, to: tmp)) != nil else { return nil }
 
         let htmls = contentDocuments(in: tmp)
         var parts: [String] = []

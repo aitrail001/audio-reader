@@ -9,8 +9,11 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/AudioReader"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
-if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
-  cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+if [[ -f ".build/release/ZIPFoundation_ZIPFoundation.bundle/PrivacyInfo.xcprivacy" ]]; then
+  cp ".build/release/ZIPFoundation_ZIPFoundation.bundle/PrivacyInfo.xcprivacy" "$APP/Contents/Resources/PrivacyInfo.xcprivacy"
+fi
+if [[ -f "$ROOT/Resources/AppIcon-trimmed.icns" ]]; then
+  cp "$ROOT/Resources/AppIcon-trimmed.icns" "$APP/Contents/Resources/AppIcon.icns"
 fi
 chmod +x "$APP/Contents/MacOS/AudioReader"
 codesign --force --deep --sign - "$APP" >/dev/null
