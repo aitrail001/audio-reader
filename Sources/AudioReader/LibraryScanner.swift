@@ -185,7 +185,23 @@ enum LibraryScanner {
     }
 
     static func stableID(_ path: String) -> String {
-        SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
+        SHA256.hash(data: Data(persistentPathIdentity(path).utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func legacyAbsolutePathID(for book: Book) -> String {
+        SHA256.hash(data: Data(book.folderPath.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func legacyAbsolutePathID(for chapter: Chapter) -> String {
+        let identity = chapter.startTime.map { "\(chapter.audioPath)#\(String(format: "%.3f", $0))" }
+            ?? chapter.audioPath
+        return SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func persistentPathIdentity(_ path: String) -> String {
+        let marker = "/ImportedBooks/"
+        guard let range = path.range(of: marker) else { return path }
+        return "ImportedBooks/" + path[range.upperBound...]
     }
 
     static func containsAudio(in folder: URL) -> Bool {

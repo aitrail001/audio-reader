@@ -3,11 +3,25 @@ import SwiftUI
 import AppKit
 #endif
 
+struct ReaderScrollTarget: Equatable {
+    var chapterID: String
+    var segmentID: String
+
+    func segmentID(for selectedChapterID: String?) -> String? {
+        chapterID == selectedChapterID ? segmentID : nil
+    }
+
+    static func shouldAnimate(from previous: ReaderScrollTarget?, to next: ReaderScrollTarget) -> Bool {
+        previous?.chapterID == next.chapterID
+    }
+}
+
 struct PlayerView: View {
     @Bindable var state: AppState
     @State private var autoScroll = true
     @State private var lookupWidth: CGFloat = 0
     @State private var lookupDragStart: CGFloat?
+    @State private var readerScrollTarget: ReaderScrollTarget?
 #if os(iOS)
     @State private var showReaderToolbar = false
     @State private var showSpeedPicker = false
@@ -114,7 +128,9 @@ struct PlayerView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .frame(maxWidth: 220)
+            .labelsHidden()
+            .frame(width: 220)
+            .fixedSize(horizontal: true, vertical: false)
             .onChange(of: state.textSource) { _, _ in state.persistSettings() }
 
             Picker("Provider", selection: $state.settings.llmProvider) {
@@ -155,14 +171,20 @@ struct PlayerView: View {
                     }
                 }
                 .frame(maxWidth: 180)
-                .onChange(of: state.settings.qwenModel) { _, _ in state.persistSettings() }
-                Toggle("Thinking", isOn: $state.settings.qwenThinking)
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .onChange(of: state.settings.qwenThinking) { _, _ in state.persistSettings() }
-                if state.settings.qwenThinking {
+                .onChange(of: state.settings.qwenModel) { _, _ in
+                    state.persistSettings()
+                    state.normalizeSelectedQwenEffort()
+                }
+                if state.qwenSupportsThinkingToggle {
+                    Toggle("Thinking", isOn: $state.settings.qwenThinking)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .onChange(of: state.settings.qwenThinking) { _, _ in state.persistSettings() }
+                }
+                if !state.selectedQwenEfforts.isEmpty
+                    && (!state.qwenSupportsThinkingToggle || state.settings.qwenThinking) {
                     Picker("Effort", selection: $state.settings.qwenEffort) {
-                        ForEach(QwenEffort.allCases) { effort in
+                        ForEach(state.selectedQwenEfforts) { effort in
                             Text(effort.rawValue).tag(effort.rawValue)
                         }
                     }
@@ -183,24 +205,12 @@ struct PlayerView: View {
                 .onChange(of: state.settings.playOnSelect) { _, _ in state.persistSettings() }
                 .help("When on, clicking a sentence or word starts playback. When off, it only jumps to that spot.")
 
-            HStack(spacing: 4) {
-                Button {
-                    state.settings.readerFontScale = max(0.75, (state.settings.readerFontScale * 10 - 1).rounded() / 10)
-                    state.persistSettings()
-                } label: {
-                    Text("A").font(.system(size: 11, weight: .medium, design: .serif))
-                }
-                .help("Smaller text")
-                Button {
-                    state.settings.readerFontScale = min(1.6, (state.settings.readerFontScale * 10 + 1).rounded() / 10)
-                    state.persistSettings()
-                } label: {
-                    Text("A").font(.system(size: 16, weight: .medium, design: .serif))
-                }
-                .help("Larger text")
+            Menu {
+                readingAppearanceMenuContent
+            } label: {
+                Label("Reading", systemImage: "textformat")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(Palette.dim)
+            .fixedSize(horizontal: true, vertical: false)
 
             Button {
                 state.showChapterAssistant.toggle()
@@ -343,13 +353,19 @@ struct PlayerView: View {
                         Text(model.id).tag(model.id)
                     }
                 }
-                .onChange(of: state.settings.qwenModel) { _, _ in state.persistSettings() }
+                .onChange(of: state.settings.qwenModel) { _, _ in
+                    state.persistSettings()
+                    state.normalizeSelectedQwenEffort()
+                }
 
-                Toggle("Thinking", isOn: $state.settings.qwenThinking)
-                    .onChange(of: state.settings.qwenThinking) { _, _ in state.persistSettings() }
-                if state.settings.qwenThinking {
+                if state.qwenSupportsThinkingToggle {
+                    Toggle("Thinking", isOn: $state.settings.qwenThinking)
+                        .onChange(of: state.settings.qwenThinking) { _, _ in state.persistSettings() }
+                }
+                if !state.selectedQwenEfforts.isEmpty
+                    && (!state.qwenSupportsThinkingToggle || state.settings.qwenThinking) {
                     Picker("Effort", selection: $state.settings.qwenEffort) {
-                        ForEach(QwenEffort.allCases) { effort in
+                        ForEach(state.selectedQwenEfforts) { effort in
                             Text(effort.rawValue).tag(effort.rawValue)
                         }
                     }
@@ -369,18 +385,7 @@ struct PlayerView: View {
             Toggle("Play on tap", isOn: $state.settings.playOnSelect)
                 .onChange(of: state.settings.playOnSelect) { _, _ in state.persistSettings() }
             Divider()
-            Button {
-                state.settings.readerFontScale = max(0.75, (state.settings.readerFontScale * 10 - 1).rounded() / 10)
-                state.persistSettings()
-            } label: {
-                Label("Smaller Text", systemImage: "textformat.size.smaller")
-            }
-            Button {
-                state.settings.readerFontScale = min(1.6, (state.settings.readerFontScale * 10 + 1).rounded() / 10)
-                state.persistSettings()
-            } label: {
-                Label("Larger Text", systemImage: "textformat.size.larger")
-            }
+            readingAppearanceMenuContent
         } label: {
             Label("Reading", systemImage: "textformat")
         }
@@ -388,6 +393,57 @@ struct PlayerView: View {
         .accessibilityLabel("Reading settings")
     }
 #endif
+
+    @ViewBuilder
+    private var readingAppearanceMenuContent: some View {
+        Menu("Typeface") {
+            Picker("Typeface", selection: $state.settings.readerFont) {
+                ForEach(ReaderFontChoice.allCases) { font in
+                    Text(font.rawValue).tag(font.rawValue)
+                }
+            }
+        }
+        .onChange(of: state.settings.readerFont) { _, _ in state.persistSettings() }
+        Toggle("Bold Text", isOn: $state.settings.readerBold)
+            .onChange(of: state.settings.readerBold) { _, _ in state.persistSettings() }
+        Divider()
+        Button {
+            state.settings.readerFontScale = max(0.75, (state.settings.readerFontScale * 10 - 1).rounded() / 10)
+            state.persistSettings()
+        } label: {
+            Label("Smaller Text", systemImage: "textformat.size.smaller")
+        }
+        Button {
+            state.settings.readerFontScale = min(1.6, (state.settings.readerFontScale * 10 + 1).rounded() / 10)
+            state.persistSettings()
+        } label: {
+            Label("Larger Text", systemImage: "textformat.size.larger")
+        }
+        Button("Increase Line Spacing") {
+            state.settings.readerLineSpacing = min(2, state.settings.readerLineSpacing + 0.1)
+            state.persistSettings()
+        }
+        Button("Decrease Line Spacing") {
+            state.settings.readerLineSpacing = max(0.7, state.settings.readerLineSpacing - 0.1)
+            state.persistSettings()
+        }
+        Button("Increase Word Spacing") {
+            state.settings.readerWordSpacing = min(12, state.settings.readerWordSpacing + 1)
+            state.persistSettings()
+        }
+        Button("Decrease Word Spacing") {
+            state.settings.readerWordSpacing = max(0, state.settings.readerWordSpacing - 1)
+            state.persistSettings()
+        }
+        Button("Wider Margins") {
+            state.settings.readerMargin = min(96, state.settings.readerMargin + 4)
+            state.persistSettings()
+        }
+        Button("Narrower Margins") {
+            state.settings.readerMargin = max(16, state.settings.readerMargin - 4)
+            state.persistSettings()
+        }
+    }
 
     private var transcribeBanner: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -416,7 +472,14 @@ struct PlayerView: View {
             let lookupOpen = state.selectedWord != nil || state.showChapterAssistant
             let split = min(max(effectiveLookupWidth, 280), max(280, geo.size.width - 320))
             let textWidth = lookupOpen ? geo.size.width - split - 8 : geo.size.width
-            let type = ReaderType.metrics(columnWidth: textWidth, scale: state.settings.readerFontScale)
+            let type = ReaderType.metrics(
+                columnWidth: textWidth,
+                scale: state.settings.readerFontScale,
+                lineSpacing: state.settings.readerLineSpacing,
+                wordSpacing: state.settings.readerWordSpacing,
+                font: state.settings.readerFont,
+                bold: state.settings.readerBold
+            )
             HStack(spacing: 0) {
                 textColumn(proxyWidth: textWidth, type: type)
                     .frame(width: textWidth)
@@ -478,75 +541,111 @@ struct PlayerView: View {
     }
 
     private func textColumn(proxyWidth: CGFloat, type: ReaderType) -> some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: type.body * 0.75) {
-                    if let transcript = state.transcript {
-                        ForEach(transcript.segments) { segment in
-                            SentenceRow(
-                                segment: segment,
-                                currentID: state.currentSegment?.id,
-                                currentWordID: state.currentWord?.id,
-                                focusedSegmentID: state.focusedSegmentID,
-                                focusedWordID: state.focusedWordID,
-                                textSource: state.textSource,
-                                gloss: state.sentenceGloss(for: segment),
-                                isTranslating: state.isTranslating && segment.id == state.currentSegment?.id,
-                                languageLabel: state.studyLanguage.menuLabel,
-                                onSeek: { time in
-                                    state.focusedSegmentID = segment.id
-                                    state.focusedWordID = nil
-                                    state.player.seek(time)
-                                    if state.settings.playOnSelect, !state.player.isPlaying {
-                                        state.player.play()
-                                    }
-                                },
-                                onPlayFrom: { time in
-                                    state.focusedSegmentID = segment.id
-                                    state.player.seek(time)
+        let readerPosition = state.currentReaderPosition
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: type.paragraph) {
+                if let transcript = state.transcript {
+                    ForEach(transcript.segments) { segment in
+                        SentenceRow(
+                            segment: segment,
+                            currentID: readerPosition.segment?.id,
+                            currentWordID: readerPosition.word?.id,
+                            focusedSegmentID: state.focusedSegmentID,
+                            focusedWordID: state.focusedWordID,
+                            textSource: state.textSource,
+                            gloss: state.sentenceGloss(for: segment),
+                            isTranslating: state.isLLMJobActive(kind: .sentenceTranslation, targetID: segment.id),
+                            languageLabel: state.studyLanguage.menuLabel,
+                            onSeek: { time in
+                                state.focusedSegmentID = segment.id
+                                state.focusedWordID = nil
+                                state.player.seek(time)
+                                if state.settings.playOnSelect, !state.player.isPlaying {
                                     state.player.play()
-                                },
-                                onInspect: { word in
-                                    state.focusedSegmentID = segment.id
-                                    state.focusedWordID = word.id
-                                    state.inspect(word: word)
-                                },
-                                onSave: { word in state.addVocab(word: word, segment: segment) },
-                                onTranslate: { state.translateCurrentSentence() },
-                                onAccept: { if let g = state.sentenceGloss(for: segment) { state.acceptGloss(g) } },
-                                onReject: { if let g = state.sentenceGloss(for: segment) { state.rejectGloss(g) } },
-                                onRetry: { state.retranslateSentence(segment) },
-                                type: type
-                            )
-                            .id(segment.id)
-                        }
-                    } else if state.selectedChapter != nil {
-                        emptyTranscript
-                    } else {
-                        Text("Pick a book from the library.")
-                            .foregroundStyle(Palette.dim)
-                            .padding(40)
+                                }
+                            },
+                            onPlayFrom: { time in
+                                state.focusedSegmentID = segment.id
+                                state.player.seek(time)
+                                state.player.play()
+                            },
+                            onInspect: { word in
+                                state.focusedSegmentID = segment.id
+                                state.focusedWordID = word.id
+                                state.inspect(word: word)
+                            },
+                            onSave: { word in state.addVocab(word: word, segment: segment) },
+                            onTranslate: { state.translateCurrentSentence() },
+                            onAccept: { if let g = state.sentenceGloss(for: segment) { state.acceptGloss(g) } },
+                            onReject: { if let g = state.sentenceGloss(for: segment) { state.rejectGloss(g) } },
+                            onRetry: { state.retranslateSentence(segment) },
+                            type: type
+                        )
+                        .id(segment.id)
                     }
+                } else if state.selectedChapter != nil {
+                    emptyTranscript
+                } else {
+                    Text("Pick a book from the library.")
+                        .foregroundStyle(Palette.dim)
+                        .padding(40)
                 }
-                .padding(.horizontal, max(20, min(48, proxyWidth * 0.06)))
-                .padding(.vertical, 28)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .onChange(of: state.currentSegment?.id) { _, newID in
-                guard autoScroll, let newID else { return }
+            .scrollTargetLayout()
+            .padding(.horizontal, min(CGFloat(state.settings.readerMargin), max(16, proxyWidth * 0.22)))
+            .padding(.vertical, 28)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .scrollPosition(id: readerScrollBinding, anchor: .center)
+        .onChange(of: currentReaderScrollTarget) { oldTarget, newTarget in
+            guard autoScroll else { return }
+            guard let newTarget else {
+                readerScrollTarget = nil
+                return
+            }
+            if ReaderScrollTarget.shouldAnimate(from: oldTarget, to: newTarget) {
                 withAnimation(.easeInOut(duration: 0.25)) {
-                    proxy.scrollTo(newID, anchor: .center)
+                    readerScrollTarget = newTarget
                 }
-            }
-            .onChange(of: state.revealToken) { _, _ in
-                guard let id = state.scrollSegmentID else { return }
-                DispatchQueue.main.async {
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        proxy.scrollTo(id, anchor: .center)
-                    }
-                }
+            } else {
+                readerScrollTarget = newTarget
             }
         }
+        .onChange(of: state.revealToken, initial: true) { _, _ in
+            guard let chapterID = state.selectedChapterID,
+                  let segmentID = state.scrollSegmentID
+            else { return }
+            let target = ReaderScrollTarget(chapterID: chapterID, segmentID: segmentID)
+            if ReaderScrollTarget.shouldAnimate(from: readerScrollTarget, to: target) {
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    readerScrollTarget = target
+                }
+            } else {
+                readerScrollTarget = target
+            }
+        }
+    }
+
+    private var currentReaderScrollTarget: ReaderScrollTarget? {
+        guard let chapterID = state.selectedChapterID,
+              let segmentID = state.currentSegment?.id
+        else { return nil }
+        return ReaderScrollTarget(chapterID: chapterID, segmentID: segmentID)
+    }
+
+    private var readerScrollBinding: Binding<String?> {
+        Binding(
+            get: {
+                readerScrollTarget?.segmentID(for: state.selectedChapterID)
+            },
+            set: { segmentID in
+                guard let chapterID = state.selectedChapterID, let segmentID else {
+                    readerScrollTarget = nil
+                    return
+                }
+                readerScrollTarget = ReaderScrollTarget(chapterID: chapterID, segmentID: segmentID)
+            }
+        )
     }
 
     private var emptyTranscript: some View {
@@ -971,8 +1070,18 @@ private struct ChapterAssistantView: View {
                     }
 
                     HStack {
-                        Button {
-                            state.translateChapter()
+                        Menu {
+                            if state.selectedChapterTranslationCheckpoint?.status == .inProgress {
+                                Button("Continue from last stop") {
+                                    state.translateChapter(mode: .continueFromCheckpoint)
+                                }
+                            }
+                            Button("Translate untranslated sentences") {
+                                state.translateChapter(mode: .untranslatedOnly)
+                            }
+                            Button("Retranslate whole chapter") {
+                                state.translateChapter(mode: .retranslateAll)
+                            }
                         } label: {
                             Label("Translate chapter", systemImage: "globe")
                         }
@@ -983,7 +1092,27 @@ private struct ChapterAssistantView: View {
                         }
                     }
                     .buttonStyle(.bordered)
-                    .disabled(state.isChapterAssistantWorking || state.transcript == nil)
+                    .disabled(state.transcript == nil)
+
+                    if let checkpoint = state.selectedChapterTranslationCheckpoint {
+                        Label(chapterTranslationStatus(checkpoint), systemImage: "checkmark.circle")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Palette.dim)
+                    }
+
+                    if !state.pendingChapterSentenceGlosses.isEmpty {
+                        assistantCard(title: "Pending review") {
+                            Text("\(state.pendingChapterSentenceGlosses.count) sentence translation(s) are ready for review in this chapter.")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Palette.dim)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Button("Accept all pending") {
+                                state.acceptAllChapterTranslations()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Palette.terracotta)
+                        }
+                    }
 
                     if state.isChapterAssistantWorking {
                         HStack(spacing: 8) {
@@ -991,6 +1120,15 @@ private struct ChapterAssistantView: View {
                             Text("Asking \(state.selectedLLMModel)…")
                                 .font(.system(size: 12))
                                 .foregroundStyle(Palette.dim)
+                            Spacer()
+                            if state.selectedChapterTranslationJobState == .running {
+                                Button(state.chapterTranslationStopRequested ? "Stopping…" : "Stop after block") {
+                                    state.requestChapterTranslationStop()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(state.chapterTranslationStopRequested)
+                            }
                         }
                     }
 
@@ -1004,10 +1142,19 @@ private struct ChapterAssistantView: View {
                     }
 
                     if let error = state.chapterAssistantError {
-                        Text(error)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.red.opacity(0.9))
-                            .fixedSize(horizontal: false, vertical: true)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(error)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.red.opacity(0.9))
+                                .fixedSize(horizontal: false, vertical: true)
+                            if state.chapterTranslationFailed {
+                                Button("Retry remaining") {
+                                    state.translateChapter(mode: .continueFromCheckpoint)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(Palette.terracotta)
+                            }
+                        }
                     }
 
                     if let summary = state.chapterSummary {
@@ -1022,13 +1169,6 @@ private struct ChapterAssistantView: View {
                                 .font(.system(size: 13))
                                 .foregroundStyle(Palette.ink)
                                 .fixedSize(horizontal: false, vertical: true)
-                            if !state.pendingChapterSentenceGlosses.isEmpty {
-                                Button("Accept all \(state.pendingChapterSentenceGlosses.count) sentence drafts") {
-                                    state.acceptAllChapterTranslations()
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(Palette.terracotta)
-                            }
                         }
                     }
 
@@ -1065,7 +1205,7 @@ private struct ChapterAssistantView: View {
                             }
                             .buttonStyle(.plain)
                             .foregroundStyle(Palette.gold)
-                            .disabled(chatDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.isChapterAssistantWorking)
+                            .disabled(chatDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
                     }
                 }
@@ -1082,6 +1222,17 @@ private struct ChapterAssistantView: View {
         let question = chatDraft
         chatDraft = ""
         state.sendChapterChat(question)
+    }
+
+    private func chapterTranslationStatus(_ checkpoint: ChapterTranslationCheckpoint) -> String {
+        switch checkpoint.status {
+        case .inProgress:
+            "Saved through sentence \(min(checkpoint.nextSegmentIndex, checkpoint.totalSentences)) of \(checkpoint.totalSentences)"
+        case .awaitingReview:
+            "All translated · waiting for review"
+        case .allAccepted:
+            "All translations accepted"
+        }
     }
 
     private func assistantCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
@@ -1139,13 +1290,15 @@ private struct SentenceRow: View {
 
             if textSource == .spoken || textSource == .dual {
                 if isSelected {
-                    FlowLayout(spacing: 2, lineSpacing: type.line) {
+                    FlowLayout(spacing: type.word, lineSpacing: type.line) {
                         ForEach(segment.words) { word in
                             WordToken(
                                 word: word,
                                 isCurrent: word.id == currentWordID || word.id == focusedWordID,
                                 dimmed: false,
                                 fontSize: type.body,
+                                font: type.font,
+                                bold: type.bold,
                                 onSeek: { onSeek(word.start) },
                                 onPlayFrom: { onPlayFrom(word.start) },
                                 onInspect: { onInspect(word) },
@@ -1155,7 +1308,7 @@ private struct SentenceRow: View {
                     }
                 } else {
                     Text(segment.spokenText)
-                        .font(.system(size: type.body, design: .serif))
+                        .font(type.font.font(size: type.body, bold: type.bold))
                         .foregroundStyle(Palette.dim)
                         .fixedSize(horizontal: false, vertical: true)
                         .lineSpacing(type.line)
@@ -1166,9 +1319,10 @@ private struct SentenceRow: View {
                 let original = segment.ebookText ?? (textSource == .original ? segment.spokenText : nil)
                 if let original {
                     Text(original)
-                        .font(.system(size: textSource == .dual ? type.dual : type.body, design: .serif))
+                        .font(type.font.font(size: textSource == .dual ? type.dual : type.body, bold: type.bold))
                         .foregroundStyle(isSelected ? Palette.ink : Palette.dim)
                         .italic(textSource == .dual)
+                        .lineSpacing(type.line)
                 }
             }
 
@@ -1239,6 +1393,8 @@ private struct WordToken: View {
     let isCurrent: Bool
     let dimmed: Bool
     var fontSize: CGFloat = 22
+    var font: ReaderFontChoice = .newYork
+    var bold = false
     let onSeek: () -> Void
     let onPlayFrom: () -> Void
     let onInspect: () -> Void
@@ -1246,7 +1402,7 @@ private struct WordToken: View {
 
     var body: some View {
         Text(word.text)
-            .font(.system(size: fontSize, weight: isCurrent ? .semibold : .regular, design: .serif))
+            .font(font.font(size: fontSize, bold: bold || isCurrent))
             .foregroundStyle(isCurrent ? Palette.inkOnGold : (dimmed ? Palette.dim : Palette.ink))
             .padding(.horizontal, isCurrent ? 4 : 0)
             .padding(.vertical, 1)
@@ -1395,7 +1551,7 @@ private struct WordInspector: View {
                                 }
                                 Button("Retranslate") { state.retranslateSelectedWord() }
                                     .buttonStyle(.bordered)
-                            } else if state.isTranslating {
+                            } else if state.isLLMJobActive(kind: .wordTranslation, targetID: word.id) {
                                 HStack(spacing: 10) {
                                     ProgressView().controlSize(.small)
                                     Text("Asking \(state.selectedLLMModel)…")

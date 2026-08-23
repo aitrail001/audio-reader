@@ -93,6 +93,16 @@ struct IPadRootView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .tint(Palette.terracotta)
+        .toolbar {
+            if !state.backgroundJobs.isEmpty {
+                ToolbarItem(placement: .primaryAction) {
+                    BackgroundJobsButton(state: state) {
+                        source = .allBooks
+                        columnVisibility = .detailOnly
+                    }
+                }
+            }
+        }
         .overlay {
             if state.isScanning, let progress = state.libraryScanProgress {
                 VStack(spacing: 12) {
@@ -110,6 +120,14 @@ struct IPadRootView: View {
         }
         .sheet(isPresented: $state.showSettings) {
             SettingsView(state: state)
+        }
+        .alert("Could Not Open Background Job", isPresented: Binding(
+            get: { state.backgroundJobNavigationError != nil },
+            set: { if !$0 { state.backgroundJobNavigationError = nil } }
+        )) {
+            Button("OK", role: .cancel) { state.backgroundJobNavigationError = nil }
+        } message: {
+            Text(state.backgroundJobNavigationError ?? "The original chapter is no longer available.")
         }
         .sheet(item: $importRequest) { request in
             IPadDocumentPicker(request: request) { result in
@@ -218,6 +236,7 @@ struct IPadRootView: View {
             IPadBookList(
                 books: filteredBooks,
                 selectedBookID: $state.selectedBookID,
+                readyChapterIDs: state.readyChapterIDs,
                 importMessage: importMessage,
                 onDelete: { pendingBookDelete = $0 }
             )
@@ -431,6 +450,7 @@ private struct IPadDocumentPicker: UIViewControllerRepresentable {
 private struct IPadBookList: View {
     let books: [Book]
     @Binding var selectedBookID: String?
+    let readyChapterIDs: Set<String>
     let importMessage: String?
     let onDelete: (Book) -> Void
 
@@ -453,7 +473,7 @@ private struct IPadBookList: View {
                             Text(book.author ?? "Unknown author")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
-                            Text("\(book.chapters.count) chapters")
+                            Text("\(book.chapters.lazy.filter { readyChapterIDs.contains($0.id) }.count)/\(book.chapters.count) transcribed")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -495,7 +515,7 @@ private struct IPadBookDetail: View {
                         Text(book.author ?? "Unknown author")
                             .font(.title3)
                             .foregroundStyle(.secondary)
-                        Label("\(book.chapters.count) chapters", systemImage: "list.bullet")
+                        Label("\(state.transcribedChapterCount(in: book)) of \(book.chapters.count) chapters transcribed", systemImage: "waveform.badge.checkmark")
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -524,6 +544,11 @@ private struct IPadBookDetail: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
+                                if state.readyChapterIDs.contains(chapter.id) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(Palette.gold)
+                                        .accessibilityLabel("Transcribed")
+                                }
                                 Image(systemName: "chevron.forward")
                                     .foregroundStyle(.tertiary)
                             }

@@ -10,7 +10,11 @@ struct LibraryView: View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 180, maximum: 220), spacing: 16)], spacing: 24) {
                 ForEach(state.books) { book in
-                    BookCard(book: book, selected: book.id == state.selectedBookID)
+                    BookCard(
+                        book: book,
+                        selected: book.id == state.selectedBookID,
+                        transcribedCount: state.transcribedChapterCount(in: book)
+                    )
                         .onTapGesture {
                             state.selectedBookID = book.id
                             state.selectedChapterID = book.chapters.first?.id
@@ -142,6 +146,7 @@ struct LibraryView: View {
 private struct BookCard: View {
     let book: Book
     let selected: Bool
+    let transcribedCount: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -183,7 +188,7 @@ private struct BookCard: View {
                 Text(book.author ?? "Unknown author")
                     .foregroundStyle(Palette.dim)
                 Spacer()
-                Text("\(book.chapters.count) ch")
+                Text("\(transcribedCount)/\(book.chapters.count) transcribed")
                     .foregroundStyle(Palette.mute)
             }
             .font(.system(size: 11))
@@ -208,7 +213,7 @@ private struct ChapterStrip: View {
                     Text(book.title)
                         .font(.system(size: 15, weight: .semibold, design: .serif))
                         .foregroundStyle(Palette.ink)
-                    Text("\(book.chapters.count) chapters" + (book.ebookPath == nil ? " · audio only" : " · ebook found"))
+                    Text("\(book.chapters.count) chapters · \(state.transcribedChapterCount(in: book)) transcribed" + (book.ebookPath == nil ? " · audio only" : " · ebook found"))
                         .font(.system(size: 11))
                         .foregroundStyle(Palette.dim)
                 }

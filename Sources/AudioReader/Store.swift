@@ -139,6 +139,8 @@ final class LibraryStore: @unchecked Sendable {
     func replaceVocab(_ items: [VocabEntry]) {
         lock.lock()
         defer { lock.unlock() }
+        exec("BEGIN IMMEDIATE TRANSACTION")
+        defer { exec("COMMIT") }
         exec("DELETE FROM vocab")
         for item in items { upsertVocabUnlocked(item) }
     }
@@ -191,6 +193,8 @@ final class LibraryStore: @unchecked Sendable {
     func replaceGlosses(_ items: [GlossEntry]) {
         lock.lock()
         defer { lock.unlock() }
+        exec("BEGIN IMMEDIATE TRANSACTION")
+        defer { exec("COMMIT") }
         exec("DELETE FROM glosses")
         for item in items { upsertGloss(item) }
     }

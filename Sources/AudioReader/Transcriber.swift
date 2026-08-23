@@ -31,7 +31,7 @@ actor Transcriber {
         chapter: Chapter,
         ebookPath: String?,
         progress: @Sendable @escaping (TranscriptionProgress) -> Void,
-        checkpoint: @Sendable @escaping (String, [TranscriptSegment]) -> Void
+        checkpoint: @Sendable @escaping (String, [TranscriptSegment]) async -> Void
     ) async throws -> Transcript {
         guard SpeechTranscriber.isAvailable else { throw TranscriptionError.unavailable }
 
@@ -91,7 +91,7 @@ actor Transcriber {
                 let frac = min(0.92, 0.08 + (seg.end / max(duration, 1)) * 0.84)
                 progress(.init(fraction: frac, message: "Transcribing \(formatClock(seg.end)) / \(formatClock(duration))"))
                 if segments.count == 1 || segments.count % 6 == 0 {
-                    checkpoint(locale.identifier, segments)
+                    await checkpoint(locale.identifier, segments)
                 }
             }
             return segments
@@ -114,7 +114,7 @@ actor Transcriber {
         }
 
         let segments = try await collector.value
-        checkpoint(locale.identifier, segments)
+        await checkpoint(locale.identifier, segments)
         progress(.init(fraction: 0.94, message: "Saved. Aligning with ebook…"))
 
         var aligned = segments

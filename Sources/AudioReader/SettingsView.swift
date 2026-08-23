@@ -55,6 +55,9 @@ struct SettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack(spacing: 8) {
+                    Text(AppVersion.displayName)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Palette.dim)
                     Spacer()
                     Button("Cancel") { state.showSettings = false }
                         .keyboardShortcut(.cancelAction)
@@ -108,7 +111,40 @@ struct SettingsView: View {
                             .frame(width: 44, alignment: .trailing)
                     }
                 }
-                helper("Reader type also scales with the text panel width. Drag the divider next to Lookup, or use A / A in the player, for quick adjustments.")
+                settingRow("Typeface") {
+                    Picker("Typeface", selection: $draft.readerFont) {
+                        ForEach(ReaderFontChoice.allCases) { font in
+                            Text(font.rawValue).tag(font.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    Toggle("Bold", isOn: $draft.readerBold)
+                }
+                settingRow("Line spacing") {
+                    HStack(spacing: 12) {
+                        Slider(value: $draft.readerLineSpacing, in: 0.7...2.0, step: 0.1)
+                        Text(String(format: "%.1fx", draft.readerLineSpacing))
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(width: 44, alignment: .trailing)
+                    }
+                }
+                settingRow("Word spacing") {
+                    HStack(spacing: 12) {
+                        Slider(value: $draft.readerWordSpacing, in: 0...12, step: 1)
+                        Text("\(Int(draft.readerWordSpacing)) pt")
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(width: 44, alignment: .trailing)
+                    }
+                }
+                settingRow("Margins") {
+                    HStack(spacing: 12) {
+                        Slider(value: $draft.readerMargin, in: 16...96, step: 4)
+                        Text("\(Int(draft.readerMargin)) pt")
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(width: 44, alignment: .trailing)
+                    }
+                }
+                helper("These reading controls are shared by the macOS and iPad readers.")
             }
             .padding(12)
         }
@@ -230,7 +266,7 @@ struct SettingsView: View {
 
     private var qwenSettings: some View {
         VStack(alignment: .leading, spacing: 12) {
-            helper("QwenCloud uses the OpenAI-compatible Responses API. Thinking can improve complex answers but adds latency and token usage.")
+            helper("QwenCloud uses Responses with a required JSON-schema tool for Qwen chapter translation, and JSON Chat Completions for supported third-party models. Thinking can improve complex answers but adds latency and token usage.")
             settingRow("Connection") {
                 Text(QwenAPIKeyStore.sourceLabel)
                     .font(.system(size: 12, weight: .medium))
@@ -251,23 +287,28 @@ struct SettingsView: View {
                     }
                 }
                 .labelsHidden()
+                .onChange(of: draft.qwenModel) { _, _ in normalizeDraftQwenEffort() }
             }
             if let selected = qwenTextModels.first(where: { $0.id == draft.qwenModel }) {
                 alignedHelper(selected.capabilities)
             }
-            settingRow("Thinking") {
-                Toggle("Enable thinking", isOn: $draft.qwenThinking)
+            if QwenRequestPolicy.supportsThinkingToggle(model: draft.qwenModel) {
+                settingRow("Thinking") {
+                    Toggle("Enable thinking", isOn: $draft.qwenThinking)
+                }
             }
-            if draft.qwenThinking {
+            if !draftQwenEfforts.isEmpty
+                && (!QwenRequestPolicy.supportsThinkingToggle(model: draft.qwenModel) || draft.qwenThinking) {
                 settingRow("Reasoning effort") {
                     Picker("Reasoning effort", selection: $draft.qwenEffort) {
-                        ForEach(QwenEffort.allCases) { effort in
+                        ForEach(draftQwenEfforts) { effort in
                             Text(effort.menuLabel).tag(effort.rawValue)
                         }
                     }
                     .labelsHidden()
                 }
             }
+            alignedHelper("QwenCloud Responses exposes none, minimal, low, medium, high, xhigh, and max. If a model or plan rejects an effort, AudioReader retries with that model's documented Chat mapping.", muted: true)
             if state.isLoadingQwenModels {
                 HStack(spacing: 8) {
                     Spacer().frame(width: labelWidth + 16)
@@ -310,6 +351,17 @@ struct SettingsView: View {
             models.append(.init(id: draft.qwenModel, brand: "Custom", capabilities: "Custom model ID", supportsText: true))
         }
         return models.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+    }
+
+    private var draftQwenEfforts: [QwenEffort] {
+        QwenRequestPolicy.supportedEfforts(model: draft.qwenModel)
+    }
+
+    private func normalizeDraftQwenEffort() {
+        guard !draftQwenEfforts.isEmpty,
+              !draftQwenEfforts.contains(where: { $0.rawValue == draft.qwenEffort })
+        else { return }
+        draft.qwenEffort = draftQwenEfforts.contains(.none) ? QwenEffort.none.rawValue : draftQwenEfforts[0].rawValue
     }
 
     private func settingRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {

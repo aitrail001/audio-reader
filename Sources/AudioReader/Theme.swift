@@ -103,13 +103,45 @@ private extension Color {
     }
 }
 
+enum ReaderFontChoice: String, CaseIterable, Identifiable, Codable {
+    case newYork = "New York"
+    case georgia = "Georgia"
+    case palatino = "Palatino"
+    case sanFrancisco = "San Francisco"
+
+    var id: String { rawValue }
+
+    func font(size: CGFloat, bold: Bool) -> Font {
+        let weight: Font.Weight = bold ? .bold : .regular
+        switch self {
+        case .newYork:
+            return .system(size: size, weight: weight, design: .serif)
+        case .georgia, .palatino:
+            return .custom(rawValue, size: size).weight(weight)
+        case .sanFrancisco:
+            return .system(size: size, weight: weight, design: .default)
+        }
+    }
+}
+
 struct ReaderType {
     var body: CGFloat
     var dual: CGFloat
     var gloss: CGFloat
     var line: CGFloat
+    var paragraph: CGFloat
+    var word: CGFloat
+    var font: ReaderFontChoice
+    var bold: Bool
 
-    static func metrics(columnWidth: CGFloat, scale: Double) -> ReaderType {
+    static func metrics(
+        columnWidth: CGFloat,
+        scale: Double,
+        lineSpacing: Double = 1,
+        wordSpacing: Double = 2,
+        font: String = ReaderFontChoice.newYork.rawValue,
+        bold: Bool = false
+    ) -> ReaderType {
         let w = max(columnWidth, 280)
         let base = min(34, max(16, 16 + (w - 320) / 38))
         let body = (base * scale).rounded()
@@ -117,7 +149,11 @@ struct ReaderType {
             body: body,
             dual: max(12, (body * 0.62).rounded()),
             gloss: max(13, (body * 0.78).rounded()),
-            line: max(4, (body * 0.28).rounded())
+            line: max(2, (body * 0.28 * lineSpacing).rounded()),
+            paragraph: max(4, (body * 0.75 * lineSpacing).rounded()),
+            word: max(0, wordSpacing),
+            font: ReaderFontChoice(rawValue: font) ?? .newYork,
+            bold: bold
         )
     }
 }

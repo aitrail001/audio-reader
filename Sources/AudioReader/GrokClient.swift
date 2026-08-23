@@ -18,6 +18,53 @@ enum LLMError: LocalizedError {
             "The LLM returned an empty reply."
         }
     }
+
+    var rejectsStructuredOutput: Bool {
+        guard case .http(_, let body) = self else { return false }
+        let message = body.lowercased()
+        let namesJSONMode = message.contains("response_format") || message.contains("json_object")
+        let rejectsParameter = message.contains("unsupported")
+            || message.contains("unknown")
+            || message.contains("invalid")
+            || message.contains("not support")
+        return namesJSONMode && rejectsParameter
+    }
+}
+
+enum ResponsesFallbackPolicy {
+    static func shouldFallbackToChat(after error: Error) -> Bool {
+        guard let llmError = error as? LLMError,
+              case .http(let status, let body) = llmError,
+              [400, 404, 405, 422].contains(status)
+        else { return false }
+
+        let message = body.lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: ".", with: " ")
+        let namesResponsesFeature = message.contains("tool choice")
+            || message.contains("\"tools\"")
+            || message.contains("'tools'")
+            || message.contains("parameter: tools")
+            || message.contains("parameter tools")
+            || message.contains("tools parameter")
+            || message.contains("tools are")
+            || message.contains("function calling")
+            || message.contains("reasoning effort")
+            || message.contains("/responses")
+            || message.contains("responses endpoint")
+            || message.contains("responses api")
+        let rejectsFeature = message.contains("unsupported")
+            || message.contains("not supported")
+            || message.contains("does not support")
+            || message.contains("unknown")
+            || message.contains("unrecognized")
+            || message.contains("invalid")
+            || message.contains("not allowed")
+            || message.contains("not found")
+            || message.contains("not implemented")
+        return namesResponsesFeature && rejectsFeature
+    }
 }
 
 enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
@@ -214,16 +261,81 @@ enum GrokEffort: String, CaseIterable, Identifiable {
 }
 
 enum QwenEffort: String, CaseIterable, Identifiable {
-    case minimal, medium, high
+    case none, minimal, low, medium, high, xhigh, max
 
     var id: String { rawValue }
 
     var menuLabel: String {
         switch self {
+        case .none: "None — fastest"
         case .minimal: "Minimal"
+        case .low: "Low"
         case .medium: "Medium"
         case .high: "High"
+        case .xhigh: "xHigh"
+        case .max: "Maximum"
         }
+    }
+}
+
+enum LLMAPIStyle: Equatable {
+    case responses
+    case chat
+}
+
+enum QwenRequestPolicy {
+    static func supportedEfforts(model: String) -> [QwenEffort] {
+        let id = model.lowercased()
+        guard id.hasPrefix("qwen") || id.hasPrefix("deepseek") || id.hasPrefix("glm") else { return [] }
+        return isThinkingOnly(model: id)
+            ? QwenEffort.allCases.filter { $0 != .none }
+            : QwenEffort.allCases
+    }
+
+    static func effort(
+        model: String,
+        requested: String,
+        thinking: Bool,
+        api: LLMAPIStyle
+    ) -> String? {
+        let id = model.lowercased()
+        let responsesEfforts = Set(QwenEffort.allCases.map(\.rawValue))
+        if api == .responses,
+           id.hasPrefix("qwen") || id.hasPrefix("deepseek") || id.hasPrefix("glm") {
+            if id.hasPrefix("qwen"), !thinking, !isThinkingOnly(model: id) { return "none" }
+            if isThinkingOnly(model: id), requested == QwenEffort.none.rawValue {
+                return QwenEffort.minimal.rawValue
+            }
+            return responsesEfforts.contains(requested) ? requested : "xhigh"
+        }
+        guard api == .chat else { return nil }
+        if id.hasPrefix("deepseek-v4-flash-0731") || id.hasPrefix("deepseek-v4-pro-0813") {
+            switch requested {
+            case "minimal", "low": return "low"
+            case "max": return "max"
+            case "medium", "high", "xhigh": return "high"
+            default: return nil
+            }
+        }
+        if id.hasPrefix("deepseek") || id.hasPrefix("glm") {
+            switch requested {
+            case "xhigh", "max": return "max"
+            case "minimal", "low", "medium", "high": return "high"
+            default: return nil
+            }
+        }
+        return nil
+    }
+
+    static func supportsThinkingToggle(model: String) -> Bool {
+        let id = model.lowercased()
+        return id.hasPrefix("qwen") && !isThinkingOnly(model: id)
+    }
+
+    private static func isThinkingOnly(model: String) -> Bool {
+        model.contains("-thinking")
+            || model == "qwen3.7-max-preview"
+            || model == "qwen3.7-max-2026-05-17"
     }
 }
 
@@ -327,25 +439,72 @@ actor GrokClient {
         }
     }
 
+    func completeStructuredJSON(
+        provider: LLMProvider,
+        system: String,
+        user: String,
+        baseURL: String,
+        model: String,
+        effort: String,
+        enableThinking: Bool
+    ) async throws -> String {
+        let key = provider == .grok ? APIKeyStore.load() : QwenAPIKeyStore.load()
+        guard let key else { throw LLMError.noAPIKey(provider) }
+        if provider == .qwenCloud {
+            do {
+                let request = try LLMRequestBuilder.responses(
+                    provider: provider,
+                    apiKey: key,
+                    baseURL: baseURL,
+                    model: model,
+                    system: system,
+                    user: user,
+                    effort: effort,
+                    enableThinking: enableThinking,
+                    structuredJSON: true
+                )
+                return try await sendResponses(request)
+            } catch where ResponsesFallbackPolicy.shouldFallbackToChat(after: error) {
+                // Some models or plans reject Responses tools or a particular
+                // Responses effort. Fall through to documented Chat JSON mode.
+            } catch {
+                throw error
+            }
+        }
+        let request = try LLMRequestBuilder.chat(
+            provider: provider,
+            apiKey: key,
+            baseURL: baseURL,
+            model: model,
+            system: system,
+            user: user,
+            effort: effort,
+            enableThinking: enableThinking,
+            structuredJSON: true
+        )
+        do {
+            return try await sendChat(request)
+        } catch let error as LLMError where error.rejectsStructuredOutput {
+            let fallback = try LLMRequestBuilder.chat(
+                provider: provider,
+                apiKey: key,
+                baseURL: baseURL,
+                model: model,
+                system: system,
+                user: user,
+                effort: effort,
+                enableThinking: enableThinking
+            )
+            return try await sendChat(fallback)
+        }
+    }
+
     func qwenModels(baseURL: String, apiKey: String? = nil) async throws -> [String] {
         let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let key = supplied?.isEmpty == false ? supplied : QwenAPIKeyStore.load() else {
             throw LLMError.noAPIKey(.qwenCloud)
         }
         let trimmed = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard let compatibleRange = trimmed.range(of: "/compatible-mode/v1", options: .backwards) else {
-            throw LLMError.invalidEndpoint(baseURL)
-        }
-        let root = String(trimmed[..<compatibleRange.lowerBound])
-        let permissionsURL = root + "/api/v1/models/permissions?authorization_scope=AUTHORIZED&action=INFERENCE&page_no=1&page_size=200"
-        do {
-            let data = try await qwenModelData(urlString: permissionsURL, key: key)
-            let parsed = try JSONDecoder().decode(ModelPermissionsResponse.self, from: data)
-            let models = parsed.output?.permissions.map(\.model) ?? []
-            if !models.isEmpty { return models }
-        } catch {
-            // Some token-plan endpoints expose only the OpenAI-compatible model list.
-        }
         let data = try await qwenModelData(urlString: trimmed + "/models", key: key)
         let parsed = try JSONDecoder().decode(ModelListResponse.self, from: data)
         return parsed.data.map(\.id)
@@ -421,6 +580,7 @@ actor GrokClient {
 
         struct OutputItem: Decodable {
             var content: [ContentItem]?
+            var arguments: String?
         }
         struct ContentItem: Decodable {
             var text: String?
@@ -428,6 +588,9 @@ actor GrokClient {
 
         var resolved: String {
             if let output_text, !output_text.isEmpty { return output_text }
+            if let arguments = output?.compactMap(\.arguments).first, !arguments.isEmpty {
+                return arguments
+            }
             let parts = output?.flatMap { $0.content ?? [] }.compactMap(\.text) ?? []
             return parts.joined(separator: "\n")
         }
@@ -443,7 +606,8 @@ enum LLMRequestBuilder {
         system: String,
         user: String,
         effort: String,
-        enableThinking: Bool
+        enableThinking: Bool,
+        structuredJSON: Bool = false
     ) throws -> URLRequest {
         var body: [String: Any] = [
             "model": model,
@@ -453,12 +617,23 @@ enum LLMRequestBuilder {
             ]
         ]
         if provider == .qwenCloud {
-            body["enable_thinking"] = enableThinking
-            if enableThinking {
-                body["reasoning"] = ["effort": effort]
+            if QwenRequestPolicy.supportsThinkingToggle(model: model) {
+                body["enable_thinking"] = effort == QwenEffort.none.rawValue ? false : enableThinking
+            }
+            if let normalized = QwenRequestPolicy.effort(
+                model: model,
+                requested: effort,
+                thinking: enableThinking,
+                api: .responses
+            ) {
+                body["reasoning"] = ["effort": normalized]
             }
         } else if GrokModel(rawValue: model)?.supportsEffort == true {
             body["reasoning"] = ["effort": effort]
+        }
+        if structuredJSON {
+            body["tools"] = [translationSubmissionTool]
+            body["tool_choice"] = "required"
         }
         return try request(path: "responses", apiKey: apiKey, baseURL: baseURL, body: body)
     }
@@ -471,7 +646,8 @@ enum LLMRequestBuilder {
         system: String,
         user: String,
         effort: String,
-        enableThinking: Bool
+        enableThinking: Bool,
+        structuredJSON: Bool = false
     ) throws -> URLRequest {
         var body: [String: Any] = [
             "model": model,
@@ -481,12 +657,22 @@ enum LLMRequestBuilder {
             ]
         ]
         if provider == .qwenCloud {
-            body["enable_thinking"] = enableThinking
-            if model.hasPrefix("deepseek") || model.hasPrefix("glm") {
-                body["reasoning_effort"] = effort
+            if QwenRequestPolicy.supportsThinkingToggle(model: model) {
+                body["enable_thinking"] = effort == QwenEffort.none.rawValue ? false : enableThinking
+            }
+            if let normalized = QwenRequestPolicy.effort(
+                model: model,
+                requested: effort,
+                thinking: enableThinking,
+                api: .chat
+            ) {
+                body["reasoning_effort"] = normalized
             }
         } else if GrokModel(rawValue: model)?.supportsEffort == true {
             body["reasoning_effort"] = effort
+        }
+        if structuredJSON {
+            body["response_format"] = ["type": "json_object"]
         }
         return try request(path: "chat/completions", apiKey: apiKey, baseURL: baseURL, body: body)
     }
@@ -503,6 +689,42 @@ enum LLMRequestBuilder {
         request.timeoutInterval = 300
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
+    }
+
+    private static var translationSubmissionTool: [String: Any] {
+        [
+            "type": "function",
+            "name": "submit_translations",
+            "description": "Submit one contextual translation result for each requested sentence ID.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "translations": [
+                        "type": "array",
+                        "items": [
+                            "type": "object",
+                            "properties": [
+                                "id": ["type": "string"],
+                                "translation": ["type": "string"],
+                                "phrases": [
+                                    "type": "array",
+                                    "items": [
+                                        "type": "object",
+                                        "properties": [
+                                            "source": ["type": "string"],
+                                            "explanation": ["type": "string"]
+                                        ],
+                                        "required": ["source", "explanation"]
+                                    ]
+                                ]
+                            ],
+                            "required": ["id", "translation", "phrases"]
+                        ]
+                    ]
+                ],
+                "required": ["translations"]
+            ]
+        ]
     }
 }
 

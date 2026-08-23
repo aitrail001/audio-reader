@@ -71,6 +71,11 @@ struct RootView: View {
                 }
                 .onChange(of: state.settings.appearance) { _, _ in state.persistSettings() }
             }
+            if !state.backgroundJobs.isEmpty {
+                ToolbarItem(placement: .automatic) {
+                    BackgroundJobsButton(state: state)
+                }
+            }
             ToolbarItem(placement: .automatic) {
                 Button {
                     state.showSettings = true
@@ -81,6 +86,14 @@ struct RootView: View {
         }
         .sheet(isPresented: $state.showSettings) {
             SettingsView(state: state)
+        }
+        .alert("Could Not Open Background Job", isPresented: Binding(
+            get: { state.backgroundJobNavigationError != nil },
+            set: { if !$0 { state.backgroundJobNavigationError = nil } }
+        )) {
+            Button("OK", role: .cancel) { state.backgroundJobNavigationError = nil }
+        } message: {
+            Text(state.backgroundJobNavigationError ?? "The original chapter is no longer available.")
         }
 #if os(macOS)
         .sheet(isPresented: $showMacAppleBooks) {
@@ -123,7 +136,7 @@ struct RootView: View {
     }
 
     private var sidebar: some View {
-        List(selection: $state.selectedBookID) {
+        List(selection: sidebarSelection) {
 #if os(macOS)
             Section("Sources") {
                 Button {
@@ -162,7 +175,7 @@ struct RootView: View {
                             Text(book.title)
                                 .font(.system(size: 12, weight: .medium))
                                 .lineLimit(2)
-                            Text("\(book.chapters.count) chapters")
+                            Text("\(state.transcribedChapterCount(in: book))/\(book.chapters.count) transcribed")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
                         }
@@ -182,12 +195,20 @@ struct RootView: View {
             }
         }
         .listStyle(.sidebar)
-        .onChange(of: state.selectedBookID) { _, id in
-            if let book = state.books.first(where: { $0.id == id }) {
+    }
+
+    private var sidebarSelection: Binding<String?> {
+        Binding(
+            get: { state.selectedBookID },
+            set: { id in
+                state.selectedBookID = id
+                guard let id,
+                      let book = state.books.first(where: { $0.id == id })
+                else { return }
                 state.selectedChapterID = book.chapters.first?.id
                 state.tab = .library
             }
-        }
+        )
     }
 
 #if os(macOS)
@@ -255,4 +276,90 @@ struct RootView: View {
         }
     }
 #endif
+}
+
+struct BackgroundJobsButton: View {
+    @Bindable var state: AppState
+    var onOpenJob: () -> Void = {}
+    @State private var isPresented = false
+
+    var body: some View {
+        Button {
+            isPresented.toggle()
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 16))
+                Text("\(state.backgroundJobs.count)")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(minWidth: 14, minHeight: 14)
+                    .background(Palette.terracotta, in: Circle())
+                    .offset(x: 7, y: -7)
+            }
+            .padding(.trailing, 5)
+        }
+        .accessibilityLabel("Background jobs, \(state.backgroundJobs.count) queued or running")
+        .help("Show background jobs")
+        .popover(isPresented: $isPresented) {
+            BackgroundJobsView(state: state) { job in
+                guard state.openBackgroundJob(job) else { return }
+                isPresented = false
+                onOpenJob()
+            }
+        }
+    }
+}
+
+private struct BackgroundJobsView: View {
+    @Bindable var state: AppState
+    let onOpenJob: (BackgroundJob) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Background Jobs")
+                .font(.headline)
+            ForEach(state.backgroundJobs) { job in
+                Button {
+                    onOpenJob(job)
+                } label: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(job.stage, systemImage: job.symbol)
+                            .font(.subheadline.weight(.semibold))
+                        Text(job.state == .queued ? "Queued" : "Running")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(job.state == .queued ? Palette.mute : Palette.gold)
+                        Text(job.bookTitle)
+                            .font(.subheadline)
+                            .lineLimit(2)
+                        Text(job.chapterTitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                        if job.state == .queued {
+                            ProgressView(value: 0)
+                        } else if let fraction = job.fraction {
+                            ProgressView(value: fraction)
+                        } else {
+                            ProgressView()
+                        }
+                        Text(job.detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(job.state == .queued ? "Queued" : "Running") \(job.stage), \(job.bookTitle), \(job.chapterTitle)")
+                .accessibilityHint("Open this chapter in the player")
+                if job.id != state.backgroundJobs.last?.id {
+                    Divider()
+                }
+            }
+        }
+        .padding(18)
+        .frame(width: 320, alignment: .leading)
+    }
 }

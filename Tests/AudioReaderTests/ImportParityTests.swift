@@ -352,6 +352,49 @@ struct ImportParityTests {
         #expect(ready == [ordinary.id])
     }
 
+    @Test("Imported-book chapter identities survive iOS container path changes")
+    func preservesImportedBookChapterIdentityAcrossContainerChanges() {
+        let oldPath = "/private/var/mobile/Containers/Data/Application/OLD/Documents/ImportedBooks/The Ride/book.m4b"
+        let currentPath = "/var/mobile/Containers/Data/Application/NEW/Documents/ImportedBooks/The Ride/book.m4b"
+
+        #expect(LibraryScanner.stableID("\(oldPath)#0.000") == LibraryScanner.stableID("\(currentPath)#0.000"))
+    }
+
+    @Test("Readiness recovers transcripts saved under an earlier iOS container")
+    func recoversTranscriptAcrossContainerChanges() {
+        let oldPath = "/private/var/mobile/Containers/Data/Application/OLD/Documents/ImportedBooks/The Ride/book.m4b"
+        let currentPath = "/var/mobile/Containers/Data/Application/NEW/Documents/ImportedBooks/The Ride/book.m4b"
+        let chapter = Chapter(
+            id: LibraryScanner.stableID("\(currentPath)#42.500"),
+            index: 1,
+            title: "Chapter Two",
+            audioPath: currentPath,
+            duration: 120,
+            startTime: 42.5
+        )
+        let transcript = Transcript(
+            chapterID: "legacy-absolute-path-id",
+            audioPath: oldPath,
+            chapterStart: 42.5,
+            createdAt: Date(),
+            locale: "en-US",
+            segments: [],
+            source: "SpeechAnalyzer",
+            ebookAligned: false
+        )
+        let book = Book(
+            id: "book",
+            title: "The Ride",
+            author: nil,
+            folderPath: currentPath,
+            coverPath: nil,
+            ebookPath: nil,
+            chapters: [chapter]
+        )
+
+        #expect(Persistence.readyChapterIDs(in: [book], transcripts: [transcript]) == [chapter.id])
+    }
+
     @Test("Chapter translation groups sentences by the configured block size")
     func groupsChapterTranslationBlocks() {
         var segments: [TranscriptSegment] = []
@@ -400,6 +443,187 @@ struct ImportParityTests {
         #expect(results[1].glossText.contains("短语：无"))
     }
 
+    @Test("Incomplete chapter JSON preserves valid sentences and identifies the retry remainder")
+    func preservesPartialChapterTranslationResults() throws {
+        let response = """
+        {
+          "translations": [
+            {"id":"segment-1","translation":"第一句。","phrases":[]},
+            {"id":"unexpected","translation":"忽略。","phrases":[]}
+          ]
+        }
+        """
+
+        let parsed = try ChapterTranslationBatch.parseAvailable(
+            response,
+            expectedIDs: ["segment-1", "segment-2"]
+        )
+
+        #expect(parsed.results.map(\.id) == ["segment-1"])
+        #expect(parsed.missingIDs == ["segment-2"])
+        #expect(ChapterTranslationBatch.maximumAttempts == 3)
+    }
+
+    @Test("Qwen request effort is normalized for each documented model family")
+    func normalizesQwenRequestEffort() {
+        #expect(QwenRequestPolicy.supportedEfforts(model: "qwen3.7-plus") == QwenEffort.allCases)
+        #expect(QwenRequestPolicy.supportedEfforts(model: "deepseek-v4-flash-0731") == QwenEffort.allCases)
+        #expect(QwenRequestPolicy.supportedEfforts(model: "glm-5.2") == QwenEffort.allCases)
+        #expect(QwenRequestPolicy.effort(model: "qwen3.7-plus", requested: "xhigh", thinking: true, api: .responses) == "xhigh")
+        #expect(QwenRequestPolicy.effort(model: "qwen3.7-plus", requested: "high", thinking: false, api: .responses) == "none")
+        #expect(QwenRequestPolicy.effort(model: "deepseek-v4-flash-0731", requested: "minimal", thinking: true, api: .responses) == "minimal")
+        #expect(QwenRequestPolicy.effort(model: "glm-5.2", requested: "medium", thinking: true, api: .responses) == "medium")
+        #expect(QwenRequestPolicy.effort(model: "deepseek-v4-flash-0731", requested: "low", thinking: true, api: .chat) == "low")
+        #expect(QwenRequestPolicy.effort(model: "deepseek-v4-flash", requested: "medium", thinking: true, api: .chat) == "high")
+        #expect(QwenRequestPolicy.effort(model: "glm-5.2", requested: "xhigh", thinking: true, api: .chat) == "max")
+        #expect(QwenRequestPolicy.effort(model: "qwen3.7-max-preview", requested: "high", thinking: false, api: .responses) == "high")
+        #expect(QwenRequestPolicy.effort(model: "custom-model", requested: "high", thinking: true, api: .chat) == nil)
+    }
+
+    @Test("Thinking-only Qwen models normalize none to a supported effort")
+    func normalizesThinkingOnlyQwenEffort() {
+        let supported = QwenRequestPolicy.supportedEfforts(model: "qwen3.7-max-preview")
+
+        #expect(!supported.contains(.none))
+        #expect(supported.contains(.minimal))
+        #expect(QwenRequestPolicy.effort(
+            model: "qwen3.7-max-preview",
+            requested: QwenEffort.none.rawValue,
+            thinking: false,
+            api: .responses
+        ) == QwenEffort.minimal.rawValue)
+    }
+
+    @Test("Thinking-only Qwen requests never disable thinking")
+    func preservesThinkingForThinkingOnlyQwenRequests() throws {
+        let responsesRequest = try LLMRequestBuilder.responses(
+            provider: .qwenCloud,
+            apiKey: "test-key",
+            baseURL: "https://example.com/compatible-mode/v1",
+            model: "qwen3.7-max-preview",
+            system: "Be concise.",
+            user: "Reply only OK.",
+            effort: QwenEffort.none.rawValue,
+            enableThinking: false
+        )
+        let responsesBody = try #require(responsesRequest.httpBody)
+        let responsesJSON = try #require(JSONSerialization.jsonObject(with: responsesBody) as? [String: Any])
+        let reasoning = try #require(responsesJSON["reasoning"] as? [String: String])
+
+        #expect(responsesJSON["enable_thinking"] == nil)
+        #expect(reasoning["effort"] == QwenEffort.minimal.rawValue)
+
+        let chatRequest = try LLMRequestBuilder.chat(
+            provider: .qwenCloud,
+            apiKey: "test-key",
+            baseURL: "https://example.com/compatible-mode/v1",
+            model: "qwen3.7-max-preview",
+            system: "Be concise.",
+            user: "Reply only OK.",
+            effort: QwenEffort.none.rawValue,
+            enableThinking: false
+        )
+        let chatBody = try #require(chatRequest.httpBody)
+        let chatJSON = try #require(JSONSerialization.jsonObject(with: chatBody) as? [String: Any])
+
+        #expect(chatJSON["enable_thinking"] == nil)
+    }
+
+    @Test("QwenCloud defaults to no reasoning and preserves it in Chat fallback")
+    func defaultsQwenEffortToNone() throws {
+        #expect(AppSettings.default.qwenEffort == QwenEffort.none.rawValue)
+
+        let request = try LLMRequestBuilder.chat(
+            provider: .qwenCloud,
+            apiKey: "test-key",
+            baseURL: "https://example.com/compatible-mode/v1",
+            model: "qwen3.7-plus",
+            system: "Be concise.",
+            user: "Reply only OK.",
+            effort: QwenEffort.none.rawValue,
+            enableThinking: true
+        )
+        let body = try #require(request.httpBody)
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+
+        #expect(json["enable_thinking"] as? Bool == false)
+        #expect(json["reasoning_effort"] == nil)
+    }
+
+    @Test("Existing settings migrate once from the former high effort default")
+    func migratesLegacyQwenEffortDefault() throws {
+        let encoded = try JSONEncoder().encode(AppSettings.default)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object["qwenEffort"] = "high"
+        object.removeValue(forKey: "qwenEffortPolicyVersion")
+
+        let migrated = try JSONDecoder().decode(
+            AppSettings.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        #expect(migrated.qwenEffort == QwenEffort.none.rawValue)
+        #expect(migrated.qwenEffortPolicyVersion == 1)
+    }
+
+    @Test("Structured chapter requests use schema enforcement supported by each API")
+    func buildsStructuredChapterRequest() throws {
+        let qwenRequest = try LLMRequestBuilder.responses(
+            provider: .qwenCloud,
+            apiKey: "test-key",
+            baseURL: "https://example.com/compatible-mode/v1",
+            model: "qwen3.7-plus",
+            system: "Return JSON output.",
+            user: "Translate this sentence.",
+            effort: "medium",
+            enableThinking: true,
+            structuredJSON: true
+        )
+        let qwenBody = try #require(qwenRequest.httpBody)
+        let qwenJSON = try #require(JSONSerialization.jsonObject(with: qwenBody) as? [String: Any])
+        let tools = try #require(qwenJSON["tools"] as? [[String: Any]])
+        let reasoning = try #require(qwenJSON["reasoning"] as? [String: String])
+        let toolName = tools.first?["name"] as? String
+
+        #expect(qwenJSON["tool_choice"] as? String == "required")
+        #expect(toolName == "submit_translations")
+        #expect(reasoning["effort"] == "medium")
+
+        let glmRequest = try LLMRequestBuilder.responses(
+            provider: .qwenCloud,
+            apiKey: "test-key",
+            baseURL: "https://example.com/compatible-mode/v1",
+            model: "glm-5.2",
+            system: "Return JSON output.",
+            user: "Translate this sentence.",
+            effort: "low",
+            enableThinking: true,
+            structuredJSON: true
+        )
+        let glmBody = try #require(glmRequest.httpBody)
+        let glmJSON = try #require(JSONSerialization.jsonObject(with: glmBody) as? [String: Any])
+        let glmReasoning = try #require(glmJSON["reasoning"] as? [String: String])
+        #expect(glmReasoning["effort"] == "low")
+        #expect(glmJSON["tool_choice"] as? String == "required")
+
+        let chatRequest = try LLMRequestBuilder.chat(
+            provider: .qwenCloud,
+            apiKey: "test-key",
+            baseURL: "https://example.com/compatible-mode/v1",
+            model: "deepseek-v4-flash",
+            system: "Return JSON output.",
+            user: "Translate this sentence.",
+            effort: "max",
+            enableThinking: true,
+            structuredJSON: true
+        )
+        let chatBody = try #require(chatRequest.httpBody)
+        let chatJSON = try #require(JSONSerialization.jsonObject(with: chatBody) as? [String: Any])
+        let format = try #require(chatJSON["response_format"] as? [String: String])
+        #expect(format["type"] == "json_object")
+        #expect(chatJSON["reasoning_effort"] as? String == "max")
+    }
+
     @Test("Legacy settings gain a safe chapter translation block size")
     func defaultsChapterTranslationBlockSize() throws {
         let legacy = try JSONEncoder().encode(AppSettings.default)
@@ -408,6 +632,342 @@ struct ImportParityTests {
         let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONSerialization.data(withJSONObject: object))
 
         #expect(decoded.chapterTranslationBlockSize == 5)
+    }
+
+    @Test("Legacy settings gain safe reader appearance defaults")
+    func defaultsReaderAppearance() throws {
+        let encoded = try JSONEncoder().encode(AppSettings.default)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        for key in ["readerFont", "readerBold", "readerLineSpacing", "readerWordSpacing", "readerMargin"] {
+            object.removeValue(forKey: key)
+        }
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONSerialization.data(withJSONObject: object))
+
+        #expect(decoded.readerFont == ReaderFontChoice.newYork.rawValue)
+        #expect(decoded.readerBold == false)
+        #expect(decoded.readerLineSpacing == 1)
+        #expect(decoded.readerWordSpacing == 2)
+        #expect(decoded.readerMargin == 32)
+    }
+
+    @Test("Reader line spacing changes wrapped lines and the space between sentence rows")
+    func appliesReaderLineSpacingThroughoutText() {
+        let compact = ReaderType.metrics(columnWidth: 600, scale: 1, lineSpacing: 0.7)
+        let expanded = ReaderType.metrics(columnWidth: 600, scale: 1, lineSpacing: 2)
+
+        #expect(compact.line < expanded.line)
+        #expect(compact.paragraph < expanded.paragraph)
+    }
+
+    @Test("Reader position resolves its current segment and word together")
+    @MainActor
+    func resolvesCurrentReaderPosition() throws {
+        let first = TranscriptSegment(
+            id: "first",
+            start: 0,
+            end: 2,
+            words: [
+                TranscriptWord(id: "one", text: "One ", start: 0, end: 1, confidence: nil),
+                TranscriptWord(id: "two", text: "two.", start: 1, end: 2, confidence: nil),
+            ],
+            ebookText: nil,
+            alignmentScore: nil
+        )
+        let second = TranscriptSegment(
+            id: "second",
+            start: 2,
+            end: 4,
+            words: [TranscriptWord(id: "three", text: "Three.", start: 2, end: 4, confidence: nil)],
+            ebookText: nil,
+            alignmentScore: nil
+        )
+        let state = AppState()
+        state.transcript = Transcript(
+            chapterID: "chapter",
+            audioPath: "/tmp/book.m4b",
+            createdAt: Date(),
+            locale: "en-US",
+            segments: [first, second],
+            source: "test",
+            ebookAligned: false
+        )
+        state.player.currentTime = 1.5
+
+        let position = state.currentReaderPosition
+
+        #expect(position.segment?.id == "first")
+        #expect(position.word?.id == "two")
+    }
+
+    @Test("Reader scroll targets are chapter-scoped and cross-chapter moves do not animate")
+    func scopesReaderScrollTargetsToChapter() {
+        let chapterThree = ReaderScrollTarget(chapterID: "chapter-3", segmentID: "segment-10")
+        let chapterFour = ReaderScrollTarget(chapterID: "chapter-4", segmentID: "segment-1")
+
+        #expect(chapterThree.segmentID(for: "chapter-3") == "segment-10")
+        #expect(chapterThree.segmentID(for: "chapter-4") == nil)
+        #expect(ReaderScrollTarget.shouldAnimate(from: chapterThree, to: chapterFour) == false)
+        #expect(ReaderScrollTarget.shouldAnimate(
+            from: chapterThree,
+            to: ReaderScrollTarget(chapterID: "chapter-3", segmentID: "segment-11")
+        ))
+    }
+
+    @MainActor
+    @Test("Background jobs keep the book and chapter where the work started")
+    func preservesBackgroundJobOrigin() throws {
+        let state = AppState()
+        state.transcriptionJobOrigin = BackgroundJobOrigin(
+            bookTitle: "Origin Book",
+            chapterTitle: "Origin Chapter"
+        )
+        state.isTranscribing = true
+        state.transcriptionProgress = TranscriptionProgress(fraction: 0.4, message: "Analysing audio")
+        state.chapterTranslationJobOrigin = BackgroundJobOrigin(
+            bookTitle: "Translation Book",
+            chapterTitle: "Translation Chapter"
+        )
+        state.isChapterAssistantWorking = true
+        state.chapterTranslationProgress = LibraryScanProgress(
+            stage: "Translating chapter",
+            detail: "10 of 20 drafts ready",
+            completed: 10,
+            total: 20
+        )
+
+        let jobs = state.backgroundJobs
+
+        #expect(jobs.count == 2)
+        #expect(jobs[0].bookTitle == "Origin Book")
+        #expect(jobs[0].chapterTitle == "Origin Chapter")
+        #expect(jobs[0].fraction == 0.4)
+        #expect(jobs[1].bookTitle == "Translation Book")
+        #expect(jobs[1].chapterTitle == "Translation Chapter")
+        #expect(jobs[1].fraction == 0.5)
+    }
+
+    @Test("Chapter translation checkpoints preserve restart state")
+    func preservesChapterTranslationCheckpoint() throws {
+        let checkpoint = ChapterTranslationCheckpoint(
+            chapterID: "chapter-7",
+            language: "zh-Hans",
+            mode: .retranslateAll,
+            nextSegmentIndex: 24,
+            totalSentences: 60,
+            status: .awaitingReview,
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+
+        let decoded = try JSONDecoder.iso.decode(
+            ChapterTranslationCheckpoint.self,
+            from: JSONEncoder.iso.encode(checkpoint)
+        )
+
+        #expect(decoded == checkpoint)
+        #expect(decoded.id == "chapter-7|zh-Hans")
+        #expect(decoded.mode == .retranslateAll)
+    }
+
+    @MainActor
+    @Test("Chapter translation stop is requested gracefully while the current block remains active")
+    func requestsGracefulChapterTranslationStop() {
+        let state = AppState()
+        state.isChapterAssistantWorking = true
+        state.chapterTranslationProgress = LibraryScanProgress(
+            stage: "Translating chapter",
+            detail: "5 of 20 drafts ready",
+            completed: 5,
+            total: 20
+        )
+
+        state.requestChapterTranslationStop()
+
+        #expect(state.chapterTranslationStopRequested)
+        #expect(state.isChapterAssistantWorking)
+        #expect(state.chapterTranslationProgress?.detail == "Stop requested · finishing the current block")
+    }
+
+    @Test("Chapter drafts are accepted as one in-memory batch")
+    func acceptsChapterDraftsAsBatch() {
+        let decidedAt = Date(timeIntervalSince1970: 1_700_000_100)
+        let drafts = (0..<5_000).map { index in
+            GlossEntry(
+                id: "gloss-\(index)",
+                kind: .sentence,
+                language: "zh-Hans",
+                source: "Sentence \(index)",
+                context: nil,
+                text: "Translation \(index)",
+                status: .pending,
+                model: "qwen3.7-flash",
+                bookID: "book",
+                bookTitle: "Book",
+                chapterID: "chapter",
+                chapterTitle: "Chapter",
+                timestamp: Double(index),
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                decidedAt: nil,
+                replacedText: "Old translation",
+                replacedModel: "old-model"
+            )
+        }
+
+        let accepted = GlossBatch.accepting(drafts, at: decidedAt)
+
+        #expect(accepted.count == drafts.count)
+        #expect(accepted.allSatisfy { $0.status == .accepted })
+        #expect(accepted.allSatisfy { $0.decidedAt == decidedAt })
+        #expect(accepted.allSatisfy { $0.replacedText == nil && $0.replacedModel == nil })
+    }
+
+    @Test("Pending review scopes repeated sentences to the current book and chapter while recovering legacy IDs")
+    func scopesPendingChapterSentenceTranslations() {
+        let audioPath = "/var/mobile/Containers/Data/Application/CURRENT/Documents/ImportedBooks/Current Book/book.m4b"
+        let chapter = Chapter(
+            id: LibraryScanner.stableID("\(audioPath)#42.500"),
+            index: 1,
+            title: "Chapter One",
+            audioPath: audioPath,
+            duration: 120,
+            startTime: 42.5
+        )
+        let book = Book(
+            id: LibraryScanner.stableID(URL(fileURLWithPath: audioPath).deletingLastPathComponent().path),
+            title: "Current Book",
+            author: nil,
+            folderPath: URL(fileURLWithPath: audioPath).deletingLastPathComponent().path,
+            coverPath: nil,
+            ebookPath: nil,
+            chapters: [chapter]
+        )
+        let legacyBookID = LibraryScanner.legacyAbsolutePathID(for: book)
+        let legacyChapterID = LibraryScanner.legacyAbsolutePathID(for: chapter)
+        let otherAudioPath = "/var/mobile/Containers/Data/Application/CURRENT/Documents/ImportedBooks/Other Copy/book.m4b"
+        let otherBookID = LibraryScanner.stableID(URL(fileURLWithPath: otherAudioPath).deletingLastPathComponent().path)
+        let otherChapterID = LibraryScanner.stableID("\(otherAudioPath)#42.500")
+        #expect(legacyBookID != book.id)
+        #expect(legacyChapterID != chapter.id)
+        #expect(otherBookID != book.id)
+        #expect(otherChapterID != chapter.id)
+        let current = GlossEntry(
+            id: "current",
+            kind: .sentence,
+            language: "zh-Hans",
+            source: "Current sentence.",
+            context: nil,
+            text: "当前句子。",
+            status: .pending,
+            model: "qwen3.8-max",
+            bookID: book.id,
+            bookTitle: book.title,
+            chapterID: chapter.id,
+            chapterTitle: chapter.title,
+            createdAt: Date()
+        )
+        var anotherPending = current
+        anotherPending.id = "another"
+        anotherPending.source = "Another sentence."
+        var accepted = current
+        accepted.id = "accepted"
+        accepted.status = .accepted
+        var otherChapter = current
+        otherChapter.id = "other-chapter"
+        otherChapter.chapterID = "chapter-2"
+        otherChapter.source = "Other chapter sentence."
+        var repeatedInOtherChapter = current
+        repeatedInOtherChapter.id = "repeated-other-chapter"
+        repeatedInOtherChapter.chapterID = "chapter-2"
+        repeatedInOtherChapter.chapterTitle = "Chapter Two"
+        var repeatedInOtherBook = current
+        repeatedInOtherBook.id = "repeated-other-book"
+        repeatedInOtherBook.bookID = otherBookID
+        repeatedInOtherBook.chapterID = otherChapterID
+        var otherLanguage = current
+        otherLanguage.id = "other-language"
+        otherLanguage.language = "ja"
+        var legacyContainerChapter = current
+        legacyContainerChapter.id = "legacy-container-chapter"
+        legacyContainerChapter.bookID = legacyBookID
+        legacyContainerChapter.chapterID = legacyChapterID
+        legacyContainerChapter.source = "Legacy sentence."
+        var pendingWord = current
+        pendingWord.id = "word"
+        pendingWord.kind = .word
+
+        let pending = GlossBatch.pendingSentences(
+            in: [current, anotherPending, accepted, otherChapter, repeatedInOtherChapter, repeatedInOtherBook, otherLanguage, legacyContainerChapter, pendingWord],
+            bookID: book.id,
+            legacyBookID: legacyBookID,
+            chapterID: chapter.id,
+            legacyChapterID: legacyChapterID,
+            language: "zh-Hans",
+            currentSentenceSources: ["Current sentence.", "Another sentence.", "Legacy sentence."]
+        )
+
+        #expect(pending.map(\.id) == ["current", "another", "legacy-container-chapter"])
+    }
+
+    @Test("Chapter gloss index resolves canonical and legacy sentence entries")
+    func indexesChapterGlosses() throws {
+        let canonical = GlossEntry(
+            id: GlossEntry.makeID(kind: .sentence, language: "zh-Hans", source: "First sentence.", context: nil),
+            kind: .sentence,
+            language: "zh-Hans",
+            source: "First sentence.",
+            context: nil,
+            text: "第一句。",
+            status: .accepted,
+            model: "qwen3.7-flash",
+            chapterID: "chapter",
+            createdAt: Date()
+        )
+        var legacy = canonical
+        legacy.id = "legacy-id"
+        legacy.source = "  SECOND   SENTENCE. "
+        legacy.text = "第二句。"
+        let index = ChapterGlossIndex(glosses: [canonical, legacy], language: "zh-Hans")
+
+        #expect(index.gloss(source: "First sentence.")?.text == "第一句。")
+        #expect(index.gloss(source: "Second sentence.")?.text == "第二句。")
+        #expect(index.gloss(source: "Missing sentence.") == nil)
+    }
+
+    @Test("Chapter gloss index cache reuses one build until its inputs change")
+    func cachesChapterGlossIndex() throws {
+        let chinese = GlossEntry(
+            id: GlossEntry.makeID(kind: .sentence, language: "zh-Hans", source: "First sentence.", context: nil),
+            kind: .sentence,
+            language: "zh-Hans",
+            source: "First sentence.",
+            context: nil,
+            text: "第一句。",
+            status: .accepted,
+            model: "qwen3.7-flash",
+            chapterID: "chapter",
+            createdAt: Date()
+        )
+        var cache = ChapterGlossIndexCache()
+
+        let first = cache.index(glosses: [chinese], generation: 0, language: "zh-Hans")
+        for _ in 0..<100 {
+            let reused = cache.index(glosses: [chinese], generation: 0, language: "zh-Hans")
+            #expect(reused === first)
+            #expect(reused.gloss(source: "First sentence.")?.text == "第一句。")
+        }
+
+        var updatedChinese = chinese
+        updatedChinese.text = "更新的第一句。"
+        let updated = cache.index(glosses: [updatedChinese], generation: 1, language: "zh-Hans")
+        #expect(updated !== first)
+        #expect(updated.gloss(source: "First sentence.")?.text == "更新的第一句。")
+
+        var japanese = chinese
+        japanese.id = GlossEntry.makeID(kind: .sentence, language: "ja", source: "First sentence.", context: nil)
+        japanese.language = "ja"
+        japanese.text = "最初の文。"
+        let changedLanguage = cache.index(glosses: [updatedChinese, japanese], generation: 1, language: "ja")
+        #expect(changedLanguage !== updated)
+        #expect(changedLanguage.gloss(source: "First sentence.")?.text == "最初の文。")
     }
 
     @Test("Vocabulary preserves the translation model attribution")
@@ -430,6 +990,27 @@ struct ImportParityTests {
         let decoded = try JSONDecoder.iso.decode(VocabEntry.self, from: JSONEncoder.iso.encode(entry))
 
         #expect(decoded.translationModel == "deepseek-v4-flash-0731")
+    }
+
+    @Test("macOS package and every Xcode configuration share the semantic version")
+    func keepsAppVersionsSynchronized() throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let plistData = try Data(contentsOf: repository.appendingPathComponent("Info.plist"))
+        let plist = try #require(
+            PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any]
+        )
+        let project = try String(
+            contentsOf: repository.appendingPathComponent("AudioReader.xcodeproj/project.pbxproj"),
+            encoding: .utf8
+        )
+
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.11")
+        #expect(plist["CFBundleVersion"] as? String == "12")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.11;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 12;").count - 1 == 4)
     }
 }
 

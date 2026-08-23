@@ -17,6 +17,7 @@ enum Persistence {
     static var vocabURL: URL { root.appendingPathComponent("vocab.json") }
     static var settingsURL: URL { root.appendingPathComponent("settings.json") }
     static var glossesURL: URL { root.appendingPathComponent("glosses.json") }
+    static var chapterTranslationCheckpointsURL: URL { root.appendingPathComponent("chapter-translation-checkpoints.json") }
     static var importedBooksURL: URL {
 #if os(iOS)
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -72,10 +73,19 @@ enum Persistence {
 
     static func loadTranscript(for chapter: Chapter) -> Transcript? {
         let legacyAudioPath = chapter.startTime == nil ? chapter.audioPath : nil
-        guard let transcript = loadTranscript(chapterID: chapter.id, audioPath: legacyAudioPath),
-              transcript.belongs(to: chapter)
+        if let transcript = loadTranscript(chapterID: chapter.id, audioPath: legacyAudioPath),
+           transcript.belongs(to: chapter) {
+            return transcript
+        }
+        guard var recovered = loadAllTranscripts()
+            .filter({ matchesPersistentMedia($0, chapter: chapter) })
+            .max(by: { $0.createdAt < $1.createdAt })
         else { return nil }
-        return transcript
+        recovered.chapterID = chapter.id
+        recovered.audioPath = chapter.audioPath
+        recovered.chapterStart = chapter.startTime
+        try? saveTranscript(recovered)
+        return recovered
     }
 
     static func loadAllTranscripts() -> [Transcript] {
@@ -85,9 +95,25 @@ enum Persistence {
     static func readyChapterIDs(in books: [Book], transcripts: [Transcript]) -> Set<String> {
         let byChapter = Dictionary(transcripts.map { ($0.chapterID, $0) }, uniquingKeysWith: { _, newest in newest })
         return Set(books.flatMap(\.chapters).compactMap { chapter in
-            guard let transcript = byChapter[chapter.id], transcript.belongs(to: chapter) else { return nil }
-            return chapter.id
+            if let transcript = byChapter[chapter.id], transcript.belongs(to: chapter) {
+                return chapter.id
+            }
+            return transcripts.contains(where: { matchesPersistentMedia($0, chapter: chapter) }) ? chapter.id : nil
         })
+    }
+
+    private static func matchesPersistentMedia(_ transcript: Transcript, chapter: Chapter) -> Bool {
+        guard LibraryScanner.persistentPathIdentity(transcript.audioPath)
+                == LibraryScanner.persistentPathIdentity(chapter.audioPath)
+        else { return false }
+        switch (transcript.chapterStart, chapter.startTime) {
+        case (nil, nil):
+            return true
+        case let (saved?, current?):
+            return abs(saved - current) < 0.01
+        default:
+            return false
+        }
     }
 
     static func saveTranscript(_ transcript: Transcript) throws {
@@ -134,6 +160,10 @@ enum Persistence {
         else {
             return .default
         }
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           object["qwenEffortPolicyVersion"] == nil {
+            saveSettings(settings)
+        }
         return settings
     }
 
@@ -164,6 +194,16 @@ enum Persistence {
         guard let data = try? JSONEncoder.iso.encode(items) else { return }
         try? data.write(to: glossesURL, options: .atomic)
     }
+
+    static func loadChapterTranslationCheckpoints() -> [ChapterTranslationCheckpoint] {
+        guard let data = try? Data(contentsOf: chapterTranslationCheckpointsURL) else { return [] }
+        return (try? JSONDecoder.iso.decode([ChapterTranslationCheckpoint].self, from: data)) ?? []
+    }
+
+    static func saveChapterTranslationCheckpoints(_ checkpoints: [ChapterTranslationCheckpoint]) {
+        guard let data = try? JSONEncoder.iso.encode(checkpoints) else { return }
+        try? data.write(to: chapterTranslationCheckpointsURL, options: .atomic)
+    }
 }
 
 struct AppSettings: Codable, Equatable {
@@ -179,6 +219,7 @@ struct AppSettings: Codable, Equatable {
     var qwenModel: String
     var qwenThinking: Bool
     var qwenEffort: String
+    var qwenEffortPolicyVersion: Int
     var sentenceContextCount: Int
     var chapterTranslationBlockSize: Int
     var chatContextCount: Int
@@ -188,6 +229,11 @@ struct AppSettings: Codable, Equatable {
     var preferredDictionary: String
     var lookupPanelWidth: Double
     var readerFontScale: Double
+    var readerFont: String
+    var readerBold: Bool
+    var readerLineSpacing: Double
+    var readerWordSpacing: Double
+    var readerMargin: Double
 
     static var `default`: AppSettings {
         AppSettings(
@@ -202,7 +248,8 @@ struct AppSettings: Codable, Equatable {
             qwenEndpoint: LLMProvider.qwenCloud.defaultEndpoint,
             qwenModel: "qwen3.7-flash",
             qwenThinking: true,
-            qwenEffort: QwenEffort.high.rawValue,
+            qwenEffort: QwenEffort.none.rawValue,
+            qwenEffortPolicyVersion: 1,
             sentenceContextCount: 2,
             chapterTranslationBlockSize: 5,
             chatContextCount: 3,
@@ -211,7 +258,12 @@ struct AppSettings: Codable, Equatable {
             appearance: AppAppearance.dark.rawValue,
             preferredDictionary: "牛津英汉汉英词典",
             lookupPanelWidth: 420,
-            readerFontScale: 1.0
+            readerFontScale: 1.0,
+            readerFont: ReaderFontChoice.newYork.rawValue,
+            readerBold: false,
+            readerLineSpacing: 1.0,
+            readerWordSpacing: 2.0,
+            readerMargin: 32
         )
     }
 
@@ -236,6 +288,7 @@ struct AppSettings: Codable, Equatable {
         qwenModel: String,
         qwenThinking: Bool,
         qwenEffort: String,
+        qwenEffortPolicyVersion: Int,
         sentenceContextCount: Int,
         chapterTranslationBlockSize: Int,
         chatContextCount: Int,
@@ -244,7 +297,12 @@ struct AppSettings: Codable, Equatable {
         appearance: String,
         preferredDictionary: String,
         lookupPanelWidth: Double,
-        readerFontScale: Double
+        readerFontScale: Double,
+        readerFont: String,
+        readerBold: Bool,
+        readerLineSpacing: Double,
+        readerWordSpacing: Double,
+        readerMargin: Double
     ) {
         self.libraryPath = libraryPath
         self.playbackRate = playbackRate
@@ -258,6 +316,7 @@ struct AppSettings: Codable, Equatable {
         self.qwenModel = qwenModel
         self.qwenThinking = qwenThinking
         self.qwenEffort = qwenEffort
+        self.qwenEffortPolicyVersion = qwenEffortPolicyVersion
         self.sentenceContextCount = sentenceContextCount
         self.chapterTranslationBlockSize = chapterTranslationBlockSize
         self.chatContextCount = chatContextCount
@@ -267,6 +326,11 @@ struct AppSettings: Codable, Equatable {
         self.preferredDictionary = preferredDictionary
         self.lookupPanelWidth = lookupPanelWidth
         self.readerFontScale = readerFontScale
+        self.readerFont = readerFont
+        self.readerBold = readerBold
+        self.readerLineSpacing = readerLineSpacing
+        self.readerWordSpacing = readerWordSpacing
+        self.readerMargin = readerMargin
     }
 
     init(from decoder: Decoder) throws {
@@ -283,7 +347,11 @@ struct AppSettings: Codable, Equatable {
         qwenEndpoint = try c.decodeIfPresent(String.self, forKey: .qwenEndpoint) ?? d.qwenEndpoint
         qwenModel = try c.decodeIfPresent(String.self, forKey: .qwenModel) ?? d.qwenModel
         qwenThinking = try c.decodeIfPresent(Bool.self, forKey: .qwenThinking) ?? d.qwenThinking
-        qwenEffort = try c.decodeIfPresent(String.self, forKey: .qwenEffort) ?? d.qwenEffort
+        let savedEffortPolicyVersion = try c.decodeIfPresent(Int.self, forKey: .qwenEffortPolicyVersion) ?? 0
+        qwenEffort = savedEffortPolicyVersion >= 1
+            ? (try c.decodeIfPresent(String.self, forKey: .qwenEffort) ?? d.qwenEffort)
+            : QwenEffort.none.rawValue
+        qwenEffortPolicyVersion = 1
         sentenceContextCount = try c.decodeIfPresent(Int.self, forKey: .sentenceContextCount) ?? d.sentenceContextCount
         chapterTranslationBlockSize = try c.decodeIfPresent(Int.self, forKey: .chapterTranslationBlockSize) ?? d.chapterTranslationBlockSize
         chatContextCount = try c.decodeIfPresent(Int.self, forKey: .chatContextCount) ?? d.chatContextCount
@@ -293,6 +361,11 @@ struct AppSettings: Codable, Equatable {
         preferredDictionary = try c.decodeIfPresent(String.self, forKey: .preferredDictionary) ?? d.preferredDictionary
         lookupPanelWidth = try c.decodeIfPresent(Double.self, forKey: .lookupPanelWidth) ?? d.lookupPanelWidth
         readerFontScale = try c.decodeIfPresent(Double.self, forKey: .readerFontScale) ?? d.readerFontScale
+        readerFont = try c.decodeIfPresent(String.self, forKey: .readerFont) ?? d.readerFont
+        readerBold = try c.decodeIfPresent(Bool.self, forKey: .readerBold) ?? d.readerBold
+        readerLineSpacing = try c.decodeIfPresent(Double.self, forKey: .readerLineSpacing) ?? d.readerLineSpacing
+        readerWordSpacing = try c.decodeIfPresent(Double.self, forKey: .readerWordSpacing) ?? d.readerWordSpacing
+        readerMargin = try c.decodeIfPresent(Double.self, forKey: .readerMargin) ?? d.readerMargin
     }
 }
 
