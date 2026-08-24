@@ -1,89 +1,53 @@
 # AudioReader
 
-A macOS and iPadOS audiobook reader for English study: spoken words highlight like lyrics while the audio plays, the page auto-scrolls, and you can save words back to the original sentence.
+AudioReader is a macOS and iPadOS audiobook study app for people learning English. It combines audiobook playback, on-device English transcription, word-level highlighting, optional EPUB alignment, dictionary lookup, vocabulary capture, and contextual assistance from Grok or QwenCloud.
 
-## Why speech-to-text, not ebook-only
+## What this is for
 
-The books in `~/Documents/books` pair chapter MP3s / M4B files with EPUB/MOBI/PDF. Those texts are **not** a 1:1 match with the narration.
+AudioReader is designed for focused listening and reading rather than passive audiobook playback. It helps you:
 
-A 45-second clip of *The Ride of a Lifetime* (ch. 1) was transcribed on-device with Apple **SpeechAnalyzer** (macOS 26) and compared to the EPUB:
+- follow the words being spoken and seek by sentence;
+- compare the narration with the published text in a companion EPUB;
+- look up unfamiliar words and save them with their original sentence, book, chapter, and timestamp;
+- replay or loop a sentence and return to saved vocabulary in context;
+- translate words, sentences, or chapters and ask questions about the current chapter through an optional LLM provider.
 
-| Source | What you get |
+The transcript is the timing source. Audio narration often contains publisher introductions, omitted footnotes, or wording that differs from the ebook, so AudioReader first transcribes what was actually spoken with Apple SpeechAnalyzer. When an EPUB is present, it then matches sufficiently similar sentences and lets you switch between **Spoken**, **Ebook**, and **Both**.
+
+Supported local resources:
+
+| Resource | Supported formats |
 |---|---|
-| Audiobook | `This is Audible. Penguin Random House Audio presents…` then the prologue |
-| EPUB | Starts at `In June 2016 I made my fortieth trip…` — no publisher intro |
-| Wording | Spoken/STT `40th / 18 years / 11th / 6 months` vs ebook `fortieth / eighteen / eleventh / six` |
-| Names | STT can misspell (`Eiger` vs `Iger`) |
+| Audio | MP3, M4A, M4B, AAC, WAV, CAF |
+| Companion ebook | EPUB |
+| Cover image | JPG, JPEG, PNG, WebP |
 
-Forced-alignment of the ebook onto the audio fails as soon as the narrator adds an intro, skips a footnote, or says a number differently. Karaoke highlighting needs timestamps of **what was actually said**.
+M4B chapter metadata is detected and exposed as separate playable and transcribable chapters. When a folder contains multiple chapter MP3 files, those files become the chapter list.
 
-**Approach used**
+## How to use
 
-1. **Speech-to-text with word timestamps** (Apple SpeechAnalyzer, on-device) is the source of truth for highlighting and seeking.
-2. **Ebook alignment** (EPUB sentence matching) is optional enrichment: when a spoken sentence is close enough to a printed sentence, the original wording is attached so you can study the published text.
-3. Toggle **Spoken / Ebook / Both** in the player.
+### Requirements
 
-This is the same idea as karaoke apps (timestamps from audio) plus a language-learning glossary.
+- macOS 26 or later, or iPadOS 26 or later
+- Xcode with the corresponding platform SDK to build the app
+- English SpeechAnalyzer assets; AudioReader requests their installation on the first transcription
+- Optional: a Grok or QwenCloud account and network connection for translation, summaries, and chapter chat
 
-## Features
+### Build and run on macOS
 
-- Scans a books folder (default `/Users/johnsonzhang/Documents/books`)
-- Chaptered MP3s preferred over a single `.m4b`
-- Word-level highlight, sentence highlight, auto-scroll
-- Play / pause, ±5s, previous/next sentence, replay sentence, sentence loop, 0.7–1.6× speed
-- Click a word to look it up in the macOS dictionary
-- Save a word with its sentence, book, chapter, and timestamp; jump back later
-- Transcripts, vocabulary, and LLM translations stored in SQLite (`~/Library/Application Support/AudioReader/library.sqlite`)
-- Select Grok or QwenCloud for word and sentence translations. QwenCloud defaults to `qwen3.7-flash`, discovers models authorized for the configured workspace, falls back to a built-in catalog, and supports thinking and reasoning-effort controls.
-- Sentence translation prompts include the book, author, chapter, and a configurable number of preceding and following sentences.
-- **Chapter AI** can translate or summarise the complete transcribed chapter and provides a side-panel chat grounded in the book metadata and nearby reading context.
-- Vocabulary grouped by book and category (words, phrases, sentences). Each card keeps the Apple Dictionary entry, the original sentence, and any accepted LLM translation. **Open in text** selects the sentence or highlights the word.
-- Both apps import individual MP3/M4A/M4B files and audiobook folders, retain companion EPUBs and covers, and use the same EPUB alignment implementation.
-- M4B files are inspected for embedded chapter tracks. Chapter titles and time ranges become separate playable and transcribable chapters instead of one full-book chapter.
-
-## Platform parity
-
-| Capability | macOS | iPadOS |
-|---|---|---|
-| Playback, transcription, highlighting, vocabulary, LLM translation, Chapter AI, and chat | Yes | Yes |
-| Import audio/EPUB/cover files | Finder import | Files/iCloud Drive import |
-| Import one book folder or a folder containing multiple books | Yes | Yes |
-| EPUB extraction and printed-text alignment | Yes | Yes |
-| Apple Books/device audiobook discovery | Discovers downloaded MP3/M4A/M4B files in Apple Books’ local audiobook store, with refresh, import, and Open in Books | Direct device-library discovery through `MPMediaQuery` |
-| Protected Apple Books titles | Downloaded protected files are shown but disabled; cloud-only titles are not visible until downloaded | Shown but disabled; they cannot be copied or transcribed |
-| Dictionary lookup | Installed macOS dictionaries | iPadOS system dictionary sheet |
-
-Platform-specific code should only represent an Apple API or interaction difference; reading and study features remain shared.
-
-## Requirements
-
-- macOS 26+
-- iPadOS 26+ for the iPad build
-- English speech assets (the app downloads them on first transcribe)
-
-## Build & run
-
-### Xcode and physical iPad
-
-Open `AudioReader.xcodeproj` and choose one of the shared schemes:
-
-- `AudioReader-iOS` for a physical iPad or iPad Simulator.
-- `AudioReader-macOS` for the native Mac app.
-
-Both targets use `com.johnsonzhang.AudioReader`. Automatic signing is enabled for the iOS target. Before the first physical-device build, open **AudioReader-iOS → Signing & Capabilities**, select your Apple developer team, connect the iPad, and choose it as the run destination. Xcode will create or download the required development profile.
-
-The existing standalone package builds remain available:
+Open `AudioReader.xcodeproj`, select the **AudioReader-macOS** scheme, and run it. You can also build the standalone app from Terminal:
 
 ```bash
 cd /Users/johnsonzhang/Documents/AI/Dataiku/src/audio-reader
-chmod +x scripts/package_app.sh
 ./scripts/package_app.sh
 open AudioReader.app
 ```
 
-First chapter you play: click **Transcribe**. A 30-minute chapter typically takes a few minutes on Apple Silicon. After that, highlighting is instant.
+### Build and run on iPad
 
-### iPad Simulator
+Open `AudioReader.xcodeproj`, select the **AudioReader-iOS** scheme, choose a physical iPad or iPad Simulator, and run it. For a physical device, select your developer team under **AudioReader-iOS → Signing & Capabilities**.
+
+To package and install the Simulator build from Terminal:
 
 ```bash
 cd /Users/johnsonzhang/Documents/AI/Dataiku/src/audio-reader
@@ -92,15 +56,67 @@ xcrun simctl install booted AudioReader-iPad.app
 xcrun simctl launch booted com.johnsonzhang.AudioReader
 ```
 
-The Simulator can validate the app and Files/folder import UI, but it has no real Apple Books media library. Validate Apple Books discovery, media permission, and asset accessibility on a physical iPad.
+### Import a book
 
-## Keyboard
+On macOS, use **Import** to select audiobook files, an audiobook folder, or an accessible downloaded title from Apple Books. You can also choose a library folder containing one subfolder per book.
 
-| Key | Action |
+On iPad, use **Import Files** or **Import Folder** to choose resources from Files or iCloud Drive. The **Apple Books & Device** source lists audiobooks exposed through the device media library.
+
+For the best result, keep each book in its own folder:
+
+```text
+Book Title/
+├── 01 Introduction.mp3
+├── 02 First Chapter.mp3
+├── book.epub
+└── cover.jpg
+```
+
+AudioReader copies explicitly imported resources into its own imported-books library. Re-importing the same audio does not create a duplicate; it can add a missing EPUB or cover to the existing book.
+
+### Transcribe and read
+
+1. Select a book and chapter.
+2. Select **Transcribe**. The first run may download the English speech assets.
+3. Wait for transcription and optional EPUB alignment to finish. You can continue using the app and inspect progress under Background Jobs.
+4. Play the chapter and use the highlighted transcript to follow, seek, replay, or loop sentences.
+5. Choose **Spoken**, **Ebook**, or **Both** when an EPUB sentence has been matched.
+6. Select a word for dictionary lookup or save it to **Vocabulary**. Use **Open in text** later to return to its source passage.
+
+Transcripts, vocabulary, settings, accepted translations, and chapter-translation checkpoints are stored locally under the platform's AudioReader application-support container. Imported iPad books are stored in the app's Documents directory.
+
+### Configure optional AI assistance
+
+Open **Settings → LLM provider** and choose Grok or QwenCloud.
+
+- Grok accepts an `XAI_API_KEY`; on macOS it can also use an existing Grok Build login.
+- QwenCloud accepts a `DASHSCOPE_API_KEY`, an editable endpoint, and a supported text model.
+
+After configuration, AudioReader can translate a selected word or sentence, translate or summarise a transcribed chapter, and provide chapter-aware chat. These requests send the selected text and configured reading context to the chosen provider; audio transcription itself remains on-device.
+
+### macOS keyboard shortcuts
+
+| Shortcut | Action |
 |---|---|
-| Space | Play / pause |
-| ← / → | Skip 5 seconds |
-| ⌥← / ⌥→ | Previous / next sentence |
-| ⌘R | Replay sentence |
-| ⌘L | Loop sentence |
-| ⌘T | Transcribe chapter |
+| Space | Play or pause |
+| Left / Right arrow | Skip backward or forward |
+| Option–Left / Option–Right | Previous or next sentence |
+| Command–R | Replay the current sentence |
+| Command–L | Toggle sentence loop |
+| Command–T | Transcribe the selected chapter |
+
+## Limitations
+
+- **Protected audiobooks cannot be imported or transcribed.** AudioReader can list some downloaded Apple Books titles, but DRM-protected items remain disabled and must be played in Apple Books. It does not remove or bypass DRM.
+- **Cloud-only Apple Books titles are unavailable.** Download a title first. Even when downloaded, the operating system must expose an unprotected, accessible asset URL before AudioReader can import it.
+- **Apple Books discovery differs by platform.** macOS discovery reads locally downloaded audiobook files; iPad discovery uses the device media library. Validate iPad media access on a physical device because the Simulator has no real Apple Books library.
+- **Podcast and publisher-app import is not implemented.** AudioReader currently does not import Apple Podcasts feeds, HBR resources, Economist resources, private RSS feeds, or audio stored inside other apps.
+- **Transcription is English-only.** The transcriber requests the `en-US` SpeechAnalyzer locale. Accuracy varies with accents, names, background noise, recording quality, and narration speed.
+- **EPUB alignment is approximate.** It may fail or attach the wrong printed sentence when the narration and ebook differ substantially. MOBI and PDF text extraction are not supported.
+- **LLM features are optional external services.** They need valid credentials and network access, may incur provider charges, and can fail because of model availability, account limits, endpoint changes, or unsupported reasoning settings. Text sent to them is governed by the selected provider's privacy and usage terms.
+- **Saved API keys are local files, not Keychain entries.** AudioReader restricts their file permissions, but users who require hardware-backed credential storage should supply keys through the environment or avoid saving them in the app.
+- **Publisher permissions still apply.** Possessing an accessible audio file or RSS URL does not necessarily grant permission to transcribe, translate, summarise, or otherwise process it. Use AudioReader only with content you are authorized to process.
+- **Data is local to each installation.** There is no built-in cross-device library, transcript, vocabulary, or playback-position synchronization.
+- **Chapter summaries and chat history are session-only.** They are kept while the app is running but are not restored after relaunch. Accepted vocabulary translations and chapter-translation checkpoints are persisted.
+- **Background execution is platform-controlled.** Long transcription or chapter-AI work can be interrupted if the operating system suspends or terminates the app; retained progress is best effort.
+- **This is a development build.** It requires current Apple platform tooling and has not been presented as an App Store release.
