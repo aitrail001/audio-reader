@@ -6,7 +6,7 @@ import AppKit
 import UIKit
 #endif
 
-struct DictionaryHit: Identifiable, Hashable {
+struct DictionaryHit: Identifiable, Hashable, Sendable {
     var id: String { name }
     var name: String
     var html: String

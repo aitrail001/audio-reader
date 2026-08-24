@@ -150,6 +150,15 @@ enum Persistence {
 
     static func saveVocab(_ items: [VocabEntry]) {
         LibraryStore.shared.replaceVocab(items)
+        saveVocabJSON(items)
+    }
+
+    static func saveVocabUpdates(_ updates: [VocabEntry], allItems: [VocabEntry]) {
+        LibraryStore.shared.upsertVocab(updates)
+        saveVocabJSON(allItems)
+    }
+
+    private static func saveVocabJSON(_ items: [VocabEntry]) {
         guard let data = try? JSONEncoder.iso.encode(items) else { return }
         try? data.write(to: vocabURL, options: .atomic)
     }
@@ -191,6 +200,15 @@ enum Persistence {
 
     static func saveGlosses(_ items: [GlossEntry]) {
         LibraryStore.shared.replaceGlosses(items)
+        saveGlossesJSON(items)
+    }
+
+    static func saveGlossUpdates(_ updates: [GlossEntry], allItems: [GlossEntry]) {
+        LibraryStore.shared.upsertGloss(updates)
+        saveGlossesJSON(allItems)
+    }
+
+    private static func saveGlossesJSON(_ items: [GlossEntry]) {
         guard let data = try? JSONEncoder.iso.encode(items) else { return }
         try? data.write(to: glossesURL, options: .atomic)
     }

@@ -46,6 +46,7 @@ final class AppState {
     var showChapterAssistant = false
     var chapterTranslation: String?
     var chapterTranslationProgress: LibraryScanProgress?
+    var chapterAcceptanceProgress: LibraryScanProgress?
     var chapterTranslationJobOrigin: BackgroundJobOrigin?
     var chapterSummary: String?
     var chapterChat: [LLMChatMessage] = []
@@ -70,6 +71,7 @@ final class AppState {
     @ObservationIgnored private var chapterSummariesByChapterID: [String: String] = [:]
     @ObservationIgnored private var chapterChatsByChapterID: [String: [LLMChatMessage]] = [:]
     @ObservationIgnored private var chapterAssistantErrorsByChapterID: [String: String] = [:]
+    @ObservationIgnored private var chapterAcceptanceID: UUID?
 
     var selectedBook: Book? {
         books.first { $0.id == selectedBookID }
@@ -1336,15 +1338,85 @@ final class AppState {
 
     func acceptAllChapterTranslations() {
         let entries = pendingChapterSentenceGlosses
-        saveGlosses(GlossBatch.accepting(entries))
-        if chapterTranslationFailed {
-            chapterTranslationFailed = false
-            chapterAssistantError = nil
-            chapterTranslation = "Accepted \(entries.count) completed sentence draft(s). Use Translate chapter to resume the untranslated remainder."
-        } else {
-            chapterTranslation = "All chapter sentence translations were accepted."
+        guard !entries.isEmpty, chapterAcceptanceProgress == nil else { return }
+        let accepted = GlossBatch.accepting(entries)
+        let operationID = UUID()
+        chapterAcceptanceID = operationID
+        chapterAcceptanceProgress = .init(
+            stage: "Accepting translations",
+            detail: "Preparing \(accepted.count) sentence translation(s)…",
+            completed: 0,
+            total: accepted.count
+        )
+        glosses = GlossBatch.merging(accepted, into: glosses)
+
+        let vocabSnapshot = vocab
+        let acceptedChapterID = selectedChapterID
+        let acceptedTranscript = transcript
+        let acceptedLanguage = settings.targetLanguage
+        let segments = acceptedTranscript?.segments ?? []
+        let defaults = chapterAcceptanceDefaults
+        let preferredDictionary = settings.preferredDictionary
+        Task {
+            await Task.yield()
+            let result = await Task.detached(priority: .userInitiated) {
+                ChapterAcceptanceBatch.prepare(
+                    glosses: accepted,
+                    vocab: vocabSnapshot,
+                    segments: segments,
+                    defaults: defaults,
+                    definitionResolver: { phrase in
+                        DictionaryLookup.lookup(phrase, preferredName: preferredDictionary).first
+                    },
+                    progress: { completed, total in
+                        Task { @MainActor [weak self] in
+                            guard self?.chapterAcceptanceID == operationID else { return }
+                            self?.chapterAcceptanceProgress = .init(
+                                stage: "Accepting translations",
+                                detail: "Prepared \(completed) of \(total) sentence translation(s)",
+                                completed: completed,
+                                total: total
+                            )
+                        }
+                    }
+                )
+            }.value
+            guard chapterAcceptanceID == operationID else { return }
+
+            mergeVocabUpserts(result.upserts, orderedAs: result.vocab)
+            chapterAcceptanceProgress = .init(
+                stage: "Saving translations",
+                detail: "Writing vocabulary and translation updates…",
+                completed: accepted.count,
+                total: accepted.count
+            )
+            let glossSnapshot = glosses
+            let updatedVocabSnapshot = vocab
+            await Task.detached(priority: .utility) {
+                Persistence.saveGlossUpdates(accepted, allItems: glossSnapshot)
+                Persistence.saveVocabUpdates(result.upserts, allItems: updatedVocabSnapshot)
+            }.value
+            guard chapterAcceptanceID == operationID else { return }
+
+            if let acceptedChapterID, let acceptedTranscript {
+                refreshChapterTranslationStatus(
+                    chapterID: acceptedChapterID,
+                    language: acceptedLanguage,
+                    transcript: acceptedTranscript
+                )
+            }
+            if selectedChapterID == acceptedChapterID {
+                if chapterTranslationFailed {
+                    chapterTranslationFailed = false
+                    chapterAssistantError = nil
+                    chapterTranslation = "Accepted \(entries.count) completed sentence draft(s). Use Translate chapter to resume the untranslated remainder."
+                } else {
+                    chapterTranslation = "All chapter sentence translations were accepted."
+                }
+            }
+            chapterAcceptanceProgress = nil
+            chapterAcceptanceID = nil
         }
-        refreshSelectedChapterTranslationStatus()
     }
 
     private func saveTranslationCheckpoint(
@@ -1596,15 +1668,40 @@ final class AppState {
     func importGlossesIntoVocab() {
         let keep = glosses.filter { $0.status == .accepted }
         guard !keep.isEmpty else { return }
-        var changed = false
-        for gloss in keep {
-            if captureAccepted(gloss, persist: false) {
-                changed = true
+        let result = ChapterAcceptanceBatch.prepare(
+            glosses: keep,
+            vocab: vocab,
+            segments: transcript?.segments ?? [],
+            defaults: chapterAcceptanceDefaults
+        )
+        guard !result.upserts.isEmpty else { return }
+        vocab = result.vocab
+        Persistence.saveVocabUpdates(result.upserts, allItems: vocab)
+    }
+
+    private var chapterAcceptanceDefaults: ChapterAcceptanceBatch.Defaults {
+        ChapterAcceptanceBatch.Defaults(
+            bookID: selectedBookID ?? "",
+            bookTitle: selectedBook?.title ?? "",
+            chapterID: selectedChapterID ?? "",
+            chapterTitle: selectedChapter?.title ?? "",
+            timestamp: currentSegment?.start ?? 0,
+            segment: currentSegment,
+            wordID: selectedWord?.id
+        )
+    }
+
+    private func mergeVocabUpserts(_ updates: [VocabEntry], orderedAs prepared: [VocabEntry]) {
+        guard !updates.isEmpty else { return }
+        let updateIDs = Set(updates.map(\.id))
+        var currentIDs = Set(vocab.map(\.id))
+        for update in updates {
+            if let index = vocab.firstIndex(where: { $0.id == update.id }) {
+                vocab[index] = update
             }
         }
-        if changed {
-            Persistence.saveVocab(vocab)
-        }
+        let additions = prepared.filter { updateIDs.contains($0.id) && currentIDs.insert($0.id).inserted }
+        vocab.insert(contentsOf: additions, at: 0)
     }
 
     @discardableResult

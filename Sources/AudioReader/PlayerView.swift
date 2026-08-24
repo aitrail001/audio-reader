@@ -1100,7 +1100,15 @@ private struct ChapterAssistantView: View {
                             .foregroundStyle(Palette.dim)
                     }
 
-                    if !state.pendingChapterSentenceGlosses.isEmpty {
+                    if let progress = state.chapterAcceptanceProgress {
+                        assistantCard(title: progress.stage) {
+                            ProgressView(value: progress.fraction)
+                            Text(progress.detail)
+                                .font(.system(size: 12))
+                                .foregroundStyle(Palette.dim)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    } else if !state.pendingChapterSentenceGlosses.isEmpty {
                         assistantCard(title: "Pending review") {
                             Text("\(state.pendingChapterSentenceGlosses.count) sentence translation(s) are ready for review in this chapter.")
                                 .font(.system(size: 12))

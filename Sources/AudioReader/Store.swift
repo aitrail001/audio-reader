@@ -106,6 +106,15 @@ final class LibraryStore: @unchecked Sendable {
         upsertVocabUnlocked(entry)
     }
 
+    func upsertVocab(_ entries: [VocabEntry]) {
+        guard !entries.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        exec("BEGIN IMMEDIATE TRANSACTION")
+        defer { exec("COMMIT") }
+        for entry in entries { upsertVocabUnlocked(entry) }
+    }
+
     private func upsertVocabUnlocked(_ entry: VocabEntry) {
         guard let json = try? JSONEncoder.iso.encode(entry),
               let jsonStr = String(data: json, encoding: .utf8)
@@ -167,6 +176,19 @@ final class LibraryStore: @unchecked Sendable {
     func upsertGloss(_ entry: GlossEntry) {
         lock.lock()
         defer { lock.unlock() }
+        upsertGlossUnlocked(entry)
+    }
+
+    func upsertGloss(_ entries: [GlossEntry]) {
+        guard !entries.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        exec("BEGIN IMMEDIATE TRANSACTION")
+        defer { exec("COMMIT") }
+        for entry in entries { upsertGlossUnlocked(entry) }
+    }
+
+    private func upsertGlossUnlocked(_ entry: GlossEntry) {
         guard let json = try? JSONEncoder.iso.encode(entry),
               let jsonStr = String(data: json, encoding: .utf8)
         else { return }
@@ -196,7 +218,7 @@ final class LibraryStore: @unchecked Sendable {
         exec("BEGIN IMMEDIATE TRANSACTION")
         defer { exec("COMMIT") }
         exec("DELETE FROM glosses")
-        for item in items { upsertGloss(item) }
+        for item in items { upsertGlossUnlocked(item) }
     }
 
     func deleteGloss(id: String) {

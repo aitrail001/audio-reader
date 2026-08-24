@@ -1,3 +1,16 @@
+enum IPadBackgroundJobsToolbarPlacement: Equatable {
+    case content
+    case detail
+
+    static func owner(
+        isVocabularySelected: Bool,
+        isReaderActive: Bool,
+        hasSelectedBook: Bool
+    ) -> Self {
+        isVocabularySelected || isReaderActive || hasSelectedBook ? .detail : .content
+    }
+}
+
 #if os(iOS)
 import MediaPlayer
 import SwiftUI
@@ -88,21 +101,17 @@ struct IPadRootView: View {
         } content: {
             contentColumn
                 .navigationSplitViewColumnWidth(min: 300, ideal: 360, max: 440)
+                .toolbar {
+                    backgroundJobsToolbar(for: .content)
+                }
         } detail: {
             detailColumn
+                .toolbar {
+                    backgroundJobsToolbar(for: .detail)
+                }
         }
         .navigationSplitViewStyle(.balanced)
         .tint(Palette.terracotta)
-        .toolbar {
-            if !state.backgroundJobs.isEmpty {
-                ToolbarItem(placement: .primaryAction) {
-                    BackgroundJobsButton(state: state) {
-                        source = .allBooks
-                        columnVisibility = .detailOnly
-                    }
-                }
-            }
-        }
         .overlay {
             if state.isScanning, let progress = state.libraryScanProgress {
                 VStack(spacing: 12) {
@@ -310,6 +319,28 @@ struct IPadRootView: View {
         case .folders: state.books.filter { $0.source == .localFolder }
         case .deviceAudiobooks: state.books.filter { $0.source == .deviceAudiobooks }
         case .vocabulary: []
+        }
+    }
+
+    private var backgroundJobsToolbarPlacement: IPadBackgroundJobsToolbarPlacement {
+        .owner(
+            isVocabularySelected: source == .vocabulary,
+            isReaderActive: state.tab == .player,
+            hasSelectedBook: state.selectedBook != nil
+        )
+    }
+
+    @ToolbarContentBuilder
+    private func backgroundJobsToolbar(
+        for placement: IPadBackgroundJobsToolbarPlacement
+    ) -> some ToolbarContent {
+        if backgroundJobsToolbarPlacement == placement, !state.backgroundJobs.isEmpty {
+            ToolbarItem(placement: .primaryAction) {
+                BackgroundJobsButton(state: state) {
+                    source = .allBooks
+                    columnVisibility = .detailOnly
+                }
+            }
         }
     }
 
