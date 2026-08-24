@@ -5,3 +5,6 @@ AudioReader.app/
 **/*.xcworkspace/xcuserdata/
 .DS_Store
 .env.local
+.codex/
+.grok/
+.cursor/
