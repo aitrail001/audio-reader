@@ -58,13 +58,13 @@ enum EPUBParser {
             return text
                 .components(separatedBy: CharacterSet(charactersIn: ".?!\n"))
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { $0.split(separator: " ").count >= 4 }
+                .filter { Aligner.tokenize($0).count >= 4 }
         }
         return ranges.compactMap { range -> String? in
             let s = ns.substring(with: range)
                 .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            return s.split(separator: " ").count >= 4 ? s : nil
+            return Aligner.tokenize(s).count >= 4 ? s : nil
         }
     }
 

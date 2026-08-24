@@ -5,6 +5,72 @@ import ZIPFoundation
 
 @Suite("EPUB document validation and trusted alignment")
 struct EPUBAlignmentTests {
+    @MainActor
+    @Test("Missing EPUB state requires a selected book without a companion ebook")
+    func identifiesMissingEbook() {
+        let state = AppState()
+        #expect(!state.currentBookIsMissingEbook)
+
+        state.books = [Book(
+            id: "missing-ebook-book",
+            title: "Book Without EPUB",
+            author: nil,
+            folderPath: "/tmp/book-without-epub",
+            coverPath: nil,
+            ebookPath: nil,
+            chapters: []
+        )]
+        state.selectedBookID = "missing-ebook-book"
+        #expect(state.currentBookIsMissingEbook)
+
+        state.books[0].ebookPath = "/tmp/book-with-epub.epub"
+        #expect(!state.currentBookIsMissingEbook)
+    }
+
+    @Test("An isolated layout move does not reject an otherwise ordered edition")
+    func toleratesIsolatedLayoutMove() {
+        let spokenOrder = [1, 2, 3, 4, 0, 5, 6, 7].map { Self.bookSentences[$0] }
+        let result = Aligner.align(
+            segments: spokenOrder.map(Self.segment),
+            document: EPUBDocument(
+                text: Self.bookSentences.joined(separator: " "),
+                title: "The Lantern Atlas",
+                author: "Morgan Vale"
+            ),
+            expectedMetadata: .init(title: "The Lantern Atlas", author: "Morgan Vale")
+        )
+
+        #expect(result.assessment.metrics.backwardJumps == 1)
+        #expect(result.assessment.status == .trusted)
+        #expect(result.segments.allSatisfy { $0.trustedEbookText != nil })
+    }
+
+    @Test("CJK text is segmented and aligned without space-delimited words")
+    func alignsChineseText() {
+        let sentences = [
+            "系统中的反馈回路会随着时间改变整体行为。",
+            "库存记录了流入和流出长期累积产生的结果。",
+            "延迟会让决策者误判现在采取行动造成的影响。",
+            "边界取决于我们提出的问题以及观察采用的尺度。",
+            "信息流能够改变规则并重新塑造参与者的选择。",
+            "增长受到资源限制时通常不会永远保持指数速度。",
+            "韧性来自多样性冗余以及适应意外变化的能力。",
+            "理解结构可以帮助读者找到更有效的干预位置。",
+        ]
+        let document = EPUBDocument(text: sentences.joined(), title: "系统思考", author: "作者")
+
+        let result = Aligner.align(
+            segments: sentences.map(Self.segment),
+            document: document,
+            expectedMetadata: .init(title: "系统思考", author: "作者")
+        )
+
+        #expect(EPUBParser.sentences(from: document.text).count == sentences.count)
+        #expect(Aligner.tokenize(sentences[0]).count > 4)
+        #expect(result.assessment.status == .trusted)
+        #expect(result.segments.allSatisfy { $0.trustedEbookText != nil })
+    }
+
     @Test("A correct EPUB becomes trusted only from document-level evidence")
     func trustsCompatibleDocument() throws {
         let spoken = Self.bookSentences.map(Self.segment)

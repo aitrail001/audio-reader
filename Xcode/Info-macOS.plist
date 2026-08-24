@@ -28,7 +28,9 @@
 	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>AudioReader listens while you dictate an editable question about the current chapter.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>AudioReader transcribes your audiobooks on this Mac so it can highlight each spoken word while you listen.</string>
+	<string>AudioReader uses on-device speech recognition to turn your chapter questions into editable text.</string>
 </dict>
 </plist>

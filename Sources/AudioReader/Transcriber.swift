@@ -5,6 +5,7 @@ import CoreMedia
 
 enum TranscriptionError: LocalizedError {
     case unavailable
+    case unsupportedLanguage(String)
     case noAudio
     case cancelled
     case failed(String)
@@ -12,6 +13,7 @@ enum TranscriptionError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .unavailable: "On-device speech transcription is not available on this device."
+        case .unsupportedLanguage(let language): "On-device speech transcription for \(language) is not available on this device."
         case .noAudio: "Could not open the audio file."
         case .cancelled: "Transcription was cancelled."
         case .failed(let s): s
@@ -31,6 +33,7 @@ actor Transcriber {
         chapter: Chapter,
         ebookPath: String?,
         expectedMetadata: EPUBBookMetadata,
+        language: TranscriptionLanguage,
         progress: @Sendable @escaping (TranscriptionProgress) -> Void,
         checkpoint: @Sendable @escaping (String, [TranscriptSegment]) async -> Void
     ) async throws -> Transcript {
@@ -38,8 +41,9 @@ actor Transcriber {
 
         progress(.init(fraction: 0.02, message: "Preparing speech model…"))
 
-        let requested = Locale(identifier: "en-US")
-        let locale = await SpeechTranscriber.supportedLocale(equivalentTo: requested) ?? requested
+        guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: language.locale) else {
+            throw TranscriptionError.unsupportedLanguage(language.menuLabel)
+        }
 
         let speech = SpeechTranscriber(
             locale: locale,
@@ -49,7 +53,7 @@ actor Transcriber {
         )
 
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [speech]) {
-            progress(.init(fraction: 0.05, message: "Installing English speech assets…"))
+            progress(.init(fraction: 0.05, message: "Installing \(language.menuLabel) speech assets…"))
             try await request.downloadAndInstall()
         }
 

@@ -41,9 +41,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>1.0.25</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>26</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIFileSharingEnabled</key>
@@ -54,8 +54,10 @@
 	<string>26.0</string>
 	<key>NSAppleMusicUsageDescription</key>
 	<string>AudioReader finds audiobooks available in your device media library so you can choose accessible titles for study and transcription.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>AudioReader listens while you dictate an editable question about the current chapter.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>AudioReader transcribes imported audiobooks on this iPad so it can highlight each spoken word while you listen.</string>
+	<string>AudioReader uses on-device speech recognition to turn your chapter questions into editable text.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchScreen</key>

@@ -229,6 +229,7 @@ struct AppSettings: Codable, Equatable {
     var playbackRate: Double
     var textSource: String
     var skipSeconds: Double
+    var transcriptionLanguage: String
     var targetLanguage: String
     var llmProvider: String
     var grokModel: String
@@ -263,6 +264,7 @@ struct AppSettings: Codable, Equatable {
             playbackRate: 1.0,
             textSource: TextSource.spoken.rawValue,
             skipSeconds: 5,
+            transcriptionLanguage: TranscriptionLanguage.englishUS.rawValue,
             targetLanguage: StudyLanguage.zhHans.rawValue,
             llmProvider: LLMProvider.grok.rawValue,
             grokModel: "grok-4.6",
@@ -306,6 +308,7 @@ struct AppSettings: Codable, Equatable {
         playbackRate: Double,
         textSource: String,
         skipSeconds: Double,
+        transcriptionLanguage: String,
         targetLanguage: String,
         llmProvider: String,
         grokModel: String,
@@ -338,6 +341,7 @@ struct AppSettings: Codable, Equatable {
         self.playbackRate = playbackRate
         self.textSource = textSource
         self.skipSeconds = skipSeconds
+        self.transcriptionLanguage = transcriptionLanguage
         self.targetLanguage = targetLanguage
         self.llmProvider = llmProvider
         self.grokModel = grokModel
@@ -374,6 +378,7 @@ struct AppSettings: Codable, Equatable {
         playbackRate = try c.decodeIfPresent(Double.self, forKey: .playbackRate) ?? d.playbackRate
         textSource = try c.decodeIfPresent(String.self, forKey: .textSource) ?? d.textSource
         skipSeconds = try c.decodeIfPresent(Double.self, forKey: .skipSeconds) ?? d.skipSeconds
+        transcriptionLanguage = try c.decodeIfPresent(String.self, forKey: .transcriptionLanguage) ?? d.transcriptionLanguage
         targetLanguage = try c.decodeIfPresent(String.self, forKey: .targetLanguage) ?? d.targetLanguage
         llmProvider = try c.decodeIfPresent(String.self, forKey: .llmProvider) ?? d.llmProvider
         grokModel = try c.decodeIfPresent(String.self, forKey: .grokModel) ?? d.grokModel

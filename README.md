@@ -1,6 +1,6 @@
 # AudioReader
 
-AudioReader is a macOS and iPadOS audiobook study app for people learning English. It combines audiobook playback, on-device English transcription, word-level highlighting, optional EPUB alignment, dictionary lookup, vocabulary capture, and contextual assistance from Grok, QwenCloud, or OpenAI.
+AudioReader is a macOS and iPadOS audiobook study app for language learners. It combines audiobook playback, multilingual on-device transcription, word-level highlighting, optional EPUB alignment, dictionary lookup, vocabulary capture, and contextual assistance from Grok, QwenCloud, or OpenAI.
 
 ## What this is for
 
@@ -30,7 +30,7 @@ M4B chapter metadata is detected and exposed as separate playable and transcriba
 
 - macOS 26 or later, or iPadOS 26 or later
 - Xcode with the corresponding platform SDK to build the app
-- English SpeechAnalyzer assets; AudioReader requests their installation on the first transcription
+- SpeechAnalyzer assets for the selected audiobook language; AudioReader requests their installation on the first transcription
 - Optional: a Grok, QwenCloud, OpenAI API, or ChatGPT plan account and network connection for translation, summaries, and chapter chat
 
 ### Build and run on macOS
@@ -76,11 +76,12 @@ AudioReader copies explicitly imported resources into its own imported-books lib
 
 ### Transcribe and read
 
-1. Select a book and chapter.
-2. Select **Transcribe**. The first run may download the English speech assets.
+1. In **Settings → Languages**, choose the audiobook's spoken language independently from **Translate into**.
+2. Select a book and chapter, then select **Transcribe**. The first run may download the selected language's speech assets.
+   If the book has no companion ebook, the reader displays **EPUB ebook missing** at the top. Select **Add EPUB** and choose the matching `.epub` file.
 3. Wait for transcription and optional EPUB validation/alignment to finish. AudioReader checks extraction quality, book metadata, sampled content, match coverage and scores, reading order, and unmatched passages before EPUB wording can replace speech.
 4. Play the chapter and use the highlighted transcript to follow, seek, replay, or loop sentences.
-5. Choose **Spoken**, **Ebook**, or **Both** when the EPUB and individual sentence matches are trusted. Unreadable, likely-wrong, different-edition, and uncertain EPUBs show the same warning and **Replace EPUB** recovery on macOS and iPadOS. **Use This EPUB Anyway** remains an explicit option after assessment and still permits only strong individual matches.
+5. Choose **Spoken**, **Ebook**, or **Both** when the EPUB and individual sentence matches are trusted. Unreadable, likely-wrong, different-edition, and uncertain EPUBs show the same warning and recovery actions on macOS and iPadOS. **Recheck EPUB** validates an existing transcript again without retranscribing audio; **Replace EPUB** installs another file; and **Use This EPUB Anyway** remains an explicit option after assessment and still permits only strong individual matches.
 6. Select a word for dictionary lookup or save it to **Vocabulary**. Use **Open in text** later to return to its source passage.
 
 Enable **Deep Reading** from the playback controls when you want time to inspect or research each sentence. AudioReader plays the current sentence and pauses while keeping it highlighted. Select **Continue** to advance to and play the next sentence. On iPad, both controls are available in the reader playback bar, and **Command–Return** also continues when using a hardware keyboard. Deep Reading and sentence looping are mutually exclusive.
@@ -96,6 +97,8 @@ Open **Settings → LLM provider** and choose Grok, QwenCloud, or OpenAI / ChatG
 - OpenAI accepts an `OPENAI_API_KEY` on macOS and iPadOS. On macOS, **ChatGPT plan** can instead reuse an existing Codex **Sign in with ChatGPT** session: install the Codex CLI, run `codex login`, and select that authentication mode in AudioReader. AudioReader prefers the native executable included with Codex installations, so an npm-installed Codex does not require `node` to be present in the Finder app's `PATH`; if only the JavaScript launcher is available, AudioReader adds its sibling Node directory for that process. AudioReader asks Codex to run an ephemeral, read-only, tool-disabled request and never reads or displays its cached OAuth tokens.
 
 After configuration, AudioReader can translate a selected word or sentence, translate or summarise a transcribed chapter, and provide chapter-aware chat. Single-sentence and chapter-batch translation use the same structured learning contract: a natural translation plus categorized notes for phrasal verbs, phrases, idioms, challenging words or combinations, and book-specific concepts. The selected translation language is treated as the reader's mother language, so explanations focus on difficulties relevant to that language and use the book plus nearby previous and next sentences as context.
+
+The chapter-chat composer includes voice input on macOS and iPadOS. Select the microphone, speak, then stop and review or edit the recognized question before sending it. A live waveform beneath the composer shows the local microphone level while AudioReader is listening. Recognition uses Apple's on-device `SpeechAnalyzer` and does not require Siri or keyboard Dictation to be enabled. The first use may download an Apple-managed language asset; microphone audio remains on the device and AudioReader does not save the recording or fall back to network recognition.
 
 Core reading-assistant prompts and translation results are provider-neutral. Provider-specific code is limited to authentication, request transport, reasoning controls, and structured-output capabilities, making additional providers and models easier to add consistently. These requests send the selected text and configured reading context to the chosen provider; audio transcription itself remains on-device.
 
@@ -118,7 +121,7 @@ Core reading-assistant prompts and translation results are provider-neutral. Pro
 - **Cloud-only Apple Books titles are unavailable.** Download a title first. Even when downloaded, the operating system must expose an unprotected, accessible asset URL before AudioReader can import it.
 - **Apple Books discovery differs by platform.** macOS discovery reads locally downloaded audiobook files; iPad discovery uses the device media library. Validate iPad media access on a physical device because the Simulator has no real Apple Books library.
 - **Podcast and publisher-app import is not implemented.** AudioReader currently does not import Apple Podcasts feeds, HBR resources, Economist resources, private RSS feeds, or audio stored inside other apps.
-- **Transcription is English-only.** The transcriber requests the `en-US` SpeechAnalyzer locale. Accuracy varies with accents, names, background noise, recording quality, and narration speed.
+- **Transcription language support depends on Apple and the device.** AudioReader offers English variants, Simplified and Traditional Chinese, Cantonese, Japanese, Korean, Spanish, French, German, Italian, Brazilian Portuguese, and Dutch. If Apple does not provide the selected on-device SpeechAnalyzer locale for the current OS/device, AudioReader reports it as unavailable. Accuracy varies with accents, names, background noise, recording quality, and narration speed.
 - **EPUB alignment remains probabilistic.** Document-level validation prevents one incidental sentence from trusting a book and keeps untrusted EPUB wording out of LLM and vocabulary workflows, but speech recognition and edition differences can still leave valid passages unmatched. Reordered or weak matches remain spoken text unless the reader explicitly accepts individually verified matches. MOBI and PDF text extraction are not supported.
 - **LLM features are optional external services.** They need valid credentials and network access, may incur provider charges, and can fail because of model availability, account limits, endpoint changes, or unsupported reasoning settings. Text sent to them is governed by the selected provider's privacy and usage terms.
 - **Saved API keys are local files, not Keychain entries.** AudioReader restricts their file permissions, but users who require hardware-backed credential storage should supply keys through the environment or avoid saving them in the app.

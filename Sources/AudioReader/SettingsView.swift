@@ -176,8 +176,16 @@ struct SettingsView: View {
     }
 
     private var languageSection: some View {
-        GroupBox("Study language") {
+        GroupBox("Languages") {
             VStack(alignment: .leading, spacing: 12) {
+                settingRow("Audiobook language") {
+                    Picker("Audiobook language", selection: $draft.transcriptionLanguage) {
+                        ForEach(TranscriptionLanguage.allCases) { language in
+                            Text(language.menuLabel).tag(language.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                }
                 settingRow("Translate into") {
                     Picker("Translate into", selection: $draft.targetLanguage) {
                         ForEach(StudyLanguage.allCases) { language in
@@ -195,6 +203,7 @@ struct SettingsView: View {
                         draft.preferredDictionary = name
                     }
                 }
+                helper("Audiobook language controls on-device transcription and synchronized EPUB matching. Translate into controls explanations and study tools.")
                 settingRow("Auto-translate") {
                     Toggle("Translate the current sentence with the selected LLM", isOn: $draft.autoTranslate)
                 }

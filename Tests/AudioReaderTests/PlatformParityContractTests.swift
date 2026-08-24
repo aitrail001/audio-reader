@@ -146,28 +146,131 @@ struct PlatformParityContractTests {
         #expect(!transcriber.contains("not available on this Mac"))
     }
 
+    @Test("Reader identity uses the native title without consuming reading height")
+    func readerIdentityUsesNativeTitle() throws {
+        let playerView = try source("Sources/AudioReader/PlayerView.swift")
+        let desktopHeader = try section(
+            in: playerView,
+            from: "    private var desktopHeader",
+            to: "    private var sentenceLoopBinding"
+        )
+
+        #expect(playerView.contains(".navigationTitle(readerNavigationTitle)"))
+        #expect(playerView.contains("private var readerNavigationTitle: String"))
+        #expect(!desktopHeader.contains("state.selectedBook?.title"))
+        #expect(!desktopHeader.contains("state.selectedChapter?.title"))
+        #expect(desktopHeader.contains("ViewThatFits(in: .horizontal)"))
+        #expect(desktopHeader.contains("desktopExpandedHeaderControls"))
+        #expect(desktopHeader.contains("desktopCompactHeaderControls"))
+    }
+
+    @Test("Reader option and playback bars have compact single-row fallbacks")
+    func readerChromeAdaptsToNarrowWindows() throws {
+        let playerView = try source("Sources/AudioReader/PlayerView.swift")
+        let controls = try section(
+            in: playerView,
+            from: "    private var controls: some View",
+            to: "#if os(iOS)\n    private var iPadTransportControls"
+        )
+
+        #expect(playerView.components(separatedBy: "ViewThatFits(in: .horizontal)").count - 1 >= 3)
+        #expect(playerView.contains("private var sharedLLMMenu: some View"))
+        #expect(playerView.contains("private var sharedReadingMenu: some View"))
+        #expect(playerView.components(separatedBy: "sharedLLMMenu").count - 1 >= 3)
+        #expect(playerView.components(separatedBy: "sharedReadingMenu").count - 1 >= 3)
+        #expect(controls.contains("desktopExpandedPlaybackControls"))
+        #expect(controls.contains("desktopCompactPlaybackControls"))
+        #expect(playerView.contains("chapterPositionLabel(in: chapters)"))
+        #expect(playerView.contains(".help(state.selectedChapter?.title ?? \"Choose a chapter\")"))
+    }
+
+    @Test("Both platforms share the selected audiobook language end to end")
+    func sharesAudiobookLanguage() throws {
+        let settingsView = try source("Sources/AudioReader/SettingsView.swift")
+        let appState = try source("Sources/AudioReader/AppState.swift")
+        let transcriber = try source("Sources/AudioReader/Transcriber.swift")
+
+        #expect(settingsView.contains("ForEach(TranscriptionLanguage.allCases)"))
+        #expect(settingsView.contains("selection: $draft.transcriptionLanguage"))
+        #expect(appState.contains("language: TranscriptionLanguage(rawValue: settings.transcriptionLanguage)"))
+        #expect(transcriber.contains("language: TranscriptionLanguage"))
+        #expect(!transcriber.contains("Locale(identifier: \"en-US\")"))
+    }
+
     @Test("Both platforms share EPUB status and the same recovery actions")
     func sharesEbookAlignmentRecovery() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
+        let body = try section(
+            in: playerView,
+            from: "    var body: some View",
+            to: "    private var ebookMissingNotice"
+        )
+        let missingNotice = try section(
+            in: playerView,
+            from: "    private var ebookMissingNotice",
+            to: "    private func ebookAlignmentNotice"
+        )
         let notice = try section(
             in: playerView,
             from: "    private func ebookAlignmentNotice",
-            to: "    private func replaceEbook()"
+            to: "    private func addOrReplaceEbook()"
         )
         let replacement = try section(
             in: playerView,
-            from: "    private func replaceEbook()",
+            from: "    private func addOrReplaceEbook()",
             to: "    private var header"
         )
 
+        #expect(body.contains("if state.currentBookIsMissingEbook"))
+        #expect(body.contains("ebookMissingNotice"))
+        #expect(missingNotice.contains("Text(\"EPUB ebook missing\")"))
+        #expect(missingNotice.contains("Add a companion EPUB to compare the published text with the audiobook and enable synchronized ebook reading."))
+        #expect(missingNotice.contains("Button(\"Add EPUB\") { addOrReplaceEbook() }"))
+        #expect(missingNotice.contains("accessibilityLabel(\"EPUB ebook missing. Add EPUB\")"))
+        #expect(!missingNotice.contains("#if os("))
         #expect(notice.contains("EPUB alignment status:"))
-        #expect(notice.contains("Button(\"Replace EPUB\")"))
+        #expect(notice.contains("Button(\"Replace EPUB\") { addOrReplaceEbook() }"))
+        #expect(notice.contains("Button(\"Recheck EPUB\")"))
         #expect(notice.contains("Button(\"Use This EPUB Anyway\")"))
         #expect(notice.contains("if state.canUseCurrentEbookAnyway"))
         #expect(!notice.contains("#if os("))
         #expect(replacement.contains("#if os(macOS)"))
         #expect(replacement.contains("showReplaceEbookImporter = true"))
         #expect(playerView.contains(".fileImporter(isPresented: $showReplaceEbookImporter"))
+    }
+
+    @Test("Chapter chat dictation is shared and remains on device")
+    func sharesOnDeviceChapterChatDictation() throws {
+        let dictation = try source("Sources/AudioReader/ChapterChatDictation.swift")
+        let playerView = try source("Sources/AudioReader/PlayerView.swift")
+        let macPlist = try source("Xcode/Info-macOS.plist")
+        let iPadPlist = try source("Xcode/Info-iOS.plist")
+
+        #expect(dictation.contains("SpeechAnalyzer"))
+        #expect(dictation.contains("SpeechTranscriber"))
+        #expect(dictation.contains("DictationTranscriber"))
+        #expect(dictation.contains("AssetInventory.assetInstallationRequest"))
+        #expect(dictation.contains("Apple on-device speech recognition is not available"))
+        #expect(dictation.contains("ChapterChatAudioTap.install("))
+        #expect(dictation.contains("levelContinuation.yield(ChapterChatVoiceLevel.normalized(buffer))"))
+        let mainActorDictation = try section(
+            in: dictation,
+            from: "@MainActor\n@Observable\nfinal class ChapterChatDictation",
+            to: "private func completeFinalization"
+        )
+        #expect(!mainActorDictation.contains(".installTap("))
+        #expect(!dictation.contains("SFSpeechRecognizer"))
+        #expect(!dictation.contains("requiresOnDeviceRecognition"))
+        #expect(playerView.contains("Button(action: toggleDictation)"))
+        #expect(playerView.contains("\"Stop voice input\""))
+        #expect(playerView.contains("\"Start voice input\""))
+        #expect(playerView.contains("Text(\"Listening on device…\")"))
+        #expect(playerView.contains("ChapterChatVoiceWaveform(levels: dictation.audioLevels)"))
+        #expect(playerView.contains("accessibilityLabel(\"Voice input is listening\")"))
+        #expect(!playerView.contains("#if os(macOS)\n                            ChapterChatVoiceWaveform"))
+        #expect(!playerView.contains("#if os(macOS)\n                            Button(action: toggleDictation)"))
+        #expect(macPlist.contains("NSMicrophoneUsageDescription"))
+        #expect(iPadPlist.contains("NSMicrophoneUsageDescription"))
     }
 
     private func source(_ relativePath: String) throws -> String {

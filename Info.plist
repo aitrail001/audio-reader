@@ -17,17 +17,19 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.20</string>
+	<string>1.0.25</string>
 	<key>CFBundleVersion</key>
-	<string>21</string>
+	<string>26</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>AudioReader listens while you dictate an editable question about the current chapter.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>AudioReader transcribes your audiobooks on this Mac so it can highlight each spoken word while you listen.</string>
+	<string>AudioReader uses on-device speech recognition to turn your chapter questions into editable text.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>AudioReader reads local audiobook and ebook files from the folder you choose.</string>
 </dict>

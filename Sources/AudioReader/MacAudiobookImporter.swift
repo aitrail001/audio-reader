@@ -44,14 +44,16 @@ enum MacAudiobookImporter {
         )
     }
 
-    static func chooseReplacementEbook(for book: Book) throws -> URL? {
+    static func chooseEbook(for book: Book, replacingExisting: Bool) throws -> URL? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.epub]
-        panel.prompt = "Replace EPUB"
-        panel.message = "Choose a replacement EPUB for \(book.title)."
+        panel.prompt = replacingExisting ? "Replace EPUB" : "Add EPUB"
+        panel.message = replacingExisting
+            ? "Choose a replacement EPUB for \(book.title)."
+            : "Choose a companion EPUB for \(book.title)."
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
         return url
     }

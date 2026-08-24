@@ -1,4 +1,5 @@
 import Foundation
+import NaturalLanguage
 
 struct EPUBAlignmentResult: Sendable {
     var segments: [TranscriptSegment]
@@ -171,6 +172,8 @@ enum Aligner {
         let backwardJumps = zip(matched, matched.dropFirst()).reduce(into: 0) { count, pair in
             if pair.1.passage.startIndex < pair.0.passage.startIndex { count += 1 }
         }
+        let backwardJumpLimit = max(1, Int(Double(max(0, matched.count - 1)) * 0.05))
+        let orderingIsConsistent = backwardJumps <= backwardJumpLimit
         let longestUnmatched = longestUnmatchedPassage(
             eligibleIndices: eligibleIndices,
             matchedIndices: trustedSegmentIndices
@@ -188,18 +191,18 @@ enum Aligner {
            anchorCoverage >= 0.50,
            median >= 0.72,
            lower >= 0.64,
-           backwardJumps == 0,
+           orderingIsConsistent,
            longestUnmatched <= max(2, eligibleIndices.count / 3) {
             status = .trusted
             reason = "Sampled content, coverage, score quality, and reading order agree."
         } else if matchedCoverage >= 0.30,
                   median >= 0.68,
-                  backwardJumps == 0 {
+                  orderingIsConsistent {
             status = .differentEdition
             reason = "Several ordered passages match, but coverage is too low for this edition to replace speech automatically."
         } else {
             status = .uncertain
-            reason = backwardJumps > 0
+            reason = !orderingIsConsistent
                 ? "Matching passages appear out of audiobook order."
                 : "There is not enough consistent evidence to trust this EPUB."
         }
@@ -227,13 +230,21 @@ enum Aligner {
     }
 
     static func tokenize(_ text: String) -> [String] {
-        let folded = text.lowercased()
-        let scalars = folded.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? Character($0) : " " }
-        return String(scalars)
-            .split(separator: " ")
-            .map(String.init)
+        let folded = text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        let tokenizer = NLTokenizer(unit: .word)
+        tokenizer.string = folded
+        let tokens = tokenizer.tokens(for: folded.startIndex..<folded.endIndex)
+            .map { String(folded[$0]) }
+            .filter { token in
+                token.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains)
+            }
             .map(normalizeNumber)
-            .filter { !$0.isEmpty }
+        if !tokens.isEmpty { return tokens }
+
+        let scalars = folded.unicodeScalars.map {
+            CharacterSet.alphanumerics.contains($0) ? Character($0) : " "
+        }
+        return String(scalars).split(separator: " ").map(String.init).map(normalizeNumber)
     }
 
     static func similarity(_ a: [String], _ b: [String]) -> Double {
@@ -251,7 +262,7 @@ enum Aligner {
         let prefix = Double(same) / Double(max(n, 1))
 
         let lengthRatio = Double(min(a.count, b.count)) / Double(max(a.count, b.count))
-        if lengthRatio < 0.55 && prefix < 0.5 {
+        if lengthRatio < 0.55 {
             return f1 * 0.35
         }
         return 0.7 * f1 + 0.3 * prefix

@@ -37,6 +37,9 @@ enum Cli {
                         title: URL(fileURLWithPath: audioPath).deletingPathExtension().lastPathComponent,
                         author: nil
                     ),
+                    language: TranscriptionLanguage(
+                        rawValue: Persistence.loadSettings().transcriptionLanguage
+                    ) ?? .englishUS,
                     progress: { p in
                         FileHandle.standardError.write(
                             Data("[\(Int(p.fraction * 100))%] \(p.message)\n".utf8)

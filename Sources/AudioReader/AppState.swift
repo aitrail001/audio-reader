@@ -21,6 +21,7 @@ final class AppState {
     var libraryScanProgress: LibraryScanProgress?
     var readyChapterIDs: Set<String> = []
     var isTranscribing = false
+    var isRecheckingEbook = false
     var transcriptionProgress: TranscriptionProgress?
     var transcriptionJobOrigin: BackgroundJobOrigin?
     var backgroundJobNavigationError: String?
@@ -255,6 +256,10 @@ final class AppState {
         book.chapters.lazy.filter { self.readyChapterIDs.contains($0.id) }.count
     }
 
+    var currentBookIsMissingEbook: Bool {
+        selectedBook != nil && selectedBook?.ebookPath == nil
+    }
+
     var currentEbookAlignment: EPUBAlignmentAssessment? {
         guard selectedBook?.ebookPath != nil else { return nil }
         if let assessment = transcript?.ebookAlignment { return assessment }
@@ -319,6 +324,48 @@ final class AppState {
         }
     }
 
+    func recheckCurrentEbookAlignment() async {
+        guard !isRecheckingEbook,
+              let book = selectedBook,
+              let ebookPath = book.ebookPath,
+              var saved = transcript
+        else { return }
+
+        isRecheckingEbook = true
+        defer { isRecheckingEbook = false }
+        errorMessage = nil
+
+        let spokenOnly = saved.segments.map { segment -> TranscriptSegment in
+            var copy = segment
+            copy.ebookText = nil
+            copy.alignmentScore = nil
+            copy.individualEbookMatchTrusted = nil
+            copy.documentEbookUseAllowed = false
+            return copy
+        }
+        let expectedMetadata = EPUBBookMetadata(title: book.title, author: book.author)
+        let result = await Task.detached(priority: .userInitiated) {
+            Aligner.align(
+                segments: spokenOnly,
+                document: EPUBParser.document(from: ebookPath),
+                expectedMetadata: expectedMetadata
+            )
+        }.value
+
+        saved.segments = result.segments
+        saved.ebookAlignment = result.assessment
+        saved.ebookUseOverride = false
+        saved.ebookAligned = result.segments.contains { $0.trustedEbookText != nil }
+        do {
+            try Persistence.saveTranscript(saved)
+            if selectedChapterID == saved.chapterID {
+                transcript = saved
+            }
+        } catch {
+            errorMessage = "Could not save the updated EPUB alignment: \(error.localizedDescription)"
+        }
+    }
+
     func replaceCurrentEbook(with source: URL) throws {
         guard let book = selectedBook else { return }
         guard AudiobookImportService.isReadableEbook(source) else {
@@ -330,7 +377,7 @@ final class AppState {
         )
         let assessment = EPUBAlignmentAssessment(
             status: .uncertain,
-            reason: "The EPUB was replaced. Re-transcribe this chapter to validate the new document.",
+            reason: "The EPUB changed. Select Recheck EPUB to validate it against the saved transcript.",
             metrics: .empty
         )
         let originals = book.chapters.compactMap { Persistence.loadTranscript(for: $0) }
@@ -628,6 +675,7 @@ final class AppState {
                     chapter: chapter,
                     ebookPath: book.ebookPath,
                     expectedMetadata: .init(title: book.title, author: book.author),
+                    language: TranscriptionLanguage(rawValue: settings.transcriptionLanguage) ?? .englishUS,
                     progress: { [weak self] p in
                         Task { @MainActor in
                             self?.transcriptionProgress = p
