@@ -35,30 +35,89 @@ enum DictionaryLookup {
 #endif
     }
 
+    static func searchOrder(
+        preferredName: String?,
+        language: StudyLanguage,
+        installedNames: [String]
+    ) -> [String] {
+        let targetNames = dictionaryNames(for: language)
+        let fallbackNames = ["Oxford Dictionary of English", "New Oxford American Dictionary"]
+        var result: [String] = []
+        var seen = Set<String>()
+
+        func appendInstalled(_ requestedName: String) {
+            guard let installed = installedNames.first(where: {
+                $0.caseInsensitiveCompare(requestedName) == .orderedSame
+            }), seen.insert(installed).inserted else { return }
+            result.append(installed)
+        }
+
+        if let preferredName,
+           targetNames.contains(where: { $0.caseInsensitiveCompare(preferredName) == .orderedSame }) {
+            appendInstalled(preferredName)
+        }
+        targetNames.forEach(appendInstalled)
+        fallbackNames.forEach(appendInstalled)
+        return result
+    }
+
+    static func recommendedName(language: StudyLanguage, installedNames: [String]) -> String? {
+        if let systemDictionary = installedNames.first(where: {
+            $0.caseInsensitiveCompare("iPadOS Dictionary") == .orderedSame
+        }) {
+            return systemDictionary
+        }
+        return searchOrder(preferredName: nil, language: language, installedNames: installedNames).first
+    }
+
+    private static func dictionaryNames(for language: StudyLanguage) -> [String] {
+        switch language {
+        case .zhHans:
+            chinesePreferred
+        case .zhHant:
+            ["Traditional Chinese - English", "Traditional Chinese", "Traditional Chinese Common Words"]
+        case .ja:
+            ["Sanseido The WISDOM English-Japanese Japanese-English Dictionary", "Japanese - English"]
+        case .ko:
+            ["Korean - English", "Korean"]
+        case .es:
+            ["Spanish - English", "Spanish"]
+        case .fr:
+            ["French - English", "French"]
+        case .de:
+            ["German - English", "German", "Duden Dictionary Data Set I"]
+        case .en:
+            ["Oxford Dictionary of English", "New Oxford American Dictionary", "Apple Dictionary"]
+        }
+    }
+
 #if os(macOS)
     private static let cacheLock = NSLock()
     nonisolated(unsafe) private static var cachedDicts: [InstalledDict]?
 #endif
 
-    static func lookup(_ raw: String, preferredName: String?) -> [DictionaryHit] {
+    static func lookup(
+        _ raw: String,
+        preferredName: String?,
+        language: StudyLanguage = .en
+    ) -> [DictionaryHit] {
 #if os(macOS)
         let word = headword(raw)
         guard !word.isEmpty else { return [] }
         let dicts = dictionaries()
         let byName = Dictionary(uniqueKeysWithValues: dicts.map { ($0.name, $0) })
-        var searchNames: [String] = []
-        if let preferredName { searchNames.append(preferredName) }
-        searchNames.append(contentsOf: chinesePreferred)
-        searchNames.append("Oxford Dictionary of English")
-        searchNames.append("New Oxford American Dictionary")
+        let searchNames = searchOrder(
+            preferredName: preferredName,
+            language: language,
+            installedNames: dicts.map(\.name)
+        )
 
         var hits: [DictionaryHit] = []
-        var seen = Set<String>()
         for name in searchNames {
-            guard seen.insert(name).inserted, let dict = byName[name] else { continue }
+            guard let dict = byName[name] else { continue }
             if let hit = search(word, in: dict) {
                 hits.append(hit)
-            } else if chinesePreferred.contains(name) {
+            } else if language == .zhHans && chinesePreferred.contains(name) {
                 let hint = chineseMonolingualHint(for: name, word: word)
                     ?? "「\(name)」没有 “\(word)” 的条目。"
                 hits.append(DictionaryHit(name: name, html: wrappedHTML("<p>\(hint)</p>"), preview: hint))
@@ -82,9 +141,9 @@ enum DictionaryLookup {
     }
 
     @MainActor
-    static func hasSystemDefinition(_ raw: String) -> Bool {
+    static func hasSystemDefinition(_ raw: String, language: StudyLanguage = .en) -> Bool {
 #if os(macOS)
-        !lookup(raw, preferredName: nil).isEmpty
+        !lookup(raw, preferredName: nil, language: language).isEmpty
 #else
         let word = headword(raw)
         return !word.isEmpty && UIReferenceLibraryViewController.dictionaryHasDefinition(forTerm: word)

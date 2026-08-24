@@ -221,6 +221,13 @@ final class AppState {
         // iOS data-container UUIDs can change after reinstalling an app, so a
         // persisted absolute Documents path must never drive library scanning.
         settings.libraryPath = Persistence.importedBooksURL.path
+        if let normalizedDictionary = DictionaryLookup.recommendedName(
+            language: StudyLanguage(rawValue: settings.targetLanguage) ?? .zhHans,
+            installedNames: DictionaryLookup.installedNames()
+        ), settings.preferredDictionary != normalizedDictionary {
+            settings.preferredDictionary = normalizedDictionary
+            Persistence.saveSettings(settings)
+        }
 #endif
         vocab = Persistence.loadVocab().map { entry in
             var copy = entry
@@ -663,10 +670,11 @@ final class AppState {
         dictionaryHits = []
         definition = nil
         let preferred = settings.preferredDictionary
+        let language = studyLanguage
         let text = word.text
         let wordID = word.id
         Task.detached(priority: .userInitiated) {
-            let hits = DictionaryLookup.lookup(text, preferredName: preferred)
+            let hits = DictionaryLookup.lookup(text, preferredName: preferred, language: language)
             await MainActor.run {
                 guard self.selectedWord?.id == wordID else { return }
                 self.dictionaryHits = hits
@@ -993,26 +1001,7 @@ final class AppState {
         let system: String
         let user: String
         if kind == .sentence {
-            system = """
-            You are a literary translator and English-learning tutor.
-            Work in \(language.promptName).
-
-            Output exactly this layout, nothing before or after it:
-
-            译文：
-            <natural translation of the whole sentence; keep names; audiobook register; 1–2 sentences>
-
-            短语：
-            • <English phrase or idiom from THIS sentence> — <how it is used here, in \(language.promptName)>
-            • <next phrase> — <meaning in this sentence>
-
-            Rules:
-            - Pull out collocations, phrasal verbs, idioms, and set phrases (e.g. "have trouble doing", "in trouble", "ask for trouble").
-            - Explain the sense in *this* sentence, not a generic dictionary dump.
-            - Skip ordinary single words unless they are part of a phrase.
-            - If there is nothing worth noting, write: 短语：无
-            - No quotes around the translation. No grammar lecture.
-            """
+            system = TranslationPrompt.sentence(language: language)
             user = """
             \(metadata)
 
@@ -1020,31 +1009,7 @@ final class AppState {
             \(segment.map { neighboringContext(around: $0, in: capturedTranscript, radius: settings.sentenceContextCount) } ?? "TARGET: \(trimmed)")
             """
         } else {
-            system = """
-            You are an English-learning tutor.
-            Apple Dictionary already lists every sense of the word. Do NOT repeat that list.
-            Your only job is the meaning of this word (or the phrase it sits in) as used in THIS sentence.
-
-            Work in \(language.promptName).
-
-            Output exactly this layout, nothing before or after it:
-
-            本句释义：
-            <part of speech in this sentence> — <short meaning here, in \(language.promptName)>
-            <if it is part of a phrase/idiom, name the phrase and what it means here>
-
-            例句：
-            • <new English sentence using THIS same sense, not some other meaning>
-              <translation of that example>
-            • <second new example, same sense>
-              <translation>
-
-            Rules:
-            - Pick the one sense that fits the given sentence. Ignore other dictionary senses.
-            - Examples must be substitutable for that sense (e.g. if the sentence uses "trouble" = difficulty/problem, do not give examples about "don't trouble yourself" or medical "heart trouble" unless that is the sentence sense).
-            - Keep examples short and natural.
-            - No extra commentary.
-            """
+            system = TranslationPrompt.word(language: language)
             user = "Word: \(trimmed)\nSentence: \(context ?? trimmed)"
         }
         enqueueLLMJob(
@@ -1179,15 +1144,7 @@ final class AppState {
                 var remaining = block
                 var lastIssue = ChapterTranslationBatchError.missingSentences.localizedDescription
                 for attempt in 1...ChapterTranslationBatch.maximumAttempts where !remaining.isEmpty {
-                    let system = """
-                    You are a literary translator and English-learning tutor. Translate each target sentence into \(language.promptName).
-                    Use every sentence in this block as context, but return exactly one result per supplied sentence.
-                    Preserve names, dialogue, tone, and meaning. For each sentence, identify useful collocations, phrasal verbs, idioms, and set phrases and explain how they are used here.
-
-                    Return valid JSON only, as an object with this exact shape:
-                    {"translations":[{"id":"the supplied sentence id","translation":"natural translation","phrases":[{"source":"English phrase","explanation":"contextual meaning in \(language.promptName)"}]}]}
-                    Use an empty phrases array when nothing is worth noting. Do not add markdown fences or commentary.
-                    """
+                    let system = TranslationPrompt.chapter(language: language)
                     let numbered = block.enumerated().map { index, segment in
                         "\(index + 1). id=\(segment.id)\n\(segment.displayText)"
                     }.joined(separator: "\n\n")
@@ -1366,7 +1323,11 @@ final class AppState {
                     segments: segments,
                     defaults: defaults,
                     definitionResolver: { phrase in
-                        DictionaryLookup.lookup(phrase, preferredName: preferredDictionary).first
+                        DictionaryLookup.lookup(
+                            phrase,
+                            preferredName: preferredDictionary,
+                            language: StudyLanguage(rawValue: acceptedLanguage) ?? .en
+                        ).first
                     },
                     progress: { completed, total in
                         Task { @MainActor [weak self] in
@@ -1806,7 +1767,11 @@ final class AppState {
                     && $0.word.caseInsensitiveCompare(phrase.phrase) == .orderedSame
                     && GlossEntry.normalize($0.context) == GlossEntry.normalize(gloss.source)
                 }) { continue }
-                let hits = DictionaryLookup.lookup(phrase.phrase, preferredName: settings.preferredDictionary)
+                let hits = DictionaryLookup.lookup(
+                    phrase.phrase,
+                    preferredName: settings.preferredDictionary,
+                    language: StudyLanguage(rawValue: gloss.language) ?? .en
+                )
                 let hit = hits.first
                 vocab.insert(
                     VocabEntry(

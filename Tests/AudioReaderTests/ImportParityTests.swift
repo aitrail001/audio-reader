@@ -438,9 +438,104 @@ struct ImportParityTests {
 
         #expect(results.count == 2)
         #expect(results[0].id == "segment-1")
-        #expect(results[0].glossText.contains("译文：\n第一句。"))
+        #expect(results[0].glossText.contains("TRANSLATION:\n第一句。"))
         #expect(results[0].glossText.contains("break the ice"))
-        #expect(results[1].glossText.contains("短语：无"))
+        #expect(results[1].glossText.contains("PHRASAL VERBS AND PHRASES:\nNone"))
+    }
+
+    @Test("Chapter translation display labels stay in the English app UI")
+    func formatsChapterTranslationWithoutChineseLabels() throws {
+        let response = """
+        {
+          "translations": [
+            {
+              "id": "segment-1",
+              "translation": "Ella rompió el hielo.",
+              "phrases": [
+                {"source": "break the ice", "explanation": "romper el hielo"}
+              ]
+            }
+          ]
+        }
+        """
+
+        let result = try #require(
+            ChapterTranslationBatch.parse(response, expectedIDs: ["segment-1"]).first
+        )
+
+        #expect(result.glossText.contains("TRANSLATION:\nElla rompió el hielo."))
+        #expect(result.glossText.contains("PHRASAL VERBS AND PHRASES:"))
+        #expect(!result.glossText.contains("译文"))
+        #expect(!result.glossText.contains("短语"))
+    }
+
+    @Test("Accepted sentence glosses capture phrasal verbs from the English section label")
+    func extractsPhrasalVerbsFromEnglishGlossLabel() throws {
+        let phrases = GlossPhrases.extract(from: """
+        TRANSLATION:
+        Ella rompió el hielo.
+
+        PHRASAL VERBS AND PHRASES:
+        • **break the ice** — romper el hielo
+        """)
+
+        let phrase = try #require(phrases.first)
+        #expect(phrase.phrase == "break the ice")
+        #expect(phrase.meaning == "romper el hielo")
+    }
+
+    @Test("Non-Chinese translation prompts apply the target language to every generated field")
+    func appliesNonChineseTargetLanguageThroughoutPrompts() {
+        for language in [StudyLanguage.ja, .ko, .es, .fr, .de, .en] {
+            let sentence = TranslationPrompt.sentence(language: language)
+            let word = TranslationPrompt.word(language: language)
+            let chapter = TranslationPrompt.chapter(language: language)
+
+            #expect(sentence.contains("Translate the whole sentence into \(language.promptName)"))
+            #expect(sentence.contains("Include every phrasal verb"))
+            #expect(sentence.contains("Do not use Markdown formatting"))
+            #expect(sentence.contains("Do not use Chinese anywhere in the response"))
+            #expect(word.contains("Write every explanation and example translation in \(language.promptName)"))
+            #expect(word.contains("Do not use Chinese anywhere in the response"))
+            #expect(chapter.contains("Every translation and phrase explanation must be in \(language.promptName)"))
+            #expect(chapter.contains("Include every phrasal verb"))
+            #expect(chapter.contains("Do not use Chinese anywhere in the response"))
+        }
+    }
+
+    @Test("Dictionary search follows the translation language instead of a stale Chinese preference")
+    func ordersDictionariesForTargetLanguage() {
+        let installed = [
+            "牛津英汉汉英词典",
+            "Spanish - English",
+            "Spanish",
+            "Oxford Dictionary of English"
+        ]
+
+        let spanish = DictionaryLookup.searchOrder(
+            preferredName: "牛津英汉汉英词典",
+            language: .es,
+            installedNames: installed
+        )
+        let chinese = DictionaryLookup.searchOrder(
+            preferredName: "牛津英汉汉英词典",
+            language: .zhHans,
+            installedNames: installed
+        )
+
+        #expect(spanish == ["Spanish - English", "Spanish", "Oxford Dictionary of English"])
+        #expect(!spanish.contains("牛津英汉汉英词典"))
+        #expect(chinese.first == "牛津英汉汉英词典")
+    }
+
+    @Test("iPad dictionary state does not retain a stale Chinese preference")
+    func normalizesIPadDictionaryPreference() {
+        let name = DictionaryLookup.recommendedName(
+            language: .ko,
+            installedNames: ["iPadOS Dictionary"]
+        )
+
+        #expect(name == "iPadOS Dictionary")
     }
 
     @Test("Incomplete chapter JSON preserves valid sentences and identifies the retry remainder")
@@ -1007,10 +1102,10 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.13")
-        #expect(plist["CFBundleVersion"] as? String == "14")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.13;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 14;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.14")
+        #expect(plist["CFBundleVersion"] as? String == "15")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.14;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 15;").count - 1 == 4)
     }
 }
 

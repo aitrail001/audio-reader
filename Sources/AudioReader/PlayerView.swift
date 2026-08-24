@@ -1653,8 +1653,7 @@ struct GlossBody: View {
     private var blocks: [Block] {
         text.split(separator: "\n", omittingEmptySubsequences: false).map { raw in
             let line = String(raw).trimmingCharacters(in: .whitespaces)
-            let isHeading = line.hasPrefix("译文") || line.hasPrefix("短语")
-                || line.hasPrefix("本句释义") || line.hasPrefix("例句") || line.hasPrefix("释义")
+            let isHeading = GlossTextFormat.isHeading(line)
             let isBullet = line.hasPrefix("•") || line.hasPrefix("- ") || line.hasPrefix("·")
             return Block(text: line.isEmpty ? " " : line, isHeading: isHeading, isBullet: isBullet)
         }

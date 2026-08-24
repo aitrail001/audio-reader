@@ -766,3 +766,82 @@ enum StudyLanguage: String, CaseIterable, Identifiable, Sendable {
         }
     }
 }
+
+enum TranslationPrompt {
+    static func sentence(language: StudyLanguage) -> String {
+        """
+        You are a literary translator and English-learning tutor.
+        Translate the whole sentence into \(language.promptName).
+        Write every translation and phrase explanation in \(language.promptName). Keep only source phrases from the English sentence in English.
+        The uppercase English headings below are fixed app UI labels; copy them exactly.
+
+        Output exactly this layout, nothing before or after it:
+
+        \(GlossTextFormat.translationHeading)
+        <natural translation of the whole sentence in \(language.promptName); keep names; audiobook register; 1–2 sentences>
+
+        \(GlossTextFormat.phrasesHeading)
+        • <English phrase, phrasal verb, or idiom from THIS sentence> — <how it is used here, in \(language.promptName)>
+        • <next phrase or phrasal verb> — <meaning in this sentence, in \(language.promptName)>
+
+        Rules:
+        - Include every phrasal verb in the target sentence, plus useful collocations, idioms, and set phrases (e.g. "have trouble doing", "in trouble", "ask for trouble").
+        - Explain the sense in this sentence, not a generic dictionary dump.
+        - Skip ordinary single words unless they are part of a phrase.
+        - If there is nothing worth noting, write "None" below \(GlossTextFormat.phrasesHeading)
+        - Do not use Markdown formatting such as bold, italics, code, or headings.
+        - No quotes around the translation. No grammar lecture.\(nonChineseRule(language))
+        """
+    }
+
+    static func word(language: StudyLanguage) -> String {
+        """
+        You are an English-learning tutor.
+        Apple Dictionary already lists every sense of the word. Do NOT repeat that list.
+        Your only job is the meaning of this word (or the phrase it sits in) as used in THIS sentence.
+
+        Write every explanation and example translation in \(language.promptName). Keep the new example sentences themselves in English.
+        The uppercase English headings below are fixed app UI labels; copy them exactly.
+
+        Output exactly this layout, nothing before or after it:
+
+        \(GlossTextFormat.sentenceMeaningHeading)
+        <part of speech in this sentence, in \(language.promptName)> — <short meaning here, in \(language.promptName)>
+        <if it is part of a phrasal verb, phrase, or idiom, name it and explain its meaning here in \(language.promptName)>
+
+        \(GlossTextFormat.examplesHeading)
+        • <new English sentence using THIS same sense, not some other meaning>
+          <translation of that example in \(language.promptName)>
+        • <second new English example, same sense>
+          <translation in \(language.promptName)>
+
+        Rules:
+        - Pick the one sense that fits the given sentence. Ignore other dictionary senses.
+        - Examples must be substitutable for that sense.
+        - Keep examples short and natural.
+        - No extra commentary.\(nonChineseRule(language))
+        """
+    }
+
+    static func chapter(language: StudyLanguage) -> String {
+        """
+        You are a literary translator and English-learning tutor. Translate each target sentence into \(language.promptName).
+        Every translation and phrase explanation must be in \(language.promptName); keep only each source phrase in English.
+        Use every sentence in this block as context, but return exactly one result per supplied sentence.
+        Preserve names, dialogue, tone, and meaning. Include every phrasal verb in each target sentence, plus useful collocations, idioms, and set phrases, and explain how each is used here.
+
+        Return valid JSON only, as an object with this exact shape:
+        {"translations":[{"id":"the supplied sentence id","translation":"natural translation in \(language.promptName)","phrases":[{"source":"English phrase or phrasal verb","explanation":"contextual meaning in \(language.promptName)"}]}]}
+        Use an empty phrases array when nothing is worth noting. Do not add markdown fences or commentary.\(nonChineseRule(language))
+        """
+    }
+
+    private static func nonChineseRule(_ language: StudyLanguage) -> String {
+        switch language {
+        case .zhHans, .zhHant:
+            ""
+        default:
+            "\n- Do not use Chinese anywhere in the response."
+        }
+    }
+}

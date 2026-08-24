@@ -517,9 +517,26 @@ struct ChapterTranslationResult: Decodable, Equatable, Sendable {
 
     var glossText: String {
         let notes = phrases.isEmpty
-            ? "短语：无"
-            : "短语：\n" + phrases.map { "• \($0.source) — \($0.explanation)" }.joined(separator: "\n")
-        return "译文：\n\(translation)\n\n\(notes)"
+            ? "\(GlossTextFormat.phrasesHeading)\nNone"
+            : "\(GlossTextFormat.phrasesHeading)\n" + phrases.map { "• \($0.source) — \($0.explanation)" }.joined(separator: "\n")
+        return "\(GlossTextFormat.translationHeading)\n\(translation)\n\n\(notes)"
+    }
+}
+
+enum GlossTextFormat {
+    static let translationHeading = "TRANSLATION:"
+    static let phrasesHeading = "PHRASAL VERBS AND PHRASES:"
+    static let sentenceMeaningHeading = "MEANING IN THIS SENTENCE:"
+    static let examplesHeading = "EXAMPLES:"
+
+    static func isHeading(_ line: String) -> Bool {
+        let normalized = line.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        return [translationHeading, phrasesHeading, sentenceMeaningHeading, examplesHeading].contains(normalized)
+            || line.hasPrefix("译文")
+            || line.hasPrefix("短语")
+            || line.hasPrefix("本句释义")
+            || line.hasPrefix("例句")
+            || line.hasPrefix("释义")
     }
 }
 

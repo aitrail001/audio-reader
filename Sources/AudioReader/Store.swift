@@ -375,22 +375,25 @@ enum GlossPhrases {
         let lines = grokText.components(separatedBy: .newlines)
         for raw in lines {
             let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            if line.hasPrefix("短语") {
+            let uppercased = line.uppercased()
+            if line.hasPrefix("短语") || uppercased.hasPrefix(GlossTextFormat.phrasesHeading) {
                 inSection = true
-                let rest = line.replacingOccurrences(of: #"^短语[：:\s]*"#, with: "", options: .regularExpression)
+                let rest = line
+                    .replacingOccurrences(of: #"^短语[：:\s]*"#, with: "", options: .regularExpression)
+                    .replacingOccurrences(of: #"(?i)^PHRASAL VERBS AND PHRASES[:\s]*"#, with: "", options: .regularExpression)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                if rest.isEmpty || rest.hasPrefix("无") { continue }
+                if rest.isEmpty || rest.hasPrefix("无") || rest.caseInsensitiveCompare("None") == .orderedSame { continue }
                 if let pair = parseLine(rest) { results.append(pair) }
                 continue
             }
-            if line.hasPrefix("译文") || line.hasPrefix("释义") || line.hasPrefix("例句") {
+            if GlossTextFormat.isHeading(line) {
                 inSection = false
                 continue
             }
             guard !line.isEmpty else { continue }
             let isBullet = line.hasPrefix("•") || line.hasPrefix("·") || line.hasPrefix("- ") || line.hasPrefix("* ")
             if inSection || isBullet {
-                if line == "无" || line.hasPrefix("无") { continue }
+                if line == "无" || line.hasPrefix("无") || line.caseInsensitiveCompare("None") == .orderedSame { continue }
                 if let pair = parseLine(line) { results.append(pair) }
             }
         }
@@ -405,7 +408,9 @@ enum GlossPhrases {
         let seps = [" — ", " – ", "——", " —", "– ", " - ", "：", ": "]
         for sep in seps {
             if let r = body.range(of: sep) {
-                let phrase = String(body[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+                let phrase = String(body[..<r.lowerBound])
+                    .trimmingCharacters(in: .whitespaces)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "*_`"))
                 let meaning = String(body[r.upperBound...]).trimmingCharacters(in: .whitespaces)
                 if phrase.count >= 2, meaning.count >= 1, phrase.count < 80 {
                     return (phrase, meaning)

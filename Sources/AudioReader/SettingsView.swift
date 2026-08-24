@@ -164,7 +164,7 @@ struct SettingsView: View {
                     }
                     .labelsHidden()
                 }
-                helper("Lookups query installed dictionaries. For English to Chinese, use 牛津英汉汉英词典; 现代汉语规范词典 is Chinese-to-Chinese.")
+                helper("Changing Translate into automatically selects a matching installed dictionary when available. English definitions are used as the fallback.")
                 HStack {
                     Spacer().frame(width: labelWidth + 16)
                     Button("Open Dictionary.app") { DictionaryLookup.openDictionaryApp() }
@@ -185,6 +185,15 @@ struct SettingsView: View {
                         }
                     }
                     .labelsHidden()
+                    .onChange(of: draft.targetLanguage) { _, rawLanguage in
+                        guard let language = StudyLanguage(rawValue: rawLanguage),
+                              let name = DictionaryLookup.recommendedName(
+                                language: language,
+                                installedNames: DictionaryLookup.installedNames()
+                              )
+                        else { return }
+                        draft.preferredDictionary = name
+                    }
                 }
                 settingRow("Auto-translate") {
                     Toggle("Translate the current sentence with the selected LLM", isOn: $draft.autoTranslate)
