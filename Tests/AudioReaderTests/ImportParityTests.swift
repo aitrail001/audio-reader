@@ -440,7 +440,7 @@ struct ImportParityTests {
         #expect(results[0].id == "segment-1")
         #expect(results[0].glossText.contains("TRANSLATION:\n第一句。"))
         #expect(results[0].glossText.contains("break the ice"))
-        #expect(results[1].glossText.contains("PHRASAL VERBS AND PHRASES:\nNone"))
+        #expect(results[1].glossText.contains("LANGUAGE AND CONTEXT NOTES:\nNone"))
     }
 
     @Test("Chapter translation display labels stay in the English app UI")
@@ -464,7 +464,7 @@ struct ImportParityTests {
         )
 
         #expect(result.glossText.contains("TRANSLATION:\nElla rompió el hielo."))
-        #expect(result.glossText.contains("PHRASAL VERBS AND PHRASES:"))
+        #expect(result.glossText.contains("LANGUAGE AND CONTEXT NOTES:"))
         #expect(!result.glossText.contains("译文"))
         #expect(!result.glossText.contains("短语"))
     }
@@ -487,19 +487,23 @@ struct ImportParityTests {
     @Test("Non-Chinese translation prompts apply the target language to every generated field")
     func appliesNonChineseTargetLanguageThroughoutPrompts() {
         for language in [StudyLanguage.ja, .ko, .es, .fr, .de, .en] {
-            let sentence = TranslationPrompt.sentence(language: language)
-            let word = TranslationPrompt.word(language: language)
-            let chapter = TranslationPrompt.chapter(language: language)
+            let sentence = ReadingAssistantPrompt.sentenceTranslation(
+                language: language,
+                metadata: "Book: Test",
+                context: "TARGET id=one: Test.",
+                targetIDs: ["one"]
+            )
+            let word = ReadingAssistantPrompt.word(language: language)
+            let summary = ReadingAssistantPrompt.chapterSummary(language: language)
 
-            #expect(sentence.contains("Translate the whole sentence into \(language.promptName)"))
-            #expect(sentence.contains("Include every phrasal verb"))
-            #expect(sentence.contains("Do not use Markdown formatting"))
-            #expect(sentence.contains("Do not use Chinese anywhere in the response"))
+            #expect(sentence.system.contains("Translate each requested English target sentence naturally into \(language.promptName)"))
+            #expect(sentence.system.contains("all phrasal verbs and idioms"))
+            #expect(sentence.system.contains("Return valid JSON only"))
+            #expect(sentence.system.contains("Do not use Chinese anywhere in the response"))
             #expect(word.contains("Write every explanation and example translation in \(language.promptName)"))
             #expect(word.contains("Do not use Chinese anywhere in the response"))
-            #expect(chapter.contains("Every translation and phrase explanation must be in \(language.promptName)"))
-            #expect(chapter.contains("Include every phrasal verb"))
-            #expect(chapter.contains("Do not use Chinese anywhere in the response"))
+            #expect(summary.contains("Summarise the supplied audiobook chapter in \(language.promptName)"))
+            #expect(summary.contains("Do not use Chinese anywhere in the response"))
         }
     }
 
@@ -1102,10 +1106,10 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.14")
-        #expect(plist["CFBundleVersion"] as? String == "15")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.14;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 15;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.20")
+        #expect(plist["CFBundleVersion"] as? String == "21")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.20;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 21;").count - 1 == 4)
     }
 }
 

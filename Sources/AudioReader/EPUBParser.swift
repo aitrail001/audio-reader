@@ -1,8 +1,26 @@
 import Foundation
 import ZIPFoundation
 
+struct EPUBDocument: Equatable, Sendable {
+    var text: String
+    var title: String?
+    var author: String?
+
+    var wordCount: Int { Aligner.tokenize(text).count }
+    var sentenceCount: Int { EPUBParser.sentences(from: text).count }
+}
+
+struct EPUBBookMetadata: Equatable, Sendable {
+    var title: String
+    var author: String?
+}
+
 enum EPUBParser {
     static func extractText(from epubPath: String) -> String? {
+        document(from: epubPath)?.text
+    }
+
+    static func document(from epubPath: String) -> EPUBDocument? {
         let epub = URL(fileURLWithPath: epubPath)
         guard FileManager.default.fileExists(atPath: epub.path) else { return nil }
 
@@ -24,7 +42,9 @@ enum EPUBParser {
             parts.append(text)
         }
         let joined = parts.joined(separator: "\n\n")
-        return joined.isEmpty ? nil : joined
+        guard !joined.isEmpty else { return nil }
+        let metadata = packageMetadata(in: tmp)
+        return EPUBDocument(text: joined, title: metadata.title, author: metadata.author)
     }
 
     static func sentences(from text: String) -> [String] {
@@ -110,6 +130,38 @@ enum EPUBParser {
             }
         }
         return hrefs
+    }
+
+    private static func packageMetadata(in root: URL) -> (title: String?, author: String?) {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: nil) else {
+            return (nil, nil)
+        }
+        var opf: URL?
+        for case let url as URL in enumerator where url.pathExtension.lowercased() == "opf" {
+            opf = url
+            break
+        }
+        guard let opf,
+              let xml = (try? String(contentsOf: opf, encoding: .utf8))
+                ?? (try? String(contentsOf: opf, encoding: .isoLatin1))
+        else { return (nil, nil) }
+        return (
+            firstElement(named: "title", in: xml),
+            firstElement(named: "creator", in: xml)
+        )
+    }
+
+    private static func firstElement(named localName: String, in xml: String) -> String? {
+        let pattern = #"<(?:(?:[A-Za-z0-9_-]+):)?\#(localName)\b[^>]*>([\s\S]*?)</(?:(?:[A-Za-z0-9_-]+):)?\#(localName)>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: xml, range: NSRange(xml.startIndex..., in: xml)),
+              match.numberOfRanges >= 2,
+              let range = Range(match.range(at: 1), in: xml)
+        else { return nil }
+        let value = stripHTML(String(xml[range]))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 
     private static func resolve(href: String, in root: URL) -> URL? {

@@ -2,6 +2,9 @@ import Foundation
 
 enum LLMError: LocalizedError {
     case noAPIKey(LLMProvider)
+    case codexUnavailable
+    case codexNotLoggedIn
+    case codexFailed(String)
     case invalidEndpoint(String)
     case http(Int, String)
     case empty
@@ -10,6 +13,12 @@ enum LLMError: LocalizedError {
         switch self {
         case .noAPIKey(let provider):
             "No \(provider.menuLabel) API key. Add \(provider.environmentKey) in Settings."
+        case .codexUnavailable:
+            "Codex CLI was not found. Install Codex or set AUDIOREADER_CODEX_PATH, then sign in with ChatGPT."
+        case .codexNotLoggedIn:
+            "Codex is not signed in with ChatGPT. Run `codex login`, then try again."
+        case .codexFailed(let message):
+            "Codex request failed: \(message)"
         case .invalidEndpoint(let endpoint):
             "Invalid LLM endpoint: \(endpoint)"
         case .http(let code, let body):
@@ -70,6 +79,7 @@ enum ResponsesFallbackPolicy {
 enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
     case grok
     case qwenCloud
+    case openAI
 
     var id: String { rawValue }
 
@@ -77,6 +87,7 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         switch self {
         case .grok: "Grok (xAI)"
         case .qwenCloud: "QwenCloud"
+        case .openAI: "OpenAI / ChatGPT"
         }
     }
 
@@ -84,6 +95,7 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         switch self {
         case .grok: "XAI_API_KEY"
         case .qwenCloud: "DASHSCOPE_API_KEY"
+        case .openAI: "OPENAI_API_KEY"
         }
     }
 
@@ -91,6 +103,7 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         switch self {
         case .grok: "https://api.x.ai/v1"
         case .qwenCloud: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+        case .openAI: "https://api.openai.com/v1"
         }
     }
 }
@@ -227,6 +240,57 @@ enum QwenAPIKeyStore {
     }
 }
 
+enum OpenAIAPIKeyStore {
+    static var fileURL: URL { Persistence.root.appendingPathComponent("openai-api-key") }
+
+    static func load() -> String? {
+        if let env = ProcessInfo.processInfo.environment["OPENAI_API_KEY"], !env.isEmpty {
+            return env
+        }
+        return savedFileKey()
+    }
+
+    static func savedFileKey() -> String? {
+        guard let data = try? Data(contentsOf: fileURL),
+              let key = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !key.isEmpty
+        else { return nil }
+        return key
+    }
+
+    @discardableResult
+    static func save(_ key: String) -> Bool {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            guard FileManager.default.fileExists(atPath: fileURL.path) else { return true }
+            do {
+                try FileManager.default.removeItem(at: fileURL)
+                return true
+            } catch {
+                return false
+            }
+        }
+        do {
+            try Data(trimmed.utf8).write(to: fileURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    static var isConfigured: Bool { load() != nil }
+
+    static var sourceLabel: String {
+        if let env = ProcessInfo.processInfo.environment["OPENAI_API_KEY"], !env.isEmpty {
+            return "Using OPENAI_API_KEY from the environment"
+        }
+        if savedFileKey() != nil { return "Using a saved OpenAI API key" }
+        return "Not configured"
+    }
+}
+
 enum GrokModel: String, CaseIterable, Identifiable {
     case grok46 = "grok-4.6"
     case grokBuild = "grok-build-0.1"
@@ -256,6 +320,53 @@ enum GrokEffort: String, CaseIterable, Identifiable {
         case .medium: "Medium"
         case .high: "High"
         case .xhigh: "xHigh — slowest"
+        }
+    }
+}
+
+enum OpenAIAuthentication: String, CaseIterable, Identifiable, Codable, Sendable {
+    case chatGPT
+    case apiKey
+
+    var id: String { rawValue }
+
+    var menuLabel: String {
+        switch self {
+        case .chatGPT: "ChatGPT plan"
+        case .apiKey: "API key"
+        }
+    }
+}
+
+enum OpenAIModel: String, CaseIterable, Identifiable {
+    case gpt56Sol = "gpt-5.6-sol"
+    case gpt56Terra = "gpt-5.6-terra"
+    case gpt56Luna = "gpt-5.6-luna"
+
+    var id: String { rawValue }
+
+    var menuLabel: String {
+        switch self {
+        case .gpt56Sol: "GPT-5.6 Sol — highest capability"
+        case .gpt56Terra: "GPT-5.6 Terra — balanced"
+        case .gpt56Luna: "GPT-5.6 Luna — efficient"
+        }
+    }
+}
+
+enum OpenAIEffort: String, CaseIterable, Identifiable {
+    case none, low, medium, high, xhigh, max
+
+    var id: String { rawValue }
+
+    var menuLabel: String {
+        switch self {
+        case .none: "None — fastest"
+        case .low: "Low"
+        case .medium: "Medium"
+        case .high: "High"
+        case .xhigh: "xHigh"
+        case .max: "Maximum"
         }
     }
 }
@@ -407,23 +518,41 @@ actor GrokClient {
         baseURL: String,
         model: String,
         effort: String,
-        enableThinking: Bool
+        enableThinking: Bool,
+        openAIAuthentication: OpenAIAuthentication = .apiKey
     ) async throws -> String {
-        let key = provider == .grok ? APIKeyStore.load() : QwenAPIKeyStore.load()
-        guard let key else { throw LLMError.noAPIKey(provider) }
-
-        do {
-            let request = try LLMRequestBuilder.responses(
-                provider: provider,
-                apiKey: key,
-                baseURL: baseURL,
-                model: model,
+        if provider == .openAI, openAIAuthentication == .chatGPT {
+            return try await CodexCLIClient.shared.complete(
                 system: system,
                 user: user,
+                model: model,
                 effort: effort,
-                enableThinking: enableThinking
+                structuredJSON: false
             )
-            return try await sendResponses(request)
+        }
+        let key: String?
+        switch provider {
+        case .grok: key = APIKeyStore.load()
+        case .qwenCloud: key = QwenAPIKeyStore.load()
+        case .openAI: key = OpenAIAPIKeyStore.load()
+        }
+        guard let key else { throw LLMError.noAPIKey(provider) }
+
+        let responsesRequest = try LLMRequestBuilder.responses(
+            provider: provider,
+            apiKey: key,
+            baseURL: baseURL,
+            model: model,
+            system: system,
+            user: user,
+            effort: effort,
+            enableThinking: enableThinking
+        )
+        if provider == .openAI {
+            return try await sendResponses(responsesRequest)
+        }
+        do {
+            return try await sendResponses(responsesRequest)
         } catch {
             let request = try LLMRequestBuilder.chat(
                 provider: provider,
@@ -446,10 +575,39 @@ actor GrokClient {
         baseURL: String,
         model: String,
         effort: String,
-        enableThinking: Bool
+        enableThinking: Bool,
+        openAIAuthentication: OpenAIAuthentication = .apiKey
     ) async throws -> String {
-        let key = provider == .grok ? APIKeyStore.load() : QwenAPIKeyStore.load()
+        if provider == .openAI, openAIAuthentication == .chatGPT {
+            return try await CodexCLIClient.shared.complete(
+                system: system,
+                user: user,
+                model: model,
+                effort: effort,
+                structuredJSON: true
+            )
+        }
+        let key: String?
+        switch provider {
+        case .grok: key = APIKeyStore.load()
+        case .qwenCloud: key = QwenAPIKeyStore.load()
+        case .openAI: key = OpenAIAPIKeyStore.load()
+        }
         guard let key else { throw LLMError.noAPIKey(provider) }
+        if provider == .openAI {
+            let request = try LLMRequestBuilder.responses(
+                provider: provider,
+                apiKey: key,
+                baseURL: baseURL,
+                model: model,
+                system: system,
+                user: user,
+                effort: effort,
+                enableThinking: enableThinking,
+                structuredJSON: true
+            )
+            return try await sendResponses(request)
+        }
         if provider == .qwenCloud {
             do {
                 let request = try LLMRequestBuilder.responses(
@@ -628,11 +786,13 @@ enum LLMRequestBuilder {
             ) {
                 body["reasoning"] = ["effort": normalized]
             }
+        } else if provider == .openAI {
+            body["reasoning"] = ["effort": effort]
         } else if GrokModel(rawValue: model)?.supportsEffort == true {
             body["reasoning"] = ["effort": effort]
         }
         if structuredJSON {
-            body["tools"] = [translationSubmissionTool]
+            body["tools"] = [SentenceTranslationContract.submissionTool]
             body["tool_choice"] = "required"
         }
         return try request(path: "responses", apiKey: apiKey, baseURL: baseURL, body: body)
@@ -668,6 +828,8 @@ enum LLMRequestBuilder {
             ) {
                 body["reasoning_effort"] = normalized
             }
+        } else if provider == .openAI {
+            body["reasoning_effort"] = effort
         } else if GrokModel(rawValue: model)?.supportsEffort == true {
             body["reasoning_effort"] = effort
         }
@@ -691,41 +853,6 @@ enum LLMRequestBuilder {
         return request
     }
 
-    private static var translationSubmissionTool: [String: Any] {
-        [
-            "type": "function",
-            "name": "submit_translations",
-            "description": "Submit one contextual translation result for each requested sentence ID.",
-            "parameters": [
-                "type": "object",
-                "properties": [
-                    "translations": [
-                        "type": "array",
-                        "items": [
-                            "type": "object",
-                            "properties": [
-                                "id": ["type": "string"],
-                                "translation": ["type": "string"],
-                                "phrases": [
-                                    "type": "array",
-                                    "items": [
-                                        "type": "object",
-                                        "properties": [
-                                            "source": ["type": "string"],
-                                            "explanation": ["type": "string"]
-                                        ],
-                                        "required": ["source", "explanation"]
-                                    ]
-                                ]
-                            ],
-                            "required": ["id", "translation", "phrases"]
-                        ]
-                    ]
-                ],
-                "required": ["translations"]
-            ]
-        ]
-    }
 }
 
 enum StudyLanguage: String, CaseIterable, Identifiable, Sendable {
@@ -763,85 +890,6 @@ enum StudyLanguage: String, CaseIterable, Identifiable, Sendable {
         case .fr: "French"
         case .de: "German"
         case .en: "English (plain paraphrase)"
-        }
-    }
-}
-
-enum TranslationPrompt {
-    static func sentence(language: StudyLanguage) -> String {
-        """
-        You are a literary translator and English-learning tutor.
-        Translate the whole sentence into \(language.promptName).
-        Write every translation and phrase explanation in \(language.promptName). Keep only source phrases from the English sentence in English.
-        The uppercase English headings below are fixed app UI labels; copy them exactly.
-
-        Output exactly this layout, nothing before or after it:
-
-        \(GlossTextFormat.translationHeading)
-        <natural translation of the whole sentence in \(language.promptName); keep names; audiobook register; 1–2 sentences>
-
-        \(GlossTextFormat.phrasesHeading)
-        • <English phrase, phrasal verb, or idiom from THIS sentence> — <how it is used here, in \(language.promptName)>
-        • <next phrase or phrasal verb> — <meaning in this sentence, in \(language.promptName)>
-
-        Rules:
-        - Include every phrasal verb in the target sentence, plus useful collocations, idioms, and set phrases (e.g. "have trouble doing", "in trouble", "ask for trouble").
-        - Explain the sense in this sentence, not a generic dictionary dump.
-        - Skip ordinary single words unless they are part of a phrase.
-        - If there is nothing worth noting, write "None" below \(GlossTextFormat.phrasesHeading)
-        - Do not use Markdown formatting such as bold, italics, code, or headings.
-        - No quotes around the translation. No grammar lecture.\(nonChineseRule(language))
-        """
-    }
-
-    static func word(language: StudyLanguage) -> String {
-        """
-        You are an English-learning tutor.
-        Apple Dictionary already lists every sense of the word. Do NOT repeat that list.
-        Your only job is the meaning of this word (or the phrase it sits in) as used in THIS sentence.
-
-        Write every explanation and example translation in \(language.promptName). Keep the new example sentences themselves in English.
-        The uppercase English headings below are fixed app UI labels; copy them exactly.
-
-        Output exactly this layout, nothing before or after it:
-
-        \(GlossTextFormat.sentenceMeaningHeading)
-        <part of speech in this sentence, in \(language.promptName)> — <short meaning here, in \(language.promptName)>
-        <if it is part of a phrasal verb, phrase, or idiom, name it and explain its meaning here in \(language.promptName)>
-
-        \(GlossTextFormat.examplesHeading)
-        • <new English sentence using THIS same sense, not some other meaning>
-          <translation of that example in \(language.promptName)>
-        • <second new English example, same sense>
-          <translation in \(language.promptName)>
-
-        Rules:
-        - Pick the one sense that fits the given sentence. Ignore other dictionary senses.
-        - Examples must be substitutable for that sense.
-        - Keep examples short and natural.
-        - No extra commentary.\(nonChineseRule(language))
-        """
-    }
-
-    static func chapter(language: StudyLanguage) -> String {
-        """
-        You are a literary translator and English-learning tutor. Translate each target sentence into \(language.promptName).
-        Every translation and phrase explanation must be in \(language.promptName); keep only each source phrase in English.
-        Use every sentence in this block as context, but return exactly one result per supplied sentence.
-        Preserve names, dialogue, tone, and meaning. Include every phrasal verb in each target sentence, plus useful collocations, idioms, and set phrases, and explain how each is used here.
-
-        Return valid JSON only, as an object with this exact shape:
-        {"translations":[{"id":"the supplied sentence id","translation":"natural translation in \(language.promptName)","phrases":[{"source":"English phrase or phrasal verb","explanation":"contextual meaning in \(language.promptName)"}]}]}
-        Use an empty phrases array when nothing is worth noting. Do not add markdown fences or commentary.\(nonChineseRule(language))
-        """
-    }
-
-    private static func nonChineseRule(_ language: StudyLanguage) -> String {
-        switch language {
-        case .zhHans, .zhHant:
-            ""
-        default:
-            "\n- Do not use Chinese anywhere in the response."
         }
     }
 }

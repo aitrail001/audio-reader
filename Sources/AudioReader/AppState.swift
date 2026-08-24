@@ -30,6 +30,8 @@ final class AppState {
     var dictionaryHits: [DictionaryHit] = []
     var selectedDictionaryName: String = ""
     var loopSentence = false
+    private(set) var deepReadingActiveSentenceID: String?
+    private(set) var deepReadingPausedSentenceID: String?
     var glosses: [GlossEntry] = [] {
         didSet { chapterGlossGeneration &+= 1 }
     }
@@ -40,6 +42,9 @@ final class AppState {
     var showSettings = false
     var apiKeyDraft = ""
     var qwenAPIKeyDraft = ""
+    var openAIAPIKeyDraft = ""
+    var codexLoginStatus = "Codex login status not checked"
+    var isCheckingCodexLogin = false
     var qwenModels = QwenModelCatalog.fallback
     var isLoadingQwenModels = false
     var qwenModelsMessage: String?
@@ -154,7 +159,42 @@ final class AppState {
     }
 
     var selectedLLMModel: String {
-        llmProvider == .qwenCloud ? settings.qwenModel : settings.grokModel
+        switch llmProvider {
+        case .grok: settings.grokModel
+        case .qwenCloud: settings.qwenModel
+        case .openAI: settings.openAIModel
+        }
+    }
+
+    var openAIAuthentication: OpenAIAuthentication {
+        OpenAIAuthentication(rawValue: settings.openAIAuthentication) ?? .chatGPT
+    }
+
+    var selectedLLMEffort: String {
+        switch llmProvider {
+        case .grok: settings.grokEffort
+        case .qwenCloud: settings.qwenEffort
+        case .openAI: settings.openAIEffort
+        }
+    }
+
+    func llmConfigurationError(for provider: LLMProvider) -> LLMError? {
+        switch provider {
+        case .grok:
+            APIKeyStore.isConfigured ? nil : .noAPIKey(provider)
+        case .qwenCloud:
+            QwenAPIKeyStore.isConfigured ? nil : .noAPIKey(provider)
+        case .openAI:
+            openAIAuthentication == .chatGPT
+                ? (CodexCLIClient.isAvailable ? nil : .codexUnavailable)
+                : (OpenAIAPIKeyStore.isConfigured ? nil : .noAPIKey(provider))
+        }
+    }
+
+    func refreshCodexLoginStatus() async {
+        isCheckingCodexLogin = true
+        codexLoginStatus = await CodexCLIClient.shared.loginStatus()
+        isCheckingCodexLogin = false
     }
 
     var qwenTextModels: [LLMModelInfo] {
@@ -215,12 +255,150 @@ final class AppState {
         book.chapters.lazy.filter { self.readyChapterIDs.contains($0.id) }.count
     }
 
+    var currentEbookAlignment: EPUBAlignmentAssessment? {
+        guard selectedBook?.ebookPath != nil else { return nil }
+        if let assessment = transcript?.ebookAlignment { return assessment }
+        if transcript == nil {
+            return EPUBAlignmentAssessment(
+                status: .uncertain,
+                reason: "This EPUB has not been validated. Transcribe a chapter to check it before EPUB text is used.",
+                metrics: .empty
+            )
+        }
+        return EPUBAlignmentAssessment(
+            status: .uncertain,
+            reason: "This saved transcript predates document-level EPUB validation. Re-transcribe to assess it safely.",
+            metrics: .empty
+        )
+    }
+
+    var canUseCurrentEbookAnyway: Bool {
+        guard let transcript,
+              transcript.ebookAlignment != nil,
+              transcript.ebookUseOverride != true
+        else { return false }
+        return transcript.alignmentStatus != .trusted
+            && transcript.alignmentStatus != .unprocessable
+    }
+
+    func useCurrentEbookAnyway() {
+        guard var transcript, let book = selectedBook, let ebookPath = book.ebookPath else { return }
+        guard transcript.alignmentStatus != .unprocessable else {
+            errorMessage = "This EPUB has no readable text. Replace it before using EPUB wording."
+            return
+        }
+        if transcript.alignmentStatus == .wrongBookLikely,
+           !transcript.segments.contains(where: { $0.individualEbookMatchTrusted == true }) {
+            let spokenOnly = transcript.segments.map { segment -> TranscriptSegment in
+                var copy = segment
+                copy.ebookText = nil
+                copy.alignmentScore = nil
+                copy.individualEbookMatchTrusted = nil
+                copy.documentEbookUseAllowed = nil
+                return copy
+            }
+            let result = Aligner.align(
+                segments: spokenOnly,
+                document: EPUBParser.document(from: ebookPath),
+                expectedMetadata: .init(title: book.title, author: book.author),
+                continueAfterWrongBookPreflight: true
+            )
+            transcript.segments = result.segments
+            transcript.ebookAlignment = result.assessment
+        }
+        transcript.allowEbookTextAnyway()
+        guard transcript.ebookAligned else {
+            errorMessage = "No sufficiently strong sentence matches were found in this EPUB."
+            return
+        }
+        do {
+            try Persistence.saveTranscript(transcript)
+            self.transcript = transcript
+        } catch {
+            errorMessage = "Could not save the EPUB override: \(error.localizedDescription)"
+        }
+    }
+
+    func replaceCurrentEbook(with source: URL) throws {
+        guard let book = selectedBook else { return }
+        guard AudiobookImportService.isReadableEbook(source) else {
+            throw AudiobookImportError.invalidEbook
+        }
+        let replacement = try AudiobookImportService.stageEbookReplacement(
+            source,
+            in: URL(fileURLWithPath: book.folderPath, isDirectory: true)
+        )
+        let assessment = EPUBAlignmentAssessment(
+            status: .uncertain,
+            reason: "The EPUB was replaced. Re-transcribe this chapter to validate the new document.",
+            metrics: .empty
+        )
+        let originals = book.chapters.compactMap { Persistence.loadTranscript(for: $0) }
+        var invalidated: [Transcript] = []
+        do {
+            for original in originals {
+                var saved = original
+                invalidateEbookText(in: &saved, assessment: assessment)
+                try Persistence.saveTranscript(saved)
+                invalidated.append(saved)
+            }
+            replacement.commit()
+        } catch {
+            var rollbackFailures: [String] = []
+            do {
+                try replacement.rollback()
+            } catch {
+                rollbackFailures.append("file rollback failed: \(error.localizedDescription)")
+            }
+            for original in originals {
+                do {
+                    try Persistence.saveTranscript(original)
+                } catch {
+                    rollbackFailures.append(
+                        "transcript \(original.chapterID) rollback failed: \(error.localizedDescription)"
+                    )
+                }
+            }
+            if let current = originals.first(where: { $0.chapterID == transcript?.chapterID }) {
+                transcript = current
+            }
+            if !rollbackFailures.isEmpty {
+                throw AudiobookImportError.replacementRollbackFailed(
+                    rollbackFailures.joined(separator: "; ")
+                )
+            }
+            throw error
+        }
+        if let current = invalidated.first(where: { $0.chapterID == transcript?.chapterID }) {
+            transcript = current
+        }
+        if let index = books.firstIndex(where: { $0.id == book.id }) {
+            books[index].ebookPath = replacement.destination.path
+        }
+    }
+
+    private func invalidateEbookText(
+        in transcript: inout Transcript,
+        assessment: EPUBAlignmentAssessment
+    ) {
+        transcript.ebookAligned = false
+        transcript.ebookUseOverride = false
+        transcript.ebookAlignment = assessment
+        for index in transcript.segments.indices {
+            transcript.segments[index].ebookText = nil
+            transcript.segments[index].alignmentScore = nil
+            transcript.segments[index].individualEbookMatchTrusted = nil
+            transcript.segments[index].documentEbookUseAllowed = nil
+        }
+    }
+
     init() {
         settings = Persistence.loadSettings()
 #if os(iOS)
         // iOS data-container UUIDs can change after reinstalling an app, so a
         // persisted absolute Documents path must never drive library scanning.
         settings.libraryPath = Persistence.importedBooksURL.path
+        settings.openAIAuthentication = OpenAIAuthentication.apiKey.rawValue
         if let normalizedDictionary = DictionaryLookup.recommendedName(
             language: StudyLanguage(rawValue: settings.targetLanguage) ?? .zhHans,
             installedNames: DictionaryLookup.installedNames()
@@ -238,6 +416,7 @@ final class AppState {
         chapterTranslationCheckpoints = Persistence.loadChapterTranslationCheckpoints()
         apiKeyDraft = APIKeyStore.savedFileKey() ?? ""
         qwenAPIKeyDraft = QwenAPIKeyStore.savedFileKey() ?? ""
+        openAIAPIKeyDraft = OpenAIAPIKeyStore.savedFileKey() ?? ""
         selectedDictionaryName = settings.preferredDictionary
         if let raw = TextSource(rawValue: settings.textSource) {
             textSource = raw
@@ -257,6 +436,8 @@ final class AppState {
         }
         if llmProvider == .qwenCloud {
             Task { await self.refreshQwenModels() }
+        } else if llmProvider == .openAI, openAIAuthentication == .chatGPT {
+            Task { await self.refreshCodexLoginStatus() }
         }
     }
 
@@ -331,6 +512,8 @@ final class AppState {
         selectedChapterID = chapter.id
         tab = .player
         player.load(path: chapter.audioPath, startTime: chapter.audioStart, duration: chapter.duration)
+        deepReadingActiveSentenceID = nil
+        deepReadingPausedSentenceID = nil
         player.rate = Float(settings.playbackRate)
         transcript = Persistence.loadTranscript(for: chapter)
         chapterTranslation = nil
@@ -444,6 +627,7 @@ final class AppState {
                 let result = try await transcriber.transcribe(
                     chapter: chapter,
                     ebookPath: book.ebookPath,
+                    expectedMetadata: .init(title: book.title, author: book.author),
                     progress: { [weak self] p in
                         Task { @MainActor in
                             self?.transcriptionProgress = p
@@ -462,7 +646,8 @@ final class AppState {
                     chapter: chapter,
                     locale: result.locale,
                     segments: result.segments,
-                    aligned: result.ebookAligned
+                    aligned: result.ebookAligned,
+                    ebookAlignment: result.ebookAlignment
                 )
             } catch is CancellationError {
                 // ignore
@@ -480,7 +665,8 @@ final class AppState {
         chapter: Chapter,
         locale: String,
         segments: [TranscriptSegment],
-        aligned: Bool
+        aligned: Bool,
+        ebookAlignment: EPUBAlignmentAssessment? = nil
     ) -> Bool {
         let transcript = Transcript(
             chapterID: chapter.id,
@@ -490,7 +676,8 @@ final class AppState {
             locale: locale,
             segments: segments,
             source: "SpeechAnalyzer",
-            ebookAligned: aligned
+            ebookAligned: aligned,
+            ebookAlignment: ebookAlignment
         )
         do {
             try Persistence.saveTranscript(transcript)
@@ -525,12 +712,20 @@ final class AppState {
         if transcript == nil, !isTranscribing {
             transcribeSelected()
         }
-        player.toggle()
+        if player.isPlaying {
+            player.pause()
+        } else if settings.deepReadingMode, deepReadingPausedSentenceID != nil {
+            continueDeepReading()
+        } else {
+            armDeepReadingSentence()
+            player.play()
+        }
     }
 
     func skipSentence(direction: Int) {
         guard let transcript, let current = currentSegment else {
             player.skip(seconds: Double(direction) * settings.skipSeconds)
+            resetDeepReadingAfterSeek()
             return
         }
         guard let idx = transcript.segments.firstIndex(of: current) else { return }
@@ -547,20 +742,116 @@ final class AppState {
                 player.seek(transcript.segments[idx + 1].start)
             }
         }
+        resetDeepReadingAfterSeek()
     }
 
     func replaySentence() {
         if let current = currentSegment {
             player.seek(current.start)
+            armDeepReadingSentence(current)
             player.play()
         }
     }
 
-    func tickLoop() {
-        guard loopSentence, let current = currentSegment else { return }
-        if player.currentTime >= current.end - 0.04 {
+    var canContinueDeepReading: Bool {
+        guard settings.deepReadingMode,
+              let transcript,
+              let sentenceID = deepReadingPausedSentenceID,
+              let index = transcript.segments.firstIndex(where: { $0.id == sentenceID })
+        else { return false }
+        return transcript.segments.indices.contains(index + 1)
+    }
+
+    var isDeepReadingPaused: Bool {
+        settings.deepReadingMode && deepReadingPausedSentenceID != nil
+    }
+
+    func setDeepReadingMode(_ enabled: Bool) {
+        guard settings.deepReadingMode != enabled else { return }
+        settings.deepReadingMode = enabled
+        if enabled {
+            loopSentence = false
+            if player.isPlaying { armDeepReadingSentence() }
+        } else {
+            deepReadingActiveSentenceID = nil
+            deepReadingPausedSentenceID = nil
+        }
+        persistSettings()
+    }
+
+    func setSentenceLoop(_ enabled: Bool) {
+        loopSentence = enabled
+        if enabled, settings.deepReadingMode {
+            setDeepReadingMode(false)
+        }
+    }
+
+    func seekToSentence(_ sentence: TranscriptSegment, time: TimeInterval, autoplay: Bool) {
+        player.seek(time)
+        armDeepReadingSentence(sentence)
+        if autoplay, !player.isPlaying { player.play() }
+    }
+
+    func seekPlayback(to time: TimeInterval) {
+        player.seek(time)
+        resetDeepReadingAfterSeek()
+    }
+
+    func skipPlayback(seconds: TimeInterval) {
+        player.skip(seconds: seconds)
+        resetDeepReadingAfterSeek()
+    }
+
+    func continueDeepReading() {
+        guard settings.deepReadingMode,
+              let transcript,
+              let sentenceID = deepReadingPausedSentenceID,
+              let index = transcript.segments.firstIndex(where: { $0.id == sentenceID }),
+              transcript.segments.indices.contains(index + 1)
+        else { return }
+        let next = transcript.segments[index + 1]
+        player.seek(next.start)
+        armDeepReadingSentence(next)
+        player.play()
+    }
+
+    func tickPlaybackModes() {
+        if loopSentence, let current = currentSegment,
+           player.currentTime >= current.end - 0.04 {
             player.seek(current.start)
             player.play()
+            return
+        }
+        guard settings.deepReadingMode, player.isPlaying, let transcript else { return }
+        if deepReadingActiveSentenceID == nil {
+            armDeepReadingSentence()
+        }
+        guard let sentenceID = deepReadingActiveSentenceID,
+              let sentence = transcript.segments.first(where: { $0.id == sentenceID }),
+              player.currentTime >= sentence.end - 0.04
+        else { return }
+        player.pause()
+        player.seek(max(sentence.start, sentence.end - 0.06))
+        deepReadingActiveSentenceID = nil
+        deepReadingPausedSentenceID = sentence.id
+    }
+
+    private func armDeepReadingSentence(_ sentence: TranscriptSegment? = nil) {
+        guard settings.deepReadingMode, let sentence = sentence ?? currentSegment else {
+            deepReadingActiveSentenceID = nil
+            deepReadingPausedSentenceID = nil
+            return
+        }
+        deepReadingActiveSentenceID = sentence.id
+        deepReadingPausedSentenceID = nil
+    }
+
+    private func resetDeepReadingAfterSeek() {
+        deepReadingPausedSentenceID = nil
+        if settings.deepReadingMode, player.isPlaying {
+            armDeepReadingSentence()
+        } else {
+            deepReadingActiveSentenceID = nil
         }
     }
 
@@ -605,7 +896,7 @@ final class AppState {
             translationModel: accepted?.model ?? gloss?.model,
             context: segment.displayText,
             spokenText: segment.spokenText,
-            ebookText: segment.ebookText,
+            ebookText: segment.trustedEbookText,
             bookID: book.id,
             bookTitle: book.title,
             chapterID: chapter.id,
@@ -972,9 +1263,8 @@ final class AppState {
             context: context
         )
         let provider = llmProvider
-        let isConfigured = provider == .grok ? APIKeyStore.isConfigured : QwenAPIKeyStore.isConfigured
-        guard isConfigured else {
-            translationError = LLMError.noAPIKey(provider).localizedDescription
+        if let configurationError = llmConfigurationError(for: provider) {
+            translationError = configurationError.localizedDescription
             showSettings = true
             return
         }
@@ -987,8 +1277,10 @@ final class AppState {
         let language = studyLanguage
         let model = selectedLLMModel
         let baseURL = provider == .qwenCloud ? settings.qwenEndpoint : provider.defaultEndpoint
-        let effort = provider == .qwenCloud ? settings.qwenEffort : settings.grokEffort
+        let effort = selectedLLMEffort
         let enableThinking = settings.qwenThinking
+        let sentenceContextCount = settings.sentenceContextCount
+        let openAIAuthentication = self.openAIAuthentication
         let book = selectedBook
         let chapter = selectedChapter
         let origin = selectedOrigin()
@@ -998,19 +1290,26 @@ final class AppState {
         }) else { return }
         let metadata = bookMetadata(book: book, chapter: chapter)
         let capturedTranscript = transcript
-        let system: String
-        let user: String
+        let prompt: LLMTaskPrompt
         if kind == .sentence {
-            system = TranslationPrompt.sentence(language: language)
-            user = """
-            \(metadata)
-
-            Passage context (translate only the TARGET sentence):
-            \(segment.map { neighboringContext(around: $0, in: capturedTranscript, radius: settings.sentenceContextCount) } ?? "TARGET: \(trimmed)")
-            """
+            let translationContext = segment.map {
+                ReadingAssistantPrompt.sentenceContext(
+                    around: [$0],
+                    in: capturedTranscript,
+                    radius: sentenceContextCount
+                )
+            } ?? "TARGET id=\(targetID): \(trimmed)"
+            prompt = ReadingAssistantPrompt.sentenceTranslation(
+                language: language,
+                metadata: metadata,
+                context: translationContext,
+                targetIDs: [targetID]
+            )
         } else {
-            system = TranslationPrompt.word(language: language)
-            user = "Word: \(trimmed)\nSentence: \(context ?? trimmed)"
+            prompt = LLMTaskPrompt(
+                system: ReadingAssistantPrompt.word(language: language),
+                user: "Word: \(trimmed)\nSentence: \(context ?? trimmed)"
+            )
         }
         enqueueLLMJob(
             kind: jobKind,
@@ -1019,15 +1318,37 @@ final class AppState {
             detail: "Requesting \(model)…"
         ) { _ in
             do {
-                let text = try await GrokClient.shared.complete(
-                    provider: provider,
-                    system: system,
-                    user: user,
-                    baseURL: baseURL,
-                    model: model,
-                    effort: effort,
-                    enableThinking: enableThinking
-                )
+                let text: String
+                if kind == .sentence {
+                    let raw = try await GrokClient.shared.completeStructuredJSON(
+                        provider: provider,
+                        system: prompt.system,
+                        user: prompt.user,
+                        baseURL: baseURL,
+                        model: model,
+                        effort: effort,
+                        enableThinking: enableThinking,
+                        openAIAuthentication: openAIAuthentication
+                    )
+                    guard let result = try ChapterTranslationBatch.parse(
+                        raw,
+                        expectedIDs: [targetID]
+                    ).first else {
+                        throw ChapterTranslationBatchError.missingSentences
+                    }
+                    text = result.glossText
+                } else {
+                    text = try await GrokClient.shared.complete(
+                        provider: provider,
+                        system: prompt.system,
+                        user: prompt.user,
+                        baseURL: baseURL,
+                        model: model,
+                        effort: effort,
+                        enableThinking: enableThinking,
+                        openAIAuthentication: openAIAuthentication
+                    )
+                }
                 let entry = GlossEntry(
                     id: id,
                     kind: kind,
@@ -1087,9 +1408,8 @@ final class AppState {
             return
         }
         let provider = llmProvider
-        let configured = provider == .grok ? APIKeyStore.isConfigured : QwenAPIKeyStore.isConfigured
-        guard configured else {
-            chapterAssistantError = LLMError.noAPIKey(provider).localizedDescription
+        if let configurationError = llmConfigurationError(for: provider) {
+            chapterAssistantError = configurationError.localizedDescription
             showSettings = true
             return
         }
@@ -1097,8 +1417,10 @@ final class AppState {
         let total = pendingSegments.count
         let model = selectedLLMModel
         let baseURL = provider == .qwenCloud ? settings.qwenEndpoint : provider.defaultEndpoint
-        let effort = provider == .qwenCloud ? settings.qwenEffort : settings.grokEffort
+        let effort = selectedLLMEffort
         let enableThinking = settings.qwenThinking
+        let sentenceContextCount = settings.sentenceContextCount
+        let openAIAuthentication = self.openAIAuthentication
         let book = selectedBook
         let chapter = selectedChapter
         let checkpointChapterID = chapter?.id ?? transcript.chapterID
@@ -1144,12 +1466,16 @@ final class AppState {
                 var remaining = block
                 var lastIssue = ChapterTranslationBatchError.missingSentences.localizedDescription
                 for attempt in 1...ChapterTranslationBatch.maximumAttempts where !remaining.isEmpty {
-                    let system = TranslationPrompt.chapter(language: language)
-                    let numbered = block.enumerated().map { index, segment in
-                        "\(index + 1). id=\(segment.id)\n\(segment.displayText)"
-                    }.joined(separator: "\n\n")
-                    let targetIDs = remaining.map(\.id).joined(separator: ", ")
-                    let user = "\(metadata)\n\nContext block:\n\(numbered)\n\nTranslate only these target IDs: \(targetIDs)"
+                    let prompt = ReadingAssistantPrompt.sentenceTranslation(
+                        language: language,
+                        metadata: metadata,
+                        context: ReadingAssistantPrompt.sentenceContext(
+                            around: block,
+                            in: transcript,
+                            radius: sentenceContextCount
+                        ),
+                        targetIDs: remaining.map(\.id)
+                    )
                     let stopRequested = self.chapterTranslationStopRequests.contains(jobID)
                     self.updateLLMJob(
                         id: jobID,
@@ -1163,12 +1489,13 @@ final class AppState {
                     do {
                         let raw = try await GrokClient.shared.completeStructuredJSON(
                             provider: provider,
-                            system: system,
-                            user: user,
+                            system: prompt.system,
+                            user: prompt.user,
                             baseURL: baseURL,
                             model: model,
                             effort: effort,
-                            enableThinking: enableThinking
+                            enableThinking: enableThinking,
+                            openAIAuthentication: openAIAuthentication
                         )
                         let parsed = try ChapterTranslationBatch.parseAvailable(
                             raw,
@@ -1460,11 +1787,7 @@ final class AppState {
         guard !llmJobQueue.jobs.contains(where: {
             $0.kind == .chapterSummary && $0.chapterID == origin.chapterID
         }) else { return }
-        let system = """
-        Summarise this audiobook chapter in \(studyLanguage.promptName).
-        Cover the main events or arguments, important characters or ideas, and themes. Use concise headings and bullet points.
-        Do not invent details outside the supplied chapter.
-        """
+        let system = ReadingAssistantPrompt.chapterSummary(language: studyLanguage)
         let metadata = bookMetadata(book: selectedBook, chapter: selectedChapter)
         enqueueChapterAssistant(
             kind: .chapterSummary,
@@ -1500,10 +1823,7 @@ final class AppState {
             .flatMap { id in transcript.segments.first(where: { $0.id == id }) }
             .map { neighboringContext(around: $0, in: transcript, radius: settings.chatContextCount) }
             ?? "No current sentence."
-        let system = """
-        You are a reading companion. Answer in \(studyLanguage.promptName) unless the reader asks for another language.
-        Ground the answer in the supplied book and nearby chapter passage. Clearly say when the context is insufficient.
-        """
+        let system = ReadingAssistantPrompt.chapterChat(language: studyLanguage)
         let user = """
         \(bookMetadata(book: selectedBook, chapter: selectedChapter))
 
@@ -1538,16 +1858,16 @@ final class AppState {
         completion: @escaping @MainActor (String) -> Void
     ) {
         let provider = llmProvider
-        let configured = provider == .grok ? APIKeyStore.isConfigured : QwenAPIKeyStore.isConfigured
-        guard configured else {
-            chapterAssistantError = LLMError.noAPIKey(provider).localizedDescription
+        if let configurationError = llmConfigurationError(for: provider) {
+            chapterAssistantError = configurationError.localizedDescription
             showSettings = true
             return
         }
         let baseURL = provider == .qwenCloud ? settings.qwenEndpoint : provider.defaultEndpoint
         let model = selectedLLMModel
-        let effort = provider == .qwenCloud ? settings.qwenEffort : settings.grokEffort
+        let effort = selectedLLMEffort
         let enableThinking = settings.qwenThinking
+        let openAIAuthentication = self.openAIAuthentication
         if let chapterID = origin.chapterID {
             chapterAssistantErrorsByChapterID[chapterID] = nil
         }
@@ -1568,7 +1888,8 @@ final class AppState {
                     baseURL: baseURL,
                     model: model,
                     effort: effort,
-                    enableThinking: enableThinking
+                    enableThinking: enableThinking,
+                    openAIAuthentication: openAIAuthentication
                 )
                 completion(result)
             } catch {
@@ -1712,7 +2033,7 @@ final class AppState {
                         translationModel: gloss.model,
                         context: original,
                         spokenText: segment?.spokenText,
-                        ebookText: segment?.ebookText,
+                        ebookText: segment?.trustedEbookText,
                         bookID: bookID,
                         bookTitle: bookTitle,
                         chapterID: chapterID,
@@ -1748,7 +2069,7 @@ final class AppState {
                         translationModel: gloss.model,
                         context: gloss.source,
                         spokenText: segment?.spokenText,
-                        ebookText: segment?.ebookText,
+                        ebookText: segment?.trustedEbookText,
                         bookID: bookID,
                         bookTitle: bookTitle,
                         chapterID: chapterID,
@@ -1786,7 +2107,7 @@ final class AppState {
                         translationModel: gloss.model,
                         context: gloss.source,
                         spokenText: segment?.spokenText,
-                        ebookText: segment?.ebookText,
+                        ebookText: segment?.trustedEbookText,
                         bookID: bookID,
                         bookTitle: bookTitle,
                         chapterID: chapterID,
@@ -1872,7 +2193,7 @@ final class AppState {
             if let hit = transcript.segments.first(where: {
                 GlossEntry.normalize($0.displayText) == needle
                 || GlossEntry.normalize($0.spokenText) == needle
-                || GlossEntry.normalize($0.ebookText ?? "").contains(needle)
+                || GlossEntry.normalize($0.trustedEbookText ?? "").contains(needle)
                 || needle.contains(GlossEntry.normalize($0.spokenText))
             }) {
                 return hit

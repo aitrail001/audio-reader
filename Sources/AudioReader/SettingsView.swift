@@ -5,6 +5,7 @@ struct SettingsView: View {
     @State private var draft: AppSettings
     @State private var xAIKey: String
     @State private var qwenKey: String
+    @State private var openAIKey: String
     @State private var saveFeedback: SaveFeedback?
 
     private let labelWidth: CGFloat = 156
@@ -14,6 +15,7 @@ struct SettingsView: View {
         _draft = State(initialValue: state.settings)
         _xAIKey = State(initialValue: state.apiKeyDraft)
         _qwenKey = State(initialValue: state.qwenAPIKeyDraft)
+        _openAIKey = State(initialValue: state.openAIAPIKeyDraft)
     }
 
     var body: some View {
@@ -36,9 +38,7 @@ struct SettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     appearanceSection
-#if os(macOS)
                     dictionarySection
-#endif
                     languageSection
                     providerSection
                 }
@@ -232,8 +232,10 @@ struct SettingsView: View {
 
                 if draftProvider == .grok {
                     grokSettings
-                } else {
+                } else if draftProvider == .qwenCloud {
                     qwenSettings
+                } else {
+                    openAISettings
                 }
             }
             .padding(12)
@@ -350,8 +352,87 @@ struct SettingsView: View {
         }
     }
 
+    private var openAISettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            helper("Use an existing Codex ‘Sign in with ChatGPT’ session for ChatGPT-plan access on macOS, or use an OpenAI API key for usage-based access on macOS and iPadOS. The two modes keep separate billing and workspace policies.")
+            settingRow("Authentication") {
+#if os(macOS)
+                Picker("Authentication", selection: $draft.openAIAuthentication) {
+                    ForEach(OpenAIAuthentication.allCases) { authentication in
+                        Text(authentication.menuLabel).tag(authentication.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+#else
+                Text("API key")
+                    .onAppear { draft.openAIAuthentication = OpenAIAuthentication.apiKey.rawValue }
+#endif
+            }
+
+            if draftOpenAIAuthentication == .chatGPT {
+                settingRow("Connection") {
+                    Text(state.codexLoginStatus)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(state.codexLoginStatus.localizedCaseInsensitiveContains("logged in") ? Palette.gold : Palette.dim)
+                }
+                alignedHelper("Codex: \(CodexCLIClient.executableLabel)", muted: true)
+                HStack {
+                    Spacer().frame(width: labelWidth + 16)
+                    if state.isCheckingCodexLogin {
+                        ProgressView().controlSize(.small)
+                    }
+                    Button {
+                        Task { await state.refreshCodexLoginStatus() }
+                    } label: {
+                        Label("Check Codex Login", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(state.isCheckingCodexLogin)
+                }
+                alignedHelper("If needed, run `codex login` in Terminal and choose Sign in with ChatGPT. AudioReader prefers Codex's native executable and never reads or displays the cached OAuth tokens.", muted: true)
+            } else {
+                settingRow("Connection") {
+                    Text(OpenAIAPIKeyStore.sourceLabel)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(OpenAIAPIKeyStore.isConfigured ? Palette.gold : Palette.dim)
+                }
+                settingRow("OpenAI API key") {
+                    SecureField("OPENAI_API_KEY", text: $openAIKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+
+            settingRow("Model") {
+                Picker("Model", selection: $draft.openAIModel) {
+                    ForEach(OpenAIModel.allCases) { model in
+                        Text(model.menuLabel).tag(model.rawValue)
+                    }
+                }
+                .labelsHidden()
+            }
+            settingRow("Reasoning effort") {
+                Picker("Reasoning effort", selection: $draft.openAIEffort) {
+                    ForEach(OpenAIEffort.allCases) { effort in
+                        Text(effort.menuLabel).tag(effort.rawValue)
+                    }
+                }
+                .labelsHidden()
+            }
+            alignedHelper("GPT-5.6 Luna is the efficient default for frequent translation and reading-assistant requests. Sol and Terra trade higher capability for greater usage.", muted: true)
+        }
+        .task {
+            if draftOpenAIAuthentication == .chatGPT {
+                await state.refreshCodexLoginStatus()
+            }
+        }
+    }
+
     private var draftProvider: LLMProvider {
         LLMProvider(rawValue: draft.llmProvider) ?? .grok
+    }
+
+    private var draftOpenAIAuthentication: OpenAIAuthentication {
+        OpenAIAuthentication(rawValue: draft.openAIAuthentication) ?? .chatGPT
     }
 
     private var qwenTextModels: [LLMModelInfo] {
@@ -416,6 +497,7 @@ struct SettingsView: View {
         let settingsSaved = Persistence.saveSettings(draft)
         let xAIKeySaved = APIKeyStore.save(xAIKey)
         let qwenKeySaved = QwenAPIKeyStore.save(qwenKey)
+        let openAIKeySaved = OpenAIAPIKeyStore.save(openAIKey)
 
         guard settingsSaved else {
             saveFeedback = .init(message: "Settings could not be written to disk. Your changes were not applied.", succeeded: false)
@@ -426,8 +508,9 @@ struct SettingsView: View {
         state.selectedDictionaryName = draft.preferredDictionary
         state.apiKeyDraft = xAIKey
         state.qwenAPIKeyDraft = qwenKey
+        state.openAIAPIKeyDraft = openAIKey
 
-        if xAIKeySaved && qwenKeySaved {
+        if xAIKeySaved && qwenKeySaved && openAIKeySaved {
             saveFeedback = .init(message: "Settings saved successfully.", succeeded: true)
         } else {
             saveFeedback = .init(message: "Settings saved, but one or more API keys could not be stored.", succeeded: false)

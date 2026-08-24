@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 #if os(macOS)
 import AppKit
 #endif
@@ -25,6 +26,7 @@ struct PlayerView: View {
 #if os(iOS)
     @State private var showReaderToolbar = false
     @State private var showSpeedPicker = false
+    @State private var showReplaceEbookImporter = false
 #endif
 
     var body: some View {
@@ -40,6 +42,9 @@ struct PlayerView: View {
 #endif
             if state.isTranscribing {
                 transcribeBanner
+            }
+            if let assessment = state.currentEbookAlignment {
+                ebookAlignmentNotice(assessment)
             }
             if let err = state.errorMessage ?? state.translationError ?? state.player.playbackError {
                 Text(err)
@@ -87,13 +92,65 @@ struct PlayerView: View {
                 .accessibilityLabel(showReaderToolbar ? "Hide reader controls" : "Show reader controls")
             }
         }
+        .fileImporter(isPresented: $showReplaceEbookImporter, allowedContentTypes: [.epub]) { result in
+            do {
+                try state.replaceCurrentEbook(with: result.get())
+            } catch {
+                state.errorMessage = error.localizedDescription
+            }
+        }
 #endif
         .onChange(of: state.player.currentTime) { _, _ in
-            state.tickLoop()
+            state.tickPlaybackModes()
         }
         .onChange(of: state.currentSegment?.id) { _, _ in
             state.ensureAutoTranslation()
         }
+    }
+
+    private func ebookAlignmentNotice(_ assessment: EPUBAlignmentAssessment) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: assessment.status == .trusted ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(assessment.status == .trusted ? Color.green : Palette.terracotta)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(assessment.status.title)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(state.transcript?.ebookUseOverride == true
+                    ? "Using individually verified EPUB matches by your explicit choice."
+                    : assessment.reason)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.dim)
+            }
+            Spacer()
+            if assessment.status != .trusted {
+                Button("Replace EPUB") { replaceEbook() }
+                    .buttonStyle(.bordered)
+                if state.canUseCurrentEbookAnyway {
+                    Button("Use This EPUB Anyway") { state.useCurrentEbookAnyway() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Palette.terracotta)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(assessment.status == .trusted ? Color.green.opacity(0.08) : Palette.goldSoft)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("EPUB alignment status: \(assessment.status.title)")
+    }
+
+    private func replaceEbook() {
+#if os(macOS)
+        guard let book = state.selectedBook else { return }
+        do {
+            guard let url = try MacAudiobookImporter.chooseReplacementEbook(for: book) else { return }
+            try state.replaceCurrentEbook(with: url)
+        } catch {
+            state.errorMessage = error.localizedDescription
+        }
+#else
+        showReplaceEbookImporter = true
+#endif
     }
 
     private var header: some View {
@@ -143,6 +200,9 @@ struct PlayerView: View {
                 state.persistSettings()
                 if provider == LLMProvider.qwenCloud.rawValue {
                     Task { await state.refreshQwenModels() }
+                } else if provider == LLMProvider.openAI.rawValue,
+                          state.openAIAuthentication == .chatGPT {
+                    Task { await state.refreshCodexLoginStatus() }
                 }
             }
 
@@ -164,7 +224,7 @@ struct PlayerView: View {
                     .frame(maxWidth: 110)
                     .onChange(of: state.settings.grokEffort) { _, _ in state.persistSettings() }
                 }
-            } else {
+            } else if state.llmProvider == .qwenCloud {
                 Picker("Model", selection: $state.settings.qwenModel) {
                     ForEach(state.qwenTextModels) { model in
                         Text(model.id).tag(model.id)
@@ -191,6 +251,21 @@ struct PlayerView: View {
                     .frame(maxWidth: 105)
                     .onChange(of: state.settings.qwenEffort) { _, _ in state.persistSettings() }
                 }
+            } else {
+                Picker("Model", selection: $state.settings.openAIModel) {
+                    ForEach(OpenAIModel.allCases) { model in
+                        Text(model.rawValue).tag(model.rawValue)
+                    }
+                }
+                .frame(maxWidth: 180)
+                .onChange(of: state.settings.openAIModel) { _, _ in state.persistSettings() }
+                Picker("Effort", selection: $state.settings.openAIEffort) {
+                    ForEach(OpenAIEffort.allCases) { effort in
+                        Text(effort.rawValue).tag(effort.rawValue)
+                    }
+                }
+                .frame(maxWidth: 105)
+                .onChange(of: state.settings.openAIEffort) { _, _ in state.persistSettings() }
             }
 
             Toggle("Auto-scroll", isOn: $autoScroll)
@@ -230,6 +305,20 @@ struct PlayerView: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
         .background(Palette.panel)
+    }
+
+    private var sentenceLoopBinding: Binding<Bool> {
+        Binding(
+            get: { state.loopSentence },
+            set: { state.setSentenceLoop($0) }
+        )
+    }
+
+    private var deepReadingBinding: Binding<Bool> {
+        Binding(
+            get: { state.settings.deepReadingMode },
+            set: { state.setDeepReadingMode($0) }
+        )
     }
 
 #if os(iOS)
@@ -328,6 +417,9 @@ struct PlayerView: View {
                 state.persistSettings()
                 if provider == LLMProvider.qwenCloud.rawValue {
                     Task { await state.refreshQwenModels() }
+                } else if provider == LLMProvider.openAI.rawValue,
+                          state.openAIAuthentication == .chatGPT {
+                    Task { await state.refreshCodexLoginStatus() }
                 }
             }
 
@@ -347,7 +439,7 @@ struct PlayerView: View {
                     }
                     .onChange(of: state.settings.grokEffort) { _, _ in state.persistSettings() }
                 }
-            } else {
+            } else if state.llmProvider == .qwenCloud {
                 Picker("Model", selection: $state.settings.qwenModel) {
                     ForEach(state.qwenTextModels) { model in
                         Text(model.id).tag(model.id)
@@ -371,6 +463,20 @@ struct PlayerView: View {
                     }
                     .onChange(of: state.settings.qwenEffort) { _, _ in state.persistSettings() }
                 }
+            } else {
+                Picker("Model", selection: $state.settings.openAIModel) {
+                    ForEach(OpenAIModel.allCases) { model in
+                        Text(model.rawValue).tag(model.rawValue)
+                    }
+                }
+                .onChange(of: state.settings.openAIModel) { _, _ in state.persistSettings() }
+
+                Picker("Effort", selection: $state.settings.openAIEffort) {
+                    ForEach(OpenAIEffort.allCases) { effort in
+                        Text(effort.rawValue).tag(effort.rawValue)
+                    }
+                }
+                .onChange(of: state.settings.openAIEffort) { _, _ in state.persistSettings() }
             }
         } label: {
             Label(state.llmProvider.menuLabel, systemImage: "brain.head.profile")
@@ -559,15 +665,11 @@ struct PlayerView: View {
                             onSeek: { time in
                                 state.focusedSegmentID = segment.id
                                 state.focusedWordID = nil
-                                state.player.seek(time)
-                                if state.settings.playOnSelect, !state.player.isPlaying {
-                                    state.player.play()
-                                }
+                                state.seekToSentence(segment, time: time, autoplay: state.settings.playOnSelect)
                             },
                             onPlayFrom: { time in
                                 state.focusedSegmentID = segment.id
-                                state.player.seek(time)
-                                state.player.play()
+                                state.seekToSentence(segment, time: time, autoplay: true)
                             },
                             onInspect: { word in
                                 state.focusedSegmentID = segment.id
@@ -653,7 +755,7 @@ struct PlayerView: View {
             Text("Prepare this chapter")
                 .font(.system(size: 28, weight: .regular, design: .serif))
                 .foregroundStyle(Palette.ink)
-            Text("This app transcribes the audio on your Mac so every spoken word can be highlighted. Ebooks rarely match audiobooks exactly — publisher intros, number wording, and abridgements all drift — so speech-to-text is the source of timing, then we align the ebook when it helps.")
+            Text("This app transcribes the audio on this device so every spoken word can be highlighted. Ebooks rarely match audiobooks exactly — publisher intros, number wording, and abridgements all drift — so speech-to-text is the source of timing, then we align the ebook when it helps.")
                 .foregroundStyle(Palette.dim)
                 .font(.system(size: 14))
                 .frame(maxWidth: 560, alignment: .leading)
@@ -681,7 +783,7 @@ struct PlayerView: View {
                 Slider(
                     value: Binding(
                         get: { state.player.currentTime },
-                        set: { state.player.seek($0) }
+                        set: { state.seekPlayback(to: $0) }
                     ),
                     in: 0...max(state.player.duration, 0.1)
                 )
@@ -720,7 +822,7 @@ struct PlayerView: View {
             }
 #else
             HStack(spacing: 18) {
-                Button { state.player.skip(seconds: -state.settings.skipSeconds) } label: {
+                Button { state.skipPlayback(seconds: -state.settings.skipSeconds) } label: {
                     Image(systemName: "gobackward.5")
                 }
                 .help("Back \(Int(state.settings.skipSeconds))s")
@@ -742,7 +844,7 @@ struct PlayerView: View {
                 }
                 .help("Next sentence")
 
-                Button { state.player.skip(seconds: state.settings.skipSeconds) } label: {
+                Button { state.skipPlayback(seconds: state.settings.skipSeconds) } label: {
                     Image(systemName: "goforward.5")
                 }
                 .help("Forward \(Int(state.settings.skipSeconds))s")
@@ -754,12 +856,25 @@ struct PlayerView: View {
                 }
                 .help("Replay sentence")
 
-                Toggle(isOn: $state.loopSentence) {
+                Toggle(isOn: sentenceLoopBinding) {
                     Image(systemName: "repeat")
                 }
                 .toggleStyle(.button)
                 .help("Loop current sentence")
                 .foregroundStyle(state.loopSentence ? Palette.gold : Palette.ink)
+
+                Toggle(isOn: deepReadingBinding) {
+                    Image(systemName: "book.closed")
+                }
+                .toggleStyle(.button)
+                .help("Deep Reading: pause after each sentence")
+                .foregroundStyle(state.settings.deepReadingMode ? Palette.gold : Palette.ink)
+
+                Button { state.continueDeepReading() } label: {
+                    Label("Continue", systemImage: "forward.end.circle")
+                }
+                .help("Continue with the next sentence (⌘↩)")
+                .disabled(!state.canContinueDeepReading)
 
                 Spacer()
 
@@ -826,7 +941,7 @@ struct PlayerView: View {
 #if os(iOS)
     private var iPadTransportControls: some View {
         HStack(spacing: 10) {
-            Button { state.player.skip(seconds: -state.settings.skipSeconds) } label: {
+            Button { state.skipPlayback(seconds: -state.settings.skipSeconds) } label: {
                 Image(systemName: "gobackward.5")
                     .frame(width: 36, height: 44)
             }
@@ -844,7 +959,7 @@ struct PlayerView: View {
                 Image(systemName: "forward.end.fill")
                     .frame(width: 36, height: 44)
             }
-            Button { state.player.skip(seconds: state.settings.skipSeconds) } label: {
+            Button { state.skipPlayback(seconds: state.settings.skipSeconds) } label: {
                 Image(systemName: "goforward.5")
                     .frame(width: 36, height: 44)
             }
@@ -861,12 +976,30 @@ struct PlayerView: View {
                 Image(systemName: "repeat.1")
                     .frame(width: 36, height: 44)
             }
-            Toggle(isOn: $state.loopSentence) {
+            Toggle(isOn: sentenceLoopBinding) {
                 Image(systemName: "repeat")
                     .frame(width: 44, height: 44)
             }
             .toggleStyle(.button)
             .foregroundStyle(state.loopSentence ? Palette.gold : Palette.ink)
+
+            Toggle(isOn: deepReadingBinding) {
+                Image(systemName: "book.closed")
+                    .frame(width: 44, height: 44)
+            }
+            .toggleStyle(.button)
+            .foregroundStyle(state.settings.deepReadingMode ? Palette.gold : Palette.ink)
+            .accessibilityLabel("Deep Reading")
+            .accessibilityValue(state.settings.deepReadingMode ? "On" : "Off")
+
+            Button { state.continueDeepReading() } label: {
+                Image(systemName: "forward.end.circle.fill")
+                    .frame(width: 44, height: 44)
+            }
+            .foregroundStyle(state.isDeepReadingPaused ? Palette.gold : Palette.ink)
+            .disabled(!state.canContinueDeepReading)
+            .accessibilityLabel("Continue with next sentence")
+            .keyboardShortcut(.return, modifiers: [.command])
         }
         .buttonStyle(.plain)
         .foregroundStyle(Palette.ink)
@@ -1324,7 +1457,7 @@ private struct SentenceRow: View {
             }
 
             if textSource == .original || textSource == .dual {
-                let original = segment.ebookText ?? (textSource == .original ? segment.spokenText : nil)
+                let original = segment.trustedEbookText ?? (textSource == .original ? segment.spokenText : nil)
                 if let original {
                     Text(original)
                         .font(type.font.font(size: textSource == .dual ? type.dual : type.body, bold: type.bold))

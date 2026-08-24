@@ -33,6 +33,10 @@ enum Cli {
                 let result = try await Transcriber().transcribe(
                     chapter: chapter,
                     ebookPath: ebookPath,
+                    expectedMetadata: .init(
+                        title: URL(fileURLWithPath: audioPath).deletingPathExtension().lastPathComponent,
+                        author: nil
+                    ),
                     progress: { p in
                         FileHandle.standardError.write(
                             Data("[\(Int(p.fraction * 100))%] \(p.message)\n".utf8)

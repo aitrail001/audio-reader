@@ -43,12 +43,23 @@ struct AudioReaderApp: App {
                     .keyboardShortcut(.leftArrow, modifiers: [.option])
                 Button("Next sentence") { state.skipSentence(direction: 1) }
                     .keyboardShortcut(.rightArrow, modifiers: [.option])
-                Button("Skip back") { state.player.skip(seconds: -state.settings.skipSeconds) }
+                Button("Skip back") { state.skipPlayback(seconds: -state.settings.skipSeconds) }
                     .keyboardShortcut(.leftArrow, modifiers: [])
-                Button("Skip forward") { state.player.skip(seconds: state.settings.skipSeconds) }
+                Button("Skip forward") { state.skipPlayback(seconds: state.settings.skipSeconds) }
                     .keyboardShortcut(.rightArrow, modifiers: [])
-                Toggle("Loop sentence", isOn: $state.loopSentence)
+                Toggle("Loop sentence", isOn: Binding(
+                    get: { state.loopSentence },
+                    set: { state.setSentenceLoop($0) }
+                ))
                     .keyboardShortcut("l", modifiers: [.command])
+                Toggle("Deep Reading", isOn: Binding(
+                    get: { state.settings.deepReadingMode },
+                    set: { state.setDeepReadingMode($0) }
+                ))
+                    .keyboardShortcut("d", modifiers: [.command])
+                Button("Continue with next sentence") { state.continueDeepReading() }
+                    .keyboardShortcut(.return, modifiers: [.command])
+                    .disabled(!state.canContinueDeepReading)
             }
             CommandMenu("Library") {
                 Button("Choose Books Folder…") { state.chooseLibrary() }

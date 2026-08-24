@@ -376,11 +376,14 @@ enum GlossPhrases {
         for raw in lines {
             let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             let uppercased = line.uppercased()
-            if line.hasPrefix("短语") || uppercased.hasPrefix(GlossTextFormat.phrasesHeading) {
+            if line.hasPrefix("短语")
+                || uppercased.hasPrefix(GlossTextFormat.phrasesHeading)
+                || uppercased.hasPrefix(GlossTextFormat.learningNotesHeading) {
                 inSection = true
                 let rest = line
                     .replacingOccurrences(of: #"^短语[：:\s]*"#, with: "", options: .regularExpression)
                     .replacingOccurrences(of: #"(?i)^PHRASAL VERBS AND PHRASES[:\s]*"#, with: "", options: .regularExpression)
+                    .replacingOccurrences(of: #"(?i)^LANGUAGE AND CONTEXT NOTES[:\s]*"#, with: "", options: .regularExpression)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if rest.isEmpty || rest.hasPrefix("无") || rest.caseInsensitiveCompare("None") == .orderedSame { continue }
                 if let pair = parseLine(rest) { results.append(pair) }

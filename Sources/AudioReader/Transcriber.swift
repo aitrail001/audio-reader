@@ -11,7 +11,7 @@ enum TranscriptionError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unavailable: "On-device speech transcription is not available on this Mac."
+        case .unavailable: "On-device speech transcription is not available on this device."
         case .noAudio: "Could not open the audio file."
         case .cancelled: "Transcription was cancelled."
         case .failed(let s): s
@@ -30,6 +30,7 @@ actor Transcriber {
     func transcribe(
         chapter: Chapter,
         ebookPath: String?,
+        expectedMetadata: EPUBBookMetadata,
         progress: @Sendable @escaping (TranscriptionProgress) -> Void,
         checkpoint: @Sendable @escaping (String, [TranscriptSegment]) async -> Void
     ) async throws -> Transcript {
@@ -119,9 +120,16 @@ actor Transcriber {
 
         var aligned = segments
         var didAlign = false
-        if let ebookPath, let ebookText = EPUBParser.extractText(from: ebookPath) {
-            aligned = Aligner.align(segments: segments, ebookText: ebookText)
-            didAlign = aligned.contains { $0.ebookText != nil }
+        var ebookAlignment: EPUBAlignmentAssessment?
+        if let ebookPath {
+            let result = Aligner.align(
+                segments: segments,
+                document: EPUBParser.document(from: ebookPath),
+                expectedMetadata: expectedMetadata
+            )
+            aligned = result.segments
+            ebookAlignment = result.assessment
+            didAlign = aligned.contains { $0.trustedEbookText != nil }
         }
 
         progress(.init(fraction: 1.0, message: "Done"))
@@ -133,7 +141,8 @@ actor Transcriber {
             locale: locale.identifier,
             segments: aligned,
             source: "SpeechAnalyzer",
-            ebookAligned: didAlign
+            ebookAligned: didAlign,
+            ebookAlignment: ebookAlignment
         )
     }
 

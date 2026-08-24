@@ -7,11 +7,53 @@ struct AudiobookImportResult: Sendable {
     var addedFileNames: [String]
 }
 
+final class EbookReplacementTransaction {
+    let destination: URL
+    private let backup: URL
+    private let originals: [(backupURL: URL, originalURL: URL)]
+    private var completed = false
+
+    init(
+        destination: URL,
+        backup: URL,
+        originals: [(backupURL: URL, originalURL: URL)]
+    ) {
+        self.destination = destination
+        self.backup = backup
+        self.originals = originals
+    }
+
+    func commit() {
+        guard !completed else { return }
+        try? FileManager.default.removeItem(at: backup)
+        completed = true
+    }
+
+    func rollback() throws {
+        guard !completed else { return }
+        let fm = FileManager.default
+        if fm.fileExists(atPath: destination.path) {
+            try fm.removeItem(at: destination)
+        }
+        for original in originals {
+            try fm.createDirectory(
+                at: original.originalURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try fm.moveItem(at: original.backupURL, to: original.originalURL)
+        }
+        try? fm.removeItem(at: backup)
+        completed = true
+    }
+}
+
 enum AudiobookImportError: LocalizedError {
     case noAudioFiles
     case protectedOrUnavailable
     case exportUnavailable
     case unsafeDeletionTarget
+    case invalidEbook
+    case replacementRollbackFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -19,6 +61,9 @@ enum AudiobookImportError: LocalizedError {
         case .protectedOrUnavailable: "This audiobook is protected or not downloaded as an accessible media file."
         case .exportUnavailable: "This audiobook cannot be copied into AudioReader for transcription."
         case .unsafeDeletionTarget: "AudioReader can only delete a book stored directly in its imported library."
+        case .invalidEbook: "Choose a readable EPUB file."
+        case .replacementRollbackFailed(let detail):
+            "The EPUB replacement could not be rolled back completely: \(detail)"
         }
     }
 }
@@ -84,6 +129,72 @@ enum AudiobookImportService {
         let accessed = urls.filter { $0.startAccessingSecurityScopedResource() }
         defer { accessed.forEach { $0.stopAccessingSecurityScopedResource() } }
         return try copyCompanionFiles(from: urls, to: folder)
+    }
+
+    @discardableResult
+    static func replaceEbook(_ source: URL, in folder: URL) throws -> URL {
+        let replacement = try stageEbookReplacement(source, in: folder)
+        replacement.commit()
+        return replacement.destination
+    }
+
+    static func stageEbookReplacement(
+        _ source: URL,
+        in folder: URL
+    ) throws -> EbookReplacementTransaction {
+        guard source.pathExtension.lowercased() == "epub" else { throw AudiobookImportError.invalidEbook }
+        let accessed = source.startAccessingSecurityScopedResource()
+        defer { if accessed { source.stopAccessingSecurityScopedResource() } }
+        guard EPUBParser.document(from: source.path) != nil else { throw AudiobookImportError.invalidEbook }
+
+        let fm = FileManager.default
+        let temporary = folder.appendingPathComponent(
+            ".audioreader-ebook-replacement-\(UUID().uuidString).epub"
+        )
+        let backup = folder.appendingPathComponent(
+            ".audioreader-ebook-backup-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try fm.copyItem(at: source, to: temporary)
+        var originals: [(backupURL: URL, originalURL: URL)] = []
+        do {
+            try fm.createDirectory(at: backup, withIntermediateDirectories: true)
+            let existingEbooks = allFiles(in: folder)
+                .filter { $0.pathExtension.lowercased() == "epub" && $0 != temporary }
+            for (index, existing) in existingEbooks.enumerated() {
+                let backupURL = backup.appendingPathComponent("\(index)-\(existing.lastPathComponent)")
+                try fm.moveItem(
+                    at: existing,
+                    to: backupURL
+                )
+                originals.append((backupURL, existing))
+            }
+            let destination = folder.appendingPathComponent(source.lastPathComponent)
+            try fm.moveItem(at: temporary, to: destination)
+            return EbookReplacementTransaction(
+                destination: destination,
+                backup: backup,
+                originals: originals
+            )
+        } catch {
+            try? fm.removeItem(at: temporary)
+            for original in originals.reversed() {
+                try? fm.createDirectory(
+                    at: original.originalURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try? fm.moveItem(at: original.backupURL, to: original.originalURL)
+            }
+            try? fm.removeItem(at: backup)
+            throw error
+        }
+    }
+
+    static func isReadableEbook(_ source: URL) -> Bool {
+        guard source.pathExtension.lowercased() == "epub" else { return false }
+        let accessed = source.startAccessingSecurityScopedResource()
+        defer { if accessed { source.stopAccessingSecurityScopedResource() } }
+        return EPUBParser.document(from: source.path) != nil
     }
 
     static func newBookFolder(title: String, in root: URL = Persistence.importedBooksURL) throws -> URL {

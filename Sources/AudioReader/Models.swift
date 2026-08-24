@@ -54,6 +54,62 @@ struct TranscriptWord: Identifiable, Hashable, Codable, Sendable {
     }
 }
 
+enum EPUBAlignmentStatus: String, Codable, CaseIterable, Sendable {
+    case unprocessable
+    case wrongBookLikely
+    case differentEdition
+    case uncertain
+    case trusted
+
+    var title: String {
+        switch self {
+        case .unprocessable: "EPUB unreadable"
+        case .wrongBookLikely: "Wrong EPUB likely"
+        case .differentEdition: "Different edition"
+        case .uncertain: "EPUB match uncertain"
+        case .trusted: "EPUB alignment trusted"
+        }
+    }
+}
+
+struct EPUBAlignmentMetrics: Codable, Equatable, Sendable {
+    var extractedWordCount: Int
+    var extractedSentenceCount: Int
+    var sampledAnchorCount: Int
+    var matchedAnchorCount: Int
+    var matchedCoverage: Double
+    var medianScore: Double
+    var lowerPercentileScore: Double
+    var backwardJumps: Int
+    var longestUnmatchedPassage: Int
+    var titleSimilarity: Double?
+    var authorSimilarity: Double?
+    var candidateComparisons: Int
+    var detailedAlignmentPerformed: Bool
+
+    static let empty = EPUBAlignmentMetrics(
+        extractedWordCount: 0,
+        extractedSentenceCount: 0,
+        sampledAnchorCount: 0,
+        matchedAnchorCount: 0,
+        matchedCoverage: 0,
+        medianScore: 0,
+        lowerPercentileScore: 0,
+        backwardJumps: 0,
+        longestUnmatchedPassage: 0,
+        titleSimilarity: nil,
+        authorSimilarity: nil,
+        candidateComparisons: 0,
+        detailedAlignmentPerformed: false
+    )
+}
+
+struct EPUBAlignmentAssessment: Codable, Equatable, Sendable {
+    var status: EPUBAlignmentStatus
+    var reason: String
+    var metrics: EPUBAlignmentMetrics
+}
+
 struct TranscriptSegment: Identifiable, Hashable, Codable, Sendable {
     var id: String
     var start: TimeInterval
@@ -61,6 +117,10 @@ struct TranscriptSegment: Identifiable, Hashable, Codable, Sendable {
     var words: [TranscriptWord]
     var ebookText: String?
     var alignmentScore: Double?
+    /// Nil for legacy transcripts, which intentionally fails closed.
+    var individualEbookMatchTrusted: Bool? = nil
+    /// Separate document-level gate. A strong sentence match is insufficient by itself.
+    var documentEbookUseAllowed: Bool? = nil
 
     var spokenText: String {
         words.map(\.text).joined()
@@ -69,10 +129,16 @@ struct TranscriptSegment: Identifiable, Hashable, Codable, Sendable {
     }
 
     var displayText: String {
-        if let ebookText, !(ebookText.isEmpty), (alignmentScore ?? 0) >= 0.52 {
-            return ebookText
-        }
-        return spokenText
+        trustedEbookText ?? spokenText
+    }
+
+    var trustedEbookText: String? {
+        guard individualEbookMatchTrusted == true,
+              documentEbookUseAllowed == true,
+              let ebookText,
+              !ebookText.isEmpty
+        else { return nil }
+        return ebookText
     }
 }
 
@@ -85,11 +151,102 @@ struct Transcript: Codable, Sendable {
     var segments: [TranscriptSegment]
     var source: String
     var ebookAligned: Bool
+    /// Nil for legacy transcripts. Their old 0.52 matches are never trusted automatically.
+    var ebookAlignment: EPUBAlignmentAssessment? = nil
+    var ebookUseOverride: Bool? = nil
+
+    init(
+        chapterID: String,
+        audioPath: String,
+        chapterStart: TimeInterval? = nil,
+        createdAt: Date,
+        locale: String,
+        segments: [TranscriptSegment],
+        source: String,
+        ebookAligned: Bool,
+        ebookAlignment: EPUBAlignmentAssessment? = nil,
+        ebookUseOverride: Bool? = nil
+    ) {
+        self.chapterID = chapterID
+        self.audioPath = audioPath
+        self.chapterStart = chapterStart
+        self.createdAt = createdAt
+        self.locale = locale
+        self.segments = segments
+        self.source = source
+        self.ebookAligned = ebookAligned
+        self.ebookAlignment = ebookAlignment
+        self.ebookUseOverride = ebookUseOverride
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case chapterID
+        case audioPath
+        case chapterStart
+        case createdAt
+        case locale
+        case segments
+        case source
+        case ebookAligned
+        case ebookAlignment
+        case ebookUseOverride
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        chapterID = try container.decode(String.self, forKey: .chapterID)
+        audioPath = try container.decode(String.self, forKey: .audioPath)
+        chapterStart = try container.decodeIfPresent(TimeInterval.self, forKey: .chapterStart)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        locale = try container.decode(String.self, forKey: .locale)
+        segments = try container.decode([TranscriptSegment].self, forKey: .segments)
+        source = try container.decode(String.self, forKey: .source)
+        ebookAlignment = try container.decodeIfPresent(
+            EPUBAlignmentAssessment.self,
+            forKey: .ebookAlignment
+        )
+        ebookUseOverride = try container.decodeIfPresent(Bool.self, forKey: .ebookUseOverride)
+
+        // Legacy transcripts have no document assessment and therefore fail closed,
+        // regardless of the old aggregate ebookAligned flag or 0.52 segment scores.
+        let documentUseAllowed = ebookAlignment?.status == .trusted || ebookUseOverride == true
+        for index in segments.indices {
+            segments[index].documentEbookUseAllowed =
+                segments[index].individualEbookMatchTrusted == true && documentUseAllowed
+        }
+        ebookAligned = segments.contains { $0.trustedEbookText != nil }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(chapterID, forKey: .chapterID)
+        try container.encode(audioPath, forKey: .audioPath)
+        try container.encodeIfPresent(chapterStart, forKey: .chapterStart)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(locale, forKey: .locale)
+        try container.encode(segments, forKey: .segments)
+        try container.encode(source, forKey: .source)
+        try container.encode(ebookAligned, forKey: .ebookAligned)
+        try container.encodeIfPresent(ebookAlignment, forKey: .ebookAlignment)
+        try container.encodeIfPresent(ebookUseOverride, forKey: .ebookUseOverride)
+    }
 
     var words: [TranscriptWord] { segments.flatMap(\.words) }
 
     var duration: TimeInterval {
         segments.last?.end ?? 0
+    }
+
+    var alignmentStatus: EPUBAlignmentStatus {
+        ebookAlignment?.status ?? .uncertain
+    }
+
+    mutating func allowEbookTextAnyway() {
+        ebookUseOverride = true
+        for index in segments.indices {
+            segments[index].documentEbookUseAllowed = segments[index].individualEbookMatchTrusted == true
+        }
+        ebookAligned = segments.contains { $0.trustedEbookText != nil }
     }
 
     func belongs(to chapter: Chapter) -> Bool {
@@ -506,32 +663,74 @@ struct ChapterGlossIndexCache {
 }
 
 struct ChapterTranslationResult: Decodable, Equatable, Sendable {
-    struct Phrase: Decodable, Equatable, Sendable {
+    struct Note: Decodable, Equatable, Sendable {
         var source: String
+        var category: String
         var explanation: String
     }
 
     var id: String
     var translation: String
-    var phrases: [Phrase]
+    var notes: [Note]
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case translation
+        case notes
+        case phrases
+    }
+
+    private struct LegacyPhrase: Decodable {
+        var source: String
+        var explanation: String
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        translation = try container.decode(String.self, forKey: .translation)
+        if let decodedNotes = try container.decodeIfPresent([Note].self, forKey: .notes) {
+            notes = decodedNotes
+        } else {
+            notes = try container.decodeIfPresent([LegacyPhrase].self, forKey: .phrases)?.map {
+                Note(source: $0.source, category: "phrase", explanation: $0.explanation)
+            } ?? []
+        }
+    }
 
     var glossText: String {
-        let notes = phrases.isEmpty
-            ? "\(GlossTextFormat.phrasesHeading)\nNone"
-            : "\(GlossTextFormat.phrasesHeading)\n" + phrases.map { "• \($0.source) — \($0.explanation)" }.joined(separator: "\n")
-        return "\(GlossTextFormat.translationHeading)\n\(translation)\n\n\(notes)"
+        let renderedNotes = notes.isEmpty
+            ? "\(GlossTextFormat.learningNotesHeading)\nNone"
+            : "\(GlossTextFormat.learningNotesHeading)\n" + notes.map {
+                "• \($0.source) — [\(Self.categoryLabel($0.category))] \($0.explanation)"
+            }.joined(separator: "\n")
+        return "\(GlossTextFormat.translationHeading)\n\(translation)\n\n\(renderedNotes)"
+    }
+
+    private static func categoryLabel(_ raw: String) -> String {
+        switch raw {
+        case "phrasal_verb": "Phrasal verb"
+        case "phrase": "Phrase"
+        case "idiom": "Idiom"
+        case "challenging_word": "Challenging word"
+        case "challenging_combination": "Challenging combination"
+        case "concept": "Concept"
+        default:
+            raw.replacingOccurrences(of: "_", with: " ").capitalized
+        }
     }
 }
 
 enum GlossTextFormat {
     static let translationHeading = "TRANSLATION:"
     static let phrasesHeading = "PHRASAL VERBS AND PHRASES:"
+    static let learningNotesHeading = "LANGUAGE AND CONTEXT NOTES:"
     static let sentenceMeaningHeading = "MEANING IN THIS SENTENCE:"
     static let examplesHeading = "EXAMPLES:"
 
     static func isHeading(_ line: String) -> Bool {
         let normalized = line.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        return [translationHeading, phrasesHeading, sentenceMeaningHeading, examplesHeading].contains(normalized)
+        return [translationHeading, phrasesHeading, learningNotesHeading, sentenceMeaningHeading, examplesHeading].contains(normalized)
             || line.hasPrefix("译文")
             || line.hasPrefix("短语")
             || line.hasPrefix("本句释义")

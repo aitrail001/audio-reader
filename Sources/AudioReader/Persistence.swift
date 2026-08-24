@@ -238,11 +238,15 @@ struct AppSettings: Codable, Equatable {
     var qwenThinking: Bool
     var qwenEffort: String
     var qwenEffortPolicyVersion: Int
+    var openAIAuthentication: String
+    var openAIModel: String
+    var openAIEffort: String
     var sentenceContextCount: Int
     var chapterTranslationBlockSize: Int
     var chatContextCount: Int
     var autoTranslate: Bool
     var playOnSelect: Bool
+    var deepReadingMode: Bool
     var appearance: String
     var preferredDictionary: String
     var lookupPanelWidth: Double
@@ -268,11 +272,15 @@ struct AppSettings: Codable, Equatable {
             qwenThinking: true,
             qwenEffort: QwenEffort.none.rawValue,
             qwenEffortPolicyVersion: 1,
+            openAIAuthentication: OpenAIAuthentication.chatGPT.rawValue,
+            openAIModel: OpenAIModel.gpt56Luna.rawValue,
+            openAIEffort: OpenAIEffort.medium.rawValue,
             sentenceContextCount: 2,
             chapterTranslationBlockSize: 5,
             chatContextCount: 3,
             autoTranslate: false,
             playOnSelect: true,
+            deepReadingMode: false,
             appearance: AppAppearance.dark.rawValue,
             preferredDictionary: "牛津英汉汉英词典",
             lookupPanelWidth: 420,
@@ -307,11 +315,15 @@ struct AppSettings: Codable, Equatable {
         qwenThinking: Bool,
         qwenEffort: String,
         qwenEffortPolicyVersion: Int,
+        openAIAuthentication: String,
+        openAIModel: String,
+        openAIEffort: String,
         sentenceContextCount: Int,
         chapterTranslationBlockSize: Int,
         chatContextCount: Int,
         autoTranslate: Bool,
         playOnSelect: Bool,
+        deepReadingMode: Bool,
         appearance: String,
         preferredDictionary: String,
         lookupPanelWidth: Double,
@@ -335,11 +347,15 @@ struct AppSettings: Codable, Equatable {
         self.qwenThinking = qwenThinking
         self.qwenEffort = qwenEffort
         self.qwenEffortPolicyVersion = qwenEffortPolicyVersion
+        self.openAIAuthentication = openAIAuthentication
+        self.openAIModel = openAIModel
+        self.openAIEffort = openAIEffort
         self.sentenceContextCount = sentenceContextCount
         self.chapterTranslationBlockSize = chapterTranslationBlockSize
         self.chatContextCount = chatContextCount
         self.autoTranslate = autoTranslate
         self.playOnSelect = playOnSelect
+        self.deepReadingMode = deepReadingMode
         self.appearance = appearance
         self.preferredDictionary = preferredDictionary
         self.lookupPanelWidth = lookupPanelWidth
@@ -370,11 +386,15 @@ struct AppSettings: Codable, Equatable {
             ? (try c.decodeIfPresent(String.self, forKey: .qwenEffort) ?? d.qwenEffort)
             : QwenEffort.none.rawValue
         qwenEffortPolicyVersion = 1
+        openAIAuthentication = try c.decodeIfPresent(String.self, forKey: .openAIAuthentication) ?? d.openAIAuthentication
+        openAIModel = try c.decodeIfPresent(String.self, forKey: .openAIModel) ?? d.openAIModel
+        openAIEffort = try c.decodeIfPresent(String.self, forKey: .openAIEffort) ?? d.openAIEffort
         sentenceContextCount = try c.decodeIfPresent(Int.self, forKey: .sentenceContextCount) ?? d.sentenceContextCount
         chapterTranslationBlockSize = try c.decodeIfPresent(Int.self, forKey: .chapterTranslationBlockSize) ?? d.chapterTranslationBlockSize
         chatContextCount = try c.decodeIfPresent(Int.self, forKey: .chatContextCount) ?? d.chatContextCount
         autoTranslate = try c.decodeIfPresent(Bool.self, forKey: .autoTranslate) ?? d.autoTranslate
         playOnSelect = try c.decodeIfPresent(Bool.self, forKey: .playOnSelect) ?? d.playOnSelect
+        deepReadingMode = try c.decodeIfPresent(Bool.self, forKey: .deepReadingMode) ?? d.deepReadingMode
         appearance = try c.decodeIfPresent(String.self, forKey: .appearance) ?? d.appearance
         preferredDictionary = try c.decodeIfPresent(String.self, forKey: .preferredDictionary) ?? d.preferredDictionary
         lookupPanelWidth = try c.decodeIfPresent(Double.self, forKey: .lookupPanelWidth) ?? d.lookupPanelWidth
