@@ -26,4 +26,28 @@ struct IPadToolbarPlacementPolicyTests {
             hasSelectedBook: true
         ) == .detail)
     }
+
+    @Test("Opening the reader focuses the detail column instead of keeping three equal columns")
+    func readerUsesFocusedDetailColumns() {
+        #expect(IPadSplitColumnPolicy.mode(
+            isReaderActive: true,
+            isVocabularySelected: false,
+            showsLibraryAlongside: false
+        ) == .readingFocused)
+        #expect(IPadSplitColumnPolicy.mode(
+            isReaderActive: true,
+            isVocabularySelected: false,
+            showsLibraryAlongside: true
+        ) == .readingWithLibrary)
+        #expect(IPadSplitColumnPolicy.contentMax - IPadSplitColumnPolicy.contentMin >= 280)
+    }
+
+    @Test("Vocabulary uses the focused detail column instead of an empty middle pane")
+    func vocabularyUsesFocusedDetailColumn() {
+        #expect(IPadSplitColumnPolicy.mode(
+            isReaderActive: false,
+            isVocabularySelected: true,
+            showsLibraryAlongside: false
+        ) == .vocabularyFocused)
+    }
 }

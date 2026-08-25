@@ -204,6 +204,169 @@ struct VocabularyReviewTests {
         #expect(VocabReviewScheduler.nextReviewDate(in: [first, unscheduled, second], after: now) == tomorrow)
     }
 
+    @Test("Sentence playback uses the matching transcript segment bounds")
+    func sentencePlaybackUsesTranscriptBounds() {
+        let entry = sentenceEntry(segmentID: "second", timestamp: 2)
+        let bounds = VocabSentencePlayback.bounds(for: entry, transcript: sentenceTranscript())
+
+        #expect(bounds.start == 2)
+        #expect(bounds.end == 4)
+    }
+
+    @Test("Sentence playback can recover a segment from the saved timestamp")
+    func sentencePlaybackRecoversSegmentFromTimestamp() {
+        let entry = sentenceEntry(segmentID: nil, timestamp: 2.05)
+        let bounds = VocabSentencePlayback.bounds(for: entry, transcript: sentenceTranscript())
+
+        #expect(bounds.start == 2)
+        #expect(bounds.end == 4)
+    }
+
+    @Test("Word and phrase playback uses the containing sentence")
+    func wordPlaybackUsesContainingSentence() {
+        let word = VocabEntry(
+            id: "word",
+            word: "Second",
+            category: .word,
+            context: "Second.",
+            bookID: "book",
+            bookTitle: "Thinking in Systems",
+            chapterID: "chapter",
+            chapterTitle: "The Basics",
+            timestamp: 3.2,
+            addedAt: Date(timeIntervalSince1970: 1_000_000)
+        )
+        let bounds = VocabSentencePlayback.bounds(for: word, transcript: sentenceTranscript())
+
+        #expect(bounds.start == 2)
+        #expect(bounds.end == 4)
+    }
+
+    @Test("Sentence playback falls back to a short clip without a transcript")
+    func sentencePlaybackFallsBackWithoutTranscript() {
+        let entry = sentenceEntry(segmentID: nil, timestamp: 12)
+        let bounds = VocabSentencePlayback.bounds(for: entry, transcript: nil)
+
+        #expect(bounds.start == 12)
+        #expect(bounds.end == 18)
+    }
+
+    @MainActor
+    @Test("Locatable word, phrase, and sentence cards can play original narration")
+    func locatableVocabCardsPlayOriginal() {
+        let state = AppState()
+        let missing = sentenceEntry(id: "missing", bookID: "absent", bookTitle: "No Such Book")
+        let word = entry(id: "word", category: .word)
+        let phrase = entry(id: "phrase", category: .phrase)
+        state.books = [
+            Book(
+                id: "book",
+                title: "Thinking in Systems",
+                author: nil,
+                folderPath: "/tmp",
+                coverPath: nil,
+                ebookPath: nil,
+                chapters: [
+                    Chapter(id: "chapter", index: 0, title: "The Basics", audioPath: "/tmp/vocab-play.m4b")
+                ]
+            )
+        ]
+
+        #expect(state.canPlayVocabSentence(word))
+        #expect(state.canPlayVocabSentence(phrase))
+        #expect(!state.canPlayVocabSentence(missing))
+        #expect(!state.playVocabSentence(missing))
+        #expect(state.canPlayVocabSentence(sentenceEntry()))
+    }
+
+    @Test("Vocabulary and review cards share one original-narration control")
+    func sentencePlayControlIsShared() throws {
+        let vocabularyView = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/AudioReader/VocabularyView.swift"),
+            encoding: .utf8
+        )
+        let reviewView = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/AudioReader/VocabularyReviewView.swift"),
+            encoding: .utf8
+        )
+        let appState = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/AudioReader/AppState.swift"),
+            encoding: .utf8
+        )
+
+        #expect(vocabularyView.contains("VocabOriginalPlayButton(state: state, entry: entry"))
+        #expect(reviewView.contains("VocabOriginalPlayButton(state: state, entry: entry"))
+        #expect(!reviewView.contains("entry.category == .sentence"))
+        #expect(!vocabularyView.contains("if entry.category == .sentence"))
+        #expect(appState.contains("func playVocabSentence("))
+        #expect(appState.contains("func toggleVocabSentencePlayback("))
+        #expect(appState.contains("func canPlayVocabSentence("))
+        #expect(!reviewView.contains("#if os("))
+    }
+
+    private func sentenceTranscript() -> Transcript {
+        Transcript(
+            chapterID: "chapter",
+            audioPath: "/tmp/vocab-play.m4b",
+            createdAt: Date(timeIntervalSince1970: 1),
+            locale: "en-US",
+            segments: [
+                TranscriptSegment(
+                    id: "first",
+                    start: 0,
+                    end: 2,
+                    words: [TranscriptWord(id: "first-word", text: "First.", start: 0, end: 2, confidence: nil)],
+                    ebookText: nil,
+                    alignmentScore: nil
+                ),
+                TranscriptSegment(
+                    id: "second",
+                    start: 2,
+                    end: 4,
+                    words: [TranscriptWord(id: "second-word", text: "Second.", start: 2, end: 4, confidence: nil)],
+                    ebookText: nil,
+                    alignmentScore: nil
+                )
+            ],
+            source: "test",
+            ebookAligned: false
+        )
+    }
+
+    private func sentenceEntry(
+        id: String = "sentence",
+        bookID: String = "book",
+        bookTitle: String = "Thinking in Systems",
+        segmentID: String? = "second",
+        timestamp: TimeInterval = 2
+    ) -> VocabEntry {
+        VocabEntry(
+            id: id,
+            word: "A forest encompasses subsystems of trees and animals.",
+            category: .sentence,
+            context: "A forest encompasses subsystems of trees and animals.",
+            bookID: bookID,
+            bookTitle: bookTitle,
+            chapterID: "chapter",
+            chapterTitle: "The Basics",
+            segmentID: segmentID,
+            timestamp: timestamp,
+            addedAt: Date(timeIntervalSince1970: 1_000_000)
+        )
+    }
+
     private func entry(
         id: String = "entry",
         addedAt: Date = Date(timeIntervalSince1970: 1_000_000),

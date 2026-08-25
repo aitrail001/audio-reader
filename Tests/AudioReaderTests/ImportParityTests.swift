@@ -1169,10 +1169,10 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.38")
-        #expect(plist["CFBundleVersion"] as? String == "39")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.38;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 39;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.42")
+        #expect(plist["CFBundleVersion"] as? String == "43")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.42;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 43;").count - 1 == 4)
     }
 }
 

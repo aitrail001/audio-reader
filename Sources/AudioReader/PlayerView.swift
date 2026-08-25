@@ -3,6 +3,9 @@ import UniformTypeIdentifiers
 #if os(macOS)
 import AppKit
 #endif
+#if os(iOS)
+import UIKit
+#endif
 
 struct ReaderScrollTarget: Equatable {
     var chapterID: String
@@ -24,19 +27,13 @@ struct PlayerView: View {
     @State private var lookupDragStart: CGFloat?
     @State private var readerScrollTarget: ReaderScrollTarget?
 #if os(iOS)
-    @State private var showReaderToolbar = false
     @State private var showSpeedPicker = false
     @State private var showReplaceEbookImporter = false
 #endif
 
     var body: some View {
         VStack(spacing: 0) {
-#if os(iOS)
-            if showReaderToolbar {
-                header
-                Divider().overlay(Palette.line)
-            }
-#else
+#if os(macOS)
             header
             Divider().overlay(Palette.line)
 #endif
@@ -85,17 +82,7 @@ struct PlayerView: View {
 #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .secondaryAction) {
-                Button {
-                    showReaderToolbar.toggle()
-                } label: {
-                    Label(
-                        showReaderToolbar ? "Hide Reader Controls" : "Show Reader Controls",
-                        systemImage: showReaderToolbar ? "chevron.up" : "slider.horizontal.3"
-                    )
-                }
-                .accessibilityLabel(showReaderToolbar ? "Hide reader controls" : "Show reader controls")
-            }
+            iPadReaderToolbar
         }
         .fileImporter(isPresented: $showReplaceEbookImporter, allowedContentTypes: [.epub]) { result in
             do {
@@ -217,12 +204,9 @@ struct PlayerView: View {
 #endif
     }
 
+#if os(macOS)
     private var header: some View {
-#if os(iOS)
-        iPadHeader
-#else
         desktopHeader
-#endif
     }
 
     private var desktopHeader: some View {
@@ -387,6 +371,7 @@ struct PlayerView: View {
             }
         }
     }
+#endif
 
     private var sentenceLoopBinding: Binding<Bool> {
         Binding(
@@ -409,75 +394,53 @@ struct PlayerView: View {
     }
 
 #if os(iOS)
-    private var iPadHeader: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) {
-                textSourcePicker
-                    .frame(minWidth: 180, idealWidth: 240, maxWidth: 300)
-                Spacer(minLength: 0)
-                sharedLLMMenu
-                sharedReadingMenu
-                Button {
-                    state.showChapterAssistant.toggle()
-                } label: {
-                    Image(systemName: "sparkles")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .tint(state.showChapterAssistant ? Palette.gold : Palette.terracotta)
-                .disabled(state.selectedChapter == nil)
-                .accessibilityLabel("Chapter AI")
-                .help("Chapter AI")
-
-                Button {
-                    state.transcribeSelected(force: state.transcript != nil)
-                } label: {
-                    Image(systemName: "waveform")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .tint(Palette.terracotta)
-                .disabled(state.selectedChapter == nil || state.isTranscribing)
-                .accessibilityLabel(state.transcript == nil ? "Transcribe" : "Re-transcribe")
-                .help(state.transcript == nil ? "Transcribe chapter" : "Re-transcribe chapter")
-            }
-            VStack(alignment: .leading, spacing: 10) {
-                textSourcePicker
-                    .frame(maxWidth: .infinity)
-                HStack(spacing: 12) {
-                    sharedLLMMenu
-                    sharedReadingMenu
-                    Spacer(minLength: 0)
-                    Button {
-                        state.showChapterAssistant.toggle()
-                    } label: {
-                        Image(systemName: "sparkles")
+    @ToolbarContentBuilder
+    private var iPadReaderToolbar: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                Picker("Text", selection: $state.textSource) {
+                    ForEach(TextSource.allCases) { source in
+                        Text(source.rawValue).tag(source)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                    .tint(state.showChapterAssistant ? Palette.gold : Palette.terracotta)
-                    .disabled(state.selectedChapter == nil)
-                    .accessibilityLabel("Chapter AI")
-
-                    Button {
-                        state.transcribeSelected(force: state.transcript != nil)
-                    } label: {
-                        Image(systemName: "waveform")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .tint(Palette.terracotta)
-                    .disabled(state.selectedChapter == nil || state.isTranscribing)
-                    .accessibilityLabel(state.transcript == nil ? "Transcribe" : "Re-transcribe")
                 }
+            } label: {
+                Image(systemName: "book.pages")
             }
+            .accessibilityLabel("Text")
+            .accessibilityValue(state.textSource.rawValue)
+            .onChange(of: state.textSource) { _, _ in state.persistSettings() }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(Palette.panel)
+        ToolbarItem(placement: .primaryAction) {
+            sharedLLMMenu
+        }
+        ToolbarItem(placement: .primaryAction) {
+            sharedReadingMenu
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                state.showChapterAssistant.toggle()
+            } label: {
+                Image(systemName: "sparkles")
+            }
+            .foregroundStyle(state.showChapterAssistant ? Palette.gold : Palette.ink)
+            .disabled(state.selectedChapter == nil)
+            .accessibilityLabel("Chapter AI")
+            .help("Chapter AI")
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                state.transcribeSelected(force: state.transcript != nil)
+            } label: {
+                Image(systemName: "waveform")
+            }
+            .disabled(state.selectedChapter == nil || state.isTranscribing)
+            .accessibilityLabel(state.transcript == nil ? "Transcribe" : "Re-transcribe")
+            .help(state.transcript == nil ? "Transcribe chapter" : "Re-transcribe chapter")
+        }
     }
 #endif
 
+#if os(macOS)
     private var textSourcePicker: some View {
         Picker("Text", selection: $state.textSource) {
             ForEach(TextSource.allCases) { source in
@@ -487,6 +450,7 @@ struct PlayerView: View {
         .pickerStyle(.segmented)
         .onChange(of: state.textSource) { _, _ in state.persistSettings() }
     }
+#endif
 
     private var sharedLLMMenu: some View {
         Menu {
@@ -560,10 +524,15 @@ struct PlayerView: View {
                 }
             }
         } label: {
+#if os(iOS)
+            Image(systemName: "brain.head.profile")
+#else
             Label(state.selectedLLMConnection.compactLabel, systemImage: "brain.head.profile")
+#endif
         }
         .fixedSize(horizontal: true, vertical: false)
         .accessibilityLabel("AI settings")
+        .accessibilityValue(state.selectedLLMConnection.compactLabel)
     }
 
     private var sharedReadingMenu: some View {
@@ -581,7 +550,11 @@ struct PlayerView: View {
             Divider()
             readingAppearanceMenuContent
         } label: {
+#if os(iOS)
+            Image(systemName: "textformat")
+#else
             Label("Reading", systemImage: "textformat")
+#endif
         }
         .fixedSize(horizontal: true, vertical: false)
         .accessibilityLabel("Reading settings")
@@ -686,10 +659,13 @@ struct PlayerView: View {
     private var lyricPane: some View {
         GeometryReader { geo in
             let lookupOpen = state.selectedWord != nil || state.showChapterAssistant
-            let split = min(max(effectiveLookupWidth, 280), max(280, geo.size.width - 320))
-            let textWidth = lookupOpen ? geo.size.width - split - 8 : geo.size.width
+            let split = ReaderSplitGeometry(
+                containerWidth: geo.size.width,
+                proposedLookupWidth: effectiveLookupWidth,
+                isLookupOpen: lookupOpen
+            )
             let type = ReaderType.metrics(
-                columnWidth: textWidth,
+                columnWidth: split.textWidth,
                 scale: state.settings.readerFontScale,
                 lineSpacing: state.settings.readerLineSpacing,
                 wordSpacing: state.settings.readerWordSpacing,
@@ -697,21 +673,27 @@ struct PlayerView: View {
                 bold: state.settings.readerBold
             )
             HStack(spacing: 0) {
-                textColumn(proxyWidth: textWidth, type: type)
-                    .frame(width: textWidth)
+                textColumn(proxyWidth: split.textWidth, type: type)
+                    .frame(width: split.textWidth)
                 if lookupOpen {
-                    lookupSplitter(maxWidth: geo.size.width)
+                    lookupSplitter(containerWidth: geo.size.width)
                     Group {
                         if state.showChapterAssistant {
                             ChapterAssistantView(state: state)
-                                .frame(width: split)
+                                .frame(width: split.lookupWidth)
                         } else {
                             WordInspector(state: state, type: type)
-                                .frame(width: split)
+                                .frame(width: split.lookupWidth)
                         }
                     }
                     .transition(.move(edge: .trailing))
                 }
+            }
+            .onChange(of: geo.size.width) { _, width in
+                lookupWidth = ReaderSplitLayout.clampedLookupWidth(
+                    proposed: effectiveLookupWidth,
+                    containerWidth: width
+                )
             }
         }
         .onAppear {
@@ -721,39 +703,80 @@ struct PlayerView: View {
         }
     }
 
-    private func lookupSplitter(maxWidth: CGFloat) -> some View {
-        Rectangle()
-            .fill(Palette.line)
-            .frame(width: 8)
-            .overlay {
-                Capsule()
-                    .fill(Palette.mute.opacity(0.55))
-                    .frame(width: 3, height: 36)
+    private func applyLookupDrag(translation: CGFloat, containerWidth: CGFloat) {
+        let start = lookupDragStart ?? effectiveLookupWidth
+        if lookupDragStart == nil { lookupDragStart = start }
+        lookupWidth = ReaderSplitLayout.clampedLookupWidth(
+            proposed: start - translation,
+            containerWidth: containerWidth
+        )
+    }
+
+    private func finishLookupDrag() {
+        lookupDragStart = nil
+        state.settings.lookupPanelWidth = Double(lookupWidth)
+        state.persistSettings()
+    }
+
+    private func lookupSplitter(containerWidth: CGFloat) -> some View {
+        ZStack {
+            Rectangle()
+                .fill(Palette.line)
+                .frame(width: 1)
+            Capsule()
+                .fill(Palette.mute.opacity(0.7))
+                .frame(width: 4, height: 44)
+        }
+        .frame(width: ReaderSplitLayout.splitterVisualWidth)
+        .contentShape(Rectangle())
+        .accessibilityLabel("Resize lookup panel")
+        .accessibilityValue("\(Int(effectiveLookupWidth.rounded())) points")
+        .accessibilityHint("Adjust to make the reading text wider or narrower")
+        .accessibilityAdjustableAction { direction in
+            let step: CGFloat = 24
+            switch direction {
+            case .increment:
+                lookupWidth = ReaderSplitLayout.clampedLookupWidth(
+                    proposed: effectiveLookupWidth + step,
+                    containerWidth: containerWidth
+                )
+            case .decrement:
+                lookupWidth = ReaderSplitLayout.clampedLookupWidth(
+                    proposed: effectiveLookupWidth - step,
+                    containerWidth: containerWidth
+                )
+            @unknown default:
+                break
             }
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 1)
-                    .onChanged { value in
-                        let start = lookupDragStart ?? effectiveLookupWidth
-                        if lookupDragStart == nil { lookupDragStart = start }
-                        let next = start - value.translation.width
-                        lookupWidth = min(max(next, 280), max(280, maxWidth - 320))
-                    }
-                    .onEnded { _ in
-                        lookupDragStart = nil
-                        state.settings.lookupPanelWidth = Double(lookupWidth)
-                        state.persistSettings()
-                    }
+            finishLookupDrag()
+        }
+#if os(iOS)
+        .overlay {
+            SplitterPanHandle(
+                translationHandler: { translation in
+                    applyLookupDrag(translation: translation, containerWidth: containerWidth)
+                },
+                endHandler: finishLookupDrag
             )
-                .onHover { hovering in
-#if os(macOS)
-                    if hovering {
-                        NSCursor.resizeLeftRight.push()
-                    } else {
-                        NSCursor.pop()
-                    }
-#endif
+        }
+#else
+        .highPriorityGesture(
+            DragGesture(minimumDistance: 1)
+                .onChanged { value in
+                    applyLookupDrag(translation: value.translation.width, containerWidth: containerWidth)
                 }
+                .onEnded { _ in
+                    finishLookupDrag()
+                }
+        )
+        .onHover { hovering in
+            if hovering {
+                NSCursor.resizeLeftRight.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+#endif
     }
 
     private func textColumn(proxyWidth: CGFloat, type: ReaderType) -> some View {
@@ -884,7 +907,7 @@ struct PlayerView: View {
     }
 
     private var controls: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: playbackChromeSpacing) {
             HStack(spacing: 10) {
                 Text(formatClock(state.player.currentTime))
                     .font(.system(size: 11, design: .monospaced))
@@ -897,6 +920,7 @@ struct PlayerView: View {
                     ),
                     in: 0...max(state.player.duration, 0.1)
                 )
+                .controlSize(.small)
                 .tint(Palette.gold)
                 Text(formatClock(state.player.duration))
                     .font(.system(size: 11, design: .monospaced))
@@ -905,31 +929,7 @@ struct PlayerView: View {
             }
 
 #if os(iOS)
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) {
-                    iPadTransportControls
-                    Divider().frame(height: 22)
-                    iPadReplayControls
-                    Spacer(minLength: 4)
-                    iPadSpeedMenu
-                    iPadChapterNavigator
-                }
-                .fixedSize(horizontal: true, vertical: false)
-
-                VStack(spacing: 6) {
-                    HStack(spacing: 16) {
-                        iPadTransportControls
-                    }
-                    .frame(maxWidth: .infinity)
-                    HStack(spacing: 10) {
-                        iPadReplayControls
-                        iPadSpeedMenu
-                        Spacer(minLength: 4)
-                        iPadChapterNavigator
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-            }
+            iPadCompactPlaybackBar
 #else
             ViewThatFits(in: .horizontal) {
                 desktopExpandedPlaybackControls
@@ -937,9 +937,42 @@ struct PlayerView: View {
             }
 #endif
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 14)
+        .padding(.horizontal, playbackChromeHorizontalPadding)
+        .padding(.top, playbackChromeTopPadding)
+        .padding(.bottom, playbackChromeBottomPadding)
         .background(Palette.panel)
+    }
+
+    private var playbackChromeSpacing: CGFloat {
+#if os(iOS)
+        2
+#else
+        10
+#endif
+    }
+
+    private var playbackChromeHorizontalPadding: CGFloat {
+#if os(iOS)
+        16
+#else
+        24
+#endif
+    }
+
+    private var playbackChromeTopPadding: CGFloat {
+#if os(iOS)
+        4
+#else
+        14
+#endif
+    }
+
+    private var playbackChromeBottomPadding: CGFloat {
+#if os(iOS)
+        6
+#else
+        14
+#endif
     }
 
 #if os(macOS)
@@ -1042,16 +1075,6 @@ struct PlayerView: View {
         }
     }
 
-    private var playbackSpeedBinding: Binding<Double> {
-        Binding(
-            get: { Double(state.player.rate) },
-            set: { value in
-                state.player.rate = Float(value)
-                state.persistSettings()
-            }
-        )
-    }
-
     private var desktopSpeedMenu: some View {
         Menu {
             Picker("Speed", selection: playbackSpeedBinding) {
@@ -1111,6 +1134,16 @@ struct PlayerView: View {
     }
 #endif
 
+    private var playbackSpeedBinding: Binding<Double> {
+        Binding(
+            get: { Double(state.player.rate) },
+            set: { value in
+                state.player.rate = Float(value)
+                state.persistSettings()
+            }
+        )
+    }
+
     private func chapterSelectionBinding(in chapters: [Chapter]) -> Binding<String> {
         Binding(
             get: { state.selectedChapterID ?? "" },
@@ -1129,53 +1162,85 @@ struct PlayerView: View {
     }
 
 #if os(iOS)
-    private var iPadTransportControls: some View {
-        HStack(spacing: 10) {
-            Button { state.skipPlayback(seconds: -state.settings.skipSeconds) } label: {
-                Image(systemName: "gobackward.5")
-                    .frame(width: 36, height: 44)
-            }
-            Button { state.skipSentence(direction: -1) } label: {
-                Image(systemName: "backward.end.fill")
-                    .frame(width: 40, height: 44)
-            }
-            Button { state.togglePlay() } label: {
-                Image(systemName: state.player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.system(size: 34))
-                    .foregroundStyle(Palette.gold)
-                    .frame(width: 36, height: 44)
-            }
-            Button { state.skipSentence(direction: 1) } label: {
-                Image(systemName: "forward.end.fill")
-                    .frame(width: 36, height: 44)
-            }
-            Button { state.skipPlayback(seconds: state.settings.skipSeconds) } label: {
-                Image(systemName: "goforward.5")
-                    .frame(width: 36, height: 44)
-            }
+    private var iPadCompactPlaybackBar: some View {
+        HStack(spacing: 4) {
+            iPadTransportControls
+            iPadReplayControls
+            Spacer(minLength: 8)
+            iPadSpeedMenu
+            iPadChapterNavigator
         }
         .buttonStyle(.plain)
         .foregroundStyle(Palette.ink)
-        .font(.system(size: 16))
-        .frame(minHeight: 44)
+        .font(.system(size: 17, weight: .regular))
+        .frame(minHeight: 36)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Playback controls")
+    }
+
+    private var iPadTransportControls: some View {
+        HStack(spacing: 2) {
+            Button { state.skipPlayback(seconds: -state.settings.skipSeconds) } label: {
+                Image(systemName: "gobackward.5")
+                    .frame(width: 32, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Back \(Int(state.settings.skipSeconds)) seconds")
+
+            Button { state.skipSentence(direction: -1) } label: {
+                Image(systemName: "backward.end.fill")
+                    .frame(width: 32, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Previous sentence")
+
+            Button { state.togglePlay() } label: {
+                Image(systemName: state.player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                    .font(.system(size: 26))
+                    .foregroundStyle(Palette.gold)
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel(state.player.isPlaying ? "Pause" : "Play")
+
+            Button { state.skipSentence(direction: 1) } label: {
+                Image(systemName: "forward.end.fill")
+                    .frame(width: 32, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Next sentence")
+
+            Button { state.skipPlayback(seconds: state.settings.skipSeconds) } label: {
+                Image(systemName: "goforward.5")
+                    .frame(width: 32, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Forward \(Int(state.settings.skipSeconds)) seconds")
+        }
     }
 
     private var iPadReplayControls: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 2) {
             Button { state.replaySentence() } label: {
                 Image(systemName: "repeat.1")
-                    .frame(width: 36, height: 44)
+                    .frame(width: 32, height: 36)
+                    .contentShape(Rectangle())
             }
+            .accessibilityLabel("Replay sentence")
+
             Toggle(isOn: sentenceLoopBinding) {
                 Image(systemName: "repeat")
-                    .frame(width: 44, height: 44)
+                    .frame(width: 32, height: 36)
+                    .contentShape(Rectangle())
             }
             .toggleStyle(.button)
             .foregroundStyle(state.loopSentence ? Palette.gold : Palette.ink)
+            .accessibilityLabel("Loop sentence")
 
             Toggle(isOn: deepReadingBinding) {
                 Image(systemName: "book.closed")
-                    .frame(width: 44, height: 44)
+                    .frame(width: 32, height: 36)
+                    .contentShape(Rectangle())
             }
             .toggleStyle(.button)
             .foregroundStyle(state.settings.deepReadingMode ? Palette.gold : Palette.ink)
@@ -1183,35 +1248,29 @@ struct PlayerView: View {
             .accessibilityValue(state.settings.deepReadingMode ? "On" : "Off")
 
             Button { state.continueDeepReading() } label: {
-                Image(systemName: "forward.end.circle.fill")
-                    .frame(width: 44, height: 44)
+                Image(systemName: "forward.end.circle")
+                    .frame(width: 32, height: 36)
+                    .contentShape(Rectangle())
             }
             .foregroundStyle(state.isDeepReadingPaused ? Palette.gold : Palette.ink)
             .disabled(!state.canContinueDeepReading)
             .accessibilityLabel("Continue with next sentence")
             .keyboardShortcut(.return, modifiers: [.command])
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(Palette.ink)
-        .font(.system(size: 16))
-        .frame(minHeight: 44)
     }
 
     private var iPadSpeedMenu: some View {
         Button {
             showSpeedPicker.toggle()
         } label: {
-            Label(String(format: "%.2fx", state.player.rate), systemImage: "speedometer")
-                .lineLimit(1)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Palette.terracotta)
-                .padding(.horizontal, 10)
-                .frame(minHeight: 44)
-                .background(Palette.goldSoft, in: Capsule())
-                .contentShape(Capsule())
+            Text(String(format: "%.2f×", state.player.rate))
+                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Palette.gold)
+                .frame(minHeight: 36)
+                .padding(.horizontal, 4)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .fixedSize(horizontal: true, vertical: false)
         .accessibilityLabel("Playback speed")
         .accessibilityValue(String(format: "%.2f times", state.player.rate))
         .popover(isPresented: $showSpeedPicker, arrowEdge: .bottom) {
@@ -1225,10 +1284,11 @@ struct PlayerView: View {
     @ViewBuilder
     private var iPadChapterNavigator: some View {
         if let chapters = state.selectedBook?.chapters, chapters.count > 1 {
-            HStack(spacing: 2) {
+            HStack(spacing: 0) {
                 Button { state.openPreviousChapter() } label: {
                     Image(systemName: "chevron.left")
-                        .frame(width: 36, height: 44)
+                        .frame(width: 32, height: 36)
+                        .contentShape(Rectangle())
                 }
                 .disabled(!state.canOpenPreviousChapter)
                 .accessibilityLabel("Previous chapter")
@@ -1240,26 +1300,100 @@ struct PlayerView: View {
                         }
                     }
                 } label: {
-                    Label(chapterPositionLabel(in: chapters), systemImage: "list.bullet")
-                        .lineLimit(1)
+                    Text(chapterCompactPositionLabel(in: chapters))
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Palette.ink)
+                        .frame(minHeight: 36)
+                        .padding(.horizontal, 2)
+                        .contentShape(Rectangle())
                 }
-                .fixedSize()
-                .frame(minHeight: 44)
+                .help(state.selectedChapter?.title ?? "Choose a chapter")
+                .accessibilityLabel("Chapter")
+                .accessibilityValue(chapterPositionLabel(in: chapters))
 
                 Button { state.openNextChapter() } label: {
                     Image(systemName: "chevron.right")
-                        .frame(width: 36, height: 44)
+                        .frame(width: 32, height: 36)
+                        .contentShape(Rectangle())
                 }
                 .disabled(!state.canOpenNextChapter)
                 .accessibilityLabel("Next chapter")
             }
-            .fixedSize(horizontal: true, vertical: false)
         }
+    }
+
+    private func chapterCompactPositionLabel(in chapters: [Chapter]) -> String {
+        let index = chapters.firstIndex { $0.id == state.selectedChapterID } ?? 0
+        return "\(index + 1)/\(chapters.count)"
     }
 #endif
 }
 
 #if os(iOS)
+private struct SplitterPanHandle: UIViewRepresentable {
+    var translationHandler: (CGFloat) -> Void
+    var endHandler: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(translationHandler: translationHandler, endHandler: endHandler)
+    }
+
+    func makeUIView(context: Context) -> SplitterPanView {
+        let view = SplitterPanView()
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ uiView: SplitterPanView, context: Context) {
+        context.coordinator.translationHandler = translationHandler
+        context.coordinator.endHandler = endHandler
+        uiView.coordinator = context.coordinator
+    }
+
+    final class Coordinator {
+        var translationHandler: (CGFloat) -> Void
+        var endHandler: () -> Void
+
+        init(translationHandler: @escaping (CGFloat) -> Void, endHandler: @escaping () -> Void) {
+            self.translationHandler = translationHandler
+            self.endHandler = endHandler
+        }
+    }
+}
+
+private final class SplitterPanView: UIView {
+    var coordinator: SplitterPanHandle.Coordinator?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isUserInteractionEnabled = true
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        pan.maximumNumberOfTouches = 1
+        addGestureRecognizer(pan)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        bounds.insetBy(dx: -8, dy: 0).contains(point)
+    }
+
+    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+        let translation = gesture.translation(in: self).x
+        switch gesture.state {
+        case .began, .changed:
+            coordinator?.translationHandler(translation)
+        case .ended, .cancelled, .failed:
+            coordinator?.endHandler()
+        default:
+            break
+        }
+    }
+}
+
 private struct IPadPlaybackSpeedPicker: View {
     @Bindable var state: AppState
     let onDismiss: () -> Void
@@ -1404,36 +1538,18 @@ private struct ChapterAssistantView: View {
                             .foregroundStyle(Palette.dim)
                     }
 
-                    HStack {
-                        Menu {
-                            if state.selectedChapterTranslationCheckpoint?.status == .inProgress {
-                                Button("Continue from last stop") {
-                                    state.translateChapter(mode: .continueFromCheckpoint)
-                                }
-                            }
-                            Button("Translate untranslated sentences") {
-                                state.translateChapter(mode: .untranslatedOnly)
-                            }
-                            Button("Retranslate whole chapter") {
-                                showChapterRetranslateConfirmation = true
-                            }
-                        } label: {
-                            Label("Translate chapter", systemImage: "globe")
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) {
+                            chapterTranslateMenu
+                            chapterSummaryButton
                         }
-                        Button {
-                            if state.chapterSummary == nil {
-                                state.summarizeChapter()
-                            } else {
-                                showChapterSummaryRegenerateConfirmation = true
-                            }
-                        } label: {
-                            Label(
-                                state.chapterSummary == nil ? "Summarise" : "Regenerate summary",
-                                systemImage: "text.alignleft"
-                            )
+                        VStack(alignment: .leading, spacing: 8) {
+                            chapterTranslateMenu
+                            chapterSummaryButton
                         }
                     }
                     .buttonStyle(.bordered)
+                    .controlSize(.small)
                     .disabled(state.transcript == nil)
 
                     if let checkpoint = state.selectedChapterTranslationCheckpoint {
@@ -1461,6 +1577,8 @@ private struct ChapterAssistantView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(Palette.terracotta)
+                            .controlSize(.small)
+                            .inspectorActionLabel()
                         }
                     }
 
@@ -1503,6 +1621,8 @@ private struct ChapterAssistantView: View {
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .tint(Palette.terracotta)
+                                .controlSize(.small)
+                                .inspectorActionLabel()
                             }
                         }
                     }
@@ -1525,6 +1645,7 @@ private struct ChapterAssistantView: View {
                                     }
                                 }
                                 .controlSize(.small)
+                                .inspectorActionLabel()
                             } else if summary.status == .accepted {
                                 HStack(spacing: 10) {
                                     Text("Saved · Model: \(summary.model)")
@@ -1665,6 +1786,43 @@ private struct ChapterAssistantView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("The new summary will be a draft. Rejecting it restores the currently saved summary.")
+        }
+    }
+
+    private var chapterTranslateMenu: some View {
+        Menu {
+            if state.selectedChapterTranslationCheckpoint?.status == .inProgress {
+                Button("Continue from last stop") {
+                    state.translateChapter(mode: .continueFromCheckpoint)
+                }
+            }
+            Button("Translate untranslated sentences") {
+                state.translateChapter(mode: .untranslatedOnly)
+            }
+            Button("Retranslate whole chapter") {
+                showChapterRetranslateConfirmation = true
+            }
+        } label: {
+            Label("Translate chapter", systemImage: "globe")
+                .inspectorActionLabel()
+                .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var chapterSummaryButton: some View {
+        Button {
+            if state.chapterSummary == nil {
+                state.summarizeChapter()
+            } else {
+                showChapterSummaryRegenerateConfirmation = true
+            }
+        } label: {
+            Label(
+                state.chapterSummary == nil ? "Summarise" : "Regenerate summary",
+                systemImage: "text.alignleft"
+            )
+            .inspectorActionLabel()
+            .frame(maxWidth: .infinity)
         }
     }
 
@@ -2040,9 +2198,11 @@ private struct WordInspector: View {
                                 DictionaryLookup.lookUpInDictionary(word.text)
                             } label: {
                                 Label("Open Dictionary Full Screen", systemImage: "book")
+                                    .inspectorActionLabel()
                                     .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
                             .tint(Palette.terracotta)
 #else
                             if state.dictionaryHits.isEmpty {
@@ -2074,8 +2234,10 @@ private struct WordInspector: View {
                                 DictionaryLookup.lookUpInDictionary(word.text)
                             } label: {
                                 Label("Open in Dictionary.app", systemImage: "book")
+                                    .inspectorActionLabel()
                                     .frame(maxWidth: .infinity)
                             }
+                            .controlSize(.small)
 #endif
                         }
 
@@ -2102,6 +2264,8 @@ private struct WordInspector: View {
                                         Button("Reject") { state.rejectGloss(gloss) }
                                         Button("Retranslate") { showRetranslateConfirmation = true }
                                     }
+                                    .controlSize(.small)
+                                    .inspectorActionLabel()
                                 } else if gloss.status == .accepted {
                                     Text("Saved · Model: \(gloss.model)")
                                         .font(.system(size: 12))
@@ -2113,10 +2277,13 @@ private struct WordInspector: View {
                                 Button {
                                     state.translateSelectedWord()
                                 } label: {
-                                    Label("This-sentence meaning (\(state.selectedLLMModel))", systemImage: "globe")
+                                    Label("Sentence meaning", systemImage: "globe")
+                                        .inspectorActionLabel()
                                         .frame(maxWidth: .infinity)
                                 }
                                 .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .accessibilityLabel("This-sentence meaning (\(state.selectedLLMModel))")
                             }
                             if let err = state.translationError {
                                 Text(err)
@@ -2132,12 +2299,12 @@ private struct WordInspector: View {
                                 state.addVocab(word: word, segment: seg)
                             } label: {
                                 Label(isSaved ? "Already in vocabulary" : "Add to vocabulary", systemImage: isSaved ? "checkmark.circle.fill" : "bookmark")
+                                    .inspectorActionLabel()
                                     .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 5)
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(Palette.terracotta)
-                            .controlSize(.large)
+                            .controlSize(.small)
                             .disabled(isSaved)
                         }
                     }

@@ -225,3 +225,12 @@ struct FlowLayout: Layout {
         return (CGSize(width: width, height: height), origins, sizes)
     }
 }
+
+extension View {
+    /// Keeps inspector and Chapter AI actions on one line when the side panel is narrow.
+    func inspectorActionLabel() -> some View {
+        lineLimit(1)
+            .minimumScaleFactor(0.78)
+            .truncationMode(.tail)
+    }
+}

@@ -1,3 +1,5 @@
+import CoreGraphics
+
 enum IPadBackgroundJobsToolbarPlacement: Equatable {
     case content
     case detail
@@ -8,6 +10,36 @@ enum IPadBackgroundJobsToolbarPlacement: Equatable {
         hasSelectedBook: Bool
     ) -> Self {
         isVocabularySelected || isReaderActive || hasSelectedBook ? .detail : .content
+    }
+}
+
+enum IPadSplitColumnPolicy: Equatable {
+    static let sidebarMin: CGFloat = 180
+    static let sidebarIdeal: CGFloat = 220
+    static let sidebarMax: CGFloat = 300
+    static let contentMin: CGFloat = 200
+    static let contentIdeal: CGFloat = 260
+    static let contentMax: CGFloat = 560
+
+    enum Mode: Equatable {
+        case library
+        case readingFocused
+        case readingWithLibrary
+        case vocabularyFocused
+    }
+
+    static func mode(
+        isReaderActive: Bool,
+        isVocabularySelected: Bool,
+        showsLibraryAlongside: Bool
+    ) -> Mode {
+        if isReaderActive {
+            return showsLibraryAlongside ? .readingWithLibrary : .readingFocused
+        }
+        if isVocabularySelected {
+            return .vocabularyFocused
+        }
+        return .library
     }
 }
 
@@ -85,6 +117,7 @@ private enum IPadImportRequest: Identifiable {
 struct IPadRootView: View {
     @Bindable var state: AppState
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var showsLibraryAlongsideReader = false
     @State private var source: IPadLibrarySource? = .allBooks
     @State private var deviceLibrary = DeviceAudiobookLibrary()
     @State private var importRequest: IPadImportRequest?
@@ -97,10 +130,18 @@ struct IPadRootView: View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             sourceSidebar
                 .navigationTitle("Library")
-                .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 300)
+                .navigationSplitViewColumnWidth(
+                    min: IPadSplitColumnPolicy.sidebarMin,
+                    ideal: IPadSplitColumnPolicy.sidebarIdeal,
+                    max: IPadSplitColumnPolicy.sidebarMax
+                )
         } content: {
             contentColumn
-                .navigationSplitViewColumnWidth(min: 300, ideal: 360, max: 440)
+                .navigationSplitViewColumnWidth(
+                    min: IPadSplitColumnPolicy.contentMin,
+                    ideal: IPadSplitColumnPolicy.contentIdeal,
+                    max: IPadSplitColumnPolicy.contentMax
+                )
                 .toolbar {
                     backgroundJobsToolbar(for: .content)
                 }
@@ -110,7 +151,7 @@ struct IPadRootView: View {
                     backgroundJobsToolbar(for: .detail)
                 }
         }
-        .navigationSplitViewStyle(.balanced)
+        .navigationSplitViewStyle(.prominentDetail)
         .tint(Palette.terracotta)
         .overlay {
             if state.isScanning, let progress = state.libraryScanProgress {
@@ -183,6 +224,33 @@ struct IPadRootView: View {
                 state.tab = .library
             }
         }
+        .onChange(of: state.tab) { _, tab in
+            applyColumnMode(
+                isReaderActive: tab == .player,
+                isVocabularySelected: tab == .vocab,
+                showsLibraryAlongsideReader: false
+            )
+        }
+    }
+
+    private func applyColumnMode(
+        isReaderActive: Bool,
+        isVocabularySelected: Bool = false,
+        showsLibraryAlongsideReader: Bool
+    ) {
+        self.showsLibraryAlongsideReader = showsLibraryAlongsideReader
+        switch IPadSplitColumnPolicy.mode(
+            isReaderActive: isReaderActive,
+            isVocabularySelected: isVocabularySelected,
+            showsLibraryAlongside: showsLibraryAlongsideReader
+        ) {
+        case .library:
+            columnVisibility = .all
+        case .readingFocused, .vocabularyFocused:
+            columnVisibility = .detailOnly
+        case .readingWithLibrary:
+            columnVisibility = .doubleColumn
+        }
     }
 
     private var sourceSidebar: some View {
@@ -239,8 +307,13 @@ struct IPadRootView: View {
             )
             .navigationTitle("Apple Books & Device")
         case .vocabulary:
-            ContentUnavailableView("Vocabulary", systemImage: "bookmark", description: Text("Review saved words in the detail pane."))
-                .navigationTitle("Vocabulary")
+            List {
+                Section("Saved") {
+                    LabeledContent("Items", value: "\(state.vocab.count)")
+                    LabeledContent("Learn list", value: "\(state.vocab.count(where: \.isInLearnList))")
+                }
+            }
+            .navigationTitle("Saved words")
         case .allBooks, .files, .folders:
             IPadBookList(
                 books: filteredBooks,
@@ -274,6 +347,17 @@ struct IPadRootView: View {
         if source == .vocabulary {
             VocabularyView(state: state) {
                 source = .allBooks
+                applyColumnMode(isReaderActive: false, showsLibraryAlongsideReader: false)
+            }
+            .toolbar {
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        source = .allBooks
+                        applyColumnMode(isReaderActive: false, showsLibraryAlongsideReader: false)
+                    } label: {
+                        Label("Library", systemImage: "chevron.backward")
+                    }
+                }
             }
         } else if state.tab == .player {
             PlayerView(state: state)
@@ -281,23 +365,26 @@ struct IPadRootView: View {
                     ToolbarItem(placement: .navigation) {
                         Button {
                             state.tab = .library
-                            columnVisibility = .all
+                            applyColumnMode(isReaderActive: false, showsLibraryAlongsideReader: false)
                         } label: {
                             Label("Book", systemImage: "chevron.backward")
                         }
                     }
                     ToolbarItem(placement: .primaryAction) {
                         Button {
-                            columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+                            applyColumnMode(
+                                isReaderActive: true,
+                                showsLibraryAlongsideReader: !showsLibraryAlongsideReader
+                            )
                         } label: {
                             Label(
-                                columnVisibility == .detailOnly ? "Show Library" : "Focus Reading",
-                                systemImage: columnVisibility == .detailOnly
-                                    ? "sidebar.left"
-                                    : "rectangle.expand.vertical"
+                                showsLibraryAlongsideReader ? "Focus Reading" : "Show Library",
+                                systemImage: showsLibraryAlongsideReader
+                                    ? "rectangle.expand.vertical"
+                                    : "sidebar.left"
                             )
                         }
-                        .help(columnVisibility == .detailOnly ? "Show the library columns" : "Hide the library columns and maximize reading space")
+                        .help(showsLibraryAlongsideReader ? "Hide the library columns and maximize reading space" : "Show the book list beside the reader")
                     }
                 }
         } else if let book = state.selectedBook {
@@ -338,7 +425,7 @@ struct IPadRootView: View {
             ToolbarItem(placement: .primaryAction) {
                 BackgroundJobsButton(state: state) {
                     source = .allBooks
-                    columnVisibility = .detailOnly
+                    applyColumnMode(isReaderActive: true, showsLibraryAlongsideReader: false)
                 }
             }
         }
@@ -553,11 +640,6 @@ private struct IPadBookDetail: View {
                     Spacer()
                 }
 
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 10) { bookActionButtons }
-                    VStack(spacing: 10) { bookActionButtons }
-                }
-
                 Divider()
 
                 Text("Chapters")
@@ -596,37 +678,33 @@ private struct IPadBookDetail: View {
         }
         .navigationTitle(book.title)
         .navigationBarTitleDisplayMode(.inline)
-    }
-
-    @ViewBuilder
-    private var bookActionButtons: some View {
-        Button {
-            if let chapter = book.chapters.first(where: { $0.id == state.selectedChapterID }) ?? book.chapters.first {
-                state.open(chapter: chapter, in: book, autoplay: false)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    if let chapter = book.chapters.first(where: { $0.id == state.selectedChapterID }) ?? book.chapters.first {
+                        state.open(chapter: chapter, in: book, autoplay: false)
+                    }
+                } label: {
+                    Label("Open Book", systemImage: "book.pages")
+                }
             }
-        } label: {
-            Label("Open Book", systemImage: "book.pages")
-                .lineLimit(1)
-                .frame(maxWidth: .infinity)
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button(action: onAddEbook) {
+                        Label(
+                            book.ebookPath == nil ? "Add EPUB" : "Add Another EPUB",
+                            systemImage: "book.closed"
+                        )
+                    }
+                    Button(role: .destructive, action: onDelete) {
+                        Label("Delete Book", systemImage: "trash")
+                    }
+                } label: {
+                    Label("Book Actions", systemImage: "ellipsis.circle")
+                }
+                .accessibilityLabel("Book actions")
+            }
         }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
-
-        Button(action: onAddEbook) {
-            Label(book.ebookPath == nil ? "Add EPUB" : "Add Another EPUB", systemImage: "book.pages")
-                .lineLimit(1)
-                .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.large)
-
-        Button(role: .destructive, action: onDelete) {
-            Label("Delete Book", systemImage: "trash")
-                .lineLimit(1)
-                .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.large)
     }
 }
 

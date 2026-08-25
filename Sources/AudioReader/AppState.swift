@@ -36,6 +36,7 @@ final class AppState {
     var dictionaryHits: [DictionaryHit] = []
     var selectedDictionaryName: String = ""
     var loopSentence = false
+    private(set) var playingVocabEntryID: String?
     private(set) var deepReadingActiveSentenceID: String?
     private(set) var deepReadingPausedSentenceID: String?
     var glosses: [GlossEntry] = [] {
@@ -1092,6 +1093,59 @@ final class AppState {
         guard let index = vocab.firstIndex(where: { $0.id == entryID }) else { return }
         vocab[index] = VocabReviewScheduler.applying(quality, to: vocab[index], at: date)
         Persistence.saveVocabUpdates([vocab[index]], allItems: vocab)
+    }
+
+    func canPlayVocabSentence(_ entry: VocabEntry) -> Bool {
+        locate(
+            bookID: entry.bookID,
+            bookTitle: entry.bookTitle,
+            chapterID: entry.chapterID,
+            chapterTitle: entry.chapterTitle
+        ) != nil
+    }
+
+    @discardableResult
+    func playVocabSentence(_ entry: VocabEntry) -> Bool {
+        guard let located = locate(
+            bookID: entry.bookID,
+            bookTitle: entry.bookTitle,
+            chapterID: entry.chapterID,
+            chapterTitle: entry.chapterTitle
+        ) else {
+            errorMessage = "Could not find “\(entry.bookTitle)” in the library."
+            return false
+        }
+        let transcript = Persistence.loadTranscript(for: located.chapter)
+        let bounds = VocabSentencePlayback.bounds(for: entry, transcript: transcript)
+        if player.loadedPath != located.chapter.audioPath {
+            player.load(
+                path: located.chapter.audioPath,
+                startTime: located.chapter.audioStart,
+                duration: located.chapter.duration
+            )
+        }
+        playingVocabEntryID = entry.id
+        player.playClip(from: bounds.start, to: bounds.end)
+        if let playbackError = player.playbackError {
+            errorMessage = playbackError
+            playingVocabEntryID = nil
+            return false
+        }
+        return true
+    }
+
+    func toggleVocabSentencePlayback(_ entry: VocabEntry) {
+        if playingVocabEntryID == entry.id, player.isPlaying {
+            stopVocabSentencePlayback()
+            return
+        }
+        _ = playVocabSentence(entry)
+    }
+
+    func stopVocabSentencePlayback() {
+        guard playingVocabEntryID != nil else { return }
+        player.pause()
+        playingVocabEntryID = nil
     }
 
     @discardableResult

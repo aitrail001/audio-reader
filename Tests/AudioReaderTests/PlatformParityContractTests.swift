@@ -42,9 +42,15 @@ struct PlatformParityContractTests {
         #expect(reviewView.contains("if isRevealed {\n                        back(of: entry)"))
         #expect(reviewView.contains("Next round"))
         #expect(vocabularyView.contains("Label(\"Choose review\""))
+        #expect(vocabularyView.contains(".navigationTitle(\"Vocabulary\")"))
+        #expect(vocabularyView.contains(".navigationBarTitleDisplayMode(.inline)"))
         #expect(vocabularyView.contains("in learn list"))
         #expect(reviewView.contains("entry.bookTitle"))
         #expect(reviewView.contains("entry.chapterTitle"))
+        #expect(vocabularyView.contains("VocabOriginalPlayButton(state: state, entry: entry"))
+        #expect(reviewView.contains("VocabOriginalPlayButton(state: state, entry: entry"))
+        #expect(appState.contains("func playVocabSentence("))
+        #expect(appState.contains("playingVocabEntryID"))
         #expect(appState.contains("func reviewVocabulary("))
         #expect(appState.contains("func setVocabularyLearnList("))
         #expect(appState.contains("quality: VocabReviewQuality"))
@@ -306,16 +312,24 @@ struct PlatformParityContractTests {
         let controls = try section(
             in: playerView,
             from: "    private var controls: some View",
-            to: "#if os(iOS)\n    private var iPadTransportControls"
+            to: "#if os(macOS)\n    private var desktopExpandedPlaybackControls"
+        )
+        let iPadPlayback = try section(
+            in: playerView,
+            from: "    private var iPadCompactPlaybackBar",
+            to: "#endif\n}"
         )
 
-        #expect(playerView.components(separatedBy: "ViewThatFits(in: .horizontal)").count - 1 >= 3)
+        #expect(playerView.components(separatedBy: "ViewThatFits(in: .horizontal)").count - 1 >= 2)
         #expect(playerView.contains("private var sharedLLMMenu: some View"))
         #expect(playerView.contains("private var sharedReadingMenu: some View"))
         #expect(playerView.components(separatedBy: "sharedLLMMenu").count - 1 >= 3)
         #expect(playerView.components(separatedBy: "sharedReadingMenu").count - 1 >= 3)
+        #expect(playerView.contains("private var iPadReaderToolbar"))
         #expect(controls.contains("desktopExpandedPlaybackControls"))
         #expect(controls.contains("desktopCompactPlaybackControls"))
+        #expect(controls.contains("iPadCompactPlaybackBar"))
+        #expect(!iPadPlayback.contains("VStack(spacing: 6)"))
         #expect(playerView.contains("chapterPositionLabel(in: chapters)"))
         #expect(playerView.contains(".help(state.selectedChapter?.title ?? \"Choose a chapter\")"))
     }

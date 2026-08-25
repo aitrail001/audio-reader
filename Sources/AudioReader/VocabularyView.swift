@@ -54,7 +54,9 @@ struct VocabularyView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+#if os(macOS)
             header
+#endif
             filters
             if filtered.isEmpty {
                 empty
@@ -62,6 +64,7 @@ struct VocabularyView: View {
                 List {
                     ForEach(filtered) { entry in
                         VocabCard(
+                            state: state,
                             entry: entry,
                             assistantBodySize: AssistantTypography.bodySize(
                                 forReaderScale: state.settings.readerFontScale
@@ -94,6 +97,21 @@ struct VocabularyView: View {
             }
         }
         .background(Palette.bg)
+#if os(iOS)
+        .navigationTitle("Vocabulary")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showReviewSetup = true
+                } label: {
+                    Label("Choose review", systemImage: "rectangle.stack")
+                }
+                .disabled(state.vocab.isEmpty)
+                .accessibilityHint("Choose a book, item type, or learn-list review scope.")
+            }
+        }
+#endif
         .alert("Delete vocabulary item?", isPresented: Binding(
             get: { pendingDelete != nil },
             set: { if !$0 { pendingDelete = nil } }
@@ -136,6 +154,7 @@ struct VocabularyView: View {
         }
     }
 
+#if os(macOS)
     private var header: some View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 2) {
@@ -166,9 +185,21 @@ struct VocabularyView: View {
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
     }
+#endif
 
     private var filters: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
+#if os(iOS)
+            HStack {
+                Text("\(filtered.count) of \(state.vocab.count)")
+                    .font(.caption)
+                    .foregroundStyle(Palette.dim)
+                Spacer()
+                Text("\(learnListCount) in learn list")
+                    .font(.caption)
+                    .foregroundStyle(Palette.dim)
+            }
+#endif
             HStack {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(Palette.mute)
@@ -195,7 +226,12 @@ struct VocabularyView: View {
             }
         }
         .padding(.horizontal, 24)
+#if os(iOS)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+#else
         .padding(.bottom, 8)
+#endif
     }
 
     private func categoryChip(_ cat: VocabCategory?, title: String, symbol: String, count: Int) -> some View {
@@ -236,7 +272,45 @@ private struct VocabularyReviewRequest: Identifiable {
     let entryIDs: [String]
 }
 
+struct VocabOriginalPlayButton: View {
+    @Bindable var state: AppState
+    let entry: VocabEntry
+    var labeled = true
+
+    private var isPlaying: Bool {
+        state.playingVocabEntryID == entry.id && state.player.isPlaying
+    }
+
+    var body: some View {
+        Button {
+            state.toggleVocabSentencePlayback(entry)
+        } label: {
+            if labeled {
+                Label(
+                    isPlaying ? "Pause" : "Play original",
+                    systemImage: isPlaying ? "pause.circle.fill" : "play.circle.fill"
+                )
+                .inspectorActionLabel()
+            } else {
+                Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .tint(Palette.gold)
+        .disabled(!state.canPlayVocabSentence(entry))
+        .accessibilityLabel(isPlaying ? "Pause original narration" : "Play original narration")
+        .accessibilityHint("Plays the original audiobook narration for this card.")
+        .help(
+            state.canPlayVocabSentence(entry)
+                ? "Play the original audiobook narration"
+                : "The original chapter is not in the library"
+        )
+    }
+}
+
 private struct VocabCard: View {
+    @Bindable var state: AppState
     let entry: VocabEntry
     let assistantBodySize: CGFloat
     let onOpen: () -> Void
@@ -261,6 +335,7 @@ private struct VocabCard: View {
                     .background(Palette.goldSoft)
                     .clipShape(Capsule())
                 Spacer()
+                VocabOriginalPlayButton(state: state, entry: entry, labeled: false)
                 Button(action: onOpen) {
                     Label("Open in text", systemImage: "text.alignleft")
                 }

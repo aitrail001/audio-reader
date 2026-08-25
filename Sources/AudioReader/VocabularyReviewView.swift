@@ -45,6 +45,12 @@ struct VocabularyReviewView: View {
             }
         }
         .background(Palette.bg)
+        .onChange(of: currentIndex) { _, _ in
+            state.stopVocabSentencePlayback()
+        }
+        .onDisappear {
+            state.stopVocabSentencePlayback()
+        }
     }
 
     private func review(_ entry: VocabEntry) -> some View {
@@ -57,6 +63,9 @@ struct VocabularyReviewView: View {
                 }
                 .font(.caption.weight(.medium))
                 .foregroundStyle(Palette.dim)
+
+                VocabOriginalPlayButton(state: state, entry: entry)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                 Group {
                     if isRevealed {

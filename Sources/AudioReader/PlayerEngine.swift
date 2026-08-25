@@ -33,6 +33,7 @@ final class PlayerEngine {
     }
     var loop: PlaybackLoop = .off
     var loadedPath: String?
+    var clipEnd: TimeInterval?
     private var mediaStart: TimeInterval = 0
     private var chapterDuration: TimeInterval?
 
@@ -73,6 +74,11 @@ final class PlayerEngine {
                     self.pause()
                     return
                 }
+                if let clipEnd = self.clipEnd, seconds >= clipEnd - 0.02 {
+                    self.currentTime = clipEnd
+                    self.pause()
+                    return
+                }
                 if abs(self.currentTime - seconds) < 0.05 { return }
                 self.currentTime = seconds
                 self.applyLoopIfNeeded()
@@ -88,6 +94,13 @@ final class PlayerEngine {
                 self?.isPlaying = false
             }
         }
+    }
+
+    func playClip(from start: TimeInterval, to end: TimeInterval) {
+        let startTime = max(0, start)
+        seek(startTime)
+        clipEnd = max(end, startTime + 0.25)
+        play()
     }
 
     func play() {
@@ -108,6 +121,7 @@ final class PlayerEngine {
     }
 
     func pause() {
+        clipEnd = nil
         player?.pause()
         isPlaying = false
     }
@@ -117,6 +131,7 @@ final class PlayerEngine {
     }
 
     func seek(_ time: TimeInterval) {
+        clipEnd = nil
         let t = max(0, min(time, duration > 0 ? duration : time))
         player?.seek(
             to: CMTime(seconds: mediaStart + t, preferredTimescale: 600),
@@ -143,6 +158,7 @@ final class PlayerEngine {
         endObserver = nil
         isPlaying = false
         loadedPath = nil
+        clipEnd = nil
         mediaStart = 0
         chapterDuration = nil
         playbackError = nil
