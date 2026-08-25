@@ -548,6 +548,7 @@ private struct IPadBookDetail: View {
                             .foregroundStyle(.secondary)
                         Label("\(state.transcribedChapterCount(in: book)) of \(book.chapters.count) chapters transcribed", systemImage: "waveform.badge.checkmark")
                             .foregroundStyle(.secondary)
+                        AudiobookLanguagePicker(state: state, book: book)
                     }
                     Spacer()
                 }

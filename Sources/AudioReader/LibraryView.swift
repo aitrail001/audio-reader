@@ -216,6 +216,7 @@ private struct ChapterStrip: View {
                     Text("\(book.chapters.count) chapters · \(state.transcribedChapterCount(in: book)) transcribed" + (book.ebookPath == nil ? " · audio only" : " · ebook found"))
                         .font(.system(size: 11))
                         .foregroundStyle(Palette.dim)
+                    AudiobookLanguagePicker(state: state, book: book)
                 }
                 Spacer()
                 Button("Open player") {

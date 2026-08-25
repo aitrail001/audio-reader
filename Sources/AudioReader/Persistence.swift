@@ -18,6 +18,7 @@ enum Persistence {
     static var settingsURL: URL { root.appendingPathComponent("settings.json") }
     static var glossesURL: URL { root.appendingPathComponent("glosses.json") }
     static var chapterTranslationCheckpointsURL: URL { root.appendingPathComponent("chapter-translation-checkpoints.json") }
+    static var chapterSummariesURL: URL { root.appendingPathComponent("chapter-summaries.json") }
     static var importedBooksURL: URL {
 #if os(iOS)
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -222,6 +223,19 @@ enum Persistence {
         guard let data = try? JSONEncoder.iso.encode(checkpoints) else { return }
         try? data.write(to: chapterTranslationCheckpointsURL, options: .atomic)
     }
+
+    static func loadChapterSummaries(from url: URL = chapterSummariesURL) -> [ChapterSummaryRecord] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        return (try? JSONDecoder.iso.decode([ChapterSummaryRecord].self, from: data)) ?? []
+    }
+
+    static func saveChapterSummaries(
+        _ summaries: [ChapterSummaryRecord],
+        to url: URL = chapterSummariesURL
+    ) {
+        guard let data = try? JSONEncoder.iso.encode(summaries) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
 }
 
 struct AppSettings: Codable, Equatable {
@@ -230,8 +244,12 @@ struct AppSettings: Codable, Equatable {
     var textSource: String
     var skipSeconds: Double
     var transcriptionLanguage: String
+    var bookTranscriptionLanguages: [String: String]
+    var readerLanguageLevel: String
     var targetLanguage: String
     var llmProvider: String
+    var grokAuthentication: String
+    var grokEndpoint: String
     var grokModel: String
     var grokEffort: String
     var qwenEndpoint: String
@@ -240,6 +258,7 @@ struct AppSettings: Codable, Equatable {
     var qwenEffort: String
     var qwenEffortPolicyVersion: Int
     var openAIAuthentication: String
+    var openAIEndpoint: String
     var openAIModel: String
     var openAIEffort: String
     var sentenceContextCount: Int
@@ -265,8 +284,12 @@ struct AppSettings: Codable, Equatable {
             textSource: TextSource.spoken.rawValue,
             skipSeconds: 5,
             transcriptionLanguage: TranscriptionLanguage.englishUS.rawValue,
+            bookTranscriptionLanguages: [:],
+            readerLanguageLevel: ReaderLanguageLevel.intermediate.rawValue,
             targetLanguage: StudyLanguage.zhHans.rawValue,
             llmProvider: LLMProvider.grok.rawValue,
+            grokAuthentication: GrokAuthentication.grokBuild.rawValue,
+            grokEndpoint: LLMProvider.grok.defaultEndpoint,
             grokModel: "grok-4.6",
             grokEffort: GrokEffort.low.rawValue,
             qwenEndpoint: LLMProvider.qwenCloud.defaultEndpoint,
@@ -275,6 +298,7 @@ struct AppSettings: Codable, Equatable {
             qwenEffort: QwenEffort.none.rawValue,
             qwenEffortPolicyVersion: 1,
             openAIAuthentication: OpenAIAuthentication.chatGPT.rawValue,
+            openAIEndpoint: LLMProvider.openAI.defaultEndpoint,
             openAIModel: OpenAIModel.gpt56Luna.rawValue,
             openAIEffort: OpenAIEffort.medium.rawValue,
             sentenceContextCount: 2,
@@ -309,8 +333,12 @@ struct AppSettings: Codable, Equatable {
         textSource: String,
         skipSeconds: Double,
         transcriptionLanguage: String,
+        bookTranscriptionLanguages: [String: String],
+        readerLanguageLevel: String,
         targetLanguage: String,
         llmProvider: String,
+        grokAuthentication: String,
+        grokEndpoint: String,
         grokModel: String,
         grokEffort: String,
         qwenEndpoint: String,
@@ -319,6 +347,7 @@ struct AppSettings: Codable, Equatable {
         qwenEffort: String,
         qwenEffortPolicyVersion: Int,
         openAIAuthentication: String,
+        openAIEndpoint: String,
         openAIModel: String,
         openAIEffort: String,
         sentenceContextCount: Int,
@@ -342,8 +371,12 @@ struct AppSettings: Codable, Equatable {
         self.textSource = textSource
         self.skipSeconds = skipSeconds
         self.transcriptionLanguage = transcriptionLanguage
+        self.bookTranscriptionLanguages = bookTranscriptionLanguages
+        self.readerLanguageLevel = readerLanguageLevel
         self.targetLanguage = targetLanguage
         self.llmProvider = llmProvider
+        self.grokAuthentication = grokAuthentication
+        self.grokEndpoint = grokEndpoint
         self.grokModel = grokModel
         self.grokEffort = grokEffort
         self.qwenEndpoint = qwenEndpoint
@@ -352,6 +385,7 @@ struct AppSettings: Codable, Equatable {
         self.qwenEffort = qwenEffort
         self.qwenEffortPolicyVersion = qwenEffortPolicyVersion
         self.openAIAuthentication = openAIAuthentication
+        self.openAIEndpoint = openAIEndpoint
         self.openAIModel = openAIModel
         self.openAIEffort = openAIEffort
         self.sentenceContextCount = sentenceContextCount
@@ -379,8 +413,12 @@ struct AppSettings: Codable, Equatable {
         textSource = try c.decodeIfPresent(String.self, forKey: .textSource) ?? d.textSource
         skipSeconds = try c.decodeIfPresent(Double.self, forKey: .skipSeconds) ?? d.skipSeconds
         transcriptionLanguage = try c.decodeIfPresent(String.self, forKey: .transcriptionLanguage) ?? d.transcriptionLanguage
+        bookTranscriptionLanguages = try c.decodeIfPresent([String: String].self, forKey: .bookTranscriptionLanguages) ?? d.bookTranscriptionLanguages
+        readerLanguageLevel = try c.decodeIfPresent(String.self, forKey: .readerLanguageLevel) ?? d.readerLanguageLevel
         targetLanguage = try c.decodeIfPresent(String.self, forKey: .targetLanguage) ?? d.targetLanguage
         llmProvider = try c.decodeIfPresent(String.self, forKey: .llmProvider) ?? d.llmProvider
+        grokAuthentication = try c.decodeIfPresent(String.self, forKey: .grokAuthentication) ?? d.grokAuthentication
+        grokEndpoint = try c.decodeIfPresent(String.self, forKey: .grokEndpoint) ?? d.grokEndpoint
         grokModel = try c.decodeIfPresent(String.self, forKey: .grokModel) ?? d.grokModel
         grokEffort = try c.decodeIfPresent(String.self, forKey: .grokEffort) ?? d.grokEffort
         qwenEndpoint = try c.decodeIfPresent(String.self, forKey: .qwenEndpoint) ?? d.qwenEndpoint
@@ -392,6 +430,7 @@ struct AppSettings: Codable, Equatable {
             : QwenEffort.none.rawValue
         qwenEffortPolicyVersion = 1
         openAIAuthentication = try c.decodeIfPresent(String.self, forKey: .openAIAuthentication) ?? d.openAIAuthentication
+        openAIEndpoint = try c.decodeIfPresent(String.self, forKey: .openAIEndpoint) ?? d.openAIEndpoint
         openAIModel = try c.decodeIfPresent(String.self, forKey: .openAIModel) ?? d.openAIModel
         openAIEffort = try c.decodeIfPresent(String.self, forKey: .openAIEffort) ?? d.openAIEffort
         sentenceContextCount = try c.decodeIfPresent(Int.self, forKey: .sentenceContextCount) ?? d.sentenceContextCount
@@ -409,6 +448,14 @@ struct AppSettings: Codable, Equatable {
         readerLineSpacing = try c.decodeIfPresent(Double.self, forKey: .readerLineSpacing) ?? d.readerLineSpacing
         readerWordSpacing = try c.decodeIfPresent(Double.self, forKey: .readerWordSpacing) ?? d.readerWordSpacing
         readerMargin = try c.decodeIfPresent(Double.self, forKey: .readerMargin) ?? d.readerMargin
+    }
+
+    func endpoint(for provider: LLMProvider) -> String {
+        switch provider {
+        case .grok: grokEndpoint
+        case .qwenCloud: qwenEndpoint
+        case .openAI: openAIEndpoint
+        }
     }
 }
 

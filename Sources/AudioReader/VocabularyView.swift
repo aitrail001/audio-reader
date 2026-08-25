@@ -7,6 +7,8 @@ struct VocabularyView: View {
     @State private var bookFilter: String = "all"
     @State private var category: VocabCategory? = nil
     @State private var pendingDelete: VocabEntry?
+    @State private var reviewRequest: VocabularyReviewRequest?
+    @State private var showReviewSetup = false
 
     private var booksInVocab: [(id: String, title: String)] {
         var seen = Set<String>()
@@ -46,6 +48,10 @@ struct VocabularyView: View {
         return base.count
     }
 
+    private var learnListCount: Int {
+        state.vocab.count(where: \.isInLearnList)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -55,13 +61,23 @@ struct VocabularyView: View {
             } else {
                 List {
                     ForEach(filtered) { entry in
-                        VocabCard(entry: entry) {
-                            if state.jumpToVocab(entry) {
-                                onOpenInText()
+                        VocabCard(
+                            entry: entry,
+                            assistantBodySize: AssistantTypography.bodySize(
+                                forReaderScale: state.settings.readerFontScale
+                            ),
+                            onOpen: {
+                                if state.jumpToVocab(entry) {
+                                    onOpenInText()
+                                }
+                            },
+                            onToggleLearnList: {
+                                state.setVocabularyLearnList(entry.id, included: !entry.isInLearnList)
+                            },
+                            onDelete: {
+                                pendingDelete = entry
                             }
-                        } onDelete: {
-                            pendingDelete = entry
-                        }
+                        )
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                             deleteSwipeButton(entry)
                         }
@@ -92,6 +108,24 @@ struct VocabularyView: View {
         } message: {
             Text("Remove “\(pendingDelete?.word ?? "this item")” from your vocabulary? This cannot be undone.")
         }
+        .sheet(item: $reviewRequest) { request in
+            VocabularyReviewView(state: state, entryIDs: request.entryIDs)
+#if os(macOS)
+                .frame(minWidth: 620, minHeight: 640)
+#endif
+        }
+        .sheet(isPresented: $showReviewSetup) {
+            VocabularyReviewSetupView(state: state) { entryIDs in
+                showReviewSetup = false
+                Task { @MainActor in
+                    await Task.yield()
+                    reviewRequest = VocabularyReviewRequest(entryIDs: entryIDs)
+                }
+            }
+#if os(macOS)
+            .frame(minWidth: 520, minHeight: 560)
+#endif
+        }
     }
 
     private func deleteSwipeButton(_ entry: VocabEntry) -> some View {
@@ -103,14 +137,31 @@ struct VocabularyView: View {
     }
 
     private var header: some View {
-        HStack {
-            Text("Vocabulary")
-                .font(.system(size: 22, weight: .regular, design: .serif))
-                .foregroundStyle(Palette.ink)
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Vocabulary")
+                    .font(.system(size: 22, weight: .regular, design: .serif))
+                    .foregroundStyle(Palette.ink)
+                Text("\(filtered.count) of \(state.vocab.count)")
+                    .foregroundStyle(Palette.dim)
+                    .font(.system(size: 12))
+            }
             Spacer()
-            Text("\(filtered.count) of \(state.vocab.count)")
-                .foregroundStyle(Palette.dim)
-                .font(.system(size: 12))
+            VStack(alignment: .trailing, spacing: 4) {
+                Button {
+                    showReviewSetup = true
+                } label: {
+                    Label("Choose review", systemImage: "rectangle.stack")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.gold)
+                .foregroundStyle(Palette.inkOnGold)
+                .disabled(state.vocab.isEmpty)
+                .accessibilityHint("Choose a book, item type, or learn-list review scope.")
+                Text("\(learnListCount) in learn list")
+                    .font(.caption)
+                    .foregroundStyle(Palette.dim)
+            }
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
@@ -180,9 +231,16 @@ struct VocabularyView: View {
     }
 }
 
+private struct VocabularyReviewRequest: Identifiable {
+    let id = UUID()
+    let entryIDs: [String]
+}
+
 private struct VocabCard: View {
     let entry: VocabEntry
+    let assistantBodySize: CGFloat
     let onOpen: () -> Void
+    let onToggleLearnList: () -> Void
     let onDelete: () -> Void
     @State private var dictHeight: CGFloat = 140
     @State private var showDictHTML = false
@@ -196,7 +254,7 @@ private struct VocabCard: View {
                     .foregroundStyle(Palette.ink)
                     .textSelection(.enabled)
                 Text(entry.category.title)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Palette.gold)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
@@ -208,6 +266,20 @@ private struct VocabCard: View {
                 }
                 .controlSize(.small)
                 .buttonStyle(.borderless)
+                Button(action: onToggleLearnList) {
+                    Label(
+                        entry.isInLearnList ? "In learn list" : "Add to learn list",
+                        systemImage: entry.isInLearnList ? "star.fill" : "star"
+                    )
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(entry.isInLearnList ? Palette.gold : Palette.dim)
+                .accessibilityHint(
+                    entry.isInLearnList
+                        ? "Removes this item from focused learn-list reviews."
+                        : "Adds this item to focused learn-list reviews."
+                )
                 Button(role: .destructive, action: onDelete) {
                     Image(systemName: "trash")
                 }
@@ -229,14 +301,10 @@ private struct VocabCard: View {
                     .textSelection(.enabled)
             }
 
-            if dictionaryHTML != nil || readableDefinition != nil {
+            if dictionaryHTML != nil || !dictionarySummary.isEmpty {
                 labeled(entry.dictionaryName.map { "Apple Dictionary · \($0)" } ?? "Apple Dictionary") {
-                    if let summary = readableDefinition {
-                        Text(summary)
-                            .font(.system(size: 14, design: .serif))
-                            .foregroundStyle(Palette.ink.opacity(0.92))
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
+                    if !dictionarySummary.isEmpty {
+                        DictionarySummaryView(lines: dictionarySummary)
                     }
                     if let html = dictionaryHTML {
                         Button(showDictHTML ? "Hide full entry" : "Show full dictionary entry") {
@@ -256,7 +324,7 @@ private struct VocabCard: View {
 
             if let translation = entry.translation, !translation.isEmpty {
                 labeled("LLM translation") {
-                    GlossBody(text: translation)
+                    GlossBody(text: translation, size: assistantBodySize)
                     if let model = entry.translationModel, !model.isEmpty {
                         Text("Model: \(model)")
                             .font(.system(size: 11))
@@ -270,19 +338,12 @@ private struct VocabCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
-    private var readableDefinition: String? {
-        if let def = entry.definition, !def.isEmpty, !DictionaryLookup.looksLikeMarkup(def) {
-            return def
-        }
-        if let html = entry.dictionaryHTML, !html.isEmpty {
-            let plain = DictionaryLookup.plainPreview(from: html)
-            return plain.isEmpty ? nil : plain
-        }
-        if let def = entry.definition, DictionaryLookup.looksLikeMarkup(def) {
-            let plain = DictionaryLookup.plainPreview(from: def)
-            return plain.isEmpty ? nil : plain
-        }
-        return nil
+    private var dictionarySummary: [String] {
+        DictionaryLookup.concisePreview(
+            definition: entry.definition,
+            html: entry.dictionaryHTML,
+            limit: 3
+        )
     }
 
     private var dictionaryHTML: String? {
@@ -298,7 +359,7 @@ private struct VocabCard: View {
     private func labeled<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title.uppercased())
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Palette.mute)
                 .tracking(0.5)
             content()

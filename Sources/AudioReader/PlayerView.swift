@@ -43,6 +43,9 @@ struct PlayerView: View {
             if state.isTranscribing {
                 transcribeBanner
             }
+            if let mismatch = state.transcriptionLanguageMismatch {
+                transcriptionLanguageNotice(mismatch)
+            }
             if state.currentBookIsMissingEbook {
                 ebookMissingNotice
             } else if let assessment = state.currentEbookAlignment {
@@ -131,6 +134,34 @@ struct PlayerView: View {
         .background(Palette.goldSoft)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("EPUB ebook missing. Add EPUB")
+    }
+
+    private func transcriptionLanguageNotice(_ mismatch: TranscriptionLanguageMismatch) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "waveform.badge.exclamationmark")
+                .foregroundStyle(Palette.terracotta)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Transcript language may be wrong")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("This transcript was created as \(mismatch.transcribedLanguage.menuLabel), but the text looks like \(mismatch.detectedLanguage.menuLabel).")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.dim)
+            }
+            Spacer()
+            Button("Re-transcribe in \(mismatch.detectedLanguage.menuLabel)") {
+                state.useSuggestedTranscriptionLanguage(mismatch.detectedLanguage)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Palette.terracotta)
+            Button("Keep current transcript") {
+                state.dismissTranscriptionLanguageMismatch()
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Palette.goldSoft)
+        .accessibilityElement(children: .contain)
     }
 
     private func ebookAlignmentNotice(_ assessment: EPUBAlignmentAssessment) -> some View {
@@ -279,28 +310,28 @@ struct PlayerView: View {
 
     @ViewBuilder
     private var desktopProviderControls: some View {
-        Picker("Provider", selection: $state.settings.llmProvider) {
-            ForEach(LLMProvider.allCases) { provider in
-                Text(provider.menuLabel).tag(provider.rawValue)
+        Picker("Connection", selection: llmConnectionBinding) {
+            ForEach(LLMConnectionChoice.availableOnCurrentPlatform) { connection in
+                Text(connection.menuLabel).tag(connection)
             }
         }
-        .frame(maxWidth: 130)
-        .onChange(of: state.settings.llmProvider) { _, provider in
-            didChangeLLMProvider(to: provider)
-        }
+        .frame(maxWidth: 210)
 
         if state.llmProvider == .grok {
             Picker("Model", selection: $state.settings.grokModel) {
-                ForEach(GrokModel.allCases) { model in
-                    Text(model.rawValue).tag(model.rawValue)
+                ForEach(state.grokTextModels) { model in
+                    Text(model.id).tag(model.id)
                 }
             }
             .frame(maxWidth: 140)
-            .onChange(of: state.settings.grokModel) { _, _ in state.persistSettings() }
+            .onChange(of: state.settings.grokModel) { _, _ in
+                state.persistSettings()
+                state.normalizeSelectedGrokEffort()
+            }
 
-            if GrokModel(rawValue: state.settings.grokModel)?.supportsEffort == true {
+            if !state.selectedGrokEfforts.isEmpty {
                 Picker("Effort", selection: $state.settings.grokEffort) {
-                    ForEach(GrokEffort.allCases) { effort in
+                    ForEach(state.selectedGrokEfforts) { effort in
                         Text(effort.rawValue).tag(effort.rawValue)
                     }
                 }
@@ -336,19 +367,24 @@ struct PlayerView: View {
             }
         } else {
             Picker("Model", selection: $state.settings.openAIModel) {
-                ForEach(OpenAIModel.allCases) { model in
-                    Text(model.rawValue).tag(model.rawValue)
+                ForEach(state.openAITextModels) { model in
+                    Text(model.id).tag(model.id)
                 }
             }
             .frame(maxWidth: 180)
-            .onChange(of: state.settings.openAIModel) { _, _ in state.persistSettings() }
-            Picker("Effort", selection: $state.settings.openAIEffort) {
-                ForEach(OpenAIEffort.allCases) { effort in
-                    Text(effort.rawValue).tag(effort.rawValue)
-                }
+            .onChange(of: state.settings.openAIModel) { _, _ in
+                state.persistSettings()
+                state.normalizeSelectedOpenAIEffort()
             }
-            .frame(maxWidth: 105)
-            .onChange(of: state.settings.openAIEffort) { _, _ in state.persistSettings() }
+            if !state.selectedOpenAIEfforts.isEmpty {
+                Picker("Effort", selection: $state.settings.openAIEffort) {
+                    ForEach(state.selectedOpenAIEfforts) { effort in
+                        Text(effort.rawValue).tag(effort.rawValue)
+                    }
+                }
+                .frame(maxWidth: 105)
+                .onChange(of: state.settings.openAIEffort) { _, _ in state.persistSettings() }
+            }
         }
     }
 
@@ -454,26 +490,26 @@ struct PlayerView: View {
 
     private var sharedLLMMenu: some View {
         Menu {
-            Picker("Provider", selection: $state.settings.llmProvider) {
-                ForEach(LLMProvider.allCases) { provider in
-                    Text(provider.menuLabel).tag(provider.rawValue)
+            Picker("Connection", selection: llmConnectionBinding) {
+                ForEach(LLMConnectionChoice.availableOnCurrentPlatform) { connection in
+                    Text(connection.menuLabel).tag(connection)
                 }
-            }
-            .onChange(of: state.settings.llmProvider) { _, provider in
-                didChangeLLMProvider(to: provider)
             }
 
             if state.llmProvider == .grok {
                 Picker("Model", selection: $state.settings.grokModel) {
-                    ForEach(GrokModel.allCases) { model in
-                        Text(model.rawValue).tag(model.rawValue)
+                    ForEach(state.grokTextModels) { model in
+                        Text(model.id).tag(model.id)
                     }
                 }
-                .onChange(of: state.settings.grokModel) { _, _ in state.persistSettings() }
+                .onChange(of: state.settings.grokModel) { _, _ in
+                    state.persistSettings()
+                    state.normalizeSelectedGrokEffort()
+                }
 
-                if GrokModel(rawValue: state.settings.grokModel)?.supportsEffort == true {
+                if !state.selectedGrokEfforts.isEmpty {
                     Picker("Effort", selection: $state.settings.grokEffort) {
-                        ForEach(GrokEffort.allCases) { effort in
+                        ForEach(state.selectedGrokEfforts) { effort in
                             Text(effort.rawValue).tag(effort.rawValue)
                         }
                     }
@@ -505,21 +541,26 @@ struct PlayerView: View {
                 }
             } else {
                 Picker("Model", selection: $state.settings.openAIModel) {
-                    ForEach(OpenAIModel.allCases) { model in
-                        Text(model.rawValue).tag(model.rawValue)
+                    ForEach(state.openAITextModels) { model in
+                        Text(model.id).tag(model.id)
                     }
                 }
-                .onChange(of: state.settings.openAIModel) { _, _ in state.persistSettings() }
+                .onChange(of: state.settings.openAIModel) { _, _ in
+                    state.persistSettings()
+                    state.normalizeSelectedOpenAIEffort()
+                }
 
-                Picker("Effort", selection: $state.settings.openAIEffort) {
-                    ForEach(OpenAIEffort.allCases) { effort in
-                        Text(effort.rawValue).tag(effort.rawValue)
+                if !state.selectedOpenAIEfforts.isEmpty {
+                    Picker("Effort", selection: $state.settings.openAIEffort) {
+                        ForEach(state.selectedOpenAIEfforts) { effort in
+                            Text(effort.rawValue).tag(effort.rawValue)
+                        }
                     }
+                    .onChange(of: state.settings.openAIEffort) { _, _ in state.persistSettings() }
                 }
-                .onChange(of: state.settings.openAIEffort) { _, _ in state.persistSettings() }
             }
         } label: {
-            Label(state.llmProvider.menuLabel, systemImage: "brain.head.profile")
+            Label(state.selectedLLMConnection.compactLabel, systemImage: "brain.head.profile")
         }
         .fixedSize(horizontal: true, vertical: false)
         .accessibilityLabel("AI settings")
@@ -530,6 +571,13 @@ struct PlayerView: View {
             Toggle("Auto-scroll", isOn: $autoScroll)
             Toggle("Play on tap", isOn: $state.settings.playOnSelect)
                 .onChange(of: state.settings.playOnSelect) { _, _ in state.persistSettings() }
+            if let book = state.selectedBook {
+                Divider()
+                AudiobookLanguagePicker(state: state, book: book)
+                if let locale = state.transcript?.locale {
+                    Text("Transcript: \(TranscriptionLanguage.matching(localeIdentifier: locale)?.menuLabel ?? locale)")
+                }
+            }
             Divider()
             readingAppearanceMenuContent
         } label: {
@@ -539,13 +587,26 @@ struct PlayerView: View {
         .accessibilityLabel("Reading settings")
     }
 
-    private func didChangeLLMProvider(to provider: String) {
+    private var llmConnectionBinding: Binding<LLMConnectionChoice> {
+        Binding(
+            get: { state.selectedLLMConnection },
+            set: { connection in
+                state.selectedLLMConnection = connection
+                didChangeLLMConnection(to: connection)
+            }
+        )
+    }
+
+    private func didChangeLLMConnection(to connection: LLMConnectionChoice) {
         state.persistSettings()
-        if provider == LLMProvider.qwenCloud.rawValue {
+        if connection == .grokAPIKey {
+            Task { await state.refreshGrokModels() }
+        } else if connection == .qwenAPIKey {
             Task { await state.refreshQwenModels() }
-        } else if provider == LLMProvider.openAI.rawValue,
-                  state.openAIAuthentication == .chatGPT {
+        } else if connection == .chatGPTPlan {
             Task { await state.refreshCodexLoginStatus() }
+        } else if connection == .openAIAPIKey {
+            Task { await state.refreshOpenAIModels() }
         }
     }
 
@@ -563,7 +624,7 @@ struct PlayerView: View {
             .onChange(of: state.settings.readerBold) { _, _ in state.persistSettings() }
         Divider()
         Button {
-            state.settings.readerFontScale = max(0.75, (state.settings.readerFontScale * 10 - 1).rounded() / 10)
+            state.settings.readerFontScale = max(0.65, (state.settings.readerFontScale * 10 - 1).rounded() / 10)
             state.persistSettings()
         } label: {
             Label("Smaller Text", systemImage: "textformat.size.smaller")
@@ -1299,6 +1360,12 @@ private struct ChapterAssistantView: View {
     @Bindable var state: AppState
     @State private var chatDraft = ""
     @State private var dictation = ChapterChatDictation()
+    @State private var showChapterRetranslateConfirmation = false
+    @State private var showChapterSummaryRegenerateConfirmation = false
+
+    private var assistantBodySize: CGFloat {
+        AssistantTypography.bodySize(forReaderScale: state.settings.readerFontScale)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1310,7 +1377,7 @@ private struct ChapterAssistantView: View {
                         .textCase(.uppercase)
                         .tracking(0.8)
                     Text(state.selectedLLMModel)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(Palette.gold)
                 }
                 Spacer()
@@ -1348,15 +1415,22 @@ private struct ChapterAssistantView: View {
                                 state.translateChapter(mode: .untranslatedOnly)
                             }
                             Button("Retranslate whole chapter") {
-                                state.translateChapter(mode: .retranslateAll)
+                                showChapterRetranslateConfirmation = true
                             }
                         } label: {
                             Label("Translate chapter", systemImage: "globe")
                         }
                         Button {
-                            state.summarizeChapter()
+                            if state.chapterSummary == nil {
+                                state.summarizeChapter()
+                            } else {
+                                showChapterSummaryRegenerateConfirmation = true
+                            }
                         } label: {
-                            Label("Summarise", systemImage: "text.alignleft")
+                            Label(
+                                state.chapterSummary == nil ? "Summarise" : "Regenerate summary",
+                                systemImage: "text.alignleft"
+                            )
                         }
                     }
                     .buttonStyle(.bordered)
@@ -1435,16 +1509,40 @@ private struct ChapterAssistantView: View {
 
                     if let summary = state.chapterSummary {
                         assistantCard(title: "Chapter summary") {
-                            GlossBody(text: summary, size: 14)
+                            ChapterSummaryView(summary: summary.summary)
+                            if summary.status == .pending {
+                                Text("Draft saved locally · \(summary.model). Accept to keep it as this chapter's summary.")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Palette.gold)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                HStack(spacing: 10) {
+                                    Button("Accept") { state.acceptChapterSummary() }
+                                        .buttonStyle(.borderedProminent)
+                                        .tint(Palette.terracotta)
+                                    Button("Reject") { state.rejectChapterSummary() }
+                                    Button("Regenerate") {
+                                        showChapterSummaryRegenerateConfirmation = true
+                                    }
+                                }
+                                .controlSize(.small)
+                            } else if summary.status == .accepted {
+                                HStack(spacing: 10) {
+                                    Text("Saved · Model: \(summary.model)")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(Palette.gold)
+                                    Spacer(minLength: 0)
+                                    Button("Regenerate") {
+                                        showChapterSummaryRegenerateConfirmation = true
+                                    }
+                                    .controlSize(.small)
+                                }
+                            }
                         }
                     }
 
                     if let translation = state.chapterTranslation {
                         assistantCard(title: "Chapter translation") {
-                            Text(translation)
-                                .font(.system(size: 13))
-                                .foregroundStyle(Palette.ink)
-                                .fixedSize(horizontal: false, vertical: true)
+                            GlossBody(text: translation, size: assistantBodySize)
                         }
                     }
 
@@ -1457,13 +1555,17 @@ private struct ChapterAssistantView: View {
                         ForEach(state.chapterChat) { message in
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(message.role == .user ? "You" : state.selectedLLMModel)
-                                    .font(.system(size: 10, weight: .semibold))
+                                    .font(.system(size: 11, weight: .semibold))
                                     .foregroundStyle(message.role == .user ? Palette.mute : Palette.gold)
-                                Text(message.text)
-                                    .font(.system(size: 13, design: .serif))
-                                    .foregroundStyle(Palette.ink)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .textSelection(.enabled)
+                                if message.role == .user {
+                                    Text(message.text)
+                                        .font(.system(size: AssistantTypography.defaultBodySize))
+                                        .foregroundStyle(Palette.ink)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .textSelection(.enabled)
+                                } else {
+                                    GlossBody(text: message.text, size: assistantBodySize)
+                                }
                             }
                             .padding(10)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1540,6 +1642,30 @@ private struct ChapterAssistantView: View {
         .background(Palette.panel)
         .overlay(Rectangle().fill(Palette.line).frame(width: 1), alignment: .leading)
         .onDisappear { dictation.cancel() }
+        .confirmationDialog(
+            "Retranslate the whole chapter?",
+            isPresented: $showChapterRetranslateConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Retranslate whole chapter", role: .destructive) {
+                state.translateChapter(mode: .retranslateAll)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This replaces the chapter's existing sentence translations with new drafts for review.")
+        }
+        .confirmationDialog(
+            "Regenerate chapter summary?",
+            isPresented: $showChapterSummaryRegenerateConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Regenerate", role: .destructive) {
+                state.summarizeChapter()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The new summary will be a draft. Rejecting it restores the currently saved summary.")
+        }
     }
 
     private func sendChat() {
@@ -1575,16 +1701,90 @@ private struct ChapterAssistantView: View {
     private func assistantCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Palette.mute)
-                .textCase(.uppercase)
-                .tracking(0.6)
+                .font(.headline)
+                .foregroundStyle(Palette.ink)
             content()
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Palette.panel2)
         .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+private struct ChapterSummaryView: View {
+    let summary: ChapterSummaryPresentation
+    @ScaledMetric(relativeTo: .body) private var overviewSize: CGFloat = 16
+    @ScaledMetric(relativeTo: .body) private var bodySize: CGFloat = 15
+    @ScaledMetric(relativeTo: .caption) private var labelSize: CGFloat = 12
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(summary.overview)
+                .font(.system(size: overviewSize, weight: .medium, design: .serif))
+                .foregroundStyle(Palette.ink)
+                .lineSpacing(4)
+                .fixedSize(horizontal: false, vertical: true)
+
+            summarySection(title: "Key points", items: summary.keyPoints)
+            summarySection(title: "Characters & ideas", items: summary.charactersOrIdeas)
+
+            if !summary.keyConcepts.isEmpty {
+                sectionLabel("Key concepts")
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(Array(summary.keyConcepts.enumerated()), id: \.offset) { _, concept in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(concept.name)
+                                .font(.system(size: bodySize, weight: .semibold, design: .serif))
+                                .foregroundStyle(Palette.ink)
+                            Text(concept.explanation)
+                                .font(.system(size: bodySize, design: .serif))
+                                .foregroundStyle(Palette.dim)
+                                .lineSpacing(3)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+
+            summarySection(title: "Themes", items: summary.themes)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .textSelection(.enabled)
+    }
+
+    @ViewBuilder
+    private func summarySection(title: String, items: [String]) -> some View {
+        if !items.isEmpty {
+            sectionLabel(title)
+            VStack(alignment: .leading, spacing: 9) {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    HStack(alignment: .firstTextBaseline, spacing: 9) {
+                        Circle()
+                            .fill(Palette.gold)
+                            .frame(width: 4, height: 4)
+                        Text(item)
+                            .font(.system(size: bodySize, design: .serif))
+                            .foregroundStyle(Palette.ink)
+                            .lineSpacing(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
+    private func sectionLabel(_ title: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(title)
+                .font(.system(size: labelSize, weight: .semibold))
+                .textCase(.uppercase)
+                .tracking(0.5)
+            Rectangle()
+                .fill(Palette.line)
+                .frame(height: 1)
+        }
+        .foregroundStyle(Palette.gold)
     }
 }
 
@@ -1607,6 +1807,7 @@ private struct SentenceRow: View {
     let onReject: () -> Void
     let onRetry: () -> Void
     let type: ReaderType
+    @State private var showRetranslateConfirmation = false
 
     private var isCurrent: Bool { segment.id == currentID }
     private var isFocused: Bool { segment.id == focusedSegmentID }
@@ -1616,11 +1817,11 @@ private struct SentenceRow: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text(formatClock(segment.start))
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(isSelected ? Palette.gold : Palette.mute)
                 if let score = segment.alignmentScore, score >= 0.52 {
                     Text("ebook matched")
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(Palette.mute)
                 }
             }
@@ -1684,7 +1885,7 @@ private struct SentenceRow: View {
     @ViewBuilder
     private var translationBlock: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if isTranslating && gloss == nil {
+            if isTranslating {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("The LLM is translating…")
@@ -1696,7 +1897,7 @@ private struct SentenceRow: View {
                 HStack(spacing: 8) {
                     if gloss.status == .pending {
                         Text("Draft · Model: \(gloss.model)")
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundStyle(Palette.gold)
                         Button("Accept", action: onAccept)
                             .buttonStyle(.borderedProminent)
@@ -1704,13 +1905,13 @@ private struct SentenceRow: View {
                             .controlSize(.small)
                         Button("Reject", action: onReject)
                             .controlSize(.small)
-                        Button("Retranslate", action: onRetry)
+                        Button("Retranslate") { showRetranslateConfirmation = true }
                             .controlSize(.small)
                     } else if gloss.status == .accepted {
                         Text("Saved · Model: \(gloss.model)")
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundStyle(Palette.gold)
-                        Button("Retranslate", action: onRetry)
+                        Button("Retranslate") { showRetranslateConfirmation = true }
                             .controlSize(.small)
                     }
                 }
@@ -1722,6 +1923,16 @@ private struct SentenceRow: View {
             }
         }
         .padding(.top, 4)
+        .confirmationDialog(
+            "Retranslate this sentence?",
+            isPresented: $showRetranslateConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Retranslate", role: .destructive, action: onRetry)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This replaces the current translation with a new draft for review.")
+        }
     }
 }
 
@@ -1761,6 +1972,7 @@ private struct WordInspector: View {
     var type: ReaderType = .metrics(columnWidth: 420, scale: 1)
     @Environment(\.colorScheme) private var colorScheme
     @State private var webHeight: CGFloat = 180
+    @State private var showRetranslateConfirmation = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1868,7 +2080,15 @@ private struct WordInspector: View {
                         }
 
                         inspectorCard(title: "In this sentence") {
-                            if let gloss = state.selectedWordGloss {
+                            if state.isLLMJobActive(kind: .wordTranslation, targetID: word.id) {
+                                HStack(spacing: 10) {
+                                    ProgressView().controlSize(.small)
+                                    Text("Asking \(state.selectedLLMModel)…")
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(Palette.dim)
+                                }
+                                .padding(.vertical, 8)
+                            } else if let gloss = state.selectedWordGloss {
                                 GlossBody(text: gloss.text, size: type.gloss)
                                 if gloss.status == .pending {
                                     Text("Draft from \(gloss.model). Accept to keep it in the library.")
@@ -1880,22 +2100,15 @@ private struct WordInspector: View {
                                             .buttonStyle(.borderedProminent)
                                             .tint(Palette.terracotta)
                                         Button("Reject") { state.rejectGloss(gloss) }
+                                        Button("Retranslate") { showRetranslateConfirmation = true }
                                     }
                                 } else if gloss.status == .accepted {
                                     Text("Saved · Model: \(gloss.model)")
                                         .font(.system(size: 12))
                                         .foregroundStyle(Palette.gold)
+                                    Button("Retranslate") { showRetranslateConfirmation = true }
+                                        .buttonStyle(.bordered)
                                 }
-                                Button("Retranslate") { state.retranslateSelectedWord() }
-                                    .buttonStyle(.bordered)
-                            } else if state.isLLMJobActive(kind: .wordTranslation, targetID: word.id) {
-                                HStack(spacing: 10) {
-                                    ProgressView().controlSize(.small)
-                                    Text("Asking \(state.selectedLLMModel)…")
-                                        .font(.system(size: 13))
-                                        .foregroundStyle(Palette.dim)
-                                }
-                                .padding(.vertical, 8)
                             } else {
                                 Button {
                                     state.translateSelectedWord()
@@ -1936,6 +2149,18 @@ private struct WordInspector: View {
         .frame(maxHeight: .infinity, alignment: .top)
         .background(Palette.panel)
         .overlay(Rectangle().fill(Palette.line).frame(width: 1), alignment: .leading)
+        .confirmationDialog(
+            "Retranslate this word or phrase?",
+            isPresented: $showRetranslateConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Retranslate", role: .destructive) {
+                state.retranslateSelectedWord()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This replaces the current in-sentence meaning with a new draft for review.")
+        }
     }
 
     private var contextSegment: TranscriptSegment? {
@@ -1963,34 +2188,165 @@ private struct WordInspector: View {
 
 struct GlossBody: View {
     let text: String
-    var size: CGFloat = 16
+    let size: CGFloat
+    @ScaledMetric(relativeTo: .body) private var dynamicTypeScale: CGFloat = 1
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                Text(block.text)
-                    .font(.system(size: block.isHeading ? max(11, size * 0.78) : size, weight: block.isHeading ? .semibold : .regular, design: .serif))
-                    .foregroundStyle(block.isHeading ? Palette.gold : Palette.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .lineSpacing(block.isBullet ? 4 : 6)
-                    .padding(.leading, block.isBullet ? 10 : 0)
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(Array(presentation.sections.enumerated()), id: \.offset) { _, section in
+                VStack(alignment: .leading, spacing: 8) {
+                    if !section.title.isEmpty {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(section.title)
+                                .font(.system(size: sectionLabelSize, weight: .semibold))
+                                .textCase(.uppercase)
+                                .tracking(0.5)
+                            Rectangle()
+                                .fill(Palette.line)
+                                .frame(height: 1)
+                        }
+                        .foregroundStyle(Palette.gold)
+                    }
+                    sectionContent(section)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var presentation: GlossPresentation {
+        GlossPresentation.parse(text)
+    }
+
+    @ViewBuilder
+    private func sectionContent(_ section: GlossPresentation.Section) -> some View {
+        if !section.examples.isEmpty {
+            VStack(alignment: .leading, spacing: 9) {
+                ForEach(Array(section.examples.enumerated()), id: \.offset) { _, example in
+                    ExampleRow(example: example, bodySize: bodySize)
+                }
+            }
+            .padding(.leading, 10)
+        } else if !section.notes.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(section.notes.enumerated()), id: \.offset) { index, note in
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(note.source)
+                                .font(.system(size: bodySize, weight: .semibold, design: .serif))
+                                .foregroundStyle(Palette.ink)
+                            Text(note.category)
+                                .font(.system(size: sectionLabelSize, weight: .semibold))
+                                .foregroundStyle(Palette.terracotta)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(Palette.goldSoft, in: Capsule())
+                        }
+                        Text(note.explanation)
+                            .font(.system(size: bodySize, design: .serif))
+                            .foregroundStyle(.secondary)
+                            .lineSpacing(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     .textSelection(.enabled)
+                    .accessibilityElement(children: .combine)
+                    if index < section.notes.count - 1 {
+                        Divider().overlay(Palette.line)
+                    }
+                }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(section.paragraphs.enumerated()), id: \.offset) { index, paragraph in
+                    paragraphRow(paragraph, index: index, section: section)
+                }
+            }
+            .padding(.leading, section.kind == .sentenceMeaning ? 14 : 0)
+            .overlay(alignment: .leading) {
+                if section.kind == .sentenceMeaning {
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Palette.line)
+                        .frame(width: 2)
+                }
             }
         }
     }
 
-    private var blocks: [Block] {
-        text.split(separator: "\n", omittingEmptySubsequences: false).map { raw in
-            let line = String(raw).trimmingCharacters(in: .whitespaces)
-            let isHeading = GlossTextFormat.isHeading(line)
-            let isBullet = line.hasPrefix("•") || line.hasPrefix("- ") || line.hasPrefix("·")
-            return Block(text: line.isEmpty ? " " : line, isHeading: isHeading, isBullet: isBullet)
+    @ViewBuilder
+    private func paragraphRow(
+        _ paragraph: GlossPresentation.Paragraph,
+        index: Int,
+        section: GlossPresentation.Section
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            if paragraph.kind == .bullet {
+                Text("•")
+                    .foregroundStyle(Palette.gold)
+            } else if paragraph.kind == .numbered {
+                Text("\(index + 1).")
+                    .foregroundStyle(Palette.mute)
+            }
+            formattedText(paragraph.text)
+                .font(.system(
+                    size: bodySize,
+                    weight: section.kind == .translation ? .medium : .regular,
+                    design: .serif
+                ))
+                .foregroundStyle(paragraphColor(for: section.kind))
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
         }
     }
 
-    private struct Block {
-        var text: String
-        var isHeading: Bool
-        var isBullet: Bool
+    private var bodySize: CGFloat {
+        AssistantTypography.clampedBodySize(size) * dynamicTypeScale
+    }
+
+    private var sectionLabelSize: CGFloat {
+        AssistantTypography.minimumBodySize * dynamicTypeScale
+    }
+
+    private func formattedText(_ text: String) -> Text {
+        guard let attributed = try? AttributedString(
+            markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ) else { return Text(text) }
+        return Text(attributed)
+    }
+
+    private func paragraphColor(for kind: GlossPresentation.Section.Kind) -> Color {
+        switch kind {
+        case .translation, .sentenceMeaning, .other:
+            Palette.ink
+        case .learningNotes, .examples:
+            .secondary
+        }
+    }
+}
+
+private struct ExampleRow: View {
+    let example: GlossPresentation.Example
+    let bodySize: CGFloat
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            Text("•")
+                .foregroundStyle(Palette.gold)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(example.source)
+                    .font(.system(size: bodySize, design: .serif))
+                    .foregroundStyle(Palette.ink)
+                if let translation = example.translation, !translation.isEmpty {
+                    Text(translation)
+                        .font(.system(size: bodySize, design: .serif))
+                        .foregroundStyle(.secondary)
+                        .italic()
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .textSelection(.enabled)
+        .accessibilityElement(children: .combine)
     }
 }

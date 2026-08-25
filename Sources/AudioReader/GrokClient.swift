@@ -2,6 +2,7 @@ import Foundation
 
 enum LLMError: LocalizedError {
     case noAPIKey(LLMProvider)
+    case grokBuildNotLoggedIn
     case codexUnavailable
     case codexNotLoggedIn
     case codexFailed(String)
@@ -12,7 +13,9 @@ enum LLMError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noAPIKey(let provider):
-            "No \(provider.menuLabel) API key. Add \(provider.environmentKey) in Settings."
+            "No \(provider.apiLabel) API key. Add \(provider.environmentKey) in Settings or configure it in the environment."
+        case .grokBuildNotLoggedIn:
+            "Grok Build is not signed in. Run `grok login`, or choose API key in Settings."
         case .codexUnavailable:
             "Codex CLI was not found. Install Codex or set AUDIOREADER_CODEX_PATH, then sign in with ChatGPT."
         case .codexNotLoggedIn:
@@ -99,6 +102,14 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         }
     }
 
+    var apiLabel: String {
+        switch self {
+        case .grok: "xAI"
+        case .qwenCloud: "QwenCloud"
+        case .openAI: "OpenAI"
+        }
+    }
+
     var defaultEndpoint: String {
         switch self {
         case .grok: "https://api.x.ai/v1"
@@ -111,7 +122,42 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
 enum APIKeyStore {
     static var fileURL: URL { Persistence.root.appendingPathComponent("xai-api-key") }
 
-    static var grokAuthURL: URL {
+    @discardableResult
+    static func migrateLegacyCredential() -> [LegacyCredentialMigrationResult] {
+        ProviderAPIKeyStore.migrateLegacyCredentials(fileURL: fileURL, for: .grok)
+    }
+
+    static func load() -> String? {
+        return ProviderAPIKeyStore.load(.grok)
+    }
+
+    @discardableResult
+    static func save(_ key: String) -> Bool {
+        let saved = ProviderAPIKeyStore.save(key, for: .grok)
+        if saved, !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try? FileManager.default.removeItem(at: fileURL)
+        }
+        return saved
+    }
+
+    @discardableResult
+    static func clear() -> Bool {
+        ProviderAPIKeyStore.clear(.grok)
+    }
+
+    static var hasSavedKey: Bool {
+        return ProviderAPIKeyStore.hasSavedKey(.grok)
+    }
+    static var isConfigured: Bool {
+        return ProviderAPIKeyStore.isConfigured(.grok)
+    }
+    static var sourceLabel: String {
+        return ProviderAPIKeyStore.sourceLabel(.grok)
+    }
+}
+
+enum GrokBuildCredentialProvider {
+    static var authURL: URL {
 #if os(macOS)
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".grok/auth.json")
 #else
@@ -119,28 +165,10 @@ enum APIKeyStore {
 #endif
     }
 
+    /// OAuth access token managed by `grok login` / Grok Build. Not an API-console key.
     static func load() -> String? {
-        if let env = ProcessInfo.processInfo.environment["XAI_API_KEY"], !env.isEmpty {
-            return env
-        }
-        if let file = savedFileKey() { return file }
-        if let grok = grokBuildToken() { return grok }
-        return nil
-    }
-
-    static func savedFileKey() -> String? {
-        guard let data = try? Data(contentsOf: fileURL),
-              let key = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-              !key.isEmpty
-        else { return nil }
-        return key
-    }
-
-    /// OAuth access token from `grok login` / Grok Build. Not an API-console key.
-    static func grokBuildToken() -> String? {
 #if os(macOS)
-        guard let data = try? Data(contentsOf: grokAuthURL),
+        guard let data = try? Data(contentsOf: authURL),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
         for value in obj.values {
@@ -156,166 +184,85 @@ enum APIKeyStore {
 #endif
     }
 
-    @discardableResult
-    static func save(_ key: String) -> Bool {
-        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            guard FileManager.default.fileExists(atPath: fileURL.path) else { return true }
-            do {
-                try FileManager.default.removeItem(at: fileURL)
-                return true
-            } catch {
-                return false
-            }
-        }
-        do {
-            try Data(trimmed.utf8).write(to: fileURL, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    static var isConfigured: Bool { load() != nil }
-
     static var sourceLabel: String {
-        if let env = ProcessInfo.processInfo.environment["XAI_API_KEY"], !env.isEmpty {
-            return "Using XAI_API_KEY from the environment"
-        }
-        if savedFileKey() != nil { return "Using a saved xAI API key" }
-        if grokBuildToken() != nil { return "Signed in via Grok Build — no extra key needed" }
-        return "Not signed in"
+        load() == nil ? "Grok Build sign-in not found" : "Grok Build sign-in found"
     }
 }
 
 enum QwenAPIKeyStore {
     static var fileURL: URL { Persistence.root.appendingPathComponent("dashscope-api-key") }
 
-    static func load() -> String? {
-        if let env = ProcessInfo.processInfo.environment["DASHSCOPE_API_KEY"], !env.isEmpty {
-            return env
-        }
-        return savedFileKey()
+    @discardableResult
+    static func migrateLegacyCredential() -> [LegacyCredentialMigrationResult] {
+        ProviderAPIKeyStore.migrateLegacyCredentials(fileURL: fileURL, for: .qwenCloud)
     }
 
-    static func savedFileKey() -> String? {
-        guard let data = try? Data(contentsOf: fileURL),
-              let key = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-              !key.isEmpty
-        else { return nil }
-        return key
+    static func load() -> String? {
+        return ProviderAPIKeyStore.load(.qwenCloud)
     }
 
     @discardableResult
     static func save(_ key: String) -> Bool {
-        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            guard FileManager.default.fileExists(atPath: fileURL.path) else { return true }
-            do {
-                try FileManager.default.removeItem(at: fileURL)
-                return true
-            } catch {
-                return false
-            }
+        let saved = ProviderAPIKeyStore.save(key, for: .qwenCloud)
+        if saved, !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try? FileManager.default.removeItem(at: fileURL)
         }
-        do {
-            try Data(trimmed.utf8).write(to: fileURL, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
-            return true
-        } catch {
-            return false
-        }
+        return saved
     }
 
-    static var isConfigured: Bool { load() != nil }
-
+    @discardableResult static func clear() -> Bool { ProviderAPIKeyStore.clear(.qwenCloud) }
+    static var hasSavedKey: Bool {
+        return ProviderAPIKeyStore.hasSavedKey(.qwenCloud)
+    }
+    static var isConfigured: Bool {
+        return ProviderAPIKeyStore.isConfigured(.qwenCloud)
+    }
     static var sourceLabel: String {
-        if let env = ProcessInfo.processInfo.environment["DASHSCOPE_API_KEY"], !env.isEmpty {
-            return "Using DASHSCOPE_API_KEY from the environment"
-        }
-        if savedFileKey() != nil { return "Using a saved QwenCloud API key" }
-        return "Not configured"
+        return ProviderAPIKeyStore.sourceLabel(.qwenCloud)
     }
 }
 
 enum OpenAIAPIKeyStore {
     static var fileURL: URL { Persistence.root.appendingPathComponent("openai-api-key") }
 
-    static func load() -> String? {
-        if let env = ProcessInfo.processInfo.environment["OPENAI_API_KEY"], !env.isEmpty {
-            return env
-        }
-        return savedFileKey()
+    @discardableResult
+    static func migrateLegacyCredential() -> [LegacyCredentialMigrationResult] {
+        ProviderAPIKeyStore.migrateLegacyCredentials(fileURL: fileURL, for: .openAI)
     }
 
-    static func savedFileKey() -> String? {
-        guard let data = try? Data(contentsOf: fileURL),
-              let key = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-              !key.isEmpty
-        else { return nil }
-        return key
+    static func load() -> String? {
+        return ProviderAPIKeyStore.load(.openAI)
     }
 
     @discardableResult
     static func save(_ key: String) -> Bool {
-        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            guard FileManager.default.fileExists(atPath: fileURL.path) else { return true }
-            do {
-                try FileManager.default.removeItem(at: fileURL)
-                return true
-            } catch {
-                return false
-            }
+        let saved = ProviderAPIKeyStore.save(key, for: .openAI)
+        if saved, !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try? FileManager.default.removeItem(at: fileURL)
         }
-        do {
-            try Data(trimmed.utf8).write(to: fileURL, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
-            return true
-        } catch {
-            return false
-        }
+        return saved
     }
 
-    static var isConfigured: Bool { load() != nil }
-
+    @discardableResult static func clear() -> Bool { ProviderAPIKeyStore.clear(.openAI) }
+    static var hasSavedKey: Bool {
+        return ProviderAPIKeyStore.hasSavedKey(.openAI)
+    }
+    static var isConfigured: Bool {
+        return ProviderAPIKeyStore.isConfigured(.openAI)
+    }
     static var sourceLabel: String {
-        if let env = ProcessInfo.processInfo.environment["OPENAI_API_KEY"], !env.isEmpty {
-            return "Using OPENAI_API_KEY from the environment"
-        }
-        if savedFileKey() != nil { return "Using a saved OpenAI API key" }
-        return "Not configured"
-    }
-}
-
-enum GrokModel: String, CaseIterable, Identifiable {
-    case grok46 = "grok-4.6"
-    case grokBuild = "grok-build-0.1"
-
-    var id: String { rawValue }
-
-    var menuLabel: String {
-        switch self {
-        case .grok46: "grok-4.6 — general / translation"
-        case .grokBuild: "grok-build-0.1 — Grok Build"
-        }
-    }
-
-    var supportsEffort: Bool {
-        self == .grok46
+        return ProviderAPIKeyStore.sourceLabel(.openAI)
     }
 }
 
 enum GrokEffort: String, CaseIterable, Identifiable {
-    case low, medium, high, xhigh
+    case none, low, medium, high, xhigh
 
     var id: String { rawValue }
 
     var menuLabel: String {
         switch self {
+        case .none: "None — no reasoning"
         case .low: "Low — fast"
         case .medium: "Medium"
         case .high: "High"
@@ -338,6 +285,92 @@ enum OpenAIAuthentication: String, CaseIterable, Identifiable, Codable, Sendable
     }
 }
 
+enum GrokAuthentication: String, CaseIterable, Identifiable, Codable, Sendable {
+    case grokBuild
+    case apiKey
+
+    var id: String { rawValue }
+
+    var menuLabel: String {
+        switch self {
+        case .grokBuild: "Grok Build"
+        case .apiKey: "API key"
+        }
+    }
+}
+
+enum LLMConnectionChoice: String, CaseIterable, Identifiable, Sendable {
+    case grokBuild
+    case grokAPIKey
+    case qwenAPIKey
+    case chatGPTPlan
+    case openAIAPIKey
+
+    var id: String { rawValue }
+
+    var menuLabel: String {
+        switch self {
+        case .grokBuild: "xAI · Grok Build (OAuth)"
+        case .grokAPIKey: "xAI · API key"
+        case .qwenAPIKey: "Qwen · API key"
+        case .chatGPTPlan: "OpenAI · ChatGPT plan (OAuth)"
+        case .openAIAPIKey: "OpenAI · API key"
+        }
+    }
+
+    var compactLabel: String {
+        switch self {
+        case .grokBuild: "xAI OAuth"
+        case .grokAPIKey: "xAI API"
+        case .qwenAPIKey: "Qwen API"
+        case .chatGPTPlan: "ChatGPT OAuth"
+        case .openAIAPIKey: "OpenAI API"
+        }
+    }
+
+    static var availableOnCurrentPlatform: [Self] {
+#if os(macOS)
+        allCases
+#else
+        [.grokAPIKey, .qwenAPIKey, .openAIAPIKey]
+#endif
+    }
+
+    static func selected(in settings: AppSettings) -> Self {
+        switch LLMProvider(rawValue: settings.llmProvider) ?? .grok {
+        case .grok:
+            GrokAuthentication(rawValue: settings.grokAuthentication) == .apiKey
+                ? .grokAPIKey
+                : .grokBuild
+        case .qwenCloud:
+            .qwenAPIKey
+        case .openAI:
+            OpenAIAuthentication(rawValue: settings.openAIAuthentication) == .apiKey
+                ? .openAIAPIKey
+                : .chatGPTPlan
+        }
+    }
+
+    func apply(to settings: inout AppSettings) {
+        switch self {
+        case .grokBuild:
+            settings.llmProvider = LLMProvider.grok.rawValue
+            settings.grokAuthentication = GrokAuthentication.grokBuild.rawValue
+        case .grokAPIKey:
+            settings.llmProvider = LLMProvider.grok.rawValue
+            settings.grokAuthentication = GrokAuthentication.apiKey.rawValue
+        case .qwenAPIKey:
+            settings.llmProvider = LLMProvider.qwenCloud.rawValue
+        case .chatGPTPlan:
+            settings.llmProvider = LLMProvider.openAI.rawValue
+            settings.openAIAuthentication = OpenAIAuthentication.chatGPT.rawValue
+        case .openAIAPIKey:
+            settings.llmProvider = LLMProvider.openAI.rawValue
+            settings.openAIAuthentication = OpenAIAuthentication.apiKey.rawValue
+        }
+    }
+}
+
 enum OpenAIModel: String, CaseIterable, Identifiable {
     case gpt56Sol = "gpt-5.6-sol"
     case gpt56Terra = "gpt-5.6-terra"
@@ -355,13 +388,14 @@ enum OpenAIModel: String, CaseIterable, Identifiable {
 }
 
 enum OpenAIEffort: String, CaseIterable, Identifiable {
-    case none, low, medium, high, xhigh, max
+    case none, minimal, low, medium, high, xhigh, max
 
     var id: String { rawValue }
 
     var menuLabel: String {
         switch self {
         case .none: "None — fastest"
+        case .minimal: "Minimal"
         case .low: "Low"
         case .medium: "Medium"
         case .high: "High"
@@ -459,6 +493,133 @@ struct LLMModelInfo: Identifiable, Hashable, Sendable {
     var menuLabel: String { "\(id) — \(brand)" }
 }
 
+enum GrokModelCatalog {
+    static let fallback: [LLMModelInfo] = [
+        .init(id: "grok-4.6", brand: "xAI", capabilities: "Current flagship reasoning model", supportsText: true),
+        .init(id: "grok-4.5", brand: "xAI", capabilities: "Reasoning model", supportsText: true),
+        .init(id: "grok-4.3", brand: "xAI", capabilities: "Reasoning model", supportsText: true),
+        .init(id: "grok-4.20", brand: "xAI", capabilities: "Reasoning model", supportsText: true),
+        .init(id: "grok-4.20-non-reasoning", brand: "xAI", capabilities: "Fast non-reasoning model", supportsText: true),
+        .init(id: "grok-4.20-multi-agent", brand: "xAI", capabilities: "Multi-agent reasoning model", supportsText: true),
+        .init(id: "grok-build-0.1", brand: "Grok Build", capabilities: "Grok Build managed model", supportsText: true)
+    ]
+
+    static func discovered(_ modelIDs: [String]) -> [LLMModelInfo] {
+        discoveredModels(modelIDs, fallback: fallback, brand: "xAI") { id in
+            id.lowercased().hasPrefix("grok-") && !isMediaOnlyModel(id)
+        }
+    }
+}
+
+enum OpenAIModelCatalog {
+    static let fallback: [LLMModelInfo] = [
+        .init(id: "gpt-5.6-luna", brand: "OpenAI", capabilities: "Efficient reasoning model", supportsText: true),
+        .init(id: "gpt-5.6-terra", brand: "OpenAI", capabilities: "Balanced reasoning model", supportsText: true),
+        .init(id: "gpt-5.6-sol", brand: "OpenAI", capabilities: "Highest-capability reasoning model", supportsText: true),
+        .init(id: "gpt-5.5", brand: "OpenAI", capabilities: "Reasoning model", supportsText: true),
+        .init(id: "gpt-5.5-pro", brand: "OpenAI", capabilities: "High-compute reasoning model", supportsText: true),
+        .init(id: "gpt-5.4", brand: "OpenAI", capabilities: "Reasoning model", supportsText: true),
+        .init(id: "gpt-5.4-mini", brand: "OpenAI", capabilities: "Efficient reasoning model", supportsText: true),
+        .init(id: "gpt-5.4-nano", brand: "OpenAI", capabilities: "Fast compact reasoning model", supportsText: true),
+        .init(id: "gpt-5.4-pro", brand: "OpenAI", capabilities: "High-compute reasoning model", supportsText: true)
+    ]
+
+    static func discovered(_ modelIDs: [String]) -> [LLMModelInfo] {
+        discoveredModels(modelIDs, fallback: fallback, brand: "OpenAI") { id in
+            let lower = id.lowercased()
+            return (lower.hasPrefix("gpt-") || lower.hasPrefix("o1") || lower.hasPrefix("o3") || lower.hasPrefix("o4"))
+                && !isMediaOnlyModel(id)
+        }
+    }
+}
+
+private func discoveredModels(
+    _ modelIDs: [String],
+    fallback: [LLMModelInfo],
+    brand: String,
+    include: (String) -> Bool
+) -> [LLMModelInfo] {
+    let fallbackByID = Dictionary(uniqueKeysWithValues: fallback.map { ($0.id, $0) })
+    return Set(modelIDs.filter(include)).map { id in
+        fallbackByID[id] ?? .init(
+            id: id,
+            brand: brand,
+            capabilities: "Discovered from the provider API",
+            supportsText: true
+        )
+    }.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+}
+
+private func isMediaOnlyModel(_ id: String) -> Bool {
+    let markers = ["image", "audio", "voice", "realtime", "transcribe", "tts", "embedding", "moderation"]
+    return markers.contains { id.localizedCaseInsensitiveContains($0) }
+}
+
+enum GrokRequestPolicy {
+    static func supportedEfforts(model: String) -> [GrokEffort] {
+        let id = model.lowercased()
+        if id.contains("grok-4.20-multi-agent") {
+            return [.low, .medium, .high, .xhigh]
+        }
+        if id.contains("grok-4.6") { return [.low, .medium, .high, .xhigh] }
+        if id.contains("grok-4.5") { return [.low, .medium, .high] }
+        if id.contains("grok-4.3") { return [.none, .low, .medium, .high] }
+        return []
+    }
+
+    static func effort(model: String, requested: String) -> String? {
+        let supported = supportedEfforts(model: model)
+        guard !supported.isEmpty else { return nil }
+        if let requested = GrokEffort(rawValue: requested), supported.contains(requested) {
+            return requested.rawValue
+        }
+        return supported.contains(.medium) ? GrokEffort.medium.rawValue : supported[0].rawValue
+    }
+}
+
+enum OpenAIRequestPolicy {
+    static func supportedAPIEfforts(model: String) -> [OpenAIEffort] {
+        let id = model.lowercased()
+        guard id.hasPrefix("gpt-5.4") || id.hasPrefix("gpt-5.5") || id.hasPrefix("gpt-5.6") else {
+            return []
+        }
+        if id.contains("-pro") { return [.high] }
+        return [.none, .minimal, .low, .medium, .high, .xhigh]
+    }
+
+    static func apiEffort(model: String, requested: String) -> String? {
+        let supported = supportedAPIEfforts(model: model)
+        guard !supported.isEmpty else { return nil }
+        if let requested = OpenAIEffort(rawValue: requested), supported.contains(requested) {
+            return requested.rawValue
+        }
+        return supported.contains(.medium) ? OpenAIEffort.medium.rawValue : supported[0].rawValue
+    }
+}
+
+enum LLMModelDiscovery {
+    static func request(provider: LLMProvider, baseURL: String, apiKey: String) throws -> URLRequest {
+        let path = "models"
+        let endpoint = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/" + path
+        guard let url = URL(string: endpoint), let scheme = url.scheme, ["http", "https"].contains(scheme) else {
+            throw LLMError.invalidEndpoint(baseURL)
+        }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 30
+        return request
+    }
+
+    static func decodeModelIDs(_ data: Data, provider: LLMProvider) throws -> [String] {
+        try JSONDecoder().decode(OpenAIModelListResponse.self, from: data).data.map(\.id)
+    }
+
+    private struct OpenAIModelListResponse: Decodable {
+        struct Model: Decodable { var id: String }
+        var data: [Model]
+    }
+}
+
 enum QwenModelCatalog {
     static let fallback: [LLMModelInfo] = [
         .init(id: "qwen3.8-max", brand: "Qwen", capabilities: "Text Generation, Reasoning Model, Visual Understanding", supportsText: true),
@@ -519,6 +680,7 @@ actor GrokClient {
         model: String,
         effort: String,
         enableThinking: Bool,
+        grokAuthentication: GrokAuthentication = .apiKey,
         openAIAuthentication: OpenAIAuthentication = .apiKey
     ) async throws -> String {
         if provider == .openAI, openAIAuthentication == .chatGPT {
@@ -532,11 +694,19 @@ actor GrokClient {
         }
         let key: String?
         switch provider {
-        case .grok: key = APIKeyStore.load()
+        case .grok:
+            key = grokAuthentication == .grokBuild
+                ? GrokBuildCredentialProvider.load()
+                : APIKeyStore.load()
         case .qwenCloud: key = QwenAPIKeyStore.load()
         case .openAI: key = OpenAIAPIKeyStore.load()
         }
-        guard let key else { throw LLMError.noAPIKey(provider) }
+        guard let key else {
+            if provider == .grok, grokAuthentication == .grokBuild {
+                throw LLMError.grokBuildNotLoggedIn
+            }
+            throw LLMError.noAPIKey(provider)
+        }
 
         let responsesRequest = try LLMRequestBuilder.responses(
             provider: provider,
@@ -576,6 +746,7 @@ actor GrokClient {
         model: String,
         effort: String,
         enableThinking: Bool,
+        grokAuthentication: GrokAuthentication = .apiKey,
         openAIAuthentication: OpenAIAuthentication = .apiKey
     ) async throws -> String {
         if provider == .openAI, openAIAuthentication == .chatGPT {
@@ -589,11 +760,19 @@ actor GrokClient {
         }
         let key: String?
         switch provider {
-        case .grok: key = APIKeyStore.load()
+        case .grok:
+            key = grokAuthentication == .grokBuild
+                ? GrokBuildCredentialProvider.load()
+                : APIKeyStore.load()
         case .qwenCloud: key = QwenAPIKeyStore.load()
         case .openAI: key = OpenAIAPIKeyStore.load()
         }
-        guard let key else { throw LLMError.noAPIKey(provider) }
+        guard let key else {
+            if provider == .grok, grokAuthentication == .grokBuild {
+                throw LLMError.grokBuildNotLoggedIn
+            }
+            throw LLMError.noAPIKey(provider)
+        }
         if provider == .openAI {
             let request = try LLMRequestBuilder.responses(
                 provider: provider,
@@ -658,23 +837,26 @@ actor GrokClient {
     }
 
     func qwenModels(baseURL: String, apiKey: String? = nil) async throws -> [String] {
-        let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let key = supplied?.isEmpty == false ? supplied : QwenAPIKeyStore.load() else {
-            throw LLMError.noAPIKey(.qwenCloud)
-        }
-        let trimmed = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let data = try await qwenModelData(urlString: trimmed + "/models", key: key)
-        let parsed = try JSONDecoder().decode(ModelListResponse.self, from: data)
-        return parsed.data.map(\.id)
+        try await providerModels(provider: .qwenCloud, baseURL: baseURL, apiKey: apiKey)
     }
 
-    private func qwenModelData(urlString: String, key: String) async throws -> Data {
-        guard let url = URL(string: urlString), let scheme = url.scheme, ["http", "https"].contains(scheme) else {
-            throw LLMError.invalidEndpoint(urlString)
+    func providerModels(provider: LLMProvider, baseURL: String, apiKey: String? = nil) async throws -> [String] {
+        let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let savedKey: String?
+        switch provider {
+        case .grok: savedKey = APIKeyStore.load()
+        case .qwenCloud: savedKey = QwenAPIKeyStore.load()
+        case .openAI: savedKey = OpenAIAPIKeyStore.load()
         }
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 30
+        guard let key = supplied?.isEmpty == false ? supplied : savedKey else {
+            throw LLMError.noAPIKey(provider)
+        }
+        let request = try LLMModelDiscovery.request(provider: provider, baseURL: baseURL, apiKey: key)
+        let data = try await modelData(request: request)
+        return try LLMModelDiscovery.decodeModelIDs(data, provider: provider)
+    }
+
+    private func modelData(request: URLRequest) async throws -> Data {
         let (data, response) = try await URLSession.shared.data(for: request)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         if code != 200 {
@@ -717,11 +899,6 @@ actor GrokClient {
             var message: Message
         }
         var choices: [Choice]
-    }
-
-    private struct ModelListResponse: Decodable {
-        struct Model: Decodable { var id: String }
-        var data: [Model]
     }
 
     private struct ModelPermissionsResponse: Decodable {
@@ -786,10 +963,12 @@ enum LLMRequestBuilder {
             ) {
                 body["reasoning"] = ["effort": normalized]
             }
-        } else if provider == .openAI {
-            body["reasoning"] = ["effort": effort]
-        } else if GrokModel(rawValue: model)?.supportsEffort == true {
-            body["reasoning"] = ["effort": effort]
+        } else if provider == .openAI,
+                  let normalized = OpenAIRequestPolicy.apiEffort(model: model, requested: effort) {
+            body["reasoning"] = ["effort": normalized]
+        } else if provider == .grok,
+                  let normalized = GrokRequestPolicy.effort(model: model, requested: effort) {
+            body["reasoning"] = ["effort": normalized]
         }
         if structuredJSON {
             body["tools"] = [SentenceTranslationContract.submissionTool]
@@ -828,10 +1007,12 @@ enum LLMRequestBuilder {
             ) {
                 body["reasoning_effort"] = normalized
             }
-        } else if provider == .openAI {
-            body["reasoning_effort"] = effort
-        } else if GrokModel(rawValue: model)?.supportsEffort == true {
-            body["reasoning_effort"] = effort
+        } else if provider == .openAI,
+                  let normalized = OpenAIRequestPolicy.apiEffort(model: model, requested: effort) {
+            body["reasoning_effort"] = normalized
+        } else if provider == .grok,
+                  let normalized = GrokRequestPolicy.effort(model: model, requested: effort) {
+            body["reasoning_effort"] = normalized
         }
         if structuredJSON {
             body["response_format"] = ["type": "json_object"]

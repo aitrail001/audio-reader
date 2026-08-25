@@ -19,6 +19,7 @@ struct OpenAIProviderTests {
         let settings = AppSettings.default
 
         #expect(settings.openAIAuthentication == OpenAIAuthentication.chatGPT.rawValue)
+        #expect(settings.openAIEndpoint == LLMProvider.openAI.defaultEndpoint)
         #expect(settings.openAIModel == OpenAIModel.gpt56Luna.rawValue)
         #expect(settings.openAIEffort == OpenAIEffort.medium.rawValue)
     }
@@ -28,6 +29,7 @@ struct OpenAIProviderTests {
         let encoded = try JSONEncoder().encode(AppSettings.default)
         var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         object.removeValue(forKey: "openAIAuthentication")
+        object.removeValue(forKey: "openAIEndpoint")
         object.removeValue(forKey: "openAIModel")
         object.removeValue(forKey: "openAIEffort")
 
@@ -37,6 +39,7 @@ struct OpenAIProviderTests {
         )
 
         #expect(migrated.openAIAuthentication == OpenAIAuthentication.chatGPT.rawValue)
+        #expect(migrated.openAIEndpoint == LLMProvider.openAI.defaultEndpoint)
         #expect(migrated.openAIModel == OpenAIModel.gpt56Luna.rawValue)
         #expect(migrated.openAIEffort == OpenAIEffort.medium.rawValue)
     }

@@ -502,7 +502,8 @@ struct ImportParityTests {
             #expect(sentence.system.contains("Do not use Chinese anywhere in the response"))
             #expect(word.contains("Write every explanation and example translation in \(language.promptName)"))
             #expect(word.contains("Do not use Chinese anywhere in the response"))
-            #expect(summary.contains("Summarise the supplied audiobook chapter in \(language.promptName)"))
+            #expect(summary.contains("Summarise it concisely in \(language.promptName)"))
+            #expect(summary.contains("\"overview\":\"one concise paragraph in \(language.promptName)\""))
             #expect(summary.contains("Do not use Chinese anywhere in the response"))
         }
     }
@@ -530,6 +531,68 @@ struct ImportParityTests {
         #expect(spanish == ["Spanish - English", "Spanish", "Oxford Dictionary of English"])
         #expect(!spanish.contains("牛津英汉汉英词典"))
         #expect(chinese.first == "牛津英汉汉英词典")
+    }
+
+    @Test("Dictionary HTML preserves native Oxford sense flow and typography")
+    func normalizesDictionaryHTML() {
+        let raw = """
+        <body>
+          <span class="hg"><span class="hw">encompass</span><span class="syl_txt">en·com·pass</span></span>
+          <span class="se2 hasSn">
+            <span class="gp x_xdh sn ty_label tg_se2">1</span>
+            <span class="msDict t_first"><span class="gg">[with object]</span> <span class="df">surround and hold within</span><span class="gp tg_df">: </span><span class="eg"><span class="ex">a vast halo encompassing the Milky Way galaxy.</span></span></span>
+            <span class="msDict hasSn t_subsense"><span class="gp sn tg_msDict">• </span><span class="df">include comprehensively</span></span>
+          </span>
+          <span class="subEntryBlock t_derivatives"><span class="gp x_xoLblBlk">DERIVATIVES</span><span class="subEntry"><span class="l">encompassment</span> <span class="pos">noun</span></span></span>
+        </body>
+        """
+
+        let rendered = DictionaryLookup.displayHTML(raw, dark: false)
+
+        #expect(rendered.contains("<span class=\"gp tg_df\">: </span>"))
+        #expect(rendered.contains("<span class=\"gp sn tg_msDict\">• </span>"))
+        #expect(rendered.contains("body * { font-weight: 400 !important; }"))
+        #expect(rendered.contains(".syl_txt { display: none; }"))
+        #expect(rendered.contains(".se2 > .x_xdh,"))
+        #expect(rendered.contains(".eg { display: inline; }"))
+        #expect(rendered.contains(".subEntryBlock"))
+    }
+
+    @Test("Vocabulary dictionary previews keep only concise primary senses")
+    func summarizesDictionaryEntryForVocabulary() {
+        let html = """
+        <body>
+          <span class="se2"><span d:def="1" class="df">a set of connected things forming a whole</span><span class="eg"><span class="ex">the railway system</span></span></span>
+          <span class="se2"><span class="df">a specialist subsense that belongs in the full entry</span></span>
+          <span class="se2"><span class="df" d:def="1">an organized method or scheme</span></span>
+          <span class="se2"><span d:def="1" class="df">the prevailing political order</span></span>
+          <span class="subEntryBlock">PHRASES all systems go</span>
+        </body>
+        """
+
+        let preview = DictionaryLookup.concisePreview(
+            definition: "system | pronunciation | noun 1 every flattened detail and example",
+            html: html,
+            limit: 2
+        )
+
+        #expect(preview == [
+            "a set of connected things forming a whole",
+            "an organized method or scheme"
+        ])
+        #expect(!preview.joined().contains("railway"))
+        #expect(!preview.joined().contains("PHRASES"))
+    }
+
+    @Test("Vocabulary dictionary previews summarize plain translated definitions")
+    func summarizesPlainDictionaryDefinition() {
+        let preview = DictionaryLookup.concisePreview(
+            definition: "制度；教育或金融体制；封建制度；用于某事的方法；系统；装置",
+            html: nil,
+            limit: 3
+        )
+
+        #expect(preview == ["制度", "教育或金融体制", "封建制度"])
     }
 
     @Test("iPad dictionary state does not retain a stale Chinese preference")
@@ -1106,10 +1169,10 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.25")
-        #expect(plist["CFBundleVersion"] as? String == "26")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.25;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 26;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.38")
+        #expect(plist["CFBundleVersion"] as? String == "39")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.38;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 39;").count - 1 == 4)
     }
 }
 

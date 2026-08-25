@@ -12,6 +12,9 @@
 
 - Preserve deliberate authentication differences. OpenAI API-key authentication must remain available on both macOS and iPadOS. ChatGPT-plan authentication through an existing Codex `Sign in with ChatGPT` session is macOS-only; keep that path isolated with `#if os(macOS)` and do not treat its absence on iPadOS as a parity defect.
 - Do not expose, copy, or add direct handling of cached Codex OAuth tokens. iPadOS must use the supported API-key path.
+- Keep provider-managed logins separate from API-key authentication. Grok Build and ChatGPT-plan tabs must warn that the unofficial integration may violate the provider's terms; API keys and editable endpoints belong only to API mode.
+- Give every API provider a valid default endpoint and persist user overrides through shared settings. Route requests through the selected provider's persisted endpoint rather than a view-only or hard-coded call-site value.
+- Store provider API keys only in the AES-GCM encrypted local credential vault, never as per-provider Apple Keychain items or in settings JSON, logs, app-bundle resources, or plaintext files. Keep only the vault's random wrapping key in a device-only Keychain item and cache it for the running app session so provider requests do not repeatedly access Keychain. Do not replace a missing wrapping key when an existing vault cannot be unlocked. Do not reload an existing API key into a settings field; accept replacement input, expose explicit removal, and securely migrate legacy Keychain items and plaintext key files before using them.
 
 ## Cross-platform verification
 

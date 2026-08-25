@@ -420,12 +420,19 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
     var addedAt: Date
     var reviewCount: Int
     var nextReview: Date?
+    var lastReviewedAt: Date?
+    var lastReviewQuality: VocabReviewQuality?
+    var reviewIntervalDays: Double
+    var reviewEaseFactor: Double
+    var isInLearnList: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, word, category, definition, dictionaryName, dictionaryHTML
         case translation, translationLanguage, translationModel, context, spokenText, ebookText
         case bookID, bookTitle, chapterID, chapterTitle, segmentID, wordID
         case timestamp, addedAt, reviewCount, nextReview
+        case lastReviewedAt, lastReviewQuality, reviewIntervalDays, reviewEaseFactor
+        case isInLearnList
     }
 
     init(
@@ -450,7 +457,12 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
         timestamp: TimeInterval,
         addedAt: Date,
         reviewCount: Int = 0,
-        nextReview: Date? = nil
+        nextReview: Date? = nil,
+        lastReviewedAt: Date? = nil,
+        lastReviewQuality: VocabReviewQuality? = nil,
+        reviewIntervalDays: Double = 0,
+        reviewEaseFactor: Double = 2.5,
+        isInLearnList: Bool = false
     ) {
         self.id = id
         self.word = word
@@ -474,6 +486,11 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
         self.addedAt = addedAt
         self.reviewCount = reviewCount
         self.nextReview = nextReview
+        self.lastReviewedAt = lastReviewedAt
+        self.lastReviewQuality = lastReviewQuality
+        self.reviewIntervalDays = reviewIntervalDays
+        self.reviewEaseFactor = reviewEaseFactor
+        self.isInLearnList = isInLearnList
     }
 
     init(from decoder: Decoder) throws {
@@ -500,6 +517,11 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
         addedAt = try c.decode(Date.self, forKey: .addedAt)
         reviewCount = try c.decodeIfPresent(Int.self, forKey: .reviewCount) ?? 0
         nextReview = try c.decodeIfPresent(Date.self, forKey: .nextReview)
+        lastReviewedAt = try c.decodeIfPresent(Date.self, forKey: .lastReviewedAt)
+        lastReviewQuality = try c.decodeIfPresent(VocabReviewQuality.self, forKey: .lastReviewQuality)
+        reviewIntervalDays = try c.decodeIfPresent(Double.self, forKey: .reviewIntervalDays) ?? 0
+        reviewEaseFactor = try c.decodeIfPresent(Double.self, forKey: .reviewEaseFactor) ?? 2.5
+        isInLearnList = try c.decodeIfPresent(Bool.self, forKey: .isInLearnList) ?? false
         sanitizeDictionaryFields()
     }
 

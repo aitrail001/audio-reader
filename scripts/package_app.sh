@@ -9,6 +9,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/AudioReader"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
+if [[ -d ".build/release/AudioReader_AudioReader.bundle" ]]; then
+  cp -R ".build/release/AudioReader_AudioReader.bundle" "$APP/Contents/Resources/AudioReader_AudioReader.bundle"
+fi
 if [[ -f ".build/release/ZIPFoundation_ZIPFoundation.bundle/PrivacyInfo.xcprivacy" ]]; then
   cp ".build/release/ZIPFoundation_ZIPFoundation.bundle/PrivacyInfo.xcprivacy" "$APP/Contents/Resources/PrivacyInfo.xcprivacy"
 fi

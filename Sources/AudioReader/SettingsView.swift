@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 struct SettingsView: View {
@@ -6,6 +7,9 @@ struct SettingsView: View {
     @State private var xAIKey: String
     @State private var qwenKey: String
     @State private var openAIKey: String
+    @State private var removeXAIKey = false
+    @State private var removeQwenKey = false
+    @State private var removeOpenAIKey = false
     @State private var saveFeedback: SaveFeedback?
 
     private let labelWidth: CGFloat = 156
@@ -13,9 +17,9 @@ struct SettingsView: View {
     init(state: AppState) {
         self.state = state
         _draft = State(initialValue: state.settings)
-        _xAIKey = State(initialValue: state.apiKeyDraft)
-        _qwenKey = State(initialValue: state.qwenAPIKeyDraft)
-        _openAIKey = State(initialValue: state.openAIAPIKeyDraft)
+        _xAIKey = State(initialValue: "")
+        _qwenKey = State(initialValue: "")
+        _openAIKey = State(initialValue: "")
     }
 
     var body: some View {
@@ -105,7 +109,7 @@ struct SettingsView: View {
                 }
                 settingRow("Text size") {
                     HStack(spacing: 12) {
-                        Slider(value: $draft.readerFontScale, in: 0.75...1.6, step: 0.05)
+                        Slider(value: $draft.readerFontScale, in: 0.65...1.6, step: 0.05)
                         Text(String(format: "%.0f%%", draft.readerFontScale * 100))
                             .font(.system(size: 11, design: .monospaced))
                             .frame(width: 44, alignment: .trailing)
@@ -178,10 +182,18 @@ struct SettingsView: View {
     private var languageSection: some View {
         GroupBox("Languages") {
             VStack(alignment: .leading, spacing: 12) {
-                settingRow("Audiobook language") {
-                    Picker("Audiobook language", selection: $draft.transcriptionLanguage) {
+                settingRow("Default audiobook language") {
+                    Picker("Default audiobook language", selection: $draft.transcriptionLanguage) {
                         ForEach(TranscriptionLanguage.allCases) { language in
                             Text(language.menuLabel).tag(language.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                }
+                settingRow("Reader level") {
+                    Picker("Reader level", selection: $draft.readerLanguageLevel) {
+                        ForEach(ReaderLanguageLevel.allCases) { level in
+                            Text(level.menuLabel).tag(level.rawValue)
                         }
                     }
                     .labelsHidden()
@@ -203,7 +215,7 @@ struct SettingsView: View {
                         draft.preferredDictionary = name
                     }
                 }
-                helper("Audiobook language controls on-device transcription and synchronized EPUB matching. Translate into controls explanations and study tools.")
+                helper("The default audiobook language is used for new books; each book can override it in the Library or Reader. Reader level keeps AI language notes selective. Translate into controls explanations and study tools.")
                 settingRow("Auto-translate") {
                     Toggle("Translate the current sentence with the selected LLM", isOn: $draft.autoTranslate)
                 }
@@ -227,6 +239,9 @@ struct SettingsView: View {
     private var providerSection: some View {
         GroupBox("LLM provider") {
             VStack(alignment: .leading, spacing: 12) {
+                if let warning = state.credentialMigrationWarning {
+                    migrationWarning(warning)
+                }
                 settingRow("Provider") {
                     Picker("Provider", selection: $draft.llmProvider) {
                         ForEach(LLMProvider.allCases) { provider in
@@ -253,28 +268,87 @@ struct SettingsView: View {
 
     private var grokSettings: some View {
         VStack(alignment: .leading, spacing: 12) {
-            helper("A Grok Build session from `grok login` works without a console API key. A saved key overrides no environment variables.")
-            settingRow("Connection") {
-                Text(APIKeyStore.sourceLabel)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(APIKeyStore.isConfigured ? Palette.gold : Palette.dim)
-            }
-            settingRow("xAI API key") {
-                SecureField("Optional XAI_API_KEY", text: $xAIKey)
-                    .textFieldStyle(.roundedBorder)
-            }
-            settingRow("Model") {
-                Picker("Model", selection: $draft.grokModel) {
-                    ForEach(GrokModel.allCases) { model in
-                        Text(model.menuLabel).tag(model.rawValue)
+            helper("Choose either a Grok Build sign-in or the supported xAI API. API credentials and endpoints apply only to API-key mode.")
+            settingRow("Authentication") {
+#if os(macOS)
+                Picker("Authentication", selection: $draft.grokAuthentication) {
+                    ForEach(GrokAuthentication.allCases) { authentication in
+                        Text(authentication.menuLabel).tag(authentication.rawValue)
                     }
                 }
                 .labelsHidden()
+                .pickerStyle(.segmented)
+#else
+                Text("API key")
+                    .onAppear { draft.grokAuthentication = GrokAuthentication.apiKey.rawValue }
+#endif
             }
-            if GrokModel(rawValue: draft.grokModel)?.supportsEffort == true {
+
+            if draftGrokAuthentication == .grokBuild {
+                legalWarning(
+                    "Using a Grok Build sign-in through AudioReader may violate xAI's terms. Review the current terms before continuing.",
+                    linkLabel: "Review xAI terms",
+                    url: URL(string: "https://x.ai/legal/terms-of-service")!
+                )
+                settingRow("Connection") {
+                    connectionStatus(
+                        GrokBuildCredentialProvider.sourceLabel,
+                        ready: GrokBuildCredentialProvider.load() != nil
+                    )
+                }
+                alignedHelper("Run `grok login` in Terminal to manage this provider-owned session. AudioReader does not save the Grok Build credential.", muted: true)
+            } else {
+                settingRow("Connection") {
+                    connectionStatus(APIKeyStore.sourceLabel, ready: APIKeyStore.isConfigured)
+                }
+                apiKeyRow(
+                    label: "xAI API key",
+                    placeholder: "Enter a new XAI_API_KEY",
+                    key: $xAIKey,
+                    removeSavedKey: $removeXAIKey,
+                    hasSavedKey: APIKeyStore.hasSavedKey
+                )
+                settingRow("Endpoint") {
+                    endpointField(
+                        "xAI API endpoint",
+                        value: $draft.grokEndpoint,
+                        defaultValue: LLMProvider.grok.defaultEndpoint
+                    )
+                }
+                if state.isLoadingGrokModels {
+                    modelLoadingRow("Refreshing the xAI model list…")
+                } else if let message = state.grokModelsMessage {
+                    alignedHelper(message)
+                }
+                HStack {
+                    Spacer().frame(width: labelWidth + 16)
+                    Button {
+                        Task {
+                            if let models = await state.retrieveGrokModels(baseURL: draft.grokEndpoint, apiKey: xAIKey) {
+                                normalizeDraftModel(models, selection: &draft.grokModel, preferred: "grok-4.6")
+                                normalizeDraftGrokEffort()
+                            }
+                        }
+                    } label: {
+                        Label("Retrieve xAI Models", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(state.isLoadingGrokModels)
+                }
+                alignedHelper("\(state.grokModels.count) language models in the current catalog.", muted: true)
+            }
+            settingRow("Model") {
+                Picker("Model", selection: $draft.grokModel) {
+                    ForEach(grokTextModels) { model in
+                        Text(model.menuLabel).tag(model.id)
+                    }
+                }
+                .labelsHidden()
+                .onChange(of: draft.grokModel) { _, _ in normalizeDraftGrokEffort() }
+            }
+            if !draftGrokEfforts.isEmpty {
                 settingRow("Reasoning effort") {
                     Picker("Reasoning effort", selection: $draft.grokEffort) {
-                        ForEach(GrokEffort.allCases) { effort in
+                        ForEach(draftGrokEfforts) { effort in
                             Text(effort.menuLabel).tag(effort.rawValue)
                         }
                     }
@@ -288,17 +362,21 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             helper("QwenCloud uses Responses with a required JSON-schema tool for Qwen chapter translation, and JSON Chat Completions for supported third-party models. Thinking can improve complex answers but adds latency and token usage.")
             settingRow("Connection") {
-                Text(QwenAPIKeyStore.sourceLabel)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(QwenAPIKeyStore.isConfigured ? Palette.gold : Palette.dim)
+                connectionStatus(QwenAPIKeyStore.sourceLabel, ready: QwenAPIKeyStore.isConfigured)
             }
-            settingRow("DashScope API key") {
-                SecureField("DASHSCOPE_API_KEY", text: $qwenKey)
-                    .textFieldStyle(.roundedBorder)
-            }
+            apiKeyRow(
+                label: "DashScope API key",
+                placeholder: "Enter a new DASHSCOPE_API_KEY",
+                key: $qwenKey,
+                removeSavedKey: $removeQwenKey,
+                hasSavedKey: QwenAPIKeyStore.hasSavedKey
+            )
             settingRow("Endpoint") {
-                TextField("QwenCloud endpoint", text: $draft.qwenEndpoint)
-                    .textFieldStyle(.roundedBorder)
+                endpointField(
+                    "QwenCloud endpoint",
+                    value: $draft.qwenEndpoint,
+                    defaultValue: LLMProvider.qwenCloud.defaultEndpoint
+                )
             }
             settingRow("Text model") {
                 Picker("Text model", selection: $draft.qwenModel) {
@@ -373,6 +451,7 @@ struct SettingsView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
+                .onChange(of: draft.openAIAuthentication) { _, _ in normalizeDraftOpenAIEffort() }
 #else
                 Text("API key")
                     .onAppear { draft.openAIAuthentication = OpenAIAuthentication.apiKey.rawValue }
@@ -380,10 +459,16 @@ struct SettingsView: View {
             }
 
             if draftOpenAIAuthentication == .chatGPT {
+                legalWarning(
+                    "Using a ChatGPT-plan Codex session through AudioReader may violate OpenAI's terms. Review the current terms before continuing.",
+                    linkLabel: "Review OpenAI terms",
+                    url: URL(string: "https://openai.com/policies/terms-of-use/")!
+                )
                 settingRow("Connection") {
-                    Text(state.codexLoginStatus)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(state.codexLoginStatus.localizedCaseInsensitiveContains("logged in") ? Palette.gold : Palette.dim)
+                    connectionStatus(
+                        state.codexLoginStatus,
+                        ready: state.codexLoginStatus.localizedCaseInsensitiveContains("logged in")
+                    )
                 }
                 alignedHelper("Codex: \(CodexCLIClient.executableLabel)", muted: true)
                 HStack {
@@ -401,33 +486,64 @@ struct SettingsView: View {
                 alignedHelper("If needed, run `codex login` in Terminal and choose Sign in with ChatGPT. AudioReader prefers Codex's native executable and never reads or displays the cached OAuth tokens.", muted: true)
             } else {
                 settingRow("Connection") {
-                    Text(OpenAIAPIKeyStore.sourceLabel)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(OpenAIAPIKeyStore.isConfigured ? Palette.gold : Palette.dim)
+                    connectionStatus(OpenAIAPIKeyStore.sourceLabel, ready: OpenAIAPIKeyStore.isConfigured)
                 }
-                settingRow("OpenAI API key") {
-                    SecureField("OPENAI_API_KEY", text: $openAIKey)
-                        .textFieldStyle(.roundedBorder)
+                apiKeyRow(
+                    label: "OpenAI API key",
+                    placeholder: "Enter a new OPENAI_API_KEY",
+                    key: $openAIKey,
+                    removeSavedKey: $removeOpenAIKey,
+                    hasSavedKey: OpenAIAPIKeyStore.hasSavedKey
+                )
+                settingRow("Endpoint") {
+                    endpointField(
+                        "OpenAI API endpoint",
+                        value: $draft.openAIEndpoint,
+                        defaultValue: LLMProvider.openAI.defaultEndpoint
+                    )
                 }
+                if state.isLoadingOpenAIModels {
+                    modelLoadingRow("Refreshing the OpenAI model list…")
+                } else if let message = state.openAIModelsMessage {
+                    alignedHelper(message)
+                }
+                HStack {
+                    Spacer().frame(width: labelWidth + 16)
+                    Button {
+                        Task {
+                            if let models = await state.retrieveOpenAIModels(baseURL: draft.openAIEndpoint, apiKey: openAIKey) {
+                                normalizeDraftModel(models, selection: &draft.openAIModel, preferred: "gpt-5.6-luna")
+                                normalizeDraftOpenAIEffort()
+                            }
+                        }
+                    } label: {
+                        Label("Retrieve OpenAI Models", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(state.isLoadingOpenAIModels)
+                }
+                alignedHelper("\(state.openAIModels.count) text models in the current catalog.", muted: true)
             }
 
             settingRow("Model") {
                 Picker("Model", selection: $draft.openAIModel) {
-                    ForEach(OpenAIModel.allCases) { model in
-                        Text(model.menuLabel).tag(model.rawValue)
+                    ForEach(openAITextModels) { model in
+                        Text(model.menuLabel).tag(model.id)
                     }
                 }
                 .labelsHidden()
+                .onChange(of: draft.openAIModel) { _, _ in normalizeDraftOpenAIEffort() }
             }
-            settingRow("Reasoning effort") {
-                Picker("Reasoning effort", selection: $draft.openAIEffort) {
-                    ForEach(OpenAIEffort.allCases) { effort in
-                        Text(effort.menuLabel).tag(effort.rawValue)
+            if !draftOpenAIEfforts.isEmpty {
+                settingRow("Reasoning effort") {
+                    Picker("Reasoning effort", selection: $draft.openAIEffort) {
+                        ForEach(draftOpenAIEfforts) { effort in
+                            Text(effort.menuLabel).tag(effort.rawValue)
+                        }
                     }
+                    .labelsHidden()
                 }
-                .labelsHidden()
             }
-            alignedHelper("GPT-5.6 Luna is the efficient default for frequent translation and reading-assistant requests. Sol and Terra trade higher capability for greater usage.", muted: true)
+            alignedHelper("Effort choices follow the selected model. API model discovery needs an OpenAI API key; ChatGPT-plan sessions do not expose that endpoint.", muted: true)
         }
         .task {
             if draftOpenAIAuthentication == .chatGPT {
@@ -444,12 +560,33 @@ struct SettingsView: View {
         OpenAIAuthentication(rawValue: draft.openAIAuthentication) ?? .chatGPT
     }
 
+    private var draftGrokAuthentication: GrokAuthentication {
+        GrokAuthentication(rawValue: draft.grokAuthentication) ?? .grokBuild
+    }
+
     private var qwenTextModels: [LLMModelInfo] {
         var models = state.qwenModels.filter(\.supportsText)
         if !models.contains(where: { $0.id == draft.qwenModel }) {
             models.append(.init(id: draft.qwenModel, brand: "Custom", capabilities: "Custom model ID", supportsText: true))
         }
         return models.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+    }
+
+    private var grokTextModels: [LLMModelInfo] {
+        selectableModels(state.grokModels, selectedID: draft.grokModel)
+    }
+
+    private var openAITextModels: [LLMModelInfo] {
+        selectableModels(state.openAIModels, selectedID: draft.openAIModel)
+    }
+
+    private var draftGrokEfforts: [GrokEffort] {
+        GrokRequestPolicy.supportedEfforts(model: draft.grokModel)
+    }
+
+    private var draftOpenAIEfforts: [OpenAIEffort] {
+        if draftOpenAIAuthentication == .chatGPT { return OpenAIEffort.allCases }
+        return OpenAIRequestPolicy.supportedAPIEfforts(model: draft.openAIModel)
     }
 
     private var draftQwenEfforts: [QwenEffort] {
@@ -461,6 +598,44 @@ struct SettingsView: View {
               !draftQwenEfforts.contains(where: { $0.rawValue == draft.qwenEffort })
         else { return }
         draft.qwenEffort = draftQwenEfforts.contains(.none) ? QwenEffort.none.rawValue : draftQwenEfforts[0].rawValue
+    }
+
+    private func normalizeDraftGrokEffort() {
+        guard !draftGrokEfforts.isEmpty,
+              !draftGrokEfforts.contains(where: { $0.rawValue == draft.grokEffort })
+        else { return }
+        draft.grokEffort = draftGrokEfforts.contains(.medium) ? GrokEffort.medium.rawValue : draftGrokEfforts[0].rawValue
+    }
+
+    private func normalizeDraftOpenAIEffort() {
+        guard !draftOpenAIEfforts.isEmpty,
+              !draftOpenAIEfforts.contains(where: { $0.rawValue == draft.openAIEffort })
+        else { return }
+        draft.openAIEffort = draftOpenAIEfforts.contains(.medium) ? OpenAIEffort.medium.rawValue : draftOpenAIEfforts[0].rawValue
+    }
+
+    private func selectableModels(_ models: [LLMModelInfo], selectedID: String) -> [LLMModelInfo] {
+        var selectable = models.filter(\.supportsText)
+        if !selectable.contains(where: { $0.id == selectedID }) {
+            selectable.append(.init(id: selectedID, brand: "Custom", capabilities: "Custom model ID", supportsText: true))
+        }
+        return selectable.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+    }
+
+    private func normalizeDraftModel(_ models: [LLMModelInfo], selection: inout String, preferred: String) {
+        let selectable = models.filter(\.supportsText)
+        guard !selectable.contains(where: { $0.id == selection }) else { return }
+        selection = selectable.first(where: { $0.id == preferred })?.id ?? selectable.first?.id ?? selection
+    }
+
+    private func modelLoadingRow(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            Spacer().frame(width: labelWidth + 16)
+            ProgressView().controlSize(.small)
+            Text(text)
+                .font(.system(size: 11))
+                .foregroundStyle(Palette.dim)
+        }
     }
 
     private func settingRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
@@ -485,11 +660,90 @@ struct SettingsView: View {
         HStack(alignment: .top, spacing: 16) {
             Spacer().frame(width: labelWidth)
             Text(text)
-                .font(.system(size: muted ? 10 : 11))
+                .font(.system(size: 11))
                 .foregroundStyle(muted ? Palette.mute : Palette.dim)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private func connectionStatus(_ text: String, ready: Bool) -> some View {
+        Label(text, systemImage: ready ? "checkmark.circle.fill" : "exclamationmark.circle")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(ready ? Palette.gold : Palette.dim)
+    }
+
+    private func endpointField(
+        _ placeholder: String,
+        value: Binding<String>,
+        defaultValue: String
+    ) -> some View {
+        HStack(spacing: 8) {
+            TextField(placeholder, text: value)
+                .textFieldStyle(.roundedBorder)
+            Button("Reset") { value.wrappedValue = defaultValue }
+                .disabled(value.wrappedValue == defaultValue)
+        }
+    }
+
+    private func apiKeyRow(
+        label: String,
+        placeholder: String,
+        key: Binding<String>,
+        removeSavedKey: Binding<Bool>,
+        hasSavedKey: Bool
+    ) -> some View {
+        settingRow(label) {
+            VStack(alignment: .leading, spacing: 8) {
+                SecureField(placeholder, text: key)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(removeSavedKey.wrappedValue)
+                HStack(spacing: 8) {
+                    Text(hasSavedKey
+                         ? (removeSavedKey.wrappedValue ? "Saved key will be removed." : "Leave blank to keep the encrypted key.")
+                         : "Encrypted locally when you save settings.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Palette.mute)
+                    Spacer(minLength: 0)
+                    if hasSavedKey {
+                        Button(removeSavedKey.wrappedValue ? "Keep key" : "Remove key") {
+                            removeSavedKey.wrappedValue.toggle()
+                            if removeSavedKey.wrappedValue { key.wrappedValue = "" }
+                        }
+                        .controlSize(.small)
+                    }
+                }
+            }
+        }
+    }
+
+    private func legalWarning(_ text: String, linkLabel: String, url: URL) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Palette.gold)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(text)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Palette.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                Link(linkLabel, destination: url)
+                    .font(.system(size: 11, weight: .medium))
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.goldSoft)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func migrationWarning(_ text: String) -> some View {
+        Label(text, systemImage: "lock.trianglebadge.exclamationmark")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(Palette.ink)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Palette.goldSoft)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private func countStepper(value: Binding<Int>, range: ClosedRange<Int>, suffix: String) -> some View {
@@ -504,9 +758,9 @@ struct SettingsView: View {
 
     private func save() {
         let settingsSaved = Persistence.saveSettings(draft)
-        let xAIKeySaved = APIKeyStore.save(xAIKey)
-        let qwenKeySaved = QwenAPIKeyStore.save(qwenKey)
-        let openAIKeySaved = OpenAIAPIKeyStore.save(openAIKey)
+        let xAIKeySaved = removeXAIKey ? APIKeyStore.clear() : APIKeyStore.save(xAIKey)
+        let qwenKeySaved = removeQwenKey ? QwenAPIKeyStore.clear() : QwenAPIKeyStore.save(qwenKey)
+        let openAIKeySaved = removeOpenAIKey ? OpenAIAPIKeyStore.clear() : OpenAIAPIKeyStore.save(openAIKey)
 
         guard settingsSaved else {
             saveFeedback = .init(message: "Settings could not be written to disk. Your changes were not applied.", succeeded: false)
@@ -515,20 +769,39 @@ struct SettingsView: View {
 
         state.settings = draft
         state.selectedDictionaryName = draft.preferredDictionary
-        state.apiKeyDraft = xAIKey
-        state.qwenAPIKeyDraft = qwenKey
-        state.openAIAPIKeyDraft = openAIKey
+        xAIKey = ""
+        qwenKey = ""
+        openAIKey = ""
+        removeXAIKey = false
+        removeQwenKey = false
+        removeOpenAIKey = false
 
         if xAIKeySaved && qwenKeySaved && openAIKeySaved {
-            saveFeedback = .init(message: "Settings saved successfully.", succeeded: true)
+            saveFeedback = .init(message: "Settings saved. API keys are protected in the encrypted local vault.", succeeded: true)
+            if ![APIKeyStore.fileURL, QwenAPIKeyStore.fileURL, OpenAIAPIKeyStore.fileURL]
+                .contains(where: { FileManager.default.fileExists(atPath: $0.path) }) {
+                state.credentialMigrationWarning = nil
+            }
         } else {
             saveFeedback = .init(message: "Settings saved, but one or more API keys could not be stored.", succeeded: false)
         }
 
-        guard draftProvider == .qwenCloud, qwenKeySaved else { return }
         Task {
-            await state.refreshQwenModels()
-            draft.qwenModel = state.settings.qwenModel
+            switch draftProvider {
+            case .grok where draftGrokAuthentication == .apiKey && xAIKeySaved:
+                await state.refreshGrokModels()
+                draft.grokModel = state.settings.grokModel
+            case .qwenCloud where qwenKeySaved:
+                await state.refreshQwenModels()
+                draft.qwenModel = state.settings.qwenModel
+            case .openAI where draftOpenAIAuthentication == .apiKey && openAIKeySaved:
+                await state.refreshOpenAIModels()
+                draft.openAIModel = state.settings.openAIModel
+            case .openAI where draftOpenAIAuthentication == .chatGPT:
+                await state.refreshCodexLoginStatus()
+            default:
+                break
+            }
         }
     }
 }

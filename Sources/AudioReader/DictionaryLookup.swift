@@ -256,7 +256,11 @@ enum DictionaryLookup {
     }
 
     static func displayHTML(_ raw: String, dark: Bool = true) -> String {
-        wrappedHTML(extractBody(raw), dark: dark)
+        wrappedHTML(normalizeEntryBody(extractBody(raw)), dark: dark)
+    }
+
+    static func normalizeEntryBody(_ body: String) -> String {
+        body
     }
 
     static func plainPreview(from raw: String) -> String {
@@ -285,6 +289,94 @@ enum DictionaryLookup {
             return translations.prefix(8).joined(separator: "；")
         }
         return stripTags(raw)
+    }
+
+    static func concisePreview(
+        definition: String?,
+        html: String?,
+        limit: Int = 3
+    ) -> [String] {
+        guard limit > 0 else { return [] }
+
+        if let html, !html.isEmpty {
+            let definitions = primaryDefinitions(from: html)
+            if !definitions.isEmpty {
+                return Array(definitions.prefix(limit))
+            }
+        }
+
+        if let definition, !definition.isEmpty {
+            let definitions = concisePlainDefinitions(from: definition)
+            if !definitions.isEmpty {
+                return Array(definitions.prefix(limit))
+            }
+        }
+
+        guard let html, !html.isEmpty else { return [] }
+        return Array(concisePlainDefinitions(from: plainPreview(from: html)).prefix(limit))
+    }
+
+    private static func primaryDefinitions(from html: String) -> [String] {
+        let pattern = #"<span\b(?=[^>]*\bd:def\s*=\s*[\"']1[\"'])(?=[^>]*\bclass\s*=\s*[\"'][^\"']*\bdf\b[^\"']*[\"'])[^>]*>([\s\S]*?)</span>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return []
+        }
+        let ns = html as NSString
+        let range = NSRange(location: 0, length: ns.length)
+        var results: [String] = []
+        regex.enumerateMatches(in: html, options: [], range: range) { match, _, _ in
+            guard let match, match.numberOfRanges > 1 else { return }
+            let value = stripTags(ns.substring(with: match.range(at: 1)))
+            guard !value.isEmpty, !results.contains(value) else { return }
+            results.append(value)
+        }
+        return results
+    }
+
+    private static func concisePlainDefinitions(from raw: String) -> [String] {
+        let text = collapseWhitespace(raw)
+        guard !text.isEmpty else { return [] }
+
+        let translated = text
+            .split(whereSeparator: { $0 == "；" || $0 == "\n" || $0 == "•" })
+            .map { collapseWhitespace(String($0)) }
+            .filter { !$0.isEmpty }
+        if translated.count > 1 {
+            return translated
+        }
+
+        let sensePattern = #"(?:^|\.\s+|\|\s*(?:noun|verb|adjective|adverb|preposition|pronoun|conjunction|determiner|exclamation)\s+)(\d+)\s+"#
+        guard let regex = try? NSRegularExpression(pattern: sensePattern, options: [.caseInsensitive]) else {
+            return [shortDefinition(text)]
+        }
+        let ns = text as NSString
+        let fullRange = NSRange(location: 0, length: ns.length)
+        let matches = regex.matches(in: text, options: [], range: fullRange)
+        guard !matches.isEmpty else { return [shortDefinition(text)] }
+
+        return matches.enumerated().compactMap { index, match in
+            let start = NSMaxRange(match.range)
+            let end = index + 1 < matches.count ? matches[index + 1].range.location : ns.length
+            guard start < end else { return nil }
+            let sense = shortDefinition(ns.substring(with: NSRange(location: start, length: end - start)))
+            return sense.isEmpty ? nil : sense
+        }
+    }
+
+    private static func shortDefinition(_ raw: String) -> String {
+        var text = collapseWhitespace(raw)
+        if let detail = text.range(of: " • ") {
+            text = String(text[..<detail.lowerBound])
+        }
+        if let examples = text.range(of: ": ") {
+            text = String(text[..<examples.lowerBound])
+        }
+        text = text.trimmingCharacters(in: CharacterSet(charactersIn: " .;:|"))
+        guard text.count > 220 else { return text }
+        let boundary = text.index(text.startIndex, offsetBy: 220)
+        let prefix = text[..<boundary]
+        let clipped = prefix.lastIndex(of: " ").map { prefix[..<$0] } ?? prefix
+        return collapseWhitespace(String(clipped)) + "…"
     }
 
     static func collapseWhitespace(_ s: String) -> String {
@@ -324,13 +416,11 @@ enum DictionaryLookup {
     }
 
     static func wrappedHTML(_ body: String, dark: Bool = true) -> String {
+        let body = normalizeEntryBody(body)
         let ink = dark ? "#F3EDE4" : "#2A2118"
         let hw = dark ? "#F8F1E8" : "#1C1611"
         let muted = dark ? "#9A8C7E" : "#6F6458"
         let gold = dark ? "#E8B86D" : "#B07A28"
-        let accent = dark ? "#E0A35A" : "#A66A1C"
-        let exampleZh = dark ? "#C9B9A8" : "#5C5248"
-        let dim = dark ? "#C4B6A6" : "#6A5E54"
         let rule = dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)"
         return """
         <!doctype html>
@@ -343,67 +433,80 @@ enum DictionaryLookup {
             padding: 0;
             background: transparent;
             color: \(ink);
-            font: 16px/1.7 ui-serif, "Iowan Old Style", Palatino, "Songti SC", "PingFang SC", serif;
+            font: 15px/1.45 ui-serif, "Iowan Old Style", Palatino, "Songti SC", "PingFang SC", serif;
             -webkit-font-smoothing: antialiased;
           }
+          body * { font-weight: 400 !important; }
           d\\:entry, .entry { display: block; }
           d\\:prn, d\\:pos, d\\:def { display: none; }
 
-          .hwg { display: block; margin: 0 0 16px; }
-          .hw { font-size: 1.25em; font-weight: 650; color: \(hw); }
-          .prx, .ph { color: \(muted); font-size: 0.92em; font-weight: 400; }
+          .hg, .hwg { display: block; margin: 0 0 8px; }
+          .hw { font-size: 1.4em; font-weight: 700 !important; color: \(hw); }
+          .syl_txt { display: none; }
+          .prx, .pr, .ph { color: \(muted); font-size: 0.96em; }
 
-          .gramb, .x_xd0.hasSn { display: block; margin: 22px 0 10px; }
+          .sg, .gramb, .se1 { display: block; }
+          .se1 > .posg,
           .gramb > .x_xdh {
             display: block;
-            margin: 0 0 10px;
-            font-size: 1.06em;
-            font-weight: 650;
-            color: \(hw);
+            margin: 0 0 6px;
+            color: \(muted);
           }
-          .ps, .pos, .posg { color: \(gold); font-style: italic; font-weight: 500; }
-          .frmg, .frm { font-weight: 650; }
+          .ps, .pos, .posg { color: \(muted); font-style: normal; }
 
-          .semb, .se1, .se2, .msDict { display: block; margin: 16px 0 8px; }
-          .semb > .x_xdh,
-          .semb > .gp.x_xdh,
-          .gp.x_xdh.sn.ty_label.tg_semb {
-            display: inline;
-            margin: 0;
-            color: \(accent);
-            font-weight: 700;
+          .se2, .semb {
+            position: relative;
+            display: block;
+            margin: 5px 0;
+            padding-left: 1.5em;
           }
-          .trgg { display: inline; }
-          .cnt { color: \(dim); }
-          .ind { color: \(dim); }
-          .trans { color: \(ink); }
+          .se2 > .x_xdh,
+          .semb > .x_xdh,
+          .se2 > .gp.x_xdh,
+          .semb > .gp.x_xdh {
+            position: absolute;
+            left: 0;
+            top: 0;
+            color: \(muted);
+          }
+          .msDict, .trg, .trgg { display: inline; margin: 0; }
+          .t_subsense {
+            display: block;
+            margin: 2px 0 0;
+            padding-left: 1em;
+          }
+          .t_subsense > .sn { margin-left: -1em; margin-right: 0.25em; }
+
+          .gg, .lg, .reg, .ind, .cnt, .co { color: \(muted); }
+          .gg, .reg, .co { font-style: italic; }
+          .df { display: inline; font-weight: 650 !important; }
+          .gp.tg_df { color: \(muted); }
+          .eg { display: inline; }
+          .ex { color: \(muted); font-style: italic; }
+          .trans { color: \(ink); font-weight: 650 !important; }
           .trans.ty_pinyin { color: \(muted); margin-left: 0.4em; }
           .lev, .fld { color: \(gold); font-style: italic; font-size: 0.9em; }
 
-          .exg, .eg, .x_xg1 {
+          .exg, .x_xg1 {
             display: block !important;
-            margin: 10px 0 2px;
+            margin: 3px 0;
           }
-          .exg > .x_xdh {
+          .subEntryBlock {
             display: block;
-            margin: 0;
+            margin-top: 24px;
           }
-          .ex { font-style: normal; color: \(ink); }
-          .sn { color: \(accent); }
-
-          .trg.x_xd3, .trg {
+          .subEntryBlock > .x_xoLblBlk {
             display: block;
-            margin: 2px 0 12px 1.5em;
-            color: \(exampleZh);
+            margin: 0 0 7px;
+            padding-bottom: 4px;
+            border-bottom: 1px solid \(rule);
+            color: \(muted);
+            font-size: 0.8em;
+            letter-spacing: 0.04em;
           }
-          .semb > .trgg .trg,
-          .trgg .trg {
-            display: inline;
-            margin: 0;
-            color: inherit;
-          }
+          .subEntry { display: block; padding-left: 1em; }
+          .subEntry .l { font-weight: 650 !important; }
 
-          .df { display: block; margin: 6px 0 8px; }
           .underline { font-style: italic; }
           hr { border: 0; border-top: 1px solid \(rule); margin: 18px 0; }
         </style>

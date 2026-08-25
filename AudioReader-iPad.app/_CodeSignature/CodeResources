@@ -18,15 +18,19 @@
 		</data>
 		<key>AudioReader.debug.dylib</key>
 		<data>
-		sJqO5SItypiWg2QdbrQHM79M8yo=
+		mvxu/Lh+qg8DP8Rnp0OuaPtoHKI=
 		</data>
 		<key>Info.plist</key>
 		<data>
-		MO05GOLzLfdW/tIdceP65VajdyU=
+		KWmLT2TmcXrPMe14ns7fIYAMyEU=
 		</data>
 		<key>PkgInfo</key>
 		<data>
 		n57qDP4tZfLD1rCS43W0B4LQjzE=
+		</data>
+		<key>ReadingAssistantPrompts.json</key>
+		<data>
+		B3ru+yOFBrSq9KqTWafmI2CL/9g=
 		</data>
 		<key>ZIPFoundation_ZIPFoundation.bundle/Info.plist</key>
 		<data>
@@ -68,7 +72,14 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			J9kVv7TPqAg77EQm1E07XGr51lw4PYCe13X4aqoRPDQ=
+			0VYwFypQm3B67eWK+6Q3q//o8MPL9Us1LgqomjP19xg=
+			</data>
+		</dict>
+		<key>ReadingAssistantPrompts.json</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			On1b1K9l7/V1z7C2+Y39YoFkwQUoHzfeKFbJM+wkeuY=
 			</data>
 		</dict>
 		<key>ZIPFoundation_ZIPFoundation.bundle/Info.plist</key>

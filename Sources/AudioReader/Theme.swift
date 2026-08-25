@@ -73,7 +73,7 @@ enum Palette {
     static let panel = Color(light: (0.995, 0.98, 0.955), dark: (0.118, 0.102, 0.086))
     static let panel2 = Color(light: (0.93, 0.90, 0.85), dark: (0.157, 0.133, 0.110))
     static let ink = Color(light: (0.16, 0.12, 0.09), dark: (0.957, 0.929, 0.890))
-    static let dim = Color(light: (0.42, 0.37, 0.32), dark: (0.545, 0.494, 0.447))
+    static let dim = Color(light: (0.42, 0.37, 0.32), dark: (0.56, 0.51, 0.47))
     static let mute = Color(light: (0.55, 0.50, 0.44), dark: (0.365, 0.325, 0.286))
     static let gold = Color(light: (0.72, 0.50, 0.18), dark: (0.910, 0.722, 0.427))
     static let goldSoft = Color(light: (0.91, 0.72, 0.43, 0.22), dark: (0.910, 0.722, 0.427, 0.18))
@@ -144,17 +144,39 @@ struct ReaderType {
     ) -> ReaderType {
         let w = max(columnWidth, 280)
         let base = min(34, max(16, 16 + (w - 320) / 38))
-        let body = (base * scale).rounded()
+        let body = max(AssistantTypography.minimumBodySize, (base * scale).rounded())
         return ReaderType(
             body: body,
-            dual: max(12, (body * 0.62).rounded()),
-            gloss: max(13, (body * 0.78).rounded()),
+            dual: min(body, max(AssistantTypography.minimumBodySize, (body * 0.62).rounded())),
+            gloss: AssistantTypography.bodySize(forBookTextSize: body),
             line: max(2, (body * 0.28 * lineSpacing).rounded()),
             paragraph: max(4, (body * 0.75 * lineSpacing).rounded()),
             word: max(0, wordSpacing),
             font: ReaderFontChoice(rawValue: font) ?? .newYork,
             bold: bold
         )
+    }
+}
+
+enum AssistantTypography {
+    static let minimumBodySize: CGFloat = 11
+    static let maximumBodySize: CGFloat = 15
+    static let defaultBodySize: CGFloat = 13
+
+    static func bodySize(forBookTextSize bookTextSize: CGFloat) -> CGFloat {
+        min(maximumBodySize, max(minimumBodySize, (bookTextSize * 0.8).rounded()))
+    }
+
+    static func bodySize(forReaderScale readerScale: Double) -> CGFloat {
+        let minimumColumnBookSize = max(
+            minimumBodySize,
+            (16 * readerScale).rounded()
+        )
+        return bodySize(forBookTextSize: minimumColumnBookSize)
+    }
+
+    static func clampedBodySize(_ proposedSize: CGFloat) -> CGFloat {
+        min(maximumBodySize, max(minimumBodySize, proposedSize))
     }
 }
 

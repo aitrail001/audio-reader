@@ -11,7 +11,12 @@ final class AppState {
     var books: [Book] = []
     var selectedBookID: String?
     var selectedChapterID: String?
-    var transcript: Transcript?
+    var transcript: Transcript? {
+        didSet {
+            transcriptionLanguageMismatch = TranscriptionLanguageMismatchDetector.detect(in: transcript)
+        }
+    }
+    var transcriptionLanguageMismatch: TranscriptionLanguageMismatch?
     var vocab: [VocabEntry] = []
     var tab: AppTab = .library
     var textSource: TextSource = .spoken
@@ -41,20 +46,24 @@ final class AppState {
     var translationError: String?
     var vocabularyNotice: String?
     var showSettings = false
-    var apiKeyDraft = ""
-    var qwenAPIKeyDraft = ""
-    var openAIAPIKeyDraft = ""
+    var credentialMigrationWarning: String?
     var codexLoginStatus = "Codex login status not checked"
     var isCheckingCodexLogin = false
+    var grokModels = GrokModelCatalog.fallback
+    var isLoadingGrokModels = false
+    var grokModelsMessage: String?
     var qwenModels = QwenModelCatalog.fallback
     var isLoadingQwenModels = false
     var qwenModelsMessage: String?
+    var openAIModels = OpenAIModelCatalog.fallback
+    var isLoadingOpenAIModels = false
+    var openAIModelsMessage: String?
     var showChapterAssistant = false
     var chapterTranslation: String?
     var chapterTranslationProgress: LibraryScanProgress?
     var chapterAcceptanceProgress: LibraryScanProgress?
     var chapterTranslationJobOrigin: BackgroundJobOrigin?
-    var chapterSummary: String?
+    var chapterSummary: ChapterSummaryRecord?
     var chapterChat: [LLMChatMessage] = []
     var isChapterAssistantWorking = false
     var chapterAssistantError: String?
@@ -74,10 +83,11 @@ final class AppState {
     var llmJobQueue = BackgroundJobQueue(maxConcurrentPerKind: 2)
     @ObservationIgnored private var llmJobOperations: [UUID: @MainActor (UUID) async -> Void] = [:]
     @ObservationIgnored private var chapterTranslationStopRequests: Set<UUID> = []
-    @ObservationIgnored private var chapterSummariesByChapterID: [String: String] = [:]
+    @ObservationIgnored private var chapterSummaries: [ChapterSummaryRecord] = []
     @ObservationIgnored private var chapterChatsByChapterID: [String: [LLMChatMessage]] = [:]
     @ObservationIgnored private var chapterAssistantErrorsByChapterID: [String: String] = [:]
     @ObservationIgnored private var chapterAcceptanceID: UUID?
+    @ObservationIgnored private var credentialMigrationSession = LegacyCredentialMigrationSession()
 
     var selectedBook: Book? {
         books.first { $0.id == selectedBookID }
@@ -155,6 +165,43 @@ final class AppState {
         StudyLanguage(rawValue: settings.targetLanguage) ?? .zhHans
     }
 
+    var readerLanguageLevel: ReaderLanguageLevel {
+        ReaderLanguageLevel(rawValue: settings.readerLanguageLevel) ?? .intermediate
+    }
+
+    var currentAudiobookLanguage: TranscriptionLanguage {
+        if let transcript,
+           let transcriptLanguage = TranscriptionLanguage.matching(localeIdentifier: transcript.locale) {
+            return transcriptLanguage
+        }
+        return audiobookLanguage(for: selectedBook)
+    }
+
+    func audiobookLanguage(for book: Book?) -> TranscriptionLanguage {
+        if let book,
+           let rawValue = settings.bookTranscriptionLanguages[book.id],
+           let language = TranscriptionLanguage(rawValue: rawValue) {
+            return language
+        }
+        return TranscriptionLanguage(rawValue: settings.transcriptionLanguage) ?? .englishUS
+    }
+
+    func setAudiobookLanguage(_ language: TranscriptionLanguage, for book: Book) {
+        settings.bookTranscriptionLanguages[book.id] = language.rawValue
+        persistSettings()
+    }
+
+    func useSuggestedTranscriptionLanguage(_ language: TranscriptionLanguage) {
+        guard let book = selectedBook else { return }
+        setAudiobookLanguage(language, for: book)
+        transcriptionLanguageMismatch = nil
+        transcribeSelected(force: true)
+    }
+
+    func dismissTranscriptionLanguageMismatch() {
+        transcriptionLanguageMismatch = nil
+    }
+
     var llmProvider: LLMProvider {
         LLMProvider(rawValue: settings.llmProvider) ?? .grok
     }
@@ -171,6 +218,15 @@ final class AppState {
         OpenAIAuthentication(rawValue: settings.openAIAuthentication) ?? .chatGPT
     }
 
+    var grokAuthentication: GrokAuthentication {
+        GrokAuthentication(rawValue: settings.grokAuthentication) ?? .grokBuild
+    }
+
+    var selectedLLMConnection: LLMConnectionChoice {
+        get { LLMConnectionChoice.selected(in: settings) }
+        set { newValue.apply(to: &settings) }
+    }
+
     var selectedLLMEffort: String {
         switch llmProvider {
         case .grok: settings.grokEffort
@@ -182,7 +238,9 @@ final class AppState {
     func llmConfigurationError(for provider: LLMProvider) -> LLMError? {
         switch provider {
         case .grok:
-            APIKeyStore.isConfigured ? nil : .noAPIKey(provider)
+            grokAuthentication == .grokBuild
+                ? (GrokBuildCredentialProvider.load() == nil ? .grokBuildNotLoggedIn : nil)
+                : (APIKeyStore.isConfigured ? nil : .noAPIKey(provider))
         case .qwenCloud:
             QwenAPIKeyStore.isConfigured ? nil : .noAPIKey(provider)
         case .openAI:
@@ -199,11 +257,24 @@ final class AppState {
     }
 
     var qwenTextModels: [LLMModelInfo] {
-        var models = qwenModels.filter(\.supportsText)
-        if !models.contains(where: { $0.id == settings.qwenModel }) {
-            models.append(.init(id: settings.qwenModel, brand: "Custom", capabilities: "Custom model ID", supportsText: true))
-        }
-        return models.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+        selectableModels(qwenModels, selectedID: settings.qwenModel)
+    }
+
+    var grokTextModels: [LLMModelInfo] {
+        selectableModels(grokModels, selectedID: settings.grokModel)
+    }
+
+    var openAITextModels: [LLMModelInfo] {
+        selectableModels(openAIModels, selectedID: settings.openAIModel)
+    }
+
+    var selectedGrokEfforts: [GrokEffort] {
+        GrokRequestPolicy.supportedEfforts(model: settings.grokModel)
+    }
+
+    var selectedOpenAIEfforts: [OpenAIEffort] {
+        if openAIAuthentication == .chatGPT { return OpenAIEffort.allCases }
+        return OpenAIRequestPolicy.supportedAPIEfforts(model: settings.openAIModel)
     }
 
     var selectedQwenEfforts: [QwenEffort] {
@@ -221,6 +292,32 @@ final class AppState {
         else { return }
         settings.qwenEffort = supported.contains(.none) ? QwenEffort.none.rawValue : supported[0].rawValue
         persistSettings()
+    }
+
+    func normalizeSelectedGrokEffort() {
+        let supported = selectedGrokEfforts
+        guard !supported.isEmpty,
+              !supported.contains(where: { $0.rawValue == settings.grokEffort })
+        else { return }
+        settings.grokEffort = supported.contains(.medium) ? GrokEffort.medium.rawValue : supported[0].rawValue
+        persistSettings()
+    }
+
+    func normalizeSelectedOpenAIEffort() {
+        let supported = selectedOpenAIEfforts
+        guard !supported.isEmpty,
+              !supported.contains(where: { $0.rawValue == settings.openAIEffort })
+        else { return }
+        settings.openAIEffort = supported.contains(.medium) ? OpenAIEffort.medium.rawValue : supported[0].rawValue
+        persistSettings()
+    }
+
+    private func selectableModels(_ models: [LLMModelInfo], selectedID: String) -> [LLMModelInfo] {
+        var selectable = models.filter(\.supportsText)
+        if !selectable.contains(where: { $0.id == selectedID }) {
+            selectable.append(.init(id: selectedID, brand: "Custom", capabilities: "Custom model ID", supportsText: true))
+        }
+        return selectable.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
     }
 
     var currentSentenceGloss: GlossEntry? {
@@ -446,6 +543,7 @@ final class AppState {
         // persisted absolute Documents path must never drive library scanning.
         settings.libraryPath = Persistence.importedBooksURL.path
         settings.openAIAuthentication = OpenAIAuthentication.apiKey.rawValue
+        settings.grokAuthentication = GrokAuthentication.apiKey.rawValue
         if let normalizedDictionary = DictionaryLookup.recommendedName(
             language: StudyLanguage(rawValue: settings.targetLanguage) ?? .zhHans,
             installedNames: DictionaryLookup.installedNames()
@@ -461,9 +559,7 @@ final class AppState {
         }
         glosses = Persistence.loadGlosses()
         chapterTranslationCheckpoints = Persistence.loadChapterTranslationCheckpoints()
-        apiKeyDraft = APIKeyStore.savedFileKey() ?? ""
-        qwenAPIKeyDraft = QwenAPIKeyStore.savedFileKey() ?? ""
-        openAIAPIKeyDraft = OpenAIAPIKeyStore.savedFileKey() ?? ""
+        chapterSummaries = Persistence.loadChapterSummaries()
         selectedDictionaryName = settings.preferredDictionary
         if let raw = TextSource(rawValue: settings.textSource) {
             textSource = raw
@@ -473,6 +569,7 @@ final class AppState {
         if vocab.contains(where: { DictionaryLookup.looksLikeMarkup($0.definition ?? "") }) {
             Persistence.saveVocab(vocab)
         }
+        migrateLegacyProviderCredentials()
     }
 
     func boot() async {
@@ -481,10 +578,22 @@ final class AppState {
             selectedBookID = first.id
             selectedChapterID = first.chapters.first?.id
         }
-        if llmProvider == .qwenCloud {
-            Task { await self.refreshQwenModels() }
-        } else if llmProvider == .openAI, openAIAuthentication == .chatGPT {
+        if llmProvider == .openAI, openAIAuthentication == .chatGPT {
             Task { await self.refreshCodexLoginStatus() }
+        }
+    }
+
+    func migrateLegacyProviderCredentials() {
+        var results: [LegacyCredentialMigrationResult]?
+        credentialMigrationSession.runOnce {
+            results = APIKeyStore.migrateLegacyCredential()
+                + QwenAPIKeyStore.migrateLegacyCredential()
+                + OpenAIAPIKeyStore.migrateLegacyCredential()
+        }
+        if let results {
+            credentialMigrationWarning = results.contains(.failed)
+                ? "An older saved API key could not be moved to the encrypted local vault. AudioReader will not use the older copy; re-enter the key in API settings."
+                : nil
         }
     }
 
@@ -564,7 +673,12 @@ final class AppState {
         player.rate = Float(settings.playbackRate)
         transcript = Persistence.loadTranscript(for: chapter)
         chapterTranslation = nil
-        chapterSummary = chapterSummariesByChapterID[chapter.id]
+        chapterSummary = chapterSummaries.first {
+            $0.id == ChapterSummaryRecord.makeID(
+                chapterID: chapter.id,
+                language: settings.targetLanguage
+            ) && $0.status != .rejected
+        }
         chapterChat = chapterChatsByChapterID[chapter.id] ?? []
         chapterAssistantError = chapterAssistantErrorsByChapterID[chapter.id]
         chapterTranslationFailed = false
@@ -675,7 +789,7 @@ final class AppState {
                     chapter: chapter,
                     ebookPath: book.ebookPath,
                     expectedMetadata: .init(title: book.title, author: book.author),
-                    language: TranscriptionLanguage(rawValue: settings.transcriptionLanguage) ?? .englishUS,
+                    language: audiobookLanguage(for: book),
                     progress: { [weak self] p in
                         Task { @MainActor in
                             self?.transcriptionProgress = p
@@ -964,6 +1078,22 @@ final class AppState {
         Persistence.saveVocab(vocab)
     }
 
+    func setVocabularyLearnList(_ entryID: String, included: Bool) {
+        guard let index = vocab.firstIndex(where: { $0.id == entryID }) else { return }
+        vocab[index].isInLearnList = included
+        Persistence.saveVocabUpdates([vocab[index]], allItems: vocab)
+    }
+
+    func reviewVocabulary(
+        _ entryID: String,
+        quality: VocabReviewQuality,
+        at date: Date = Date()
+    ) {
+        guard let index = vocab.firstIndex(where: { $0.id == entryID }) else { return }
+        vocab[index] = VocabReviewScheduler.applying(quality, to: vocab[index], at: date)
+        Persistence.saveVocabUpdates([vocab[index]], allItems: vocab)
+    }
+
     @discardableResult
     func jumpToVocab(_ entry: VocabEntry) -> Bool {
         pendingReveal = PendingReveal(
@@ -1047,6 +1177,85 @@ final class AppState {
             settings.qwenModel = replacement.id
             persistSettings()
         }
+    }
+
+    func refreshGrokModels() async {
+        guard let models = await retrieveGrokModels(baseURL: settings.grokEndpoint, apiKey: nil) else { return }
+        if let replacement = preferredModel(in: models, current: settings.grokModel, preferred: "grok-4.6") {
+            settings.grokModel = replacement
+        }
+        normalizeSelectedGrokEffort()
+        persistSettings()
+    }
+
+    @discardableResult
+    func retrieveGrokModels(baseURL: String, apiKey: String?) async -> [LLMModelInfo]? {
+        grokModels = GrokModelCatalog.fallback
+        let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard supplied?.isEmpty == false || APIKeyStore.isConfigured else {
+            grokModelsMessage = "Using the built-in xAI model catalog until an API key is configured."
+            return nil
+        }
+        isLoadingGrokModels = true
+        grokModelsMessage = nil
+        defer { isLoadingGrokModels = false }
+        do {
+            let discovered = try await GrokClient.shared.providerModels(provider: .grok, baseURL: baseURL, apiKey: apiKey)
+            let compatible = GrokModelCatalog.discovered(discovered)
+            guard !compatible.isEmpty else {
+                grokModelsMessage = "xAI returned no compatible language models; using the built-in catalog."
+                return nil
+            }
+            grokModels = compatible
+            grokModelsMessage = "Loaded \(compatible.count) language models from xAI."
+            return grokModels
+        } catch {
+            grokModelsMessage = "Model discovery failed; using the built-in catalog. \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    func refreshOpenAIModels() async {
+        guard let models = await retrieveOpenAIModels(baseURL: settings.openAIEndpoint, apiKey: nil) else { return }
+        if let replacement = preferredModel(in: models, current: settings.openAIModel, preferred: "gpt-5.6-luna") {
+            settings.openAIModel = replacement
+        }
+        normalizeSelectedOpenAIEffort()
+        persistSettings()
+    }
+
+    @discardableResult
+    func retrieveOpenAIModels(baseURL: String, apiKey: String?) async -> [LLMModelInfo]? {
+        openAIModels = OpenAIModelCatalog.fallback
+        let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard supplied?.isEmpty == false || OpenAIAPIKeyStore.isConfigured else {
+            openAIModelsMessage = "Using the built-in OpenAI model catalog until an API key is configured."
+            return nil
+        }
+        isLoadingOpenAIModels = true
+        openAIModelsMessage = nil
+        defer { isLoadingOpenAIModels = false }
+        do {
+            let discovered = try await GrokClient.shared.providerModels(provider: .openAI, baseURL: baseURL, apiKey: apiKey)
+            let compatible = OpenAIModelCatalog.discovered(discovered)
+            guard !compatible.isEmpty else {
+                openAIModelsMessage = "OpenAI returned no compatible text models; using the built-in catalog."
+                return nil
+            }
+            openAIModels = compatible
+            openAIModelsMessage = "Loaded \(compatible.count) text models from OpenAI."
+            return openAIModels
+        } catch {
+            openAIModelsMessage = "Model discovery failed; using the built-in catalog. \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    private func preferredModel(in models: [LLMModelInfo]?, current: String, preferred: String) -> String? {
+        guard let selectable = models?.filter(\.supportsText),
+              !selectable.contains(where: { $0.id == current })
+        else { return nil }
+        return selectable.first(where: { $0.id == preferred })?.id ?? selectable.first?.id
     }
 
     @discardableResult
@@ -1323,12 +1532,15 @@ final class AppState {
         }
         translationError = nil
         let language = studyLanguage
+        let sourceLanguage = currentAudiobookLanguage
+        let readerLevel = readerLanguageLevel
         let model = selectedLLMModel
-        let baseURL = provider == .qwenCloud ? settings.qwenEndpoint : provider.defaultEndpoint
+        let baseURL = settings.endpoint(for: provider)
         let effort = selectedLLMEffort
         let enableThinking = settings.qwenThinking
         let sentenceContextCount = settings.sentenceContextCount
         let openAIAuthentication = self.openAIAuthentication
+        let grokAuthentication = self.grokAuthentication
         let book = selectedBook
         let chapter = selectedChapter
         let origin = selectedOrigin()
@@ -1349,13 +1561,19 @@ final class AppState {
             } ?? "TARGET id=\(targetID): \(trimmed)"
             prompt = ReadingAssistantPrompt.sentenceTranslation(
                 language: language,
+                sourceLanguage: sourceLanguage,
+                readerLevel: readerLevel,
                 metadata: metadata,
                 context: translationContext,
                 targetIDs: [targetID]
             )
         } else {
             prompt = LLMTaskPrompt(
-                system: ReadingAssistantPrompt.word(language: language),
+                system: ReadingAssistantPrompt.word(
+                    language: language,
+                    sourceLanguage: sourceLanguage,
+                    readerLevel: readerLevel
+                ),
                 user: "Word: \(trimmed)\nSentence: \(context ?? trimmed)"
             )
         }
@@ -1376,6 +1594,7 @@ final class AppState {
                         model: model,
                         effort: effort,
                         enableThinking: enableThinking,
+                        grokAuthentication: grokAuthentication,
                         openAIAuthentication: openAIAuthentication
                     )
                     guard let result = try ChapterTranslationBatch.parse(
@@ -1394,6 +1613,7 @@ final class AppState {
                         model: model,
                         effort: effort,
                         enableThinking: enableThinking,
+                        grokAuthentication: grokAuthentication,
                         openAIAuthentication: openAIAuthentication
                     )
                 }
@@ -1434,6 +1654,8 @@ final class AppState {
             return
         }
         let language = studyLanguage
+        let sourceLanguage = currentAudiobookLanguage
+        let readerLevel = readerLanguageLevel
         let resumedMode = mode == .continueFromCheckpoint
             ? selectedChapterTranslationCheckpoint?.mode ?? .untranslatedOnly
             : mode
@@ -1464,11 +1686,12 @@ final class AppState {
         let blocks = ChapterTranslationBatch.blocks(pendingSegments, size: settings.chapterTranslationBlockSize)
         let total = pendingSegments.count
         let model = selectedLLMModel
-        let baseURL = provider == .qwenCloud ? settings.qwenEndpoint : provider.defaultEndpoint
+        let baseURL = settings.endpoint(for: provider)
         let effort = selectedLLMEffort
         let enableThinking = settings.qwenThinking
         let sentenceContextCount = settings.sentenceContextCount
         let openAIAuthentication = self.openAIAuthentication
+        let grokAuthentication = self.grokAuthentication
         let book = selectedBook
         let chapter = selectedChapter
         let checkpointChapterID = chapter?.id ?? transcript.chapterID
@@ -1516,6 +1739,8 @@ final class AppState {
                 for attempt in 1...ChapterTranslationBatch.maximumAttempts where !remaining.isEmpty {
                     let prompt = ReadingAssistantPrompt.sentenceTranslation(
                         language: language,
+                        sourceLanguage: sourceLanguage,
+                        readerLevel: readerLevel,
                         metadata: metadata,
                         context: ReadingAssistantPrompt.sentenceContext(
                             around: block,
@@ -1543,6 +1768,7 @@ final class AppState {
                             model: model,
                             effort: effort,
                             enableThinking: enableThinking,
+                            grokAuthentication: grokAuthentication,
                             openAIAuthentication: openAIAuthentication
                         )
                         let parsed = try ChapterTranslationBatch.parseAvailable(
@@ -1835,7 +2061,18 @@ final class AppState {
         guard !llmJobQueue.jobs.contains(where: {
             $0.kind == .chapterSummary && $0.chapterID == origin.chapterID
         }) else { return }
-        let system = ReadingAssistantPrompt.chapterSummary(language: studyLanguage)
+        let system = ReadingAssistantPrompt.chapterSummary(
+            language: studyLanguage,
+            sourceLanguage: currentAudiobookLanguage,
+            readerLevel: readerLanguageLevel
+        )
+        guard let chapterID = origin.chapterID else { return }
+        let language = settings.targetLanguage
+        let model = selectedLLMModel
+        let existing = chapterSummaries.first {
+            $0.id == ChapterSummaryRecord.makeID(chapterID: chapterID, language: language)
+                && $0.status != .rejected
+        }
         let metadata = bookMetadata(book: selectedBook, chapter: selectedChapter)
         enqueueChapterAssistant(
             kind: .chapterSummary,
@@ -1843,11 +2080,54 @@ final class AppState {
             system: system,
             user: fullChapterInput(transcript, metadata: metadata)
         ) { summary in
-            guard let chapterID = origin.chapterID else { return }
-            self.chapterSummariesByChapterID[chapterID] = summary
-            if self.isSelected(origin) {
-                self.chapterSummary = summary
+            do {
+                let presentation = try ChapterSummaryPresentation.parse(summary)
+                let record = ChapterSummaryRecord.pending(
+                    summary: presentation,
+                    language: language,
+                    model: model,
+                    bookID: origin.bookID,
+                    bookTitle: origin.bookTitle,
+                    chapterID: chapterID,
+                    chapterTitle: origin.chapterTitle,
+                    replacing: existing
+                )
+                self.saveChapterSummary(record, origin: origin)
+            } catch {
+                self.chapterAssistantErrorsByChapterID[chapterID] = error.localizedDescription
+                if self.isSelected(origin) {
+                    self.chapterAssistantError = error.localizedDescription
+                }
             }
+        }
+    }
+
+    func acceptChapterSummary() {
+        guard let chapterSummary, chapterSummary.status == .pending else { return }
+        saveChapterSummary(chapterSummary.accept(at: Date()), origin: selectedOrigin())
+    }
+
+    func rejectChapterSummary() {
+        guard let chapterSummary, chapterSummary.status == .pending else { return }
+        let reviewed = chapterSummary.reject(at: Date())
+        saveChapterSummary(reviewed, origin: selectedOrigin())
+        if reviewed.status == .rejected {
+            self.chapterSummary = nil
+        }
+    }
+
+    private func saveChapterSummary(
+        _ summary: ChapterSummaryRecord,
+        origin: BackgroundJobOrigin
+    ) {
+        if let index = chapterSummaries.firstIndex(where: { $0.id == summary.id }) {
+            chapterSummaries[index] = summary
+        } else {
+            chapterSummaries.append(summary)
+        }
+        Persistence.saveChapterSummaries(chapterSummaries)
+        if isSelected(origin) {
+            chapterSummary = summary.status == .rejected ? nil : summary
         }
     }
 
@@ -1871,7 +2151,11 @@ final class AppState {
             .flatMap { id in transcript.segments.first(where: { $0.id == id }) }
             .map { neighboringContext(around: $0, in: transcript, radius: settings.chatContextCount) }
             ?? "No current sentence."
-        let system = ReadingAssistantPrompt.chapterChat(language: studyLanguage)
+        let system = ReadingAssistantPrompt.chapterChat(
+            language: studyLanguage,
+            sourceLanguage: currentAudiobookLanguage,
+            readerLevel: readerLanguageLevel
+        )
         let user = """
         \(bookMetadata(book: selectedBook, chapter: selectedChapter))
 
@@ -1911,11 +2195,12 @@ final class AppState {
             showSettings = true
             return
         }
-        let baseURL = provider == .qwenCloud ? settings.qwenEndpoint : provider.defaultEndpoint
+        let baseURL = settings.endpoint(for: provider)
         let model = selectedLLMModel
         let effort = selectedLLMEffort
         let enableThinking = settings.qwenThinking
         let openAIAuthentication = self.openAIAuthentication
+        let grokAuthentication = self.grokAuthentication
         if let chapterID = origin.chapterID {
             chapterAssistantErrorsByChapterID[chapterID] = nil
         }
@@ -1937,6 +2222,7 @@ final class AppState {
                     model: model,
                     effort: effort,
                     enableThinking: enableThinking,
+                    grokAuthentication: grokAuthentication,
                     openAIAuthentication: openAIAuthentication
                 )
                 completion(result)

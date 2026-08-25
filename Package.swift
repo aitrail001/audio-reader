@@ -20,7 +20,12 @@ let package = Package(
                 .product(name: "ZIPFoundation", package: "ZIPFoundation")
             ],
             path: "Sources/AudioReader",
+            resources: [
+                .process("Resources")
+            ],
             linkerSettings: [
+                .linkedFramework("Security"),
+                .linkedFramework("LocalAuthentication", .when(platforms: [.macOS])),
                 .linkedFramework("Speech"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("AVFAudio"),
