@@ -15,6 +15,8 @@ enum Persistence {
     }
 
     static var vocabURL: URL { root.appendingPathComponent("vocab.json") }
+    static var knownLemmasURL: URL { root.appendingPathComponent("lexicon.json") }
+    static var studyActivityURL: URL { root.appendingPathComponent("study-activity.json") }
     static var settingsURL: URL { root.appendingPathComponent("settings.json") }
     static var glossesURL: URL { root.appendingPathComponent("glosses.json") }
     static var chapterTranslationCheckpointsURL: URL { root.appendingPathComponent("chapter-translation-checkpoints.json") }
@@ -164,6 +166,32 @@ enum Persistence {
         try? data.write(to: vocabURL, options: .atomic)
     }
 
+    static func loadKnownLemmas(from url: URL = knownLemmasURL) -> [KnownLemmaRecord] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        return (try? JSONDecoder.iso.decode([KnownLemmaRecord].self, from: data)) ?? []
+    }
+
+    static func saveKnownLemmas(
+        _ items: [KnownLemmaRecord],
+        to url: URL = knownLemmasURL
+    ) {
+        guard let data = try? JSONEncoder.iso.encode(items) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    static func loadStudyActivityLog(from url: URL = studyActivityURL) -> StudyActivityLog {
+        guard let data = try? Data(contentsOf: url) else { return .empty }
+        return (try? JSONDecoder.iso.decode(StudyActivityLog.self, from: data)) ?? .empty
+    }
+
+    static func saveStudyActivityLog(
+        _ log: StudyActivityLog,
+        to url: URL = studyActivityURL
+    ) {
+        guard let data = try? JSONEncoder.iso.encode(log) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
     static func loadSettings() -> AppSettings {
         guard let data = try? Data(contentsOf: settingsURL),
               let settings = try? JSONDecoder().decode(AppSettings.self, from: data)
@@ -267,6 +295,8 @@ struct AppSettings: Codable, Equatable {
     var autoTranslate: Bool
     var playOnSelect: Bool
     var deepReadingMode: Bool
+    var showStudyOverlay: Bool
+    var vocabReviewPrompt: String
     var appearance: String
     var preferredDictionary: String
     var lookupPanelWidth: Double
@@ -307,6 +337,8 @@ struct AppSettings: Codable, Equatable {
             autoTranslate: false,
             playOnSelect: true,
             deepReadingMode: false,
+            showStudyOverlay: false,
+            vocabReviewPrompt: VocabReviewPrompt.recognition.rawValue,
             appearance: AppAppearance.dark.rawValue,
             preferredDictionary: "牛津英汉汉英词典",
             lookupPanelWidth: 420,
@@ -356,6 +388,8 @@ struct AppSettings: Codable, Equatable {
         autoTranslate: Bool,
         playOnSelect: Bool,
         deepReadingMode: Bool,
+        showStudyOverlay: Bool,
+        vocabReviewPrompt: String,
         appearance: String,
         preferredDictionary: String,
         lookupPanelWidth: Double,
@@ -394,6 +428,8 @@ struct AppSettings: Codable, Equatable {
         self.autoTranslate = autoTranslate
         self.playOnSelect = playOnSelect
         self.deepReadingMode = deepReadingMode
+        self.showStudyOverlay = showStudyOverlay
+        self.vocabReviewPrompt = vocabReviewPrompt
         self.appearance = appearance
         self.preferredDictionary = preferredDictionary
         self.lookupPanelWidth = lookupPanelWidth
@@ -439,6 +475,8 @@ struct AppSettings: Codable, Equatable {
         autoTranslate = try c.decodeIfPresent(Bool.self, forKey: .autoTranslate) ?? d.autoTranslate
         playOnSelect = try c.decodeIfPresent(Bool.self, forKey: .playOnSelect) ?? d.playOnSelect
         deepReadingMode = try c.decodeIfPresent(Bool.self, forKey: .deepReadingMode) ?? d.deepReadingMode
+        showStudyOverlay = try c.decodeIfPresent(Bool.self, forKey: .showStudyOverlay) ?? d.showStudyOverlay
+        vocabReviewPrompt = try c.decodeIfPresent(String.self, forKey: .vocabReviewPrompt) ?? d.vocabReviewPrompt
         appearance = try c.decodeIfPresent(String.self, forKey: .appearance) ?? d.appearance
         preferredDictionary = try c.decodeIfPresent(String.self, forKey: .preferredDictionary) ?? d.preferredDictionary
         lookupPanelWidth = try c.decodeIfPresent(Double.self, forKey: .lookupPanelWidth) ?? d.lookupPanelWidth
@@ -455,6 +493,7 @@ struct AppSettings: Codable, Equatable {
         case .grok: grokEndpoint
         case .qwenCloud: qwenEndpoint
         case .openAI: openAIEndpoint
+        case .appleFoundation: ""
         }
     }
 }

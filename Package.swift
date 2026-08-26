@@ -27,6 +27,7 @@ let package = Package(
                 .linkedFramework("Security"),
                 .linkedFramework("LocalAuthentication", .when(platforms: [.macOS])),
                 .linkedFramework("Speech"),
+                .linkedFramework("FoundationModels"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("AVFAudio"),
                 .linkedFramework("CoreMedia"),

@@ -15,9 +15,8 @@ private extension Double {
     }
 }
 
-@MainActor
 @Observable
-final class PlayerEngine {
+final class PlayerEngine: @unchecked Sendable {
     private var player: AVPlayer?
     private var observer: Any?
     private var endObserver: NSObjectProtocol?
@@ -56,7 +55,8 @@ final class PlayerEngine {
         if mediaStart > 0 {
             p.seek(to: CMTime(seconds: mediaStart, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         }
-        Task { @MainActor in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             if let d = try? await item.asset.load(.duration), d.seconds.isFinite {
                 self.duration = duration ?? max(0, d.seconds - self.mediaStart)
             }
@@ -66,23 +66,7 @@ final class PlayerEngine {
             forInterval: CMTime(seconds: 0.08, preferredTimescale: 600),
             queue: .main
         ) { [weak self] time in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                let seconds = max(0, time.seconds - self.mediaStart)
-                if let limit = self.chapterDuration, seconds >= limit - 0.02 {
-                    self.currentTime = limit
-                    self.pause()
-                    return
-                }
-                if let clipEnd = self.clipEnd, seconds >= clipEnd - 0.02 {
-                    self.currentTime = clipEnd
-                    self.pause()
-                    return
-                }
-                if abs(self.currentTime - seconds) < 0.05 { return }
-                self.currentTime = seconds
-                self.applyLoopIfNeeded()
-            }
+            self?.handleTick(time)
         }
 
         endObserver = NotificationCenter.default.addObserver(
@@ -90,9 +74,7 @@ final class PlayerEngine {
             object: item,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
-                self?.isPlaying = false
-            }
+            self?.isPlaying = false
         }
     }
 
@@ -162,6 +144,23 @@ final class PlayerEngine {
         mediaStart = 0
         chapterDuration = nil
         playbackError = nil
+    }
+
+    private func handleTick(_ time: CMTime) {
+        let seconds = max(0, time.seconds - mediaStart)
+        if let limit = chapterDuration, seconds >= limit - 0.02 {
+            currentTime = limit
+            pause()
+            return
+        }
+        if let clipEnd, seconds >= clipEnd - 0.02 {
+            currentTime = clipEnd
+            pause()
+            return
+        }
+        if abs(currentTime - seconds) < 0.05 { return }
+        currentTime = seconds
+        applyLoopIfNeeded()
     }
 
     private func applyLoopIfNeeded() {

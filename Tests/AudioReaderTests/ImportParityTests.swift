@@ -1169,10 +1169,12 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.42")
-        #expect(plist["CFBundleVersion"] as? String == "43")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.42;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 43;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.52")
+        #expect(plist["CFBundleVersion"] as? String == "53")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.52;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 53;").count - 1 == 4)
+        let environment = plist["LSEnvironment"] as? [String: String]
+        #expect(environment?["SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE"] == "nocrash")
     }
 }
 

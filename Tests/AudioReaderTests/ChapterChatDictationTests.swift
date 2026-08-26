@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import AudioReader
 
@@ -60,5 +61,96 @@ struct ChapterChatDictationTests {
         history.append(0.75)
 
         #expect(history.samples == [1, 0, 0.75])
+    }
+
+    @Test("Voice capture uses the audiobook speech locale, not the system locale")
+    func speechLocaleFollowsAudiobookLanguage() {
+        #expect(VoiceCaptureLocale.speechLocale(for: .englishUS).identifier == "en-US")
+        #expect(VoiceCaptureLocale.speechLocale(for: .french).identifier == "fr-FR")
+        #expect(VoiceCaptureLocale.speechLocale(for: .simplifiedChinese).identifier == "zh-CN")
+    }
+
+    @Test("Chapter questions keep the already-installed system dictation locale")
+    func chapterQuestionsDoNotSwitchToAudiobookLocale() {
+        let question = VoiceCaptureLocale.speechLocale(for: .chapterQuestion, audiobook: .englishUS)
+        let shadowing = VoiceCaptureLocale.speechLocale(for: .sentenceShadowing, audiobook: .englishUS)
+        #expect(question == Locale.autoupdatingCurrent)
+        #expect(shadowing.identifier == "en-US")
+        #expect(question != shadowing)
+    }
+
+    @Test("An unusable microphone format is rejected before the engine starts")
+    func rejectsInvalidInputFormat() {
+        #expect(VoiceCaptureLocale.isUsable(sampleRate: 48_000, channelCount: 1))
+        #expect(!VoiceCaptureLocale.isUsable(sampleRate: 0, channelCount: 1))
+        #expect(!VoiceCaptureLocale.isUsable(sampleRate: 44_100, channelCount: 0))
+    }
+
+    @Test("Voice capture status reports when the microphone can start")
+    func voiceCaptureStatusCanStart() {
+        var status = VoiceCaptureStatus()
+        #expect(status.canStart)
+        #expect(status.audioLevels.count == 24)
+
+        status.isRequestingPermission = true
+        #expect(!status.canStart)
+
+        status.isRequestingPermission = false
+        status.isListening = true
+        #expect(!status.canStart)
+
+        status.isListening = false
+        status.isFinalizing = true
+        #expect(!status.canStart)
+    }
+
+    @Test("Dictation publishes a value snapshot instead of making SwiftUI observe a MainActor class")
+    func dictationUIStateIsAValueSnapshot() throws {
+        let dictation = try source()
+        #expect(dictation.contains("struct VoiceCaptureStatus"))
+        #expect(dictation.contains("final class ChapterChatDictation: @unchecked Sendable"))
+        #expect(!dictation.contains("@Observable\nfinal class ChapterChatDictation"))
+        #expect(!dictation.contains("@MainActor\nfinal class ChapterChatDictation"))
+        #expect(dictation.contains("onStatus: @escaping (VoiceCaptureStatus) -> Void"))
+        #expect(dictation.contains("actor SpeechAssetSupport"))
+        let classStart = try #require(dictation.range(of: "final class ChapterChatDictation: @unchecked Sendable"))
+        let classEnd = try #require(dictation.range(of: "private func completeFinalization", range: classStart.upperBound..<dictation.endIndex))
+        let body = String(dictation[classStart.lowerBound..<classEnd.lowerBound])
+        #expect(body.contains("SpeechAssetSupport.shared.installIfNeeded"))
+        #expect(!body.contains("downloadAndInstall()"))
+    }
+
+    @Test("Playback ticks and the app entry point never call MainActor.assumeIsolated")
+    func playbackTicksDoNotAssumeMainActor() throws {
+        let engine = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/AudioReader/PlayerEngine.swift"),
+            encoding: .utf8
+        )
+        #expect(!engine.contains("MainActor.assumeIsolated"))
+        #expect(engine.contains("final class PlayerEngine: @unchecked Sendable"))
+        let app = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/AudioReader/AudioReaderApp.swift"),
+            encoding: .utf8
+        )
+        #expect(app.contains("IsolationRuntimeGuard.install()"))
+    }
+
+    private func source() throws -> String {
+        try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/AudioReader/ChapterChatDictation.swift"),
+            encoding: .utf8
+        )
     }
 }

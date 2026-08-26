@@ -41,11 +41,18 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.42</string>
+	<string>1.0.52</string>
 	<key>CFBundleVersion</key>
-	<string>43</string>
+	<string>53</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>LSEnvironment</key>
+	<dict>
+		<key>SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE</key>
+		<string>nocrash</string>
+		<key>SWIFT_UNEXPECTED_EXECUTOR_LOG_LEVEL</key>
+		<string>1</string>
+	</dict>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
@@ -55,9 +62,9 @@
 	<key>NSAppleMusicUsageDescription</key>
 	<string>AudioReader finds audiobooks available in your device media library so you can choose accessible titles for study and transcription.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>AudioReader listens while you dictate an editable question about the current chapter.</string>
+	<string>AudioReader listens while you dictate a chapter question or speak a sentence for shadowing practice.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>AudioReader uses on-device speech recognition to turn your chapter questions into editable text.</string>
+	<string>AudioReader uses on-device speech recognition for chapter questions and for scoring how closely you spoke the current sentence.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchScreen</key>

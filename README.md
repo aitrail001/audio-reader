@@ -1,6 +1,6 @@
 # AudioReader
 
-AudioReader is a macOS and iPadOS audiobook study app for language learners. It combines audiobook playback, multilingual on-device transcription, word-level highlighting, optional EPUB alignment, dictionary lookup, vocabulary capture, and contextual assistance from Grok, QwenCloud, or OpenAI.
+AudioReader is a macOS and iPadOS audiobook study app for language learners. It combines audiobook playback, multilingual on-device transcription, word-level highlighting, optional EPUB alignment, dictionary lookup, vocabulary capture, a local known/learning map with cloze and reverse review, and contextual assistance from Apple Intelligence, Grok, QwenCloud, or OpenAI.
 
 ## What this is for
 
@@ -9,8 +9,10 @@ AudioReader is designed for focused listening and reading rather than passive au
 - follow the words being spoken and seek by sentence;
 - compare the narration with the published text in a companion EPUB;
 - look up unfamiliar words and save them with their original sentence, book, chapter, and timestamp;
+- mark words known, see coverage for the current chapter, underline unknown or learning words across the chapter, shadow a sentence, and take a local chapter quiz;
+- review vocabulary as recognition, cloze, or reverse cards, still using the original narration;
 - replay or loop a sentence and return to saved vocabulary in context;
-- translate words, sentences, or chapters and ask questions about the current chapter through an optional LLM provider.
+- translate words, sentences, or chapters and ask questions about the current chapter through an optional LLM provider, including on-device Apple Intelligence.
 
 The transcript is the timing source. Audio narration often contains publisher introductions, omitted footnotes, or wording that differs from the ebook, so AudioReader first transcribes what was actually spoken with Apple SpeechAnalyzer. When an EPUB is present, it then matches sufficiently similar sentences and lets you switch between **Spoken**, **Ebook**, and **Both**.
 
@@ -31,7 +33,7 @@ M4B chapter metadata is detected and exposed as separate playable and transcriba
 - macOS 26 or later, or iPadOS 26 or later
 - Xcode with the corresponding platform SDK to build the app
 - SpeechAnalyzer assets for the selected audiobook language; AudioReader requests their installation on the first transcription
-- Optional: a Grok, QwenCloud, OpenAI API, or ChatGPT plan account and network connection for translation, summaries, and chapter chat
+- Optional: Apple Intelligence on this device, or a Grok, QwenCloud, OpenAI API, or ChatGPT plan account and network connection for translation, summaries, and chapter chat
 
 ### Build and run on macOS
 
@@ -83,6 +85,7 @@ AudioReader copies explicitly imported resources into its own imported-books lib
 4. Play the chapter and use the highlighted transcript to follow, seek, replay, or loop sentences.
 5. Choose **Spoken**, **Ebook**, or **Both** when the EPUB and individual sentence matches are trusted. Unreadable, likely-wrong, different-edition, and uncertain EPUBs show the same warning and recovery actions on macOS and iPadOS. **Recheck EPUB** validates an existing transcript again without retranscribing audio; **Replace EPUB** installs another file; and **Use This EPUB Anyway** remains an explicit option after assessment and still permits only strong individual matches.
 6. Select a word for dictionary lookup or save it to **Vocabulary**. Use **Open in text** later to return to its source passage.
+7. Turn on **Study overlay** in the reader header or **Reading** menu to underline unknown and learning content words throughout the chapter, not only the current sentence. **Chapter words** is a chapter-level list (macOS also has a header button, not only a menu item). **Shadow this sentence** scores on-device speech against the current sentence. **Chapter quiz** is a local cloze and “what comes next” check; it does not add XP, streaks-as-flames, or remote content libraries. Study days are a quiet local calendar count.
 
 Enable **Deep Reading** from the playback controls when you want time to inspect or research each sentence. AudioReader plays the current sentence and pauses while keeping it highlighted. Select **Continue** to advance to and play the next sentence. On iPad, both controls are available in the reader playback bar, and **Command–Return** also continues when using a hardware keyboard. Deep Reading and sentence looping are mutually exclusive.
 
@@ -90,7 +93,9 @@ Transcripts, vocabulary, settings, accepted translations, and chapter-translatio
 
 ### Configure optional AI assistance
 
-Open **Settings → LLM provider** and choose Grok, QwenCloud, or OpenAI / ChatGPT.
+Open **Settings → LLM provider** and choose Apple Intelligence, Grok, QwenCloud, or OpenAI / ChatGPT.
+
+- Apple Intelligence uses the on-device Foundation Models on a compatible Mac or iPad. It needs Apple Intelligence enabled, sends no API key, and does not use the credential vault. The 3B on-device model is best-effort for translation notes; study overlay, coverage, cloze, and mark-known keep working when it is unavailable.
 
 - Grok API mode accepts an `XAI_API_KEY` and defaults to `https://api.x.ai/v1`. On macOS, the separate **Grok Build** authentication tab can use an existing `grok login` session. This is an unofficial integration and may violate xAI's terms; review the linked current terms before using it.
 - QwenCloud accepts a `DASHSCOPE_API_KEY` and defaults to `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`.
@@ -115,6 +120,8 @@ Core reading-assistant prompts and translation results are provider-neutral. Pro
 | Command–L | Toggle sentence loop |
 | Command–D | Toggle Deep Reading |
 | Command–Return | Continue with the next sentence |
+| Command–Option–S | Toggle study overlay |
+| Command–K | Mark the selected word known |
 | Command–T | Transcribe the selected chapter |
 
 ## Limitations
@@ -125,7 +132,7 @@ Core reading-assistant prompts and translation results are provider-neutral. Pro
 - **Podcast and publisher-app import is not implemented.** AudioReader currently does not import Apple Podcasts feeds, HBR resources, Economist resources, private RSS feeds, or audio stored inside other apps.
 - **Transcription language support depends on Apple and the device.** AudioReader offers English variants, Simplified and Traditional Chinese, Cantonese, Japanese, Korean, Spanish, French, German, Italian, Brazilian Portuguese, and Dutch. If Apple does not provide the selected on-device SpeechAnalyzer locale for the current OS/device, AudioReader reports it as unavailable. Accuracy varies with accents, names, background noise, recording quality, and narration speed.
 - **EPUB alignment remains probabilistic.** Document-level validation prevents one incidental sentence from trusting a book and keeps untrusted EPUB wording out of LLM and vocabulary workflows, but speech recognition and edition differences can still leave valid passages unmatched. Reordered or weak matches remain spoken text unless the reader explicitly accepts individually verified matches. MOBI and PDF text extraction are not supported.
-- **LLM features are optional external services.** They need valid credentials and network access, may incur provider charges, and can fail because of model availability, account limits, endpoint changes, or unsupported reasoning settings. Text sent to them is governed by the selected provider's privacy and usage terms.
+- **LLM features are optional.** Apple Intelligence runs on-device when available. Grok, QwenCloud, and OpenAI need valid credentials and network access, may incur provider charges, and can fail because of model availability, account limits, endpoint changes, or unsupported reasoning settings. Text sent to a remote provider is governed by that provider's privacy and usage terms.
 - **Provider-managed login integrations are unofficial.** Reusing Grok Build or a ChatGPT-plan Codex session through AudioReader may not be permitted by the provider's current terms. Review the xAI or OpenAI terms linked in Settings before choosing either mode. Supported API-key modes remain available separately.
 - **Saved API keys use an encrypted local vault.** Provider keys are AES-GCM encrypted and are not stored as Keychain items, in AudioReader settings, or in plaintext app files. One device-only Keychain item protects the vault's wrapping key. Environment-provided keys remain the responsibility of the environment configuration.
 - **ChatGPT-plan access requires an installed, signed-in Codex on macOS.** AudioReader does not bundle Codex or its OAuth credentials. The standalone Codex installer avoids a Node.js dependency, while AudioReader also supports npm installations by selecting their bundled native binary when available. ChatGPT-plan access is distinct from OpenAI API billing and is unavailable on iPadOS; use an OpenAI API key there. Model access and usage limits depend on the signed-in ChatGPT plan.

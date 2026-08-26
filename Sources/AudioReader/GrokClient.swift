@@ -9,6 +9,7 @@ enum LLMError: LocalizedError {
     case invalidEndpoint(String)
     case http(Int, String)
     case empty
+    case appleIntelligenceUnavailable(String)
 
     var errorDescription: String? {
         switch self {
@@ -28,6 +29,8 @@ enum LLMError: LocalizedError {
             "LLM request failed (\(code)): \(body)"
         case .empty:
             "The LLM returned an empty reply."
+        case .appleIntelligenceUnavailable(let message):
+            message
         }
     }
 
@@ -83,6 +86,7 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
     case grok
     case qwenCloud
     case openAI
+    case appleFoundation
 
     var id: String { rawValue }
 
@@ -91,7 +95,12 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         case .grok: "Grok (xAI)"
         case .qwenCloud: "QwenCloud"
         case .openAI: "OpenAI / ChatGPT"
+        case .appleFoundation: "Apple Intelligence"
         }
+    }
+
+    var usesRemoteAPI: Bool {
+        self != .appleFoundation
     }
 
     var environmentKey: String {
@@ -99,6 +108,7 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         case .grok: "XAI_API_KEY"
         case .qwenCloud: "DASHSCOPE_API_KEY"
         case .openAI: "OPENAI_API_KEY"
+        case .appleFoundation: ""
         }
     }
 
@@ -107,6 +117,7 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         case .grok: "xAI"
         case .qwenCloud: "QwenCloud"
         case .openAI: "OpenAI"
+        case .appleFoundation: "Apple Intelligence"
         }
     }
 
@@ -115,6 +126,7 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
         case .grok: "https://api.x.ai/v1"
         case .qwenCloud: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
         case .openAI: "https://api.openai.com/v1"
+        case .appleFoundation: ""
         }
     }
 }
@@ -305,6 +317,7 @@ enum LLMConnectionChoice: String, CaseIterable, Identifiable, Sendable {
     case qwenAPIKey
     case chatGPTPlan
     case openAIAPIKey
+    case appleFoundation
 
     var id: String { rawValue }
 
@@ -315,6 +328,7 @@ enum LLMConnectionChoice: String, CaseIterable, Identifiable, Sendable {
         case .qwenAPIKey: "Qwen · API key"
         case .chatGPTPlan: "OpenAI · ChatGPT plan (OAuth)"
         case .openAIAPIKey: "OpenAI · API key"
+        case .appleFoundation: "On-device · Apple Intelligence"
         }
     }
 
@@ -325,6 +339,7 @@ enum LLMConnectionChoice: String, CaseIterable, Identifiable, Sendable {
         case .qwenAPIKey: "Qwen API"
         case .chatGPTPlan: "ChatGPT OAuth"
         case .openAIAPIKey: "OpenAI API"
+        case .appleFoundation: "On-device"
         }
     }
 
@@ -332,7 +347,7 @@ enum LLMConnectionChoice: String, CaseIterable, Identifiable, Sendable {
 #if os(macOS)
         allCases
 #else
-        [.grokAPIKey, .qwenAPIKey, .openAIAPIKey]
+        [.grokAPIKey, .qwenAPIKey, .openAIAPIKey, .appleFoundation]
 #endif
     }
 
@@ -348,6 +363,8 @@ enum LLMConnectionChoice: String, CaseIterable, Identifiable, Sendable {
             OpenAIAuthentication(rawValue: settings.openAIAuthentication) == .apiKey
                 ? .openAIAPIKey
                 : .chatGPTPlan
+        case .appleFoundation:
+            .appleFoundation
         }
     }
 
@@ -367,6 +384,8 @@ enum LLMConnectionChoice: String, CaseIterable, Identifiable, Sendable {
         case .openAIAPIKey:
             settings.llmProvider = LLMProvider.openAI.rawValue
             settings.openAIAuthentication = OpenAIAuthentication.apiKey.rawValue
+        case .appleFoundation:
+            settings.llmProvider = LLMProvider.appleFoundation.rawValue
         }
     }
 }
@@ -683,6 +702,9 @@ actor GrokClient {
         grokAuthentication: GrokAuthentication = .apiKey,
         openAIAuthentication: OpenAIAuthentication = .apiKey
     ) async throws -> String {
+        if provider == .appleFoundation {
+            return try await FoundationModelsClient.shared.complete(system: system, user: user)
+        }
         if provider == .openAI, openAIAuthentication == .chatGPT {
             return try await CodexCLIClient.shared.complete(
                 system: system,
@@ -700,6 +722,10 @@ actor GrokClient {
                 : APIKeyStore.load()
         case .qwenCloud: key = QwenAPIKeyStore.load()
         case .openAI: key = OpenAIAPIKeyStore.load()
+        case .appleFoundation:
+            throw LLMError.appleIntelligenceUnavailable(
+                AppleIntelligenceAvailability.current().userMessage
+            )
         }
         guard let key else {
             if provider == .grok, grokAuthentication == .grokBuild {
@@ -749,6 +775,12 @@ actor GrokClient {
         grokAuthentication: GrokAuthentication = .apiKey,
         openAIAuthentication: OpenAIAuthentication = .apiKey
     ) async throws -> String {
+        if provider == .appleFoundation {
+            return try await FoundationModelsClient.shared.completeStructuredJSON(
+                system: system,
+                user: user
+            )
+        }
         if provider == .openAI, openAIAuthentication == .chatGPT {
             return try await CodexCLIClient.shared.complete(
                 system: system,
@@ -766,6 +798,10 @@ actor GrokClient {
                 : APIKeyStore.load()
         case .qwenCloud: key = QwenAPIKeyStore.load()
         case .openAI: key = OpenAIAPIKeyStore.load()
+        case .appleFoundation:
+            throw LLMError.appleIntelligenceUnavailable(
+                AppleIntelligenceAvailability.current().userMessage
+            )
         }
         guard let key else {
             if provider == .grok, grokAuthentication == .grokBuild {
@@ -841,12 +877,16 @@ actor GrokClient {
     }
 
     func providerModels(provider: LLMProvider, baseURL: String, apiKey: String? = nil) async throws -> [String] {
+        if provider == .appleFoundation {
+            return ["Apple Intelligence"]
+        }
         let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
         let savedKey: String?
         switch provider {
         case .grok: savedKey = APIKeyStore.load()
         case .qwenCloud: savedKey = QwenAPIKeyStore.load()
         case .openAI: savedKey = OpenAIAPIKeyStore.load()
+        case .appleFoundation: return ["Apple Intelligence"]
         }
         guard let key = supplied?.isEmpty == false ? supplied : savedKey else {
             throw LLMError.noAPIKey(provider)

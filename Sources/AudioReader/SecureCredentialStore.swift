@@ -345,6 +345,7 @@ enum ProviderAPIKeyStore {
     static let savedCredentialSourceLabel = "Ready — API key stored in encrypted local vault"
 
     static func load(_ provider: LLMProvider) -> String? {
+        guard provider.usesRemoteAPI, !provider.environmentKey.isEmpty else { return nil }
         if let environmentValue = ProcessInfo.processInfo.environment[provider.environmentKey],
            !environmentValue.isEmpty {
             return environmentValue
@@ -357,6 +358,7 @@ enum ProviderAPIKeyStore {
     }
 
     static func isConfigured(_ provider: LLMProvider) -> Bool {
+        guard provider.usesRemoteAPI, !provider.environmentKey.isEmpty else { return false }
         if let environmentValue = ProcessInfo.processInfo.environment[provider.environmentKey],
            !environmentValue.isEmpty {
             return true
@@ -366,6 +368,7 @@ enum ProviderAPIKeyStore {
 
     @discardableResult
     static func save(_ key: String, for provider: LLMProvider) -> Bool {
+        guard provider.usesRemoteAPI else { return false }
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return true }
         return EncryptedFileCredentialVault.shared.save(trimmed, account: provider.rawValue)
@@ -377,6 +380,9 @@ enum ProviderAPIKeyStore {
     }
 
     static func sourceLabel(_ provider: LLMProvider) -> String {
+        guard provider.usesRemoteAPI, !provider.environmentKey.isEmpty else {
+            return "On-device — no API key"
+        }
         if let environmentValue = ProcessInfo.processInfo.environment[provider.environmentKey],
            !environmentValue.isEmpty {
             return environmentSourceLabel(provider)

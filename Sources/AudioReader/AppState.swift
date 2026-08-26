@@ -14,10 +14,22 @@ final class AppState {
     var transcript: Transcript? {
         didSet {
             transcriptionLanguageMismatch = TranscriptionLanguageMismatchDetector.detect(in: transcript)
+            refreshStudyIndex()
         }
     }
     var transcriptionLanguageMismatch: TranscriptionLanguageMismatch?
-    var vocab: [VocabEntry] = []
+    var vocab: [VocabEntry] = [] {
+        didSet { refreshStudyIndex() }
+    }
+    var knownLemmas: [KnownLemmaRecord] = [] {
+        didSet { refreshStudyIndex() }
+    }
+    private(set) var studyIndex = StudyIndex.empty
+    var chapterStudyPresentation: ChapterStudyPresentation?
+    var shadowingSegment: TranscriptSegment?
+    var chapterQuizSession: ChapterQuizSession?
+    var studyActivityLog = StudyActivityLog.empty
+    var appleIntelligenceAvailability: AppleIntelligenceAvailability = .unavailable("Not checked")
     var tab: AppTab = .library
     var textSource: TextSource = .spoken
     var player = PlayerEngine()
@@ -145,13 +157,8 @@ final class AppState {
 
     var currentReaderPosition: (segment: TranscriptSegment?, word: TranscriptWord?) {
         guard let transcript else { return (nil, nil) }
-        let t = player.currentTime
-        guard let segment = transcript.segments.last(where: { t >= $0.start - 0.05 && t < $0.end + 0.12 })
-            ?? transcript.segments.last(where: { t >= $0.start })
-        else { return (nil, nil) }
-        let word = segment.words.last(where: { t >= $0.start && t < $0.end + 0.02 })
-            ?? segment.words.last(where: { t >= $0.start })
-        return (segment, word)
+        let cursor = PlaybackCursor.resolve(segments: transcript.segments, time: player.currentTime)
+        return (cursor.segment, cursor.word)
     }
 
     var currentSegment: TranscriptSegment? {
@@ -190,6 +197,7 @@ final class AppState {
     func setAudiobookLanguage(_ language: TranscriptionLanguage, for book: Book) {
         settings.bookTranscriptionLanguages[book.id] = language.rawValue
         persistSettings()
+        refreshStudyIndex()
     }
 
     func useSuggestedTranscriptionLanguage(_ language: TranscriptionLanguage) {
@@ -212,6 +220,7 @@ final class AppState {
         case .grok: settings.grokModel
         case .qwenCloud: settings.qwenModel
         case .openAI: settings.openAIModel
+        case .appleFoundation: "Apple Intelligence"
         }
     }
 
@@ -233,7 +242,108 @@ final class AppState {
         case .grok: settings.grokEffort
         case .qwenCloud: settings.qwenEffort
         case .openAI: settings.openAIEffort
+        case .appleFoundation: ""
         }
+    }
+
+    var vocabReviewPrompt: VocabReviewPrompt {
+        get { VocabReviewPrompt(rawValue: settings.vocabReviewPrompt) ?? .recognition }
+        set {
+            settings.vocabReviewPrompt = newValue.rawValue
+            persistSettings()
+        }
+    }
+
+    var studyLexiconLanguage: String {
+        StudyTokenIndex.languageKey(for: currentAudiobookLanguage)
+    }
+
+    var chapterCoverage: ChapterCoverage { studyIndex.coverage }
+
+    var chapterStudyItems: [ChapterStudyItem] { studyIndex.priming }
+
+    func refreshStudyIndex() {
+        studyIndex = StudyIndex.build(
+            segments: transcript?.segments ?? [],
+            language: studyLexiconLanguage,
+            vocab: vocab,
+            knownRecords: knownLemmas
+        )
+    }
+
+    func presentChapterStudyList() {
+        refreshStudyIndex()
+        chapterStudyPresentation = ChapterStudyPresentation(
+            id: selectedChapterID ?? transcript?.chapterID ?? "chapter",
+            chapterTitle: selectedChapter?.title ?? "Chapter words",
+            coverage: studyIndex.coverage,
+            items: studyIndex.priming,
+            hasTranscript: transcript != nil
+        )
+    }
+
+    func presentShadowing(for segment: TranscriptSegment? = nil) {
+        let target = segment
+            ?? transcript?.segments.first(where: { $0.id == focusedSegmentID })
+            ?? currentSegment
+        shadowingSegment = target
+        if target != nil {
+            player.pause()
+        }
+    }
+
+    func presentChapterQuiz() {
+        guard let transcript, !transcript.segments.isEmpty else { return }
+        let quiz = ChapterQuizBuilder.build(
+            segments: transcript.segments,
+            language: studyLexiconLanguage
+        )
+        guard !quiz.questions.isEmpty else { return }
+        chapterQuizSession = ChapterQuizSession(quiz: quiz)
+    }
+
+    func recordStudyActivity(now: Date = Date()) {
+        studyActivityLog = studyActivityLog.recording(on: now)
+        Persistence.saveStudyActivityLog(studyActivityLog)
+    }
+
+    func refreshAppleIntelligenceAvailability() {
+        appleIntelligenceAvailability = AppleIntelligenceAvailability.current()
+    }
+
+    func familiarity(for word: TranscriptWord) -> WordFamiliarity {
+        studyIndex.familiarity(for: word.text)
+    }
+
+    func isMarkedKnown(_ word: TranscriptWord) -> Bool {
+        guard let lemma = StudyLemma.make(language: studyLexiconLanguage, surface: word.text) else { return false }
+        return studyIndex.known.contains(lemma)
+    }
+
+    func markKnown(lemma: StudyLemma, known: Bool) {
+        knownLemmas = known
+            ? KnownLemmaStore.upsert(lemma, into: knownLemmas)
+            : KnownLemmaStore.remove(lemma, from: knownLemmas)
+        Persistence.saveKnownLemmas(knownLemmas)
+        if chapterStudyPresentation != nil {
+            chapterStudyPresentation = ChapterStudyPresentation(
+                id: selectedChapterID ?? transcript?.chapterID ?? chapterStudyPresentation?.id ?? "chapter",
+                chapterTitle: selectedChapter?.title ?? chapterStudyPresentation?.chapterTitle ?? "Chapter words",
+                coverage: studyIndex.coverage,
+                items: studyIndex.priming,
+                hasTranscript: transcript != nil
+            )
+        }
+    }
+
+    func markKnown(_ word: TranscriptWord, known: Bool) {
+        guard let lemma = StudyLemma.make(language: studyLexiconLanguage, surface: word.text) else { return }
+        markKnown(lemma: lemma, known: known)
+    }
+
+    func markSelectedWordKnown(_ known: Bool = true) {
+        guard let word = selectedWord else { return }
+        markKnown(word, known: known)
     }
 
     func llmConfigurationError(for provider: LLMProvider) -> LLMError? {
@@ -244,11 +354,22 @@ final class AppState {
                 : (APIKeyStore.isConfigured ? nil : .noAPIKey(provider))
         case .qwenCloud:
             QwenAPIKeyStore.isConfigured ? nil : .noAPIKey(provider)
+        case .appleFoundation:
+            appleIntelligenceConfigurationError()
         case .openAI:
             openAIAuthentication == .chatGPT
                 ? (CodexCLIClient.isAvailable ? nil : .codexUnavailable)
                 : (OpenAIAPIKeyStore.isConfigured ? nil : .noAPIKey(provider))
         }
+    }
+
+    private func appleIntelligenceConfigurationError() -> LLMError? {
+        let availability = AppleIntelligenceAvailability.current()
+        appleIntelligenceAvailability = availability
+        guard availability.isReady else {
+            return .appleIntelligenceUnavailable(availability.userMessage)
+        }
+        return nil
     }
 
     func refreshCodexLoginStatus() async {
@@ -558,6 +679,9 @@ final class AppState {
             copy.sanitizeDictionaryFields()
             return copy
         }
+        knownLemmas = Persistence.loadKnownLemmas()
+        studyActivityLog = Persistence.loadStudyActivityLog()
+        appleIntelligenceAvailability = AppleIntelligenceAvailability.current()
         glosses = Persistence.loadGlosses()
         chapterTranslationCheckpoints = Persistence.loadChapterTranslationCheckpoints()
         chapterSummaries = Persistence.loadChapterSummaries()
@@ -1737,7 +1861,13 @@ final class AppState {
             showSettings = true
             return
         }
-        let blocks = ChapterTranslationBatch.blocks(pendingSegments, size: settings.chapterTranslationBlockSize)
+        let blocks = ChapterTranslationBatch.blocks(
+            pendingSegments,
+            size: FoundationModelsPromptPolicy.chapterTranslationBlockSize(
+                for: provider,
+                requested: settings.chapterTranslationBlockSize
+            )
+        )
         let total = pendingSegments.count
         let model = selectedLLMModel
         let baseURL = settings.endpoint(for: provider)

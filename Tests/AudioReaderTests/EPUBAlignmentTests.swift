@@ -536,10 +536,11 @@ struct EPUBAlignmentTests {
         )]
         state.selectedBookID = "book"
         state.selectedChapterID = "chapter"
+        state.vocab = []
 
         state.addVocab(word: try #require(segment.words.first), segment: segment)
 
-        let saved = try #require(state.vocab.first)
+        let saved = try #require(state.vocab.first { $0.word.caseInsensitiveCompare("Spoken") == .orderedSame })
         #expect(saved.context == segment.spokenText)
         #expect(saved.ebookText == nil)
     }

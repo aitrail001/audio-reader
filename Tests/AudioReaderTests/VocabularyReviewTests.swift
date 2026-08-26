@@ -45,6 +45,19 @@ struct VocabularyReviewTests {
         #expect(nextReview.timeIntervalSince(now) == expectedDays * 86_400)
     }
 
+    @Test("Cloze sessions still record review quality on the same scheduler")
+    func clozeSessionStillAppliesSchedulerQuality() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let card = entry(id: "cloze", category: .word)
+        #expect(VocabCloze.blankedSentence(for: card).contains(VocabCloze.blank))
+
+        let reviewed = VocabReviewScheduler.applying(.remember, to: card, at: now)
+
+        #expect(reviewed.reviewCount == 1)
+        #expect(reviewed.lastReviewQuality == .remember)
+        #expect(reviewed.reviewIntervalDays == 7)
+    }
+
     @Test("Remembering expands the previous interval and forgetting resets it")
     func adjustsLaterReviews() throws {
         let firstReview = Date(timeIntervalSince1970: 2_000_000)

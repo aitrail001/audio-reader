@@ -84,6 +84,9 @@ struct RootView: View {
                 }
             }
         }
+        .sheet(item: $state.chapterStudyPresentation) { _ in
+            ChapterStudyListView(state: state)
+        }
         .sheet(isPresented: $state.showSettings) {
             SettingsView(state: state)
         }

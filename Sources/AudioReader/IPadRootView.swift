@@ -168,6 +168,9 @@ struct IPadRootView: View {
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
             }
         }
+        .sheet(item: $state.chapterStudyPresentation) { _ in
+            ChapterStudyListView(state: state)
+        }
         .sheet(isPresented: $state.showSettings) {
             SettingsView(state: state)
         }
