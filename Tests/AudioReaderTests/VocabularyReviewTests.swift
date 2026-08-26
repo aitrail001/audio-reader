@@ -201,7 +201,7 @@ struct VocabularyReviewTests {
     @MainActor
     @Test("Learn-list management removes an item without deleting its vocabulary")
     func removesOnlyLearnListMembership() {
-        let state = AppState()
+        let state = AppState(composition: .inMemory())
         state.vocab = [entry(id: "learned", isInLearnList: true)]
 
         state.setVocabularyLearnList("learned", included: false)

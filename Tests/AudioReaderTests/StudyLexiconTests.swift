@@ -334,7 +334,7 @@ struct StudyIndexCacheTests {
     @MainActor
     @Test("Marking known updates the cached chapter index without requiring a view pass")
     func cachedIndexUpdatesWhenMarkingKnown() {
-        let state = AppState()
+        let state = AppState(composition: .inMemory())
         state.settings.transcriptionLanguage = TranscriptionLanguage.englishUS.rawValue
         state.vocab = []
         state.knownLemmas = []
@@ -468,7 +468,7 @@ struct KnownLemmaPersistenceTests {
     @MainActor
     @Test("Marking known does not delete vocabulary and uses the audiobook language")
     func markDoesNotRemoveVocabOrUseGlossLanguage() {
-        let state = AppState()
+        let state = AppState(composition: .inMemory())
         state.settings.targetLanguage = StudyLanguage.zhHans.rawValue
         state.settings.transcriptionLanguage = TranscriptionLanguage.englishUS.rawValue
         let word = TranscriptWord(id: "w1", text: "Forest.", start: 0.2, end: 0.6, confidence: nil)

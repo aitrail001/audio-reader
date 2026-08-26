@@ -80,7 +80,7 @@ struct ChapterStudyPresentationTests {
     @MainActor
     @Test("Marking known refreshes the open snapshot instead of leaving a stale empty sheet")
     func markKnownUpdatesOpenSnapshot() {
-        let state = AppState()
+        let state = AppState(composition: .inMemory())
         state.settings.transcriptionLanguage = TranscriptionLanguage.englishUS.rawValue
         state.vocab = []
         state.knownLemmas = []

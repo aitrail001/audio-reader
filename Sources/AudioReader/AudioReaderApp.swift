@@ -3,7 +3,7 @@ import Foundation
 
 @main
 struct AudioReaderApp: App {
-    @State private var state = AppState()
+    @State private var state = AppState(composition: .live)
 
     init() {
 #if os(macOS)

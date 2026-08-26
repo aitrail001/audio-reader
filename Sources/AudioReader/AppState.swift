@@ -101,6 +101,8 @@ final class AppState {
     @ObservationIgnored private var chapterAssistantErrorsByChapterID: [String: String] = [:]
     @ObservationIgnored private var chapterAcceptanceID: UUID?
     @ObservationIgnored private var credentialMigrationSession = LegacyCredentialMigrationSession()
+    @ObservationIgnored private let vocabularyRepository: any VocabularyRepository
+    @ObservationIgnored private let knownLemmaRepository: any KnownLemmaRepository
 
     var selectedBook: Book? {
         books.first { $0.id == selectedBookID }
@@ -324,7 +326,7 @@ final class AppState {
         knownLemmas = known
             ? KnownLemmaStore.upsert(lemma, into: knownLemmas)
             : KnownLemmaStore.remove(lemma, from: knownLemmas)
-        Persistence.saveKnownLemmas(knownLemmas)
+        persistKnownLemmas()
         if chapterStudyPresentation != nil {
             chapterStudyPresentation = ChapterStudyPresentation(
                 id: selectedChapterID ?? transcript?.chapterID ?? chapterStudyPresentation?.id ?? "chapter",
@@ -658,7 +660,9 @@ final class AppState {
         }
     }
 
-    init() {
+    init(composition: AppComposition = .live) {
+        vocabularyRepository = composition.vocabulary
+        knownLemmaRepository = composition.knownLemmas
         settings = Persistence.loadSettings()
 #if os(iOS)
         // iOS data-container UUIDs can change after reinstalling an app, so a
@@ -674,12 +678,12 @@ final class AppState {
             Persistence.saveSettings(settings)
         }
 #endif
-        vocab = Persistence.loadVocab().map { entry in
-            var copy = entry
+        vocab = ((try? vocabularyRepository.loadVocabulary()) ?? []).map { stored in
+            var copy = VocabEntry(stored)
             copy.sanitizeDictionaryFields()
             return copy
         }
-        knownLemmas = Persistence.loadKnownLemmas()
+        knownLemmas = ((try? knownLemmaRepository.loadKnownLemmas()) ?? []).map(KnownLemmaRecord.init)
         studyActivityLog = Persistence.loadStudyActivityLog()
         appleIntelligenceAvailability = AppleIntelligenceAvailability.current()
         glosses = Persistence.loadGlosses()
@@ -692,7 +696,7 @@ final class AppState {
         player.rate = Float(settings.playbackRate)
         importGlossesIntoVocab()
         if vocab.contains(where: { DictionaryLookup.looksLikeMarkup($0.definition ?? "") }) {
-            Persistence.saveVocab(vocab)
+            persistVocabulary()
         }
         migrateLegacyProviderCredentials()
     }
@@ -795,7 +799,7 @@ final class AppState {
         }
         guard migrated != vocab else { return }
         vocab = migrated
-        Persistence.saveVocab(vocab)
+        persistVocabulary()
         refreshStudyIndex()
     }
 
@@ -1206,19 +1210,19 @@ final class AppState {
             addedAt: Date()
         )
         vocab.insert(entry, at: 0)
-        Persistence.saveVocab(vocab)
+        persistVocabulary()
         vocabularyNotice = "Added “\(head)” to your vocabulary."
     }
 
     func removeVocab(_ entry: VocabEntry) {
         vocab.removeAll { $0.id == entry.id }
-        Persistence.saveVocab(vocab)
+        persistVocabulary()
     }
 
     func setVocabularyLearnList(_ entryID: String, included: Bool) {
         guard let index = vocab.firstIndex(where: { $0.id == entryID }) else { return }
         vocab[index].isInLearnList = included
-        Persistence.saveVocabUpdates([vocab[index]], allItems: vocab)
+        persistVocabularyUpdates([vocab[index]])
     }
 
     func reviewVocabulary(
@@ -1228,7 +1232,7 @@ final class AppState {
     ) {
         guard let index = vocab.firstIndex(where: { $0.id == entryID }) else { return }
         vocab[index] = VocabReviewScheduler.applying(quality, to: vocab[index], at: date)
-        Persistence.saveVocabUpdates([vocab[index]], allItems: vocab)
+        persistVocabularyUpdates([vocab[index]])
     }
 
     func canPlayVocabSentence(_ entry: VocabEntry) -> Bool {
@@ -1356,6 +1360,18 @@ final class AppState {
         settings.playbackRate = Double(player.rate)
         settings.textSource = textSource.rawValue
         Persistence.saveSettings(settings)
+    }
+
+    private func persistKnownLemmas() {
+        try? knownLemmaRepository.saveKnownLemmas(knownLemmas.map(StoredKnownLemma.init))
+    }
+
+    private func persistVocabulary() {
+        try? vocabularyRepository.saveVocabulary(vocab.map(StoredVocabularyOccurrence.init))
+    }
+
+    private func persistVocabularyUpdates(_ updates: [VocabEntry]) {
+        try? vocabularyRepository.upsertVocabulary(updates.map(StoredVocabularyOccurrence.init))
     }
 
     func refreshQwenModels() async {
@@ -1562,7 +1578,7 @@ final class AppState {
             GlossEntry.normalize($0.context) == source
             || (entry.kind == .word && $0.category == .word && $0.word.caseInsensitiveCompare(entry.source) == .orderedSame && $0.translation == entry.text)
         }
-        Persistence.saveVocab(vocab)
+        persistVocabulary()
         refreshSelectedChapterTranslationStatus()
     }
 
@@ -2149,10 +2165,11 @@ final class AppState {
                 total: accepted.count
             )
             let glossSnapshot = glosses
-            let updatedVocabSnapshot = vocab
+            let vocabulary = vocabularyRepository
+            let storedVocabUpdates = result.upserts.map(StoredVocabularyOccurrence.init)
             await Task.detached(priority: .utility) {
                 Persistence.saveGlossUpdates(accepted, allItems: glossSnapshot)
-                Persistence.saveVocabUpdates(result.upserts, allItems: updatedVocabSnapshot)
+                try? vocabulary.upsertVocabulary(storedVocabUpdates)
             }.value
             guard chapterAcceptanceID == operationID else { return }
 
@@ -2473,7 +2490,7 @@ final class AppState {
             vocabularyChanged = vocabularyChanged || changed
         }
         if vocabularyChanged {
-            Persistence.saveVocab(vocab)
+            persistVocabulary()
         }
     }
 
@@ -2488,7 +2505,7 @@ final class AppState {
         )
         guard !result.upserts.isEmpty else { return }
         vocab = result.vocab
-        Persistence.saveVocabUpdates(result.upserts, allItems: vocab)
+        persistVocabularyUpdates(result.upserts)
     }
 
     private var chapterAcceptanceDefaults: ChapterAcceptanceBatch.Defaults {
@@ -2665,7 +2682,7 @@ final class AppState {
             }
         }
         if persist, changed {
-            Persistence.saveVocab(vocab)
+            persistVocabulary()
         }
         return changed
     }
