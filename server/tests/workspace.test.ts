@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,6 +42,23 @@ describe("server workspace", () => {
     const yaml = readFileSync(join(serverRoot, "pnpm-workspace.yaml"), "utf8");
     expect(yaml).toMatch(/apps\/\*/);
     expect(yaml).toMatch(/packages\/\*/);
+  });
+
+  it("enables engineStrict in the workspace manifest", () => {
+    const yaml = readFileSync(join(serverRoot, "pnpm-workspace.yaml"), "utf8");
+    expect(yaml).toMatch(/^engineStrict:\s*true\s*$/m);
+    expect(existsSync(join(serverRoot, ".npmrc"))).toBe(false);
+    const value = execFileSync("pnpm", ["config", "get", "engineStrict"], {
+      cwd: serverRoot,
+      encoding: "utf8",
+    }).trim();
+    expect(value).toBe("true");
+  });
+
+  it("does not declare removed onlyBuiltDependencies", () => {
+    const yaml = readFileSync(join(serverRoot, "pnpm-workspace.yaml"), "utf8");
+    expect(yaml).not.toMatch(/onlyBuiltDependencies/);
+    expect(yaml).toMatch(/^allowBuilds:\s*$/m);
   });
 
   it("keeps a lockfile", () => {
