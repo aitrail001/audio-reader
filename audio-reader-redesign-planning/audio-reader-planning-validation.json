@@ -1,0 +1,78 @@
+{
+  "generated_at": "2026-08-26T08:16:00+10:00",
+  "ok": true,
+  "status": "validated",
+  "notes": [
+    "OpenAPI validation is structural: YAML parse, unique operation IDs, and internal component-reference resolution.",
+    "No external OpenAPI linter was available in the sandbox.",
+    "The repository worktree was not created in this sandbox because GitHub cloning was blocked by DNS and branch creation through the connector returned 403."
+  ],
+  "files": {
+    "Audio-Reader-Cross-Device-Multi-User-Design-and-Plan.md": {
+      "exists": true,
+      "bytes": 60789,
+      "sha256": "3003ec1a57065ef5ddaf1e19983b5cca6c971a5e5540a7d9391092764197b93e",
+      "words": 7487
+    },
+    "audio-reader-openapi-v1.yaml": {
+      "exists": true,
+      "bytes": 83135,
+      "sha256": "34781793ac2f6a13a4f49d68b80f527d67f0b0d172212a23e2b750960eea5f91",
+      "words": null
+    },
+    "audio_reader_repo_audit.md": {
+      "exists": true,
+      "bytes": 15422,
+      "sha256": "246df1d41045d79691a9ccdc650b5640eb51e70a952678a7a77c638310e485ad",
+      "words": 1921
+    },
+    "audio_reader_user_research.md": {
+      "exists": true,
+      "bytes": 18587,
+      "sha256": "d061ec4c68b05e7af2be8755c978a0c5bdc7a7f3c216ddd4926d36b36e4e87f5",
+      "words": 2449
+    }
+  },
+  "openapi": {
+    "version": "3.1.0",
+    "path_count": 45,
+    "operation_count": 54,
+    "unique_operation_ids": true,
+    "schema_count": 70,
+    "internal_ref_count": 175,
+    "missing_internal_refs": [],
+    "yaml_parse": true
+  },
+  "markdown_placeholder_scan": {
+    "Audio-Reader-Cross-Device-Multi-User-Design-and-Plan.md": {
+      "TBD": 0,
+      "TODO": 0,
+      "implement later": 0,
+      "fill in details": 0
+    },
+    "audio_reader_repo_audit.md": {
+      "TBD": 0,
+      "TODO": 0,
+      "implement later": 0,
+      "fill in details": 0
+    },
+    "audio_reader_user_research.md": {
+      "TBD": 0,
+      "TODO": 0,
+      "implement later": 0,
+      "fill in details": 0
+    }
+  },
+  "bundle": {
+    "expected_members": [
+      "audio-reader-redesign-planning/README.md",
+      "audio-reader-redesign-planning/Audio-Reader-Cross-Device-Multi-User-Design-and-Plan.md",
+      "audio-reader-redesign-planning/contracts/audio-reader-openapi-v1.yaml",
+      "audio-reader-redesign-planning/research/audio_reader_repo_audit.md",
+      "audio-reader-redesign-planning/research/audio_reader_user_research.md",
+      "audio-reader-redesign-planning/audio-reader-planning-validation.json"
+    ],
+    "zip_integrity_test": true,
+    "self_checksum_omitted": true
+  }
+}
