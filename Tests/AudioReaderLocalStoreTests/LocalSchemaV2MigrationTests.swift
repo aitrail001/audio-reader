@@ -109,30 +109,51 @@ struct LocalSchemaV2MigrationTests {
         let token = "v2-isolation-\(UUID().uuidString)"
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("AudioReader", isDirectory: true)
-        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
-        let plantedLexicon = support.appendingPathComponent("lexicon.json")
-        let existing = try? Data(contentsOf: plantedLexicon)
-        try JSONSerialization.data(withJSONObject: [
-            ["language": "en", "form": token, "updatedAt": "2023-11-14T22:13:20Z"]
-        ]).write(to: plantedLexicon, options: .atomic)
-        defer {
-            if let existing {
-                try? existing.write(to: plantedLexicon, options: .atomic)
-            } else {
-                try? FileManager.default.removeItem(at: plantedLexicon)
-            }
-        }
+        let transcriptsDir = support.appendingPathComponent("transcripts", isDirectory: true)
+        try FileManager.default.createDirectory(at: transcriptsDir, withIntermediateDirectories: true)
+        let planted = transcriptsDir.appendingPathComponent("\(token).json")
+        let plantedJSON = """
+            {"chapterID":"\(token)","audioPath":"/tmp/\(token).m4b","createdAt":"2023-11-14T22:13:20Z","locale":"en-US","source":"planted","ebookAligned":false,"segments":[{"id":"seg","start":0,"end":1,"words":[{"id":"w","text":"\(token)","start":0,"end":1}]}]}
+            """
+        try Data(plantedJSON.utf8).write(to: planted, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: planted) }
 
         let fixture = try IsolatedLocalStoreFixture()
         defer { fixture.remove() }
         let store = LocalSQLiteStore(fileURL: fixture.sqliteURL)
         _ = try store.migrateLegacyData(from: fixture.sources)
 
-        #expect(try store.loadKnownLemmas().isEmpty)
+        #expect(try store.loadTranscripts().isEmpty)
         let sqliteData = try Data(contentsOf: fixture.sqliteURL)
         #expect(sqliteData.range(of: Data(token.utf8)) == nil)
         #expect(store.url.path.contains(fixture.root.path))
         #expect(store.url != support.appendingPathComponent("library.sqlite"))
+    }
+
+    @Test("skips undecodable legacy rows and still writes a receipt")
+    func skipsUndecodableLegacyRowsAndWritesReceipt() throws {
+        let fixture = try IsolatedLocalStoreFixture()
+        defer { fixture.remove() }
+        try seedLegacyV1(
+            at: fixture.sqliteURL,
+            transcripts: [Self.transcriptJSON, "{not-json"],
+            vocab: [Self.vocabJSON, #"{"id":1}"#],
+            glosses: [Self.pendingGlossJSON]
+        )
+        try Data("nope".utf8).write(to: fixture.root.appendingPathComponent("lexicon.json"))
+        let transcriptsDir = fixture.root.appendingPathComponent("transcripts", isDirectory: true)
+        try FileManager.default.createDirectory(at: transcriptsDir, withIntermediateDirectories: true)
+        try Data("{".utf8).write(to: transcriptsDir.appendingPathComponent("broken.json"))
+
+        let store = LocalSQLiteStore(fileURL: fixture.sqliteURL)
+        let receipt = try store.migrateLegacyData(from: fixture.sources)
+
+        #expect(receipt.vocabularyCount == 1)
+        #expect(receipt.transcriptRevisionCount == 1)
+        #expect(receipt.assistantResultCount == 1)
+        #expect(try store.loadVocabulary().map(\.surface) == ["Ishmael"])
+        #expect(try store.loadKnownLemmas().isEmpty)
+        #expect(try store.loadReceipt()?.schemaVersion == LocalSchemaV2.version)
     }
 
     private static let transcriptJSON = """
@@ -288,5 +309,98 @@ extension LocalSQLiteStore {
             counts[name] = try rowCount(name)
         }
         return counts
+    }
+}
+
+private func seedLegacyV1(
+    at url: URL,
+    transcripts: [String],
+    vocab: [String],
+    glosses: [String]
+) throws {
+    let connection = SQLiteConnection(fileURL: url)
+    try connection.exec("""
+        CREATE TABLE IF NOT EXISTS transcripts (
+          chapter_id TEXT PRIMARY KEY,
+          audio_path TEXT,
+          created_at REAL,
+          locale TEXT,
+          source TEXT,
+          ebook_aligned INTEGER,
+          json TEXT NOT NULL
+        );
+        """)
+    try connection.exec("""
+        CREATE TABLE IF NOT EXISTS vocab (
+          id TEXT PRIMARY KEY,
+          word TEXT NOT NULL,
+          category TEXT NOT NULL DEFAULT 'word',
+          book_id TEXT,
+          book_title TEXT,
+          chapter_id TEXT,
+          timestamp REAL,
+          added_at REAL,
+          json TEXT NOT NULL
+        );
+        """)
+    try connection.exec("""
+        CREATE TABLE IF NOT EXISTS glosses (
+          id TEXT PRIMARY KEY,
+          kind TEXT,
+          language TEXT,
+          status TEXT,
+          book_id TEXT,
+          chapter_id TEXT,
+          created_at REAL,
+          json TEXT NOT NULL
+        );
+        """)
+
+    for json in transcripts {
+        let object = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] ?? [:]
+        try connection.run(
+            "INSERT OR REPLACE INTO transcripts(chapter_id, audio_path, created_at, locale, source, ebook_aligned, json) VALUES (?,?,?,?,?,?,?)"
+        ) { stmt in
+            connection.bind(stmt, 1, object["chapterID"] as? String ?? "corrupt-\(json.hashValue)")
+            connection.bind(stmt, 2, object["audioPath"] as? String)
+            connection.bind(stmt, 3, 0)
+            connection.bind(stmt, 4, object["locale"] as? String)
+            connection.bind(stmt, 5, object["source"] as? String)
+            connection.bind(stmt, 6, 0)
+            connection.bind(stmt, 7, json)
+        }
+    }
+
+    for json in vocab {
+        let object = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] ?? [:]
+        try connection.run(
+            "INSERT OR REPLACE INTO vocab(id, word, category, book_id, book_title, chapter_id, timestamp, added_at, json) VALUES (?,?,?,?,?,?,?,?,?)"
+        ) { stmt in
+            connection.bind(stmt, 1, object["id"] as? String ?? "corrupt-\(json.hashValue)")
+            connection.bind(stmt, 2, object["word"] as? String ?? "")
+            connection.bind(stmt, 3, object["category"] as? String ?? "word")
+            connection.bind(stmt, 4, object["bookID"] as? String)
+            connection.bind(stmt, 5, object["bookTitle"] as? String)
+            connection.bind(stmt, 6, object["chapterID"] as? String)
+            connection.bind(stmt, 7, object["timestamp"] as? Double ?? 0)
+            connection.bind(stmt, 8, 0)
+            connection.bind(stmt, 9, json)
+        }
+    }
+
+    for json in glosses {
+        let object = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] ?? [:]
+        try connection.run(
+            "INSERT OR REPLACE INTO glosses(id, kind, language, status, book_id, chapter_id, created_at, json) VALUES (?,?,?,?,?,?,?,?)"
+        ) { stmt in
+            connection.bind(stmt, 1, object["id"] as? String ?? "corrupt-\(json.hashValue)")
+            connection.bind(stmt, 2, object["kind"] as? String)
+            connection.bind(stmt, 3, object["language"] as? String)
+            connection.bind(stmt, 4, object["status"] as? String)
+            connection.bind(stmt, 5, object["bookID"] as? String)
+            connection.bind(stmt, 6, object["chapterID"] as? String)
+            connection.bind(stmt, 7, 0)
+            connection.bind(stmt, 8, json)
+        }
     }
 }

@@ -87,10 +87,26 @@ final class SQLiteConnection: @unchecked Sendable {
     }
 
     func bind(_ stmt: OpaquePointer, _ index: Int32, _ value: String?) {
-        if let value {
-            sqlite3_bind_text(stmt, index, value, -1, sqliteTransient)
-        } else {
+        guard let value else {
             sqlite3_bind_null(stmt, index)
+            return
+        }
+        let bytes = Array(value.utf8)
+        _ = bytes.withUnsafeBytes { raw in
+            sqlite3_bind_text(
+                stmt,
+                index,
+                raw.baseAddress?.assumingMemoryBound(to: Int8.self),
+                Int32(bytes.count),
+                sqliteTransient
+            )
+        }
+    }
+
+    static func validateIdentifier(_ value: String) throws {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
+        guard !value.isEmpty, value.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
+            throw LocalMigrationError.sqlite("invalid identifier \(value)")
         }
     }
 
@@ -161,10 +177,20 @@ enum LocalJSON {
         try decoder.decode(type, from: Data(text.utf8))
     }
 
-    static func decodeFile<Value: Decodable>(_ type: Value.Type, at url: URL) throws -> Value? {
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try decoder.decode(type, from: data)
+    static func decodeFile<Value: Decodable>(_ type: Value.Type, at url: URL) -> Value? {
+        guard FileManager.default.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url)
+        else { return nil }
+        do {
+            return try decoder.decode(type, from: data)
+        } catch {
+            NSLog(
+                "AudioReader local schema v2: skipped undecodable file %@: %@",
+                url.lastPathComponent,
+                String(describing: error)
+            )
+            return nil
+        }
     }
 }
 

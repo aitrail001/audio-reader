@@ -179,6 +179,26 @@ struct LocalSchemaV2RealShapedMigrationTests {
         #expect(store.url != Persistence.root.appendingPathComponent("library.sqlite"))
     }
 
+    @Test("shared importLegacyJSON path migrates from an isolated persistence root")
+    func sharedImportLegacyJSONPathMigratesFromIsolatedRoot() throws {
+        let fixture = try IsolatedMigrationFixture()
+        defer { fixture.remove() }
+        try JSONEncoder.iso.encode([
+            KnownLemmaRecord(language: "en", form: "forest", updatedAt: occurredAt)
+        ]).write(to: fixture.root.appendingPathComponent("lexicon.json"), options: .atomic)
+        try JSONEncoder.iso.encode(StudyActivityLog(days: ["2023-11-14"]))
+            .write(to: fixture.root.appendingPathComponent("study-activity.json"), options: .atomic)
+
+        let library = LibraryStore(fileURL: fixture.sqliteURL, importingLegacyJSONFrom: fixture.root)
+        let store = LocalSQLiteStore(fileURL: fixture.sqliteURL)
+
+        #expect(library.url == fixture.sqliteURL)
+        #expect(try store.loadReceipt()?.schemaVersion == LocalSchemaV2.version)
+        #expect(try store.loadKnownLemmas().map(\.form) == ["forest"])
+        #expect(try store.loadStudyActivityDays() == ["2023-11-14"])
+        #expect(library.url != Persistence.root.appendingPathComponent("library.sqlite"))
+    }
+
     private func migrateFullFixture() throws -> PlantedMigration {
         let planted = try plantFullFixture()
         _ = try planted.store.migrateLegacyData(from: planted.sources)

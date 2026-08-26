@@ -5,7 +5,9 @@ import AudioReaderDomain
 
 public final class LocalSQLiteStore: @unchecked Sendable {
     public let url: URL
+    #if DEBUG
     var interruptAfterTable: String?
+    #endif
 
     private let lock = NSRecursiveLock()
     private let connection: SQLiteConnection
@@ -73,7 +75,7 @@ public final class LocalSQLiteStore: @unchecked Sendable {
     public func rowCount(_ table: String) throws -> Int {
         lock.lock()
         defer { lock.unlock() }
-        try Self.validateIdentifier(table)
+        try SQLiteConnection.validateIdentifier(table)
         let rows = try connection.query("SELECT COUNT(*) AS c FROM \(table)")
         return rows.first?.int("c") ?? 0
     }
@@ -249,6 +251,7 @@ public final class LocalSQLiteStore: @unchecked Sendable {
 
     private func clearMigratedDataUnlocked() throws {
         for table in LocalSchemaV2.dataTablesInDeleteOrder {
+            try SQLiteConnection.validateIdentifier(table)
             try connection.exec("DELETE FROM \(table)")
         }
     }
@@ -278,11 +281,15 @@ public final class LocalSQLiteStore: @unchecked Sendable {
         try interruptIfNeeded("entity_versions")
     }
 
+    #if DEBUG
     private func interruptIfNeeded(_ table: String) throws {
         if interruptAfterTable == table {
             throw LocalMigrationError.interrupted(table: table)
         }
     }
+    #else
+    private func interruptIfNeeded(_: String) throws {}
+    #endif
 
     private func insertBooks(_ books: [BookDraft]) throws {
         let sql = """
@@ -686,12 +693,6 @@ public final class LocalSQLiteStore: @unchecked Sendable {
         )
     }
 
-    private static func validateIdentifier(_ value: String) throws {
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
-        guard !value.isEmpty, value.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
-            throw LocalMigrationError.sqlite("invalid identifier \(value)")
-        }
-    }
 }
 
 struct BookDraft {
@@ -769,10 +770,10 @@ enum LegacyImportLoader {
         ).compactMap { $0.stored() }
 
         let jsonTranscripts = try loadTranscriptFiles(in: sources.transcriptsDirectory)
-        let jsonVocab = (try LocalJSON.decodeFile([LegacyVocabJSON].self, at: sources.vocabJSON) ?? []).map { $0.stored() }
-        let jsonGlosses = (try LocalJSON.decodeFile([LegacyGlossJSON].self, at: sources.glossesJSON) ?? []).compactMap { $0.stored() }
-        let lemmas = (try LocalJSON.decodeFile([LegacyLemmaJSON].self, at: sources.lexiconJSON) ?? []).map { $0.stored() }
-        let activity = (try LocalJSON.decodeFile(LegacyActivityJSON.self, at: sources.studyActivityJSON))?.days ?? []
+        let jsonVocab = (LocalJSON.decodeFile([LegacyVocabJSON].self, at: sources.vocabJSON) ?? []).map { $0.stored() }
+        let jsonGlosses = (LocalJSON.decodeFile([LegacyGlossJSON].self, at: sources.glossesJSON) ?? []).compactMap { $0.stored() }
+        let lemmas = (LocalJSON.decodeFile([LegacyLemmaJSON].self, at: sources.lexiconJSON) ?? []).map { $0.stored() }
+        let activity = LocalJSON.decodeFile(LegacyActivityJSON.self, at: sources.studyActivityJSON)?.days ?? []
         let settings = decodeSettings(at: sources.settingsJSON)
         let summaries = try (LocalJSON.decodeFile([LegacySummaryJSON].self, at: sources.summariesJSON) ?? []).map { try $0.stored() }
         let checkpoints = try (LocalJSON.decodeFile([LegacyCheckpointJSON].self, at: sources.checkpointsJSON) ?? []).map { try $0.stored() }
@@ -890,11 +891,21 @@ enum LegacyImportLoader {
         fromSQLite connection: SQLiteConnection,
         table: String
     ) throws -> [Value] {
+        try SQLiteConnection.validateIdentifier(table)
         guard try tableExists(table, connection: connection) else { return [] }
         let rows = try connection.query("SELECT json FROM \(table)")
-        return try rows.compactMap { row in
+        return rows.compactMap { row in
             guard let json = row["json"] else { return nil }
-            return try LocalJSON.decode(type, from: json)
+            do {
+                return try LocalJSON.decode(type, from: json)
+            } catch {
+                NSLog(
+                    "AudioReader local schema v2: skipped undecodable %@ row: %@",
+                    table,
+                    String(describing: error)
+                )
+                return nil
+            }
         }
     }
 
@@ -913,11 +924,20 @@ enum LegacyImportLoader {
                 includingPropertiesForKeys: nil
               )
         else { return [] }
-        return try files
+        return files
             .filter { $0.pathExtension.lowercased() == "json" }
             .compactMap { url in
                 guard let data = try? Data(contentsOf: url) else { return nil }
-                return try LocalJSON.decoder.decode(LegacyTranscriptJSON.self, from: data).stored()
+                do {
+                    return try LocalJSON.decoder.decode(LegacyTranscriptJSON.self, from: data).stored()
+                } catch {
+                    NSLog(
+                        "AudioReader local schema v2: skipped undecodable transcript %@: %@",
+                        url.lastPathComponent,
+                        String(describing: error)
+                    )
+                    return nil
+                }
             }
     }
 

@@ -17,27 +17,44 @@ final class LibraryStore: @unchecked Sendable {
 
     let url: URL
     private let importLegacyJSON: Bool
+    private let persistenceRoot: URL
 
     private convenience init() {
+        let root = Persistence.root
         self.init(
-            url: Persistence.root.appendingPathComponent("library.sqlite"),
-            importLegacyJSON: true
+            url: root.appendingPathComponent("library.sqlite"),
+            importLegacyJSON: true,
+            persistenceRoot: root
         )
     }
 
     convenience init(fileURL: URL) {
-        self.init(url: fileURL, importLegacyJSON: false)
+        self.init(
+            url: fileURL,
+            importLegacyJSON: false,
+            persistenceRoot: fileURL.deletingLastPathComponent()
+        )
     }
 
-    private init(url: URL, importLegacyJSON: Bool) {
+    #if DEBUG
+    convenience init(fileURL: URL, importingLegacyJSONFrom persistenceRoot: URL) {
+        self.init(
+            url: fileURL,
+            importLegacyJSON: true,
+            persistenceRoot: persistenceRoot
+        )
+    }
+    #endif
+
+    private init(url: URL, importLegacyJSON: Bool, persistenceRoot: URL) {
         self.url = url
         self.importLegacyJSON = importLegacyJSON
+        self.persistenceRoot = persistenceRoot
         open()
         migrateSchema()
         if importLegacyJSON {
             importLegacyJSONIfNeeded()
-            let sources = LegacyLocalDataSources(sqliteURL: url, persistenceRoot: Persistence.root)
-            _ = try? LocalSQLiteStore(fileURL: url).migrateLegacyData(from: sources)
+            migrateLocalSchemaV2()
         }
     }
 
@@ -314,17 +331,24 @@ final class LibraryStore: @unchecked Sendable {
     }
 
     private func importLegacyJSONIfNeeded() {
-        let flag = Persistence.root.appendingPathComponent(".sqlite-migrated-v1")
+        let flag = persistenceRoot.appendingPathComponent(".sqlite-migrated-v1")
         guard !FileManager.default.fileExists(atPath: flag.path) else { return }
 
-        let vocab = Persistence.loadVocabJSON()
-        if !vocab.isEmpty { replaceVocab(vocab) }
+        if let data = try? Data(contentsOf: persistenceRoot.appendingPathComponent("vocab.json")),
+           let vocab = try? JSONDecoder.iso.decode([VocabEntry].self, from: data),
+           !vocab.isEmpty {
+            replaceVocab(vocab)
+        }
 
-        let glosses = Persistence.loadGlossesJSON()
-        if !glosses.isEmpty { replaceGlosses(glosses) }
+        if let data = try? Data(contentsOf: persistenceRoot.appendingPathComponent("glosses.json")),
+           let glosses = try? JSONDecoder.iso.decode([GlossEntry].self, from: data),
+           !glosses.isEmpty {
+            replaceGlosses(glosses)
+        }
 
+        let transcriptsDir = persistenceRoot.appendingPathComponent("transcripts", isDirectory: true)
         if let files = try? FileManager.default.contentsOfDirectory(
-            at: Persistence.transcriptsDir,
+            at: transcriptsDir,
             includingPropertiesForKeys: nil
         ) {
             for url in files where url.pathExtension.lowercased() == "json" {
@@ -335,6 +359,15 @@ final class LibraryStore: @unchecked Sendable {
             }
         }
         try? Data("ok".utf8).write(to: flag)
+    }
+
+    private func migrateLocalSchemaV2() {
+        let sources = LegacyLocalDataSources(sqliteURL: url, persistenceRoot: persistenceRoot)
+        do {
+            _ = try LocalSQLiteStore(fileURL: url).migrateLegacyData(from: sources)
+        } catch {
+            NSLog("AudioReader schema v2 migration failed: %@", String(describing: error))
+        }
     }
 
     // MARK: - SQLite helpers
