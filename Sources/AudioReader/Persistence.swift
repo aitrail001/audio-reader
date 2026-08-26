@@ -174,12 +174,18 @@ enum Persistence {
         return (try? JSONDecoder.iso.decode([KnownLemmaRecord].self, from: data)) ?? []
     }
 
+    @discardableResult
     static func saveKnownLemmas(
         _ items: [KnownLemmaRecord],
         to url: URL = knownLemmasURL
-    ) {
-        guard let data = try? JSONEncoder.iso.encode(items) else { return }
-        try? data.write(to: url, options: .atomic)
+    ) -> Bool {
+        guard let data = try? JSONEncoder.iso.encode(items) else { return false }
+        do {
+            try data.write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
     }
 
     static func loadStudyActivityLog(from url: URL = studyActivityURL) -> StudyActivityLog {
@@ -561,7 +567,9 @@ struct PersistenceKnownLemmaRepository: KnownLemmaRepository {
     }
 
     func saveKnownLemmas(_ lemmas: [StoredKnownLemma]) throws {
-        Persistence.saveKnownLemmas(lemmas.map(KnownLemmaRecord.init), to: url)
+        guard Persistence.saveKnownLemmas(lemmas.map(KnownLemmaRecord.init), to: url) else {
+            throw LocalStoreError.saveFailed
+        }
     }
 }
 

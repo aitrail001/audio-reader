@@ -123,7 +123,7 @@ public final class InMemoryVocabularyRepository: VocabularyRepository, @unchecke
     public func saveVocabulary(_ entries: [StoredVocabularyOccurrence]) throws {
         lock.lock()
         defer { lock.unlock() }
-        items = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
+        items = Dictionary(entries.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
     }
 
     public func upsertVocabulary(_ entries: [StoredVocabularyOccurrence]) throws {
@@ -204,7 +204,7 @@ public final class InMemoryAssistantResultRepository: AssistantResultRepository,
     public func replaceAssistantResults(_ results: [StoredAssistantResult]) throws {
         lock.lock()
         defer { lock.unlock() }
-        items = Dictionary(uniqueKeysWithValues: results.map { ($0.id, $0) })
+        items = Dictionary(results.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
     }
 }
 

@@ -178,13 +178,67 @@ public struct StoredTranscriptSegment: Codable, Equatable, Sendable {
     }
 }
 
+public struct StoredEPUBAlignmentMetrics: Codable, Equatable, Sendable {
+    public var extractedWordCount: Int
+    public var extractedSentenceCount: Int
+    public var sampledAnchorCount: Int
+    public var matchedAnchorCount: Int
+    public var matchedCoverage: Double
+    public var medianScore: Double
+    public var lowerPercentileScore: Double
+    public var backwardJumps: Int
+    public var longestUnmatchedPassage: Int
+    public var titleSimilarity: Double?
+    public var authorSimilarity: Double?
+    public var candidateComparisons: Int
+    public var detailedAlignmentPerformed: Bool
+
+    public init(
+        extractedWordCount: Int = 0,
+        extractedSentenceCount: Int = 0,
+        sampledAnchorCount: Int = 0,
+        matchedAnchorCount: Int = 0,
+        matchedCoverage: Double = 0,
+        medianScore: Double = 0,
+        lowerPercentileScore: Double = 0,
+        backwardJumps: Int = 0,
+        longestUnmatchedPassage: Int = 0,
+        titleSimilarity: Double? = nil,
+        authorSimilarity: Double? = nil,
+        candidateComparisons: Int = 0,
+        detailedAlignmentPerformed: Bool = false
+    ) {
+        self.extractedWordCount = extractedWordCount
+        self.extractedSentenceCount = extractedSentenceCount
+        self.sampledAnchorCount = sampledAnchorCount
+        self.matchedAnchorCount = matchedAnchorCount
+        self.matchedCoverage = matchedCoverage
+        self.medianScore = medianScore
+        self.lowerPercentileScore = lowerPercentileScore
+        self.backwardJumps = backwardJumps
+        self.longestUnmatchedPassage = longestUnmatchedPassage
+        self.titleSimilarity = titleSimilarity
+        self.authorSimilarity = authorSimilarity
+        self.candidateComparisons = candidateComparisons
+        self.detailedAlignmentPerformed = detailedAlignmentPerformed
+    }
+
+    public static let empty = StoredEPUBAlignmentMetrics()
+}
+
 public struct StoredEPUBAlignment: Codable, Equatable, Sendable {
     public var status: String
     public var reason: String
+    public var metrics: StoredEPUBAlignmentMetrics
 
-    public init(status: String, reason: String) {
+    public init(
+        status: String,
+        reason: String,
+        metrics: StoredEPUBAlignmentMetrics = .empty
+    ) {
         self.status = status
         self.reason = reason
+        self.metrics = metrics
     }
 }
 

@@ -13,6 +13,7 @@ final class LibraryStore: @unchecked Sendable {
     private var db: OpaquePointer?
 
     let url: URL
+    private let importLegacyJSON: Bool
 
     private convenience init() {
         self.init(
@@ -27,6 +28,7 @@ final class LibraryStore: @unchecked Sendable {
 
     private init(url: URL, importLegacyJSON: Bool) {
         self.url = url
+        self.importLegacyJSON = importLegacyJSON
         open()
         migrateSchema()
         if importLegacyJSON {
@@ -93,6 +95,7 @@ final class LibraryStore: @unchecked Sendable {
                 return t
             }
         }
+        guard importLegacyJSON else { return nil }
         return Persistence.loadTranscriptJSON(chapterID: chapterID, audioPath: audioPath)
     }
 
@@ -172,6 +175,8 @@ final class LibraryStore: @unchecked Sendable {
     }
 
     func deleteVocab(id: String) {
+        lock.lock()
+        defer { lock.unlock() }
         guard let stmt = try? prepare("DELETE FROM vocab WHERE id = ?") else { return }
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, id)
@@ -239,6 +244,8 @@ final class LibraryStore: @unchecked Sendable {
     }
 
     func deleteGloss(id: String) {
+        lock.lock()
+        defer { lock.unlock() }
         guard let stmt = try? prepare("DELETE FROM glosses WHERE id = ?") else { return }
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, id)
@@ -444,11 +451,11 @@ struct LibraryStoreAssistantResultRepository: AssistantResultRepository {
     }
 
     func saveAssistantResult(_ result: StoredAssistantResult) throws {
-        store.upsertGloss(GlossEntry(result))
+        store.upsertGloss(try GlossEntry(result))
     }
 
     func replaceAssistantResults(_ results: [StoredAssistantResult]) throws {
-        store.replaceGlosses(results.map(GlossEntry.init))
+        store.replaceGlosses(try results.map(GlossEntry.init))
     }
 }
 
@@ -462,9 +469,7 @@ extension StoredTranscript {
             locale: transcript.locale,
             source: transcript.source,
             ebookAligned: transcript.ebookAligned,
-            ebookAlignment: transcript.ebookAlignment.map {
-                StoredEPUBAlignment(status: $0.status.rawValue, reason: $0.reason)
-            },
+            ebookAlignment: transcript.ebookAlignment.map(StoredEPUBAlignment.init),
             ebookUseOverride: transcript.ebookUseOverride,
             segments: transcript.segments.map(StoredTranscriptSegment.init)
         )
@@ -509,13 +514,7 @@ extension Transcript {
             segments: stored.segments.map(TranscriptSegment.init),
             source: stored.source,
             ebookAligned: stored.ebookAligned,
-            ebookAlignment: stored.ebookAlignment.map {
-                EPUBAlignmentAssessment(
-                    status: EPUBAlignmentStatus(rawValue: $0.status) ?? .uncertain,
-                    reason: $0.reason,
-                    metrics: .empty
-                )
-            },
+            ebookAlignment: stored.ebookAlignment.map(EPUBAlignmentAssessment.init),
             ebookUseOverride: stored.ebookUseOverride
         )
     }
@@ -642,11 +641,80 @@ extension StoredAssistantResult {
     }
 }
 
+extension StoredEPUBAlignment {
+    init(_ assessment: EPUBAlignmentAssessment) {
+        self.init(
+            status: assessment.status.rawValue,
+            reason: assessment.reason,
+            metrics: StoredEPUBAlignmentMetrics(assessment.metrics)
+        )
+    }
+}
+
+extension StoredEPUBAlignmentMetrics {
+    init(_ metrics: EPUBAlignmentMetrics) {
+        self.init(
+            extractedWordCount: metrics.extractedWordCount,
+            extractedSentenceCount: metrics.extractedSentenceCount,
+            sampledAnchorCount: metrics.sampledAnchorCount,
+            matchedAnchorCount: metrics.matchedAnchorCount,
+            matchedCoverage: metrics.matchedCoverage,
+            medianScore: metrics.medianScore,
+            lowerPercentileScore: metrics.lowerPercentileScore,
+            backwardJumps: metrics.backwardJumps,
+            longestUnmatchedPassage: metrics.longestUnmatchedPassage,
+            titleSimilarity: metrics.titleSimilarity,
+            authorSimilarity: metrics.authorSimilarity,
+            candidateComparisons: metrics.candidateComparisons,
+            detailedAlignmentPerformed: metrics.detailedAlignmentPerformed
+        )
+    }
+}
+
+extension EPUBAlignmentAssessment {
+    init(_ stored: StoredEPUBAlignment) {
+        self.init(
+            status: EPUBAlignmentStatus(rawValue: stored.status) ?? .uncertain,
+            reason: stored.reason,
+            metrics: EPUBAlignmentMetrics(stored.metrics)
+        )
+    }
+}
+
+extension EPUBAlignmentMetrics {
+    init(_ stored: StoredEPUBAlignmentMetrics) {
+        self.init(
+            extractedWordCount: stored.extractedWordCount,
+            extractedSentenceCount: stored.extractedSentenceCount,
+            sampledAnchorCount: stored.sampledAnchorCount,
+            matchedAnchorCount: stored.matchedAnchorCount,
+            matchedCoverage: stored.matchedCoverage,
+            medianScore: stored.medianScore,
+            lowerPercentileScore: stored.lowerPercentileScore,
+            backwardJumps: stored.backwardJumps,
+            longestUnmatchedPassage: stored.longestUnmatchedPassage,
+            titleSimilarity: stored.titleSimilarity,
+            authorSimilarity: stored.authorSimilarity,
+            candidateComparisons: stored.candidateComparisons,
+            detailedAlignmentPerformed: stored.detailedAlignmentPerformed
+        )
+    }
+}
+
 extension GlossEntry {
-    init(_ stored: StoredAssistantResult) {
+    init(_ stored: StoredAssistantResult) throws {
+        let kind: GlossKind
+        switch stored.kind {
+        case .wordGloss:
+            kind = .word
+        case .sentenceGloss:
+            kind = .sentence
+        case .chapterSummary, .chapterTranslation:
+            throw LocalStoreError.unsupportedAssistantResultKind
+        }
         self.init(
             id: stored.id,
-            kind: stored.kind == .wordGloss ? .word : .sentence,
+            kind: kind,
             language: stored.language,
             source: stored.source,
             context: stored.context,

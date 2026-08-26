@@ -2,6 +2,7 @@ import Foundation
 
 public enum LocalStoreError: Error, Equatable, Sendable {
     case saveFailed
+    case unsupportedAssistantResultKind
 }
 
 public protocol SettingsRepository: Sendable {

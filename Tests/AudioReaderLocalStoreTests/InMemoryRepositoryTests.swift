@@ -97,6 +97,12 @@ struct InMemoryRepositoryTests {
 
         try repo.saveVocabulary([newer])
         #expect(try repo.loadVocabulary().map(\.id.rawValue) == ["vocab-2"])
+
+        let duplicate = sampleVocabulary(id: "vocab-dup", surface: "first", addedAt: occurredAt)
+        var duplicateLast = duplicate
+        duplicateLast.surface = "last"
+        try repo.saveVocabulary([duplicate, duplicateLast])
+        #expect(try repo.loadVocabulary().map(\.surface) == ["last"])
     }
 
     @Test("known lemmas replace and load")
@@ -166,6 +172,12 @@ struct InMemoryRepositoryTests {
 
         try repo.replaceAssistantResults([newer])
         #expect(try repo.loadAssistantResults().map(\.id) == ["gloss-2"])
+
+        try repo.replaceAssistantResults([
+            sampleAssistantResult(id: "gloss-dup", text: "first", createdAt: occurredAt),
+            sampleAssistantResult(id: "gloss-dup", text: "last", createdAt: occurredAt)
+        ])
+        #expect(try repo.loadAssistantResults().map(\.text) == ["last"])
     }
 
     @Test("outbox enqueues pending mutations and acknowledges without rewriting payload")
@@ -257,12 +269,21 @@ struct InMemoryRepositoryTests {
     private func assertApplicationSupportWasNotUsed(for token: String) {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("AudioReader", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: support.path) else { return }
         let names = (try? FileManager.default.contentsOfDirectory(atPath: support.path)) ?? []
         #expect(!names.contains(where: { $0.contains(token) }))
         let transcriptNames = (try? FileManager.default.contentsOfDirectory(
             atPath: support.appendingPathComponent("transcripts").path
         )) ?? []
         #expect(!transcriptNames.contains(where: { $0.contains(token) }))
+        let needle = Data(token.utf8)
+        for name in ["settings.json", "lexicon.json", "vocab.json", "glosses.json"] {
+            let url = support.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: url.path),
+                  let data = try? Data(contentsOf: url)
+            else { continue }
+            #expect(data.range(of: needle) == nil)
+        }
     }
 
     private func sampleBook(id: String, title: String) -> StoredBook {

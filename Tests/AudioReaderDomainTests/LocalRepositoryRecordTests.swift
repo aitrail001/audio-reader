@@ -107,7 +107,25 @@ struct LocalRepositoryRecordTests {
             locale: "en-US",
             source: "apple-speech",
             ebookAligned: false,
-            ebookAlignment: nil,
+            ebookAlignment: StoredEPUBAlignment(
+                status: "trusted",
+                reason: "anchors matched",
+                metrics: StoredEPUBAlignmentMetrics(
+                    extractedWordCount: 12,
+                    extractedSentenceCount: 2,
+                    sampledAnchorCount: 4,
+                    matchedAnchorCount: 4,
+                    matchedCoverage: 1,
+                    medianScore: 0.9,
+                    lowerPercentileScore: 0.8,
+                    backwardJumps: 0,
+                    longestUnmatchedPassage: 0,
+                    titleSimilarity: 1,
+                    authorSimilarity: 0.95,
+                    candidateComparisons: 3,
+                    detailedAlignmentPerformed: true
+                )
+            ),
             ebookUseOverride: nil,
             segments: [
                 StoredTranscriptSegment(
