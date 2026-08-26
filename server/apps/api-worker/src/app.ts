@@ -1,12 +1,16 @@
 import {
   LOCAL_JWT_CONFIG,
+  createCloudflareTurnstileVerifier,
   createFakePrincipal,
   createMemoryAuthService,
+  createMemoryPasswordlessLimiter,
   type AuthService,
+  type PasswordlessLimiter,
   type Principal,
+  type TurnstileVerifier,
 } from "@audio-reader/auth";
 import { createFakeDatabaseClient } from "@audio-reader/database";
-import { logUnhandledError, resolveRequestId } from "@audio-reader/observability";
+import { logSecurityEvent, logUnhandledError, resolveRequestId } from "@audio-reader/observability";
 import { createFakeQwenClient } from "@audio-reader/qwen";
 import { authMethodError, handleAuthRoute, isAuthPath } from "./auth-routes";
 import { DEFAULT_MAX_BODY_BYTES, validateRequestBody } from "./body";
@@ -40,6 +44,8 @@ export type AppOptions = {
   authenticate?: (request: Request) => Principal | Promise<Principal | null> | null;
   auth?: AuthService;
   idempotencyStore?: IdempotencyStore;
+  passwordlessLimiter?: PasswordlessLimiter;
+  verifyTurnstile?: TurnstileVerifier;
 };
 
 export type ApiApp = {
@@ -51,6 +57,11 @@ export function createApiApp(options: AppOptions): ApiApp {
   const allowlist = resolveCorsAllowlist(options);
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const idempotencyStore = options.idempotencyStore ?? createMemoryIdempotencyStore();
+  const passwordlessLimiter =
+    options.passwordlessLimiter ??
+    (options.verifyTurnstile === undefined
+      ? createDefaultPasswordlessLimiter(options.environment)
+      : createDefaultPasswordlessLimiter(options.environment, options.verifyTurnstile));
 
   async function authenticate(request: Request): Promise<Principal | null> {
     const principal = await options.authenticate?.(request);
@@ -67,6 +78,7 @@ export function createApiApp(options: AppOptions): ApiApp {
         maxBodyBytes,
         authenticate,
         idempotencyStore,
+        passwordlessLimiter,
       );
       return applyCorsHeaders(request, withRequestId(response, requestId), allowlist);
     } catch (error: unknown) {
@@ -107,6 +119,7 @@ export function createApiAppFromEnv(env: WorkerEnv): ApiApp {
   const jwt = resolveJwtSigningConfig(env, environment);
   const auth =
     jwt === undefined ? undefined : createMemoryAuthService({ jwt, allowLocalIssuance: useFakes });
+  const turnstileSecret = env.TURNSTILE_SECRET_KEY?.trim() ?? "";
   return createApiApp({
     environment,
     version: version === undefined || version === "" ? "1.0.0-draft.1" : version,
@@ -118,6 +131,34 @@ export function createApiAppFromEnv(env: WorkerEnv): ApiApp {
     qwen: useFakes ? createFakeQwenClient() : unavailableProbe(),
     ...(auth === undefined ? {} : { auth }),
     authenticate: auth === undefined ? () => null : (request) => auth.authenticate(request),
+    ...(turnstileSecret === ""
+      ? {}
+      : { verifyTurnstile: createCloudflareTurnstileVerifier({ secretKey: turnstileSecret }) }),
+  });
+}
+
+function createDefaultPasswordlessLimiter(
+  environment: AppEnvironment,
+  verifyTurnstile?: TurnstileVerifier,
+): PasswordlessLimiter {
+  const verifier: TurnstileVerifier =
+    verifyTurnstile ??
+    (environment === "local" || environment === "test"
+      ? (token) => Promise.resolve(token === "turnstile-ok")
+      : () => Promise.resolve(false));
+  return createMemoryPasswordlessLimiter({
+    verifyTurnstile: verifier,
+    onSecurityEvent: (event) => {
+      logSecurityEvent({
+        message: event.type,
+        requestId: event.requestId ?? "unspecified",
+        action: event.action,
+        emailHash: event.emailHash,
+        ipHash: event.ipHash,
+        reason: event.reason,
+        ...(event.deviceId === null ? {} : { deviceId: event.deviceId }),
+      });
+    },
   });
 }
 
@@ -128,6 +169,7 @@ async function handleRequest(
   maxBodyBytes: number,
   authenticate: (request: Request) => Promise<Principal | null>,
   idempotencyStore: IdempotencyStore,
+  passwordlessLimiter: PasswordlessLimiter,
 ): Promise<Response> {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204 });
@@ -185,6 +227,7 @@ async function handleRequest(
       ...(options.auth === undefined ? {} : { auth: options.auth }),
       authenticate,
       idempotencyStore,
+      passwordlessLimiter,
     });
     if (routed !== undefined) {
       return routed;

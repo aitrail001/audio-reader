@@ -35,3 +35,20 @@ export {
   type ProductSettings,
   type SessionTokens,
 } from "./service";
+export {
+  DEFAULT_PASSWORDLESS_LIMITS,
+  createCloudflareTurnstileVerifier,
+  createMemoryPasswordlessLimiter,
+  hashIdentifier,
+  type BlockedAttempt,
+  type BucketLimit,
+  type MemoryPasswordlessLimiterOptions,
+  type PasswordlessAction,
+  type PasswordlessAttempt,
+  type PasswordlessDecision,
+  type PasswordlessLimiter,
+  type PasswordlessLimits,
+  type PasswordlessSecurityEvent,
+  type TurnstileFetch,
+  type TurnstileVerifier,
+} from "./passwordless-limit";

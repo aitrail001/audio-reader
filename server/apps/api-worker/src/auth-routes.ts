@@ -1,6 +1,8 @@
 import {
   AUTH_PROVIDERS,
   type AuthService,
+  type PasswordlessDecision,
+  type PasswordlessLimiter,
   type Principal,
   type ProductProfile,
 } from "@audio-reader/auth";
@@ -33,6 +35,7 @@ const AUTH_METHODS: Record<string, readonly string[]> = {
   "/v1/me": ["GET", "HEAD"],
   "/v1/me/devices": ["GET", "HEAD"],
   "/v1/me/devices/{deviceId}": ["DELETE"],
+  "/v1/admin/auth/blocked-attempts": ["GET", "HEAD"],
 };
 
 const DEVICE_REVOKE_PATH = /^\/v1\/me\/devices\/([^/]+)$/;
@@ -60,6 +63,7 @@ export type AuthRouteContext = {
   auth?: AuthService;
   authenticate: (request: Request) => Promise<Principal | null>;
   idempotencyStore: IdempotencyStore;
+  passwordlessLimiter?: PasswordlessLimiter;
 };
 
 export function isAuthPath(path: string): boolean {
@@ -120,6 +124,8 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<Respon
       return listDevices(context);
     case "/v1/me/devices/{deviceId}":
       return revokeDevice(context, resolved.deviceId ?? "");
+    case "/v1/admin/auth/blocked-attempts":
+      return listBlockedAttempts(context);
     default:
       return undefined;
   }
@@ -144,6 +150,10 @@ async function requestEmailOtp(context: AuthRouteContext): Promise<Response> {
   }
   if (!EMAIL_PATTERN.test(email)) {
     return fieldError(context.requestId, "email", "email must be a valid email address.");
+  }
+  const limited = await enforcePasswordlessLimit(context, "email_otp_request", body.value, email);
+  if (limited !== undefined) {
+    return limited;
   }
   const requested = await auth.requestEmailOtp(email);
   if (!requested.ok) {
@@ -182,13 +192,30 @@ async function verifyEmailOtp(context: AuthRouteContext): Promise<Response> {
   if (!UUID_PATTERN.test(deviceId)) {
     return fieldError(context.requestId, "deviceId", "deviceId must be a UUID.");
   }
+  const limited = await enforcePasswordlessLimit(
+    context,
+    "email_otp_verify",
+    body.value,
+    email,
+    deviceId,
+  );
+  if (limited !== undefined) {
+    return limited;
+  }
   const result = await auth.verifyEmailOtp(email, code, deviceId);
   if (!result.ok) {
     if (result.code === "not_ready") {
       return issuanceUnavailable(context.requestId);
     }
+    await context.passwordlessLimiter?.recordVerifyFailure({
+      email,
+      ip: clientIp(context.request),
+      deviceId,
+      requestId: context.requestId,
+    });
     return unauthorized(context.requestId, "The email code is invalid or expired.");
   }
+  await context.passwordlessLimiter?.recordVerifySuccess({ email });
   return jsonResponse(toTokenPair(result.value.tokens));
 }
 
@@ -457,6 +484,100 @@ async function revokeDevice(context: AuthRouteContext, deviceId: string): Promis
     context.requestId,
     principal,
   );
+}
+
+async function listBlockedAttempts(context: AuthRouteContext): Promise<Response> {
+  const principal = await requirePrincipal(context);
+  if (principal instanceof Response) {
+    return principal;
+  }
+  if (principal.role !== "admin") {
+    return forbidden(context.requestId, "Administrator role required.");
+  }
+  const items = context.passwordlessLimiter?.listBlockedAttempts() ?? [];
+  return asHead(context.request, jsonResponse({ items }));
+}
+
+async function enforcePasswordlessLimit(
+  context: AuthRouteContext,
+  action: "email_otp_request" | "email_otp_verify",
+  body: Record<string, unknown>,
+  email: string,
+  deviceId?: string,
+): Promise<Response | undefined> {
+  const limiter = context.passwordlessLimiter;
+  if (limiter === undefined) {
+    return undefined;
+  }
+  const headerDevice = optionalDeviceHeader(context.request);
+  const resolvedDevice = deviceId ?? headerDevice;
+  const turnstileToken = optionalTurnstileToken(body, context.request);
+  const attempt = {
+    email,
+    ip: clientIp(context.request),
+    requestId: context.requestId,
+    ...(resolvedDevice === undefined ? {} : { deviceId: resolvedDevice }),
+    ...(turnstileToken === undefined ? {} : { turnstileToken }),
+  };
+  const decision =
+    action === "email_otp_request"
+      ? await limiter.checkRequest(attempt)
+      : await limiter.checkVerify(attempt);
+  if (decision.ok) {
+    return undefined;
+  }
+  return passwordlessDenied(context.requestId, decision);
+}
+
+function passwordlessDenied(
+  requestId: string,
+  decision: Exclude<PasswordlessDecision, { ok: true }>,
+): Response {
+  if (decision.code === "rate_limited") {
+    return problemResponse({
+      status: 429,
+      code: "rate_limited",
+      title: "Too many requests",
+      detail: "Too many authentication attempts. Try again later.",
+      traceId: requestId,
+      retryAfterSeconds: decision.retryAfterSeconds,
+      headers: { "Retry-After": String(decision.retryAfterSeconds) },
+    });
+  }
+  return problemResponse({
+    status: 403,
+    code: "challenge_required",
+    title: "Challenge required",
+    detail: "Complete the Turnstile challenge and retry.",
+    traceId: requestId,
+  });
+}
+
+function clientIp(request: Request): string {
+  const connecting = request.headers.get("CF-Connecting-IP")?.trim() ?? "";
+  if (connecting !== "") {
+    return connecting;
+  }
+  const forwarded = request.headers.get("X-Forwarded-For")?.trim() ?? "";
+  const first = forwarded.split(",")[0]?.trim() ?? "";
+  return first === "" ? "unknown" : first;
+}
+
+function optionalDeviceHeader(request: Request): string | undefined {
+  const deviceId = request.headers.get("X-Device-Id")?.trim() ?? "";
+  return UUID_PATTERN.test(deviceId) ? deviceId : undefined;
+}
+
+function optionalTurnstileToken(
+  body: Record<string, unknown>,
+  request: Request,
+): string | undefined {
+  const fromBody = optionalString(body.turnstileToken);
+  if (fromBody !== undefined) {
+    return fromBody;
+  }
+  const fromHeader = request.headers.get("cf-turnstile-response")?.trim() ?? "";
+  return fromHeader === "" ? undefined : fromHeader;
 }
 
 async function requirePrincipal(context: AuthRouteContext): Promise<Principal | Response> {

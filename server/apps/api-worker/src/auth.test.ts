@@ -1,6 +1,15 @@
-import { LOCAL_JWT_CONFIG, createMemoryAuthService, signAccessToken } from "@audio-reader/auth";
+import {
+  LOCAL_JWT_CONFIG,
+  createFakePrincipal,
+  createMemoryAuthService,
+  createMemoryPasswordlessLimiter,
+  hashIdentifier,
+  normalizeEmail,
+  signAccessToken,
+  type MemoryPasswordlessLimiterOptions,
+} from "@audio-reader/auth";
 import { REQUEST_ID_HEADER } from "@audio-reader/observability";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createApiAppFromEnv, createTestApp } from "./app";
 
 const DEVICE_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
@@ -26,16 +35,31 @@ function jsonPost(path: string, body: unknown, headers: Record<string, string> =
   });
 }
 
-function createAuthApp(options: { now?: () => Date; generateOtp?: () => string } = {}) {
+function createAuthApp(
+  options: {
+    now?: () => Date;
+    generateOtp?: () => string;
+    verifyTurnstile?: (token: string, ip: string) => Promise<boolean>;
+    passwordlessLimits?: MemoryPasswordlessLimiterOptions["limits"];
+  } = {},
+) {
+  const now = options.now ?? (() => new Date());
   const auth = createMemoryAuthService({
     jwt: LOCAL_JWT_CONFIG,
-    ...(options.now === undefined ? {} : { now: options.now }),
+    now,
     generateOtp: options.generateOtp ?? (() => "123456"),
+  });
+  const passwordlessLimiter = createMemoryPasswordlessLimiter({
+    now,
+    ...(options.verifyTurnstile === undefined ? {} : { verifyTurnstile: options.verifyTurnstile }),
+    ...(options.passwordlessLimits === undefined ? {} : { limits: options.passwordlessLimits }),
   });
   return {
     auth,
+    passwordlessLimiter,
     app: createTestApp({
       auth,
+      passwordlessLimiter,
       authenticate: (request) => auth.authenticate(request),
     }),
   };
@@ -184,6 +208,224 @@ describe("product authentication API", () => {
     expect(expiredResponse.status).toBe(401);
     const expiredBody = await readJson(expiredResponse);
     expect(isRecord(expiredBody) && expiredBody.code).toBe("unauthorized");
+  });
+
+  it("rate limits OTP resend per email hash without enumerating accounts", async () => {
+    const { app } = createAuthApp();
+    const first = await app.fetch(jsonPost("/v1/auth/email-otp/request", { email: EMAIL }));
+    expect(first.status).toBe(202);
+    const headers = { [REQUEST_ID_HEADER]: "otp-resend-1" };
+    const existing = await app.fetch(
+      jsonPost("/v1/auth/email-otp/request", { email: EMAIL }, headers),
+    );
+    const unknownFirst = await app.fetch(
+      jsonPost("/v1/auth/email-otp/request", { email: UNKNOWN_EMAIL }),
+    );
+    const unknownSecond = await app.fetch(
+      jsonPost("/v1/auth/email-otp/request", { email: UNKNOWN_EMAIL }, headers),
+    );
+    expect(existing.status).toBe(429);
+    expect(unknownFirst.status).toBe(202);
+    expect(unknownSecond.status).toBe(429);
+    const existingBody = await readJson(existing);
+    const unknownBody = await readJson(unknownSecond);
+    expect(isRecord(existingBody) && existingBody.code).toBe("rate_limited");
+    expect(isRecord(unknownBody) && unknownBody.code).toBe("rate_limited");
+    expect(isRecord(existingBody) && existingBody.status).toBe(429);
+    expect(existing.headers.get("Retry-After")).toEqual(expect.any(String));
+    expect(JSON.stringify(existingBody)).not.toContain(EMAIL);
+    expect(JSON.stringify(unknownBody)).not.toContain(UNKNOWN_EMAIL);
+  });
+
+  it("rate limits brute-force OTP verification including the correct code after lockout", async () => {
+    const { app } = createAuthApp({
+      passwordlessLimits: {
+        verifyEmail: { max: 3, challengeAfter: 3 },
+      },
+    });
+    await app.fetch(jsonPost("/v1/auth/email-otp/request", { email: EMAIL }));
+    for (let index = 0; index < 3; index += 1) {
+      const wrong = await app.fetch(
+        jsonPost("/v1/auth/email-otp/verify", {
+          email: EMAIL,
+          code: "000000",
+          deviceId: DEVICE_ID,
+        }),
+      );
+      expect(wrong.status).toBe(401);
+    }
+    const locked = await app.fetch(
+      jsonPost("/v1/auth/email-otp/verify", {
+        email: EMAIL,
+        code: "123456",
+        deviceId: DEVICE_ID,
+      }),
+    );
+    expect(locked.status).toBe(429);
+    const body = await readJson(locked);
+    expect(isRecord(body) && body.code).toBe("rate_limited");
+    expect(JSON.stringify(body)).not.toContain(EMAIL);
+  });
+
+  it("requires a Turnstile token after repeated OTP failures", async () => {
+    const { app } = createAuthApp({
+      verifyTurnstile: (token) => Promise.resolve(token === "turnstile-ok"),
+      passwordlessLimits: {
+        verifyEmail: { max: 5, challengeAfter: 2 },
+      },
+    });
+    await app.fetch(jsonPost("/v1/auth/email-otp/request", { email: EMAIL }));
+    for (let index = 0; index < 2; index += 1) {
+      const wrong = await app.fetch(
+        jsonPost("/v1/auth/email-otp/verify", {
+          email: EMAIL,
+          code: "000000",
+          deviceId: DEVICE_ID,
+        }),
+      );
+      expect(wrong.status).toBe(401);
+    }
+    const challenged = await app.fetch(
+      jsonPost("/v1/auth/email-otp/verify", {
+        email: EMAIL,
+        code: "123456",
+        deviceId: DEVICE_ID,
+      }),
+    );
+    expect(challenged.status).toBe(403);
+    const challengedBody = await readJson(challenged);
+    expect(isRecord(challengedBody) && challengedBody.code).toBe("challenge_required");
+    expect(JSON.stringify(challengedBody)).not.toContain(EMAIL);
+
+    const withToken = await app.fetch(
+      jsonPost("/v1/auth/email-otp/verify", {
+        email: EMAIL,
+        code: "123456",
+        deviceId: DEVICE_ID,
+        turnstileToken: "turnstile-ok",
+      }),
+    );
+    expect(withToken.status).toBe(200);
+  });
+
+  it("applies IP and device buckets to OTP requests", async () => {
+    const { app } = createAuthApp({
+      passwordlessLimits: {
+        requestCooldownSeconds: 0,
+        requestEmail: { max: 50, challengeAfter: 50 },
+        requestIp: { max: 2, challengeAfter: 2 },
+        requestDevice: { max: 2, challengeAfter: 2 },
+      },
+    });
+    const ipHeaders = { "CF-Connecting-IP": "203.0.113.10" };
+    expect(
+      (await app.fetch(jsonPost("/v1/auth/email-otp/request", { email: EMAIL }, ipHeaders))).status,
+    ).toBe(202);
+    expect(
+      (await app.fetch(jsonPost("/v1/auth/email-otp/request", { email: ALICE_EMAIL }, ipHeaders)))
+        .status,
+    ).toBe(202);
+    const ipBlocked = await app.fetch(
+      jsonPost("/v1/auth/email-otp/request", { email: BOB_EMAIL }, ipHeaders),
+    );
+    expect(ipBlocked.status).toBe(429);
+
+    const deviceHeaders = {
+      "CF-Connecting-IP": "198.51.100.20",
+      "X-Device-Id": DEVICE_ID,
+    };
+    expect(
+      (await app.fetch(jsonPost("/v1/auth/email-otp/request", { email: EMAIL }, deviceHeaders)))
+        .status,
+    ).toBe(202);
+    expect(
+      (
+        await app.fetch(
+          jsonPost("/v1/auth/email-otp/request", { email: ALICE_EMAIL }, deviceHeaders),
+        )
+      ).status,
+    ).toBe(202);
+    const deviceBlocked = await app.fetch(
+      jsonPost("/v1/auth/email-otp/request", { email: BOB_EMAIL }, deviceHeaders),
+    );
+    expect(deviceBlocked.status).toBe(429);
+    expect(
+      (
+        await app.fetch(
+          jsonPost(
+            "/v1/auth/email-otp/request",
+            { email: BOB_EMAIL },
+            { "CF-Connecting-IP": "198.51.100.21", "X-Device-Id": DEVICE_B },
+          ),
+        )
+      ).status,
+    ).toBe(202);
+  });
+
+  it("logs passwordless security events without raw email", async () => {
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const auth = createMemoryAuthService({
+        jwt: LOCAL_JWT_CONFIG,
+        generateOtp: () => "123456",
+      });
+      const app = createTestApp({
+        auth,
+        authenticate: (request) => auth.authenticate(request),
+      });
+      await app.fetch(jsonPost("/v1/auth/email-otp/request", { email: EMAIL }));
+      const blocked = await app.fetch(
+        jsonPost(
+          "/v1/auth/email-otp/request",
+          { email: EMAIL },
+          { [REQUEST_ID_HEADER]: "otp-limit-log-1" },
+        ),
+      );
+      expect(blocked.status).toBe(429);
+      const logged = spy.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(logged).toContain("passwordless_rate_limited");
+      expect(logged).toContain("otp-limit-log-1");
+      expect(logged).toContain(await hashIdentifier(normalizeEmail(EMAIL)));
+      expect(logged).not.toContain(EMAIL);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("lets admins list blocked attempts and keeps raw email out of the payload", async () => {
+    const { app, auth, passwordlessLimiter } = createAuthApp();
+    await app.fetch(jsonPost("/v1/auth/email-otp/request", { email: EMAIL }));
+    expect((await app.fetch(jsonPost("/v1/auth/email-otp/request", { email: EMAIL }))).status).toBe(
+      429,
+    );
+
+    const anon = await app.fetch(new Request("http://localhost/v1/admin/auth/blocked-attempts"));
+    expect(anon.status).toBe(401);
+
+    const userDenied = await createTestApp({
+      auth,
+      passwordlessLimiter,
+      authenticate: () => createFakePrincipal({ role: "user" }),
+    }).fetch(new Request("http://localhost/v1/admin/auth/blocked-attempts"));
+    expect(userDenied.status).toBe(403);
+
+    const listed = await createTestApp({
+      auth,
+      passwordlessLimiter,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    }).fetch(new Request("http://localhost/v1/admin/auth/blocked-attempts"));
+    expect(listed.status).toBe(200);
+    const payload = await readJson(listed);
+    expect(payload).toEqual({
+      items: [
+        expect.objectContaining({
+          action: "email_otp_request",
+          reason: "rate_limited",
+          emailHash: await hashIdentifier(normalizeEmail(EMAIL)),
+        }),
+      ],
+    });
+    expect(JSON.stringify(payload)).not.toContain(EMAIL);
   });
 
   it("rejects access tokens with invalid issuer, audience, or signature", async () => {

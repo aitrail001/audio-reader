@@ -36,3 +36,22 @@ export function logUnhandledError(requestId: string, error: unknown): void {
     }),
   );
 }
+
+export type SecurityEventFields = {
+  message: string;
+  requestId: string;
+  action?: string;
+  emailHash?: string;
+  ipHash?: string;
+  deviceId?: string;
+  reason?: string;
+};
+
+export function logSecurityEvent(event: SecurityEventFields): void {
+  console.warn(
+    JSON.stringify({
+      level: "warn",
+      ...event,
+    }),
+  );
+}

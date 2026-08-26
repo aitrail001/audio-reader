@@ -912,6 +912,7 @@ export interface components {
             /** Format: email */
             email: string;
             redirectUri?: string | null;
+            turnstileToken?: string;
         };
         EmailOtpVerifyRequest: {
             /** Format: email */
@@ -919,6 +920,7 @@ export interface components {
             code: string;
             /** Format: uuid */
             deviceId: string;
+            turnstileToken?: string;
         };
         TokenPair: {
             accessToken: string;

@@ -1961,6 +1961,9 @@ components:
           type: string
           format: email
         redirectUri: *id025
+        turnstileToken:
+          type: string
+          minLength: 1
     EmailOtpVerifyRequest:
       type: object
       additionalProperties: false
@@ -1976,6 +1979,9 @@ components:
           type: string
           pattern: ^[0-9]{6}$
         deviceId: *id009
+        turnstileToken:
+          type: string
+          minLength: 1
     TokenPair:
       type: object
       additionalProperties: false

@@ -11,6 +11,7 @@ export type WorkerEnv = {
   SUPABASE_URL?: string;
   SUPABASE_JWT_SECRET?: string;
   SUPABASE_JWT_AUDIENCE?: string;
+  TURNSTILE_SECRET_KEY?: string;
 };
 
 export function parseEnvironment(value: string | undefined): AppEnvironment {

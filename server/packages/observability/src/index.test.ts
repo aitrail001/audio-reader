@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   formatError,
+  logSecurityEvent,
   logUnhandledError,
   packageId,
   REQUEST_ID_HEADER,
@@ -46,6 +47,31 @@ describe("@audio-reader/observability", () => {
       expect(line).toContain("client-request-1");
       expect(line).toContain("unhandled_request_error");
       expect(line).toContain("boom");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("logs security events as JSON without extra fields", () => {
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      logSecurityEvent({
+        message: "passwordless_rate_limited",
+        requestId: "otp-limit-log-1",
+        action: "email_otp_request",
+        emailHash: "abc123",
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+      const line = String(spy.mock.calls[0]?.[0]);
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      expect(parsed).toEqual({
+        level: "warn",
+        message: "passwordless_rate_limited",
+        requestId: "otp-limit-log-1",
+        action: "email_otp_request",
+        emailHash: "abc123",
+      });
+      expect(line).not.toContain("@");
     } finally {
       spy.mockRestore();
     }
