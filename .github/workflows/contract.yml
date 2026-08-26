@@ -1,0 +1,27 @@
+name: Contract
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  openapi:
+    name: OpenAPI v1
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install validator dependencies
+        run: python3 -m pip install -r contracts/requirements-validator.txt
+
+      - name: Run contract tests
+        run: python3 -m unittest discover -s Tests/contract -v
+
+      - name: Lint OpenAPI contract
+        run: python3 scripts/validate_openapi.py

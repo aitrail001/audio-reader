@@ -1,0 +1,20 @@
+{
+  "deviceId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "batchId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "baseCursor": "seq:42",
+  "mutations": [
+    {
+      "mutationId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+      "entityType": "progress",
+      "entityId": "2c5ea4c0-4067-11e9-8bad-9b1deb4d3b7d",
+      "operation": "upsert",
+      "baseRevision": 7,
+      "occurredAt": "2026-08-26T09:12:04Z",
+      "payload": {
+        "chapterId": "2c5ea4c0-4067-11e9-8bad-9b1deb4d3b7d",
+        "positionSeconds": 184.25,
+        "completed": false
+      }
+    }
+  ]
+}
