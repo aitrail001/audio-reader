@@ -1,8 +1,4 @@
-"""Contract tests for the product OpenAPI v1 document.
-
-These tests must fail until contracts/openapi-v1.yaml exists and
-scripts/validate_openapi.py implements the Phase 0.2 checks.
-"""
+"""Lock the product OpenAPI v1 rules that CI lint enforces."""
 
 from __future__ import annotations
 
