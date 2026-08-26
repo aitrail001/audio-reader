@@ -105,7 +105,8 @@ export function createApiAppFromEnv(env: WorkerEnv): ApiApp {
   const adminOrigin = env.ADMIN_ORIGIN?.trim();
   const version = env.APP_VERSION?.trim();
   const jwt = resolveJwtSigningConfig(env, environment);
-  const auth = jwt === undefined ? undefined : createMemoryAuthService({ jwt });
+  const auth =
+    jwt === undefined ? undefined : createMemoryAuthService({ jwt, allowLocalIssuance: useFakes });
   return createApiApp({
     environment,
     version: version === undefined || version === "" ? "1.0.0-draft.1" : version,

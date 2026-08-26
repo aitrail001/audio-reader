@@ -311,4 +311,59 @@ describe("product authentication API", () => {
     expect(response.status).toBe(401);
     await expect(app.authenticate(new Request("http://localhost/v1/me"))).resolves.toBeNull();
   });
+
+  it("validates production JWTs without minting stub OAuth or OTP sessions", async () => {
+    const jwt = {
+      issuer: "https://example.supabase.co/auth/v1",
+      audience: "authenticated",
+      secret: "super-secret",
+      accessTokenTtlSeconds: 3600,
+      clockSkewSeconds: 0,
+    };
+    const app = createApiAppFromEnv({
+      ENVIRONMENT: "production",
+      SUPABASE_URL: "https://example.supabase.co",
+      SUPABASE_JWT_SECRET: "super-secret",
+      SUPABASE_JWT_AUDIENCE: "authenticated",
+    });
+    const token = await signAccessToken({ sub: "user-prod", email: EMAIL }, jwt);
+    const me = await app.fetch(new Request("http://localhost/v1/me", { headers: bearer(token) }));
+    expect(me.status).toBe(200);
+    const profile = await readJson(me);
+    expect(isRecord(profile) && profile.email).toBe(EMAIL);
+
+    const pkce = await pkcePair();
+    const authorize = await app.fetch(
+      jsonPost("/v1/auth/oauth/authorize", {
+        provider: "google",
+        redirectUri: "http://localhost/callback",
+        codeChallenge: pkce.challenge,
+        state: "oauth-prod-state",
+      }),
+    );
+    expect(authorize.status).toBe(503);
+    const authorizeBody = await readJson(authorize);
+    expect(isRecord(authorizeBody) && authorizeBody.code).toBe("not_ready");
+
+    const exchange = await app.fetch(
+      jsonPost("/v1/auth/oauth/exchange", {
+        provider: "google",
+        code: "should-not-issue",
+        codeVerifier: pkce.verifier,
+        redirectUri: "http://localhost/callback",
+      }),
+    );
+    expect(exchange.status).toBe(503);
+
+    const otpRequest = await app.fetch(jsonPost("/v1/auth/email-otp/request", { email: EMAIL }));
+    expect(otpRequest.status).toBe(503);
+    const otpVerify = await app.fetch(
+      jsonPost("/v1/auth/email-otp/verify", {
+        email: EMAIL,
+        code: "123456",
+        deviceId: DEVICE_ID,
+      }),
+    );
+    expect(otpVerify.status).toBe(503);
+  });
 });

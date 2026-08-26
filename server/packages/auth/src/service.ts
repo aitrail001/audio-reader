@@ -80,7 +80,9 @@ export type AuthFailureCode =
   | "invalid_audience"
   | "invalid_signature"
   | "expired"
-  | "missing_subject";
+  | "missing_subject"
+  | "not_ready"
+  | "already_linked";
 
 export type AuthResult<T> = { ok: true; value: T } | { ok: false; code: AuthFailureCode };
 
@@ -124,12 +126,14 @@ export type MemoryAuthServiceOptions = {
   generateOtp?: () => string;
   otpTtlSeconds?: number;
   refreshTtlSeconds?: number;
+  allowLocalIssuance?: boolean;
 };
 
 export type AuthService = {
   authConfig(): { providers: readonly { id: AuthProviderId }[] };
+  canIssueSessions(): boolean;
   authenticate(request: Request): Promise<Principal | null>;
-  requestEmailOtp(email: string): Promise<{ accepted: true }>;
+  requestEmailOtp(email: string): Promise<AuthResult<{ accepted: true }>>;
   verifyEmailOtp(email: string, code: string): Promise<AuthResult<AuthenticatedSession>>;
   authorizeOAuth(
     input: OAuthAuthorizeInput,
@@ -190,6 +194,7 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
   const generateOtp = options.generateOtp ?? randomOtp;
   const otpTtlSeconds = options.otpTtlSeconds ?? 600;
   const refreshTtlSeconds = options.refreshTtlSeconds ?? 60 * 60 * 24 * 30;
+  const allowLocalIssuance = options.allowLocalIssuance ?? true;
 
   const accounts = new Map<string, AccountRecord>();
   const subjects = new Map<string, string>();
@@ -346,6 +351,10 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
       return { providers: AUTH_PROVIDERS };
     },
 
+    canIssueSessions() {
+      return allowLocalIssuance;
+    },
+
     async authenticate(request) {
       const token = extractBearerToken(request.headers.get("authorization"));
       if (token === null) {
@@ -362,15 +371,21 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
     },
 
     requestEmailOtp(email) {
+      if (!allowLocalIssuance) {
+        return Promise.resolve({ ok: false as const, code: "not_ready" as const });
+      }
       const normalized = normalizeEmail(email);
       otps.set(normalized, {
         code: generateOtp(),
         expiresAtMs: now().getTime() + otpTtlSeconds * 1000,
       });
-      return Promise.resolve({ accepted: true as const });
+      return Promise.resolve({ ok: true as const, value: { accepted: true as const } });
     },
 
     async verifyEmailOtp(email, code) {
+      if (!allowLocalIssuance) {
+        return { ok: false, code: "not_ready" };
+      }
       const normalized = normalizeEmail(email);
       const record = otps.get(normalized);
       if (record === undefined || record.expiresAtMs <= now().getTime() || record.code !== code) {
@@ -382,6 +397,9 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
     },
 
     authorizeOAuth(input) {
+      if (!allowLocalIssuance) {
+        return Promise.resolve({ ok: false as const, code: "not_ready" as const });
+      }
       const identity = input.identity ?? {
         providerSubject: crypto.randomUUID(),
         email: `${input.provider}-${crypto.randomUUID()}@oauth.example.invalid`,
@@ -409,6 +427,9 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
     },
 
     async exchangeOAuth(input) {
+      if (!allowLocalIssuance) {
+        return { ok: false, code: "not_ready" };
+      }
       const record = oauthCodes.get(input.code);
       if (record === undefined || record.expiresAtMs <= now().getTime()) {
         return { ok: false, code: "invalid_oauth" };
@@ -507,12 +528,18 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
         return { ok: false, code: "invalid_token" };
       }
       const key = identityKey(input.provider, input.providerSubject);
-      identities.set(key, {
-        provider: input.provider,
-        providerSubject: input.providerSubject,
-        email: normalizeEmail(input.email),
-        accountId: principal.accountId,
-      });
+      const existing = identities.get(key);
+      if (existing !== undefined && existing.accountId !== principal.accountId) {
+        return { ok: false, code: "already_linked" };
+      }
+      if (existing === undefined) {
+        identities.set(key, {
+          provider: input.provider,
+          providerSubject: input.providerSubject,
+          email: normalizeEmail(input.email),
+          accountId: principal.accountId,
+        });
+      }
       return { ok: true, value: { profile } };
     },
   };

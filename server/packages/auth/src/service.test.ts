@@ -35,9 +35,9 @@ describe("memory auth service", () => {
     expect(existing.ok).toBe(true);
     const secondExisting = await auth.requestEmailOtp(EMAIL);
     const secondUnknown = await auth.requestEmailOtp(UNKNOWN_EMAIL);
-    expect(firstUnknown).toEqual({ accepted: true });
-    expect(secondExisting).toEqual({ accepted: true });
-    expect(secondUnknown).toEqual({ accepted: true });
+    expect(firstUnknown).toEqual({ ok: true, value: { accepted: true } });
+    expect(secondExisting).toEqual({ ok: true, value: { accepted: true } });
+    expect(secondUnknown).toEqual({ ok: true, value: { accepted: true } });
     expect(secondExisting).toEqual(secondUnknown);
   });
 
@@ -156,16 +156,51 @@ describe("memory auth service", () => {
       microsoftSession.value.principal.accountId,
     );
 
-    const linked = auth.linkIdentity(emailSession.value.principal, {
+    const stolen = auth.linkIdentity(emailSession.value.principal, {
       provider: "google",
       providerSubject: "google-user-1",
       email: EMAIL,
     });
-    expect(linked.ok).toBe(true);
-    if (!linked.ok) {
+    expect(stolen).toEqual({ ok: false, code: "already_linked" });
+
+    const rebound = auth.linkIdentity(googleSession.value.principal, {
+      provider: "google",
+      providerSubject: "google-user-1",
+      email: EMAIL,
+    });
+    expect(rebound.ok).toBe(true);
+
+    const firstBind = auth.linkIdentity(emailSession.value.principal, {
+      provider: "google",
+      providerSubject: "google-user-unbound",
+      email: EMAIL,
+    });
+    expect(firstBind.ok).toBe(true);
+
+    const googleUnbound = await pkcePair();
+    const googleUnboundAuth = await auth.authorizeOAuth({
+      provider: "google",
+      redirectUri: "http://localhost/callback",
+      codeChallenge: googleUnbound.challenge,
+      state: "google-state-unbound",
+      identity: { email: EMAIL, providerSubject: "google-user-unbound" },
+    });
+    expect(googleUnboundAuth.ok).toBe(true);
+    if (!googleUnboundAuth.ok) {
       return;
     }
-    expect(linked.value.profile.accountId).toBe(emailSession.value.principal.accountId);
+    const unboundCode = new URL(googleUnboundAuth.value.authorizationUrl).searchParams.get("code");
+    const unboundSession = await auth.exchangeOAuth({
+      provider: "google",
+      code: unboundCode ?? "",
+      codeVerifier: googleUnbound.verifier,
+      redirectUri: "http://localhost/callback",
+    });
+    expect(unboundSession.ok).toBe(true);
+    if (!unboundSession.ok) {
+      return;
+    }
+    expect(unboundSession.value.principal.accountId).toBe(emailSession.value.principal.accountId);
 
     const googleAgain = await pkcePair();
     const googleAuthAgain = await auth.authorizeOAuth({
@@ -182,17 +217,45 @@ describe("memory auth service", () => {
     const googleCodeAgain = new URL(googleAuthAgain.value.authorizationUrl).searchParams.get(
       "code",
     );
-    const googleLinked = await auth.exchangeOAuth({
+    const googleStillB = await auth.exchangeOAuth({
       provider: "google",
       code: googleCodeAgain ?? "",
       codeVerifier: googleAgain.verifier,
       redirectUri: "http://localhost/callback",
     });
-    expect(googleLinked.ok).toBe(true);
-    if (!googleLinked.ok) {
+    expect(googleStillB.ok).toBe(true);
+    if (!googleStillB.ok) {
       return;
     }
-    expect(googleLinked.value.principal.accountId).toBe(emailSession.value.principal.accountId);
+    expect(googleStillB.value.principal.accountId).toBe(googleSession.value.principal.accountId);
+  });
+
+  it("does not mint stub sessions when local issuance is disabled", async () => {
+    const auth = createMemoryAuthService({
+      jwt: LOCAL_JWT_CONFIG,
+      allowLocalIssuance: false,
+      generateOtp: () => "123456",
+    });
+    expect(auth.canIssueSessions()).toBe(false);
+    expect(await auth.requestEmailOtp(EMAIL)).toEqual({ ok: false, code: "not_ready" });
+    expect(await auth.verifyEmailOtp(EMAIL, "123456")).toEqual({ ok: false, code: "not_ready" });
+    const pkce = await pkcePair();
+    expect(
+      await auth.authorizeOAuth({
+        provider: "google",
+        redirectUri: "http://localhost/callback",
+        codeChallenge: pkce.challenge,
+        state: "google-state-disabled",
+      }),
+    ).toEqual({ ok: false, code: "not_ready" });
+    expect(
+      await auth.exchangeOAuth({
+        provider: "google",
+        code: "not-a-real-code",
+        codeVerifier: pkce.verifier,
+        redirectUri: "http://localhost/callback",
+      }),
+    ).toEqual({ ok: false, code: "not_ready" });
   });
 
   it("refreshes a session and rejects the refresh token after logout", async () => {

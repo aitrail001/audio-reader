@@ -37,18 +37,25 @@ export function resolveJwtSigningConfig(
   const secret = env.SUPABASE_JWT_SECRET?.trim() ?? "";
   const url = env.SUPABASE_URL?.trim() ?? "";
   const audience = env.SUPABASE_JWT_AUDIENCE?.trim() || "authenticated";
-  if (secret !== "") {
-    const issuer = url === "" ? LOCAL_JWT_CONFIG.issuer : `${url.replace(/\/$/, "")}/auth/v1`;
+  const local = environment === "local" || environment === "test";
+  if (secret !== "" && url !== "") {
     return {
-      issuer,
+      issuer: `${url.replace(/\/$/, "")}/auth/v1`,
       audience,
       secret,
       accessTokenTtlSeconds: 3600,
       clockSkewSeconds: 0,
     };
   }
-  if (environment === "local" || environment === "test") {
+  if (local && secret === "") {
     return LOCAL_JWT_CONFIG;
+  }
+  if (local && secret !== "") {
+    return {
+      ...LOCAL_JWT_CONFIG,
+      audience,
+      secret,
+    };
   }
   return undefined;
 }

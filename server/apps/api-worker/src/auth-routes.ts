@@ -97,7 +97,7 @@ function authConfig(): AuthConfig {
 }
 
 async function requestEmailOtp(context: AuthRouteContext): Promise<Response> {
-  const auth = requireAuthService(context);
+  const auth = requireIssuance(context);
   if (auth instanceof Response) {
     return auth;
   }
@@ -112,12 +112,15 @@ async function requestEmailOtp(context: AuthRouteContext): Promise<Response> {
   if (!EMAIL_PATTERN.test(email)) {
     return fieldError(context.requestId, "email", "email must be a valid email address.");
   }
-  await auth.requestEmailOtp(email);
+  const requested = await auth.requestEmailOtp(email);
+  if (!requested.ok) {
+    return issuanceUnavailable(context.requestId);
+  }
   return new Response(null, { status: 202 });
 }
 
 async function verifyEmailOtp(context: AuthRouteContext): Promise<Response> {
-  const auth = requireAuthService(context);
+  const auth = requireIssuance(context);
   if (auth instanceof Response) {
     return auth;
   }
@@ -148,13 +151,16 @@ async function verifyEmailOtp(context: AuthRouteContext): Promise<Response> {
   }
   const result = await auth.verifyEmailOtp(email, code);
   if (!result.ok) {
+    if (result.code === "not_ready") {
+      return issuanceUnavailable(context.requestId);
+    }
     return unauthorized(context.requestId, "The email code is invalid or expired.");
   }
   return jsonResponse(toTokenPair(result.value.tokens));
 }
 
 async function authorizeOAuth(context: AuthRouteContext): Promise<Response> {
-  const auth = requireAuthService(context);
+  const auth = requireIssuance(context);
   if (auth instanceof Response) {
     return auth;
   }
@@ -206,6 +212,9 @@ async function authorizeOAuth(context: AuthRouteContext): Promise<Response> {
     state,
   });
   if (!result.ok) {
+    if (result.code === "not_ready") {
+      return issuanceUnavailable(context.requestId);
+    }
     return unauthorized(context.requestId, "The OAuth request is invalid.");
   }
   const payload: AuthOAuthAuthorizeResponse = {
@@ -216,7 +225,7 @@ async function authorizeOAuth(context: AuthRouteContext): Promise<Response> {
 }
 
 async function exchangeOAuth(context: AuthRouteContext): Promise<Response> {
-  const auth = requireAuthService(context);
+  const auth = requireIssuance(context);
   if (auth instanceof Response) {
     return auth;
   }
@@ -252,6 +261,9 @@ async function exchangeOAuth(context: AuthRouteContext): Promise<Response> {
     ...(state === undefined ? {} : { state }),
   });
   if (!result.ok) {
+    if (result.code === "not_ready") {
+      return issuanceUnavailable(context.requestId);
+    }
     return unauthorized(context.requestId, "The OAuth authorization code is invalid.");
   }
   return jsonResponse(toTokenPair(result.value.tokens));
@@ -385,6 +397,27 @@ function requireAuthService(context: AuthRouteContext): AuthService | Response {
     });
   }
   return context.auth;
+}
+
+function requireIssuance(context: AuthRouteContext): AuthService | Response {
+  const auth = requireAuthService(context);
+  if (auth instanceof Response) {
+    return auth;
+  }
+  if (!auth.canIssueSessions()) {
+    return issuanceUnavailable(context.requestId);
+  }
+  return auth;
+}
+
+function issuanceUnavailable(requestId: string): Response {
+  return problemResponse({
+    status: 503,
+    code: "not_ready",
+    title: "Service unavailable",
+    detail: "Passwordless and OAuth login are not available in this environment.",
+    traceId: requestId,
+  });
 }
 
 async function readRefreshToken(context: AuthRouteContext): Promise<string | Response> {

@@ -29,6 +29,30 @@ describe("resolveJwtSigningConfig", () => {
     expect(resolveJwtSigningConfig({ SUPABASE_JWT_SECRET: "   " }, "staging")).toBeUndefined();
   });
 
+  it("fails closed in staging and production when the secret is set but SUPABASE_URL is missing", () => {
+    expect(
+      resolveJwtSigningConfig({ SUPABASE_JWT_SECRET: "super-secret" }, "production"),
+    ).toBeUndefined();
+    expect(
+      resolveJwtSigningConfig(
+        { SUPABASE_JWT_SECRET: "super-secret", SUPABASE_URL: "   " },
+        "staging",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("does not use the local-dev issuer outside local and test", () => {
+    const production = resolveJwtSigningConfig(
+      {
+        SUPABASE_URL: "https://example.supabase.co",
+        SUPABASE_JWT_SECRET: "super-secret",
+      },
+      "production",
+    );
+    expect(production?.issuer).toBe("https://example.supabase.co/auth/v1");
+    expect(production?.issuer).not.toBe(LOCAL_JWT_CONFIG.issuer);
+  });
+
   it("builds issuer and audience from Supabase env", () => {
     expect(
       resolveJwtSigningConfig(
