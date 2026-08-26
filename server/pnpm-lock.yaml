@@ -99,6 +99,9 @@ importers:
       '@audio-reader/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@audio-reader/qwen':
+        specifier: workspace:*
+        version: link:../../packages/qwen
     devDependencies:
       '@cloudflare/workers-types':
         specifier: 'catalog:'

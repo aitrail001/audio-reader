@@ -2,7 +2,7 @@
 
 Pinned Node/pnpm workspace for the Cloudflare API worker, job worker, admin console, and shared TypeScript packages.
 
-This tree is a compile-and-test scaffold. Health routes, Qwen calls, and auth logic are out of scope here. TypeScript types are generated from `contracts/openapi-v1.yaml` into `@audio-reader/contract`.
+TypeScript types are generated from `contracts/openapi-v1.yaml` into `@audio-reader/contract`. The API worker implements health/readiness, request correlation, CORS, body validation, and `application/problem+json` errors. Real auth, Qwen inference, and Postgres schema are out of scope here.
 
 ## Requirements
 
@@ -27,30 +27,64 @@ Run from `server/`:
 
 ```bash
 pnpm test
+pnpm test:all
 pnpm lint
 pnpm typecheck
 pnpm format:check
 pnpm contract:generate
 pnpm contract:check
+pnpm dev:db
+pnpm dev:api
 ```
 
 `pnpm format` rewrites files with Prettier.
 
 `pnpm contract:generate` writes TypeScript request/response types from the repo-root OpenAPI document into `packages/contract/src/generated/openapi.ts`. Commit that file. `pnpm contract:check` regenerates in memory and fails if the working copy differs.
 
+`pnpm test:all` is the one command for contract, unit, and integration suites: Python OpenAPI contract tests, generated-type drift check, then Vitest (package unit tests plus API worker HTTP tests against fake adapters).
+
+## Health and readiness
+
+OpenAPI documents product health as `GET /v1/health` (`operationId: getHealth`) with the `Health` schema. Ops probes are aliases, not separate OpenAPI paths:
+
+| Path             | Role                 | Response                                                                                                        |
+| ---------------- | -------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `GET /v1/health` | Product health       | `200` `application/json` `Health`. `status` is `ok` or `degraded`; `dependencies` lists database, R2, and Qwen. |
+| `GET /healthz`   | Process liveness     | `200` `Health` without dependency checks. Stays `ok` even if adapters are down.                                 |
+| `GET /readyz`    | Dependency readiness | `200` `Health` when every dependency is `ok`; `503` `application/problem+json` otherwise.                       |
+
+Local and test environments use in-memory fake database, R2, and Qwen adapters so readiness succeeds without Docker. Staging/production wiring reports those dependencies as `unavailable` until later PRs attach real clients.
+
+Error responses use RFC 7807 `application/problem+json` with the OpenAPI `Problem` schema (`type`, `title`, `status`, `code`, `traceId`, optional `detail` / `retryAfterSeconds` / `fieldErrors`). The OpenAPI document currently lists those bodies as `application/json`; the worker emits `application/problem+json` for the same schema. Every response includes `X-Request-Id`, which is also `Problem.traceId`.
+
+CORS origins come from `CORS_ALLOWED_ORIGINS` and `ADMIN_ORIGIN`. The `local` environment also allows localhost admin (`5173`) and worker (`8787`) origins. JSON writes require `Content-Type: application/json` and are capped at `MAX_BODY_BYTES` (default 1 MiB).
+
+Route-level idempotency is an interface (`withIdempotency` + `IdempotencyStore`) for later write routes. `createFakePrincipal` is for tests only; production/local env wiring does not authenticate.
+
+## Local development
+
+```bash
+pnpm dev:db    # supabase --workdir server start (requires the Supabase CLI)
+pnpm dev:api   # wrangler dev for @audio-reader/api-worker with fake adapters
+```
+
+`supabase/config.toml` is CLI config only: ports, schemas, and local auth settings. No JWT secrets, service-role keys, or provider client secrets.
+
 ## Layout
 
 ```text
 server/
   apps/
-    api-worker/     Cloudflare Worker API/BFF stub
+    api-worker/     Cloudflare Worker API/BFF
     job-worker/     Cloudflare Worker queue consumer stub
     admin-web/      React + TypeScript + Vite stub
   packages/
     contract/       Generated API types from OpenAPI v1
     domain/         Shared domain types and rules
-    database/       Persistence adapters
-    auth/           Session/JWT validation
-    qwen/           Managed Qwen client
+    database/       Persistence adapters (fake ping for local/test)
+    auth/           Session/JWT validation (fake principal for tests)
+    qwen/           Managed Qwen client (fake ping for local/test)
     observability/  Logging and tracing
+  scripts/          Local db, API worker runner, full test suites
+  supabase/         Supabase CLI config
 ```

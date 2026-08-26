@@ -10,6 +10,10 @@
   },
   "scripts": {
     "test": "vitest run",
+    "test:contract": "python3 -m unittest discover -s ../Tests/contract -v",
+    "test:all": "bash ./scripts/run-test-suites.sh",
+    "dev:api": "bash ./scripts/run-api-worker.sh",
+    "dev:db": "bash ./scripts/start-local-db.sh",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit -p tsconfig.json && pnpm --filter \"./apps/**\" --filter \"./packages/**\" -r typecheck",
     "format": "prettier --write .",
