@@ -61,6 +61,31 @@ struct AudioReaderApp: App {
                     .keyboardShortcut(.return, modifiers: [.command])
                     .disabled(!state.canContinueDeepReading)
             }
+            CommandMenu("Study") {
+                Toggle("Study overlay", isOn: Binding(
+                    get: { state.settings.showStudyOverlay },
+                    set: {
+                        state.settings.showStudyOverlay = $0
+                        state.persistSettings()
+                    }
+                ))
+                .keyboardShortcut("s", modifiers: [.command, .option])
+                Button("Mark known") { state.markSelectedWordKnown(true) }
+                    .keyboardShortcut("k", modifiers: [.command])
+                    .disabled(state.selectedWord == nil)
+                Button("Chapter words") {
+                    state.presentChapterStudyList()
+                }
+                    .disabled(state.transcript == nil)
+                Button("Shadow this sentence") {
+                    state.presentShadowing()
+                }
+                    .disabled(state.transcript == nil)
+                Button("Chapter quiz") {
+                    state.presentChapterQuiz()
+                }
+                    .disabled(state.transcript == nil)
+            }
             CommandMenu("Library") {
                 Button("Choose Books Folder…") { state.chooseLibrary() }
                     .keyboardShortcut("o", modifiers: [.command, .shift])

@@ -75,7 +75,21 @@ struct PlayerView: View {
                 .background(Palette.goldSoft)
             }
             lyricPane
-            controls
+            VStack(spacing: playbackChromeSpacing) {
+                PlaybackChrome(state: state)
+#if os(iOS)
+                iPadCompactPlaybackBar
+#else
+                ViewThatFits(in: .horizontal) {
+                    desktopExpandedPlaybackControls
+                    desktopCompactPlaybackControls
+                }
+#endif
+            }
+            .padding(.horizontal, playbackChromeHorizontalPadding)
+            .padding(.top, playbackChromeTopPadding)
+            .padding(.bottom, playbackChromeBottomPadding)
+            .background(Palette.panel)
         }
         .background(Palette.bg)
         .navigationTitle(readerNavigationTitle)
@@ -92,11 +106,11 @@ struct PlayerView: View {
             }
         }
 #endif
-        .onChange(of: state.player.currentTime) { _, _ in
-            state.tickPlaybackModes()
+        .sheet(item: $state.shadowingSegment) { segment in
+            ShadowingPracticeView(state: state, segment: segment)
         }
-        .onChange(of: state.currentSegment?.id) { _, _ in
-            state.ensureAutoTranslation()
+        .sheet(item: $state.chapterQuizSession) { _ in
+            ChapterQuizView(state: state)
         }
     }
 
@@ -238,7 +252,31 @@ struct PlayerView: View {
                 .onChange(of: state.settings.playOnSelect) { _, _ in state.persistSettings() }
                 .help("When on, clicking a sentence or word starts playback. When off, it only jumps to that spot.")
 
+            Toggle("Study overlay", isOn: $state.settings.showStudyOverlay)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .foregroundStyle(Palette.dim)
+                .onChange(of: state.settings.showStudyOverlay) { _, _ in state.persistSettings() }
+                .help("Underline unknown and learning words in the chapter.")
+                .accessibilityHint("Underlines unknown and learning words throughout the chapter.")
+
+            Button("Chapter words") {
+                state.presentChapterStudyList()
+            }
+            .disabled(state.transcript == nil)
+
             Menu {
+                Toggle("Study overlay", isOn: $state.settings.showStudyOverlay)
+                    .onChange(of: state.settings.showStudyOverlay) { _, _ in state.persistSettings() }
+                Button("Shadow this sentence") {
+                    state.presentShadowing()
+                }
+                .disabled(state.transcript == nil)
+                Button("Chapter quiz") {
+                    state.presentChapterQuiz()
+                }
+                .disabled(state.transcript == nil)
+                Divider()
                 readingAppearanceMenuContent
             } label: {
                 Label("Reading", systemImage: "textformat")
@@ -301,7 +339,8 @@ struct PlayerView: View {
         }
         .frame(maxWidth: 210)
 
-        if state.llmProvider == .grok {
+        switch state.llmProvider {
+        case .grok:
             Picker("Model", selection: $state.settings.grokModel) {
                 ForEach(state.grokTextModels) { model in
                     Text(model.id).tag(model.id)
@@ -322,7 +361,7 @@ struct PlayerView: View {
                 .frame(maxWidth: 110)
                 .onChange(of: state.settings.grokEffort) { _, _ in state.persistSettings() }
             }
-        } else if state.llmProvider == .qwenCloud {
+        case .qwenCloud:
             Picker("Model", selection: $state.settings.qwenModel) {
                 ForEach(state.qwenTextModels) { model in
                     Text(model.id).tag(model.id)
@@ -349,7 +388,7 @@ struct PlayerView: View {
                 .frame(maxWidth: 105)
                 .onChange(of: state.settings.qwenEffort) { _, _ in state.persistSettings() }
             }
-        } else {
+        case .openAI:
             Picker("Model", selection: $state.settings.openAIModel) {
                 ForEach(state.openAITextModels) { model in
                     Text(model.id).tag(model.id)
@@ -369,6 +408,10 @@ struct PlayerView: View {
                 .frame(maxWidth: 105)
                 .onChange(of: state.settings.openAIEffort) { _, _ in state.persistSettings() }
             }
+        case .appleFoundation:
+            Text(state.appleIntelligenceAvailability.shortLabel)
+                .foregroundStyle(state.appleIntelligenceAvailability.isReady ? Palette.gold : Palette.dim)
+                .help(state.appleIntelligenceAvailability.userMessage)
         }
     }
 #endif
@@ -388,9 +431,11 @@ struct PlayerView: View {
     }
 
     private var readerNavigationTitle: String {
-        [state.selectedBook?.title, state.selectedChapter?.title]
-            .compactMap { $0 }
-            .joined(separator: " · ")
+        ReaderWindowTitle.make(
+            book: state.selectedBook?.title,
+            chapter: state.selectedChapter?.title,
+            coverage: state.chapterCoverage
+        )
     }
 
 #if os(iOS)
@@ -399,9 +444,9 @@ struct PlayerView: View {
         ToolbarItem(placement: .primaryAction) {
             Menu {
                 Picker("Text", selection: $state.textSource) {
-                    ForEach(TextSource.allCases) { source in
-                        Text(source.rawValue).tag(source)
-                    }
+                    Text(TextSource.spoken.rawValue).tag(TextSource.spoken)
+                    Text(TextSource.original.rawValue).tag(TextSource.original)
+                    Text(TextSource.dual.rawValue).tag(TextSource.dual)
                 }
             } label: {
                 Image(systemName: "book.pages")
@@ -443,9 +488,9 @@ struct PlayerView: View {
 #if os(macOS)
     private var textSourcePicker: some View {
         Picker("Text", selection: $state.textSource) {
-            ForEach(TextSource.allCases) { source in
-                Text(source.rawValue).tag(source)
-            }
+            Text(TextSource.spoken.rawValue).tag(TextSource.spoken)
+            Text(TextSource.original.rawValue).tag(TextSource.original)
+            Text(TextSource.dual.rawValue).tag(TextSource.dual)
         }
         .pickerStyle(.segmented)
         .onChange(of: state.textSource) { _, _ in state.persistSettings() }
@@ -460,7 +505,8 @@ struct PlayerView: View {
                 }
             }
 
-            if state.llmProvider == .grok {
+            switch state.llmProvider {
+            case .grok:
                 Picker("Model", selection: $state.settings.grokModel) {
                     ForEach(state.grokTextModels) { model in
                         Text(model.id).tag(model.id)
@@ -479,7 +525,7 @@ struct PlayerView: View {
                     }
                     .onChange(of: state.settings.grokEffort) { _, _ in state.persistSettings() }
                 }
-            } else if state.llmProvider == .qwenCloud {
+            case .qwenCloud:
                 Picker("Model", selection: $state.settings.qwenModel) {
                     ForEach(state.qwenTextModels) { model in
                         Text(model.id).tag(model.id)
@@ -503,7 +549,7 @@ struct PlayerView: View {
                     }
                     .onChange(of: state.settings.qwenEffort) { _, _ in state.persistSettings() }
                 }
-            } else {
+            case .openAI:
                 Picker("Model", selection: $state.settings.openAIModel) {
                     ForEach(state.openAITextModels) { model in
                         Text(model.id).tag(model.id)
@@ -522,6 +568,8 @@ struct PlayerView: View {
                     }
                     .onChange(of: state.settings.openAIEffort) { _, _ in state.persistSettings() }
                 }
+            case .appleFoundation:
+                Text(state.appleIntelligenceAvailability.userMessage)
             }
         } label: {
 #if os(iOS)
@@ -540,6 +588,33 @@ struct PlayerView: View {
             Toggle("Auto-scroll", isOn: $autoScroll)
             Toggle("Play on tap", isOn: $state.settings.playOnSelect)
                 .onChange(of: state.settings.playOnSelect) { _, _ in state.persistSettings() }
+            Toggle("Study overlay", isOn: $state.settings.showStudyOverlay)
+                .onChange(of: state.settings.showStudyOverlay) { _, _ in state.persistSettings() }
+                .accessibilityHint("Underlines unknown and learning words throughout the chapter.")
+            if state.chapterCoverage.contentCount > 0 {
+                Text(state.chapterCoverage.caption)
+            }
+            Button("Chapter words") {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(80))
+                    state.presentChapterStudyList()
+                }
+            }
+            .disabled(state.transcript == nil)
+            Button("Shadow this sentence") {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(80))
+                    state.presentShadowing()
+                }
+            }
+            .disabled(state.transcript == nil)
+            Button("Chapter quiz") {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(80))
+                    state.presentChapterQuiz()
+                }
+            }
+            .disabled(state.transcript == nil)
             if let book = state.selectedBook {
                 Divider()
                 AudiobookLanguagePicker(state: state, book: book)
@@ -580,6 +655,8 @@ struct PlayerView: View {
             Task { await state.refreshCodexLoginStatus() }
         } else if connection == .openAIAPIKey {
             Task { await state.refreshOpenAIModels() }
+        } else if connection == .appleFoundation {
+            state.refreshAppleIntelligenceAvailability()
         }
     }
 
@@ -673,7 +750,13 @@ struct PlayerView: View {
                 bold: state.settings.readerBold
             )
             HStack(spacing: 0) {
-                textColumn(proxyWidth: split.textWidth, type: type)
+                TranscriptTextColumn(
+                    state: state,
+                    autoScroll: $autoScroll,
+                    readerScrollTarget: $readerScrollTarget,
+                    proxyWidth: split.textWidth,
+                    type: type
+                )
                     .frame(width: split.textWidth)
                 if lookupOpen {
                     lookupSplitter(containerWidth: geo.size.width)
@@ -777,170 +860,6 @@ struct PlayerView: View {
             }
         }
 #endif
-    }
-
-    private func textColumn(proxyWidth: CGFloat, type: ReaderType) -> some View {
-        let readerPosition = state.currentReaderPosition
-        return ScrollView {
-            LazyVStack(alignment: .leading, spacing: type.paragraph) {
-                if let transcript = state.transcript {
-                    ForEach(transcript.segments) { segment in
-                        SentenceRow(
-                            segment: segment,
-                            currentID: readerPosition.segment?.id,
-                            currentWordID: readerPosition.word?.id,
-                            focusedSegmentID: state.focusedSegmentID,
-                            focusedWordID: state.focusedWordID,
-                            textSource: state.textSource,
-                            gloss: state.sentenceGloss(for: segment),
-                            isTranslating: state.isLLMJobActive(kind: .sentenceTranslation, targetID: segment.id),
-                            languageLabel: state.studyLanguage.menuLabel,
-                            onSeek: { time in
-                                state.focusedSegmentID = segment.id
-                                state.focusedWordID = nil
-                                state.seekToSentence(segment, time: time, autoplay: state.settings.playOnSelect)
-                            },
-                            onPlayFrom: { time in
-                                state.focusedSegmentID = segment.id
-                                state.seekToSentence(segment, time: time, autoplay: true)
-                            },
-                            onInspect: { word in
-                                state.focusedSegmentID = segment.id
-                                state.focusedWordID = word.id
-                                state.inspect(word: word)
-                            },
-                            onSave: { word in state.addVocab(word: word, segment: segment) },
-                            onTranslate: { state.translateCurrentSentence() },
-                            onAccept: { if let g = state.sentenceGloss(for: segment) { state.acceptGloss(g) } },
-                            onReject: { if let g = state.sentenceGloss(for: segment) { state.rejectGloss(g) } },
-                            onRetry: { state.retranslateSentence(segment) },
-                            type: type
-                        )
-                        .id(segment.id)
-                    }
-                } else if state.selectedChapter != nil {
-                    emptyTranscript
-                } else {
-                    Text("Pick a book from the library.")
-                        .foregroundStyle(Palette.dim)
-                        .padding(40)
-                }
-            }
-            .scrollTargetLayout()
-            .padding(.horizontal, min(CGFloat(state.settings.readerMargin), max(16, proxyWidth * 0.22)))
-            .padding(.vertical, 28)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .scrollPosition(id: readerScrollBinding, anchor: .center)
-        .onChange(of: currentReaderScrollTarget) { oldTarget, newTarget in
-            guard autoScroll else { return }
-            guard let newTarget else {
-                readerScrollTarget = nil
-                return
-            }
-            if ReaderScrollTarget.shouldAnimate(from: oldTarget, to: newTarget) {
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    readerScrollTarget = newTarget
-                }
-            } else {
-                readerScrollTarget = newTarget
-            }
-        }
-        .onChange(of: state.revealToken, initial: true) { _, _ in
-            guard let chapterID = state.selectedChapterID,
-                  let segmentID = state.scrollSegmentID
-            else { return }
-            let target = ReaderScrollTarget(chapterID: chapterID, segmentID: segmentID)
-            if ReaderScrollTarget.shouldAnimate(from: readerScrollTarget, to: target) {
-                withAnimation(.easeInOut(duration: 0.3)) {
-                    readerScrollTarget = target
-                }
-            } else {
-                readerScrollTarget = target
-            }
-        }
-    }
-
-    private var currentReaderScrollTarget: ReaderScrollTarget? {
-        guard let chapterID = state.selectedChapterID,
-              let segmentID = state.currentSegment?.id
-        else { return nil }
-        return ReaderScrollTarget(chapterID: chapterID, segmentID: segmentID)
-    }
-
-    private var readerScrollBinding: Binding<String?> {
-        Binding(
-            get: {
-                readerScrollTarget?.segmentID(for: state.selectedChapterID)
-            },
-            set: { segmentID in
-                guard let chapterID = state.selectedChapterID, let segmentID else {
-                    readerScrollTarget = nil
-                    return
-                }
-                readerScrollTarget = ReaderScrollTarget(chapterID: chapterID, segmentID: segmentID)
-            }
-        )
-    }
-
-    private var emptyTranscript: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Prepare this chapter")
-                .font(.system(size: 28, weight: .regular, design: .serif))
-                .foregroundStyle(Palette.ink)
-            Text("This app transcribes the audio on this device so every spoken word can be highlighted. Ebooks rarely match audiobooks exactly — publisher intros, number wording, and abridgements all drift — so speech-to-text is the source of timing, then we align the ebook when it helps.")
-                .foregroundStyle(Palette.dim)
-                .font(.system(size: 14))
-                .frame(maxWidth: 560, alignment: .leading)
-            Button {
-                state.transcribeSelected()
-            } label: {
-                Label("Transcribe chapter", systemImage: "waveform.badge.mic")
-                    .padding(.horizontal, 8)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(Palette.terracotta)
-            .controlSize(.large)
-            .disabled(state.isTranscribing)
-        }
-        .padding(.top, 40)
-    }
-
-    private var controls: some View {
-        VStack(spacing: playbackChromeSpacing) {
-            HStack(spacing: 10) {
-                Text(formatClock(state.player.currentTime))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Palette.dim)
-                    .frame(width: 54, alignment: .leading)
-                Slider(
-                    value: Binding(
-                        get: { state.player.currentTime },
-                        set: { state.seekPlayback(to: $0) }
-                    ),
-                    in: 0...max(state.player.duration, 0.1)
-                )
-                .controlSize(.small)
-                .tint(Palette.gold)
-                Text(formatClock(state.player.duration))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Palette.dim)
-                    .frame(width: 54, alignment: .trailing)
-            }
-
-#if os(iOS)
-            iPadCompactPlaybackBar
-#else
-            ViewThatFits(in: .horizontal) {
-                desktopExpandedPlaybackControls
-                desktopCompactPlaybackControls
-            }
-#endif
-        }
-        .padding(.horizontal, playbackChromeHorizontalPadding)
-        .padding(.top, playbackChromeTopPadding)
-        .padding(.bottom, playbackChromeBottomPadding)
-        .background(Palette.panel)
     }
 
     private var playbackChromeSpacing: CGFloat {
@@ -1473,7 +1392,7 @@ private struct IPadPlaybackSpeedPicker: View {
 }
 #endif
 
-private struct ChapterChatVoiceWaveform: View {
+struct ChapterChatVoiceWaveform: View {
     let levels: [Double]
 
     var body: some View {
@@ -1494,6 +1413,7 @@ private struct ChapterAssistantView: View {
     @Bindable var state: AppState
     @State private var chatDraft = ""
     @State private var dictation = ChapterChatDictation()
+    @State private var voice = VoiceCaptureStatus()
     @State private var showChapterRetranslateConfirmation = false
     @State private var showChapterSummaryRegenerateConfirmation = false
 
@@ -1699,28 +1619,29 @@ private struct ChapterAssistantView: View {
                                 .lineLimit(1...5)
                                 .onSubmit { sendChat() }
                                 .disabled(
-                                    dictation.isListening
-                                        || dictation.isRequestingPermission
-                                        || dictation.isFinalizing
+                                    voice.isListening
+                                        || voice.isRequestingPermission
+                                        || voice.isFinalizing
                                 )
-                            Button(action: toggleDictation) {
-                                if dictation.isRequestingPermission || dictation.isFinalizing {
+                            ZStack {
+                                if voice.isRequestingPermission || voice.isFinalizing {
                                     ProgressView()
                                         .controlSize(.small)
                                 } else {
-                                    Image(systemName: dictation.isListening ? "stop.circle.fill" : "mic.circle.fill")
+                                    Image(systemName: voice.isListening ? "stop.circle.fill" : "mic.circle.fill")
                                         .font(.system(size: 22))
+                                        .foregroundStyle(voice.isListening ? Palette.terracotta : Palette.gold)
                                 }
+                                PlatformTap(
+                                    isEnabled: voice.canStart || voice.isListening,
+                                    accessibilityLabelText: voice.isListening
+                                        ? "Stop voice input"
+                                        : (voice.isFinalizing ? "Finishing voice input" : "Start voice input"),
+                                    accessibilityHintText: "Uses on-device speech recognition and leaves the result editable before sending.",
+                                    action: toggleDictation
+                                )
                             }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(dictation.isListening ? Palette.terracotta : Palette.gold)
-                            .disabled(!dictation.canStart && !dictation.isListening)
-                            .accessibilityLabel(
-                                dictation.isListening
-                                    ? "Stop voice input"
-                                    : (dictation.isFinalizing ? "Finishing voice input" : "Start voice input")
-                            )
-                            .accessibilityHint("Uses on-device speech recognition and leaves the result editable before sending.")
+                            .frame(width: 28, height: 28)
                             Button(action: sendChat) {
                                 Image(systemName: "arrow.up.circle.fill")
                                     .font(.system(size: 22))
@@ -1728,26 +1649,26 @@ private struct ChapterAssistantView: View {
                             .buttonStyle(.plain)
                             .foregroundStyle(Palette.gold)
                             .disabled(
-                                dictation.isListening
-                                    || dictation.isRequestingPermission
-                                    || dictation.isFinalizing
+                                voice.isListening
+                                    || voice.isRequestingPermission
+                                    || voice.isFinalizing
                                     || chatDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                             )
                         }
-                        if dictation.isListening {
+                        if voice.isListening {
                             HStack(spacing: 8) {
-                                ChapterChatVoiceWaveform(levels: dictation.audioLevels)
+                                ChapterChatVoiceWaveform(levels: voice.audioLevels)
                                 Text("Listening on device…")
                                     .font(.system(size: 11, weight: .medium))
                                     .foregroundStyle(Palette.terracotta)
                             }
                             .accessibilityElement(children: .ignore)
                             .accessibilityLabel("Voice input is listening")
-                        } else if let message = dictation.preparationMessage {
+                        } else if let message = voice.preparationMessage {
                             Text(message)
                                 .font(.system(size: 11))
                                 .foregroundStyle(Palette.dim)
-                        } else if let message = dictation.unavailableMessage {
+                        } else if let message = voice.unavailableMessage {
                             Text(message)
                                 .font(.system(size: 11))
                                 .foregroundStyle(Palette.dim)
@@ -1834,12 +1755,18 @@ private struct ChapterAssistantView: View {
     }
 
     private func toggleDictation() {
-        if dictation.isListening {
+        if voice.isListening {
             dictation.stop()
             return
         }
+        state.player.pause()
         dictation.start(
             existingText: chatDraft,
+            locale: VoiceCaptureLocale.speechLocale(
+                for: .chapterQuestion,
+                audiobook: state.currentAudiobookLanguage
+            ),
+            onStatus: { voice = $0 },
             onWillRecord: { state.player.pause() },
             onTextUpdate: { chatDraft = $0 }
         )
@@ -1946,6 +1873,191 @@ private struct ChapterSummaryView: View {
     }
 }
 
+private struct PlaybackChrome: View {
+    @Bindable var state: AppState
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(formatClock(state.player.currentTime))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(Palette.dim)
+                .frame(width: 54, alignment: .leading)
+            Slider(
+                value: Binding(
+                    get: { state.player.currentTime },
+                    set: { state.seekPlayback(to: $0) }
+                ),
+                in: 0...max(state.player.duration, 0.1)
+            )
+            .controlSize(.small)
+            .tint(Palette.gold)
+            Text(formatClock(state.player.duration))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(Palette.dim)
+                .frame(width: 54, alignment: .trailing)
+        }
+        .onChange(of: state.player.currentTime) { _, _ in
+            state.tickPlaybackModes()
+        }
+    }
+}
+
+private struct TranscriptTextColumn: View {
+    @Bindable var state: AppState
+    @Binding var autoScroll: Bool
+    @Binding var readerScrollTarget: ReaderScrollTarget?
+    let proxyWidth: CGFloat
+    let type: ReaderType
+
+    var body: some View {
+        let cursor = PlaybackCursor.resolve(
+            segments: state.transcript?.segments ?? [],
+            time: state.player.currentTime
+        )
+        let studyOverlayEnabled = state.settings.showStudyOverlay
+        let studyLanguageKey = state.studyIndex.language
+        let studyLearning = state.studyIndex.learning
+        let studyKnown = state.studyIndex.known
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: type.paragraph) {
+                if let transcript = state.transcript {
+                    ForEach(transcript.segments) { segment in
+                        SentenceRow(
+                            segment: segment,
+                            currentID: cursor.segmentID,
+                            currentWordID: segment.id == cursor.segmentID ? cursor.wordID : nil,
+                            focusedSegmentID: state.focusedSegmentID,
+                            focusedWordID: state.focusedWordID,
+                            textSource: state.textSource,
+                            gloss: state.sentenceGloss(for: segment),
+                            isTranslating: state.isLLMJobActive(kind: .sentenceTranslation, targetID: segment.id),
+                            languageLabel: state.studyLanguage.menuLabel,
+                            studyOverlayEnabled: studyOverlayEnabled,
+                            studyLanguageKey: studyLanguageKey,
+                            studyLearningLemmas: studyLearning,
+                            studyKnownLemmas: studyKnown,
+                            onSeek: { time in
+                                state.focusedSegmentID = segment.id
+                                state.focusedWordID = nil
+                                state.seekToSentence(segment, time: time, autoplay: state.settings.playOnSelect)
+                            },
+                            onPlayFrom: { time in
+                                state.focusedSegmentID = segment.id
+                                state.seekToSentence(segment, time: time, autoplay: true)
+                            },
+                            onInspect: { word in
+                                state.focusedSegmentID = segment.id
+                                state.focusedWordID = word.id
+                                state.inspect(word: word)
+                            },
+                            onSave: { word in state.addVocab(word: word, segment: segment) },
+                            onMarkKnown: { word in
+                                state.markKnown(word, known: !state.isMarkedKnown(word))
+                            },
+                            onTranslate: { state.translateCurrentSentence() },
+                            onAccept: { if let g = state.sentenceGloss(for: segment) { state.acceptGloss(g) } },
+                            onReject: { if let g = state.sentenceGloss(for: segment) { state.rejectGloss(g) } },
+                            onRetry: { state.retranslateSentence(segment) },
+                            type: type
+                        )
+                        .equatable()
+                        .id(segment.id)
+                    }
+                } else if state.selectedChapter != nil {
+                    emptyTranscript
+                } else {
+                    Text("Pick a book from the library.")
+                        .foregroundStyle(Palette.dim)
+                        .padding(40)
+                }
+            }
+            .scrollTargetLayout()
+            .padding(.horizontal, min(CGFloat(state.settings.readerMargin), max(16, proxyWidth * 0.22)))
+            .padding(.vertical, 28)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .scrollPosition(id: readerScrollBinding, anchor: .center)
+        .onChange(of: currentReaderScrollTarget) { oldTarget, newTarget in
+            guard autoScroll else { return }
+            guard let newTarget else {
+                readerScrollTarget = nil
+                return
+            }
+            if ReaderScrollTarget.shouldAnimate(from: oldTarget, to: newTarget) {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    readerScrollTarget = newTarget
+                }
+            } else {
+                readerScrollTarget = newTarget
+            }
+        }
+        .onChange(of: cursor.segmentID) { _, _ in
+            state.ensureAutoTranslation()
+        }
+        .onChange(of: state.revealToken, initial: true) { _, _ in
+            guard let chapterID = state.selectedChapterID,
+                  let segmentID = state.scrollSegmentID
+            else { return }
+            let target = ReaderScrollTarget(chapterID: chapterID, segmentID: segmentID)
+            if ReaderScrollTarget.shouldAnimate(from: readerScrollTarget, to: target) {
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    readerScrollTarget = target
+                }
+            } else {
+                readerScrollTarget = target
+            }
+        }
+    }
+
+    private var currentReaderScrollTarget: ReaderScrollTarget? {
+        guard let chapterID = state.selectedChapterID else { return nil }
+        let cursor = PlaybackCursor.resolve(
+            segments: state.transcript?.segments ?? [],
+            time: state.player.currentTime
+        )
+        guard let segmentID = cursor.segmentID else { return nil }
+        return ReaderScrollTarget(chapterID: chapterID, segmentID: segmentID)
+    }
+
+    private var readerScrollBinding: Binding<String?> {
+        Binding(
+            get: {
+                readerScrollTarget?.segmentID(for: state.selectedChapterID)
+            },
+            set: { segmentID in
+                guard let chapterID = state.selectedChapterID, let segmentID else {
+                    readerScrollTarget = nil
+                    return
+                }
+                readerScrollTarget = ReaderScrollTarget(chapterID: chapterID, segmentID: segmentID)
+            }
+        )
+    }
+
+    private var emptyTranscript: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Prepare this chapter")
+                .font(.system(size: 28, weight: .regular, design: .serif))
+                .foregroundStyle(Palette.ink)
+            Text("This app transcribes the audio on this device so every spoken word can be highlighted. Ebooks rarely match audiobooks exactly — publisher intros, number wording, and abridgements all drift — so speech-to-text is the source of timing, then we align the ebook when it helps.")
+                .foregroundStyle(Palette.dim)
+                .font(.system(size: 14))
+                .frame(maxWidth: 560, alignment: .leading)
+            Button {
+                state.transcribeSelected()
+            } label: {
+                Label("Transcribe chapter", systemImage: "waveform.badge.mic")
+                    .padding(.horizontal, 8)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Palette.terracotta)
+            .controlSize(.large)
+            .disabled(state.isTranscribing)
+        }
+        .padding(.top, 40)
+    }
+}
+
 private struct SentenceRow: View {
     let segment: TranscriptSegment
     let currentID: String?
@@ -1956,10 +2068,15 @@ private struct SentenceRow: View {
     let gloss: GlossEntry?
     let isTranslating: Bool
     let languageLabel: String
+    var studyOverlayEnabled = false
+    var studyLanguageKey = ""
+    var studyLearningLemmas: Set<StudyLemma> = []
+    var studyKnownLemmas: Set<StudyLemma> = []
     let onSeek: (TimeInterval) -> Void
     let onPlayFrom: (TimeInterval) -> Void
     let onInspect: (TranscriptWord) -> Void
     let onSave: (TranscriptWord) -> Void
+    var onMarkKnown: (TranscriptWord) -> Void = { _ in }
     let onTranslate: () -> Void
     let onAccept: () -> Void
     let onReject: () -> Void
@@ -1970,6 +2087,40 @@ private struct SentenceRow: View {
     private var isCurrent: Bool { segment.id == currentID }
     private var isFocused: Bool { segment.id == focusedSegmentID }
     private var isSelected: Bool { isCurrent || isFocused }
+
+    @ViewBuilder
+    private func wordTokens(_ tokens: [TranscriptWord], dimmed: Bool) -> some View {
+        FlowLayout(spacing: type.word, lineSpacing: type.line) {
+            ForEach(tokens) { word in
+                WordToken(
+                    word: word,
+                    isCurrent: word.id == currentWordID || word.id == focusedWordID,
+                    dimmed: dimmed,
+                    fontSize: type.body,
+                    font: type.font,
+                    bold: type.bold,
+                    studyOverlayEnabled: studyOverlayEnabled,
+                    familiarity: familiarity(of: word),
+                    onSeek: MainActorAction { onSeek(word.start) },
+                    onPlayFrom: MainActorAction { onPlayFrom(word.start) },
+                    onInspect: MainActorAction { onInspect(word) },
+                    onSave: MainActorAction { onSave(word) },
+                    onMarkKnown: MainActorAction { onMarkKnown(word) }
+                )
+            }
+        }
+    }
+
+    private func familiarity(of word: TranscriptWord) -> WordFamiliarity {
+        guard let lemma = StudyLemma.make(language: studyLanguageKey, surface: word.text) else {
+            return .unknown
+        }
+        return WordFamiliarityResolver.status(
+            lemma: lemma,
+            learning: studyLearningLemmas,
+            known: studyKnownLemmas
+        )
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1985,23 +2136,8 @@ private struct SentenceRow: View {
             }
 
             if textSource == .spoken || textSource == .dual {
-                if isSelected {
-                    FlowLayout(spacing: type.word, lineSpacing: type.line) {
-                        ForEach(segment.words) { word in
-                            WordToken(
-                                word: word,
-                                isCurrent: word.id == currentWordID || word.id == focusedWordID,
-                                dimmed: false,
-                                fontSize: type.body,
-                                font: type.font,
-                                bold: type.bold,
-                                onSeek: { onSeek(word.start) },
-                                onPlayFrom: { onPlayFrom(word.start) },
-                                onInspect: { onInspect(word) },
-                                onSave: { onSave(word) }
-                            )
-                        }
-                    }
+                if isSelected || studyOverlayEnabled {
+                    wordTokens(StudyTokenIndex.tokens(in: segment), dimmed: !isSelected)
                 } else {
                     Text(segment.spokenText)
                         .font(type.font.font(size: type.body, bold: type.bold))
@@ -2014,11 +2150,18 @@ private struct SentenceRow: View {
             if textSource == .original || textSource == .dual {
                 let original = segment.trustedEbookText ?? (textSource == .original ? segment.spokenText : nil)
                 if let original {
-                    Text(original)
-                        .font(type.font.font(size: textSource == .dual ? type.dual : type.body, bold: type.bold))
-                        .foregroundStyle(isSelected ? Palette.ink : Palette.dim)
-                        .italic(textSource == .dual)
-                        .lineSpacing(type.line)
+                    if textSource == .original, studyOverlayEnabled {
+                        wordTokens(
+                            StudyTokenIndex.tokens(in: segment, source: .original),
+                            dimmed: !isSelected
+                        )
+                    } else {
+                        Text(original)
+                            .font(type.font.font(size: textSource == .dual ? type.dual : type.body, bold: type.bold))
+                            .foregroundStyle(isSelected ? Palette.ink : Palette.dim)
+                            .italic(textSource == .dual)
+                            .lineSpacing(type.line)
+                    }
                 }
             }
 
@@ -2094,6 +2237,29 @@ private struct SentenceRow: View {
     }
 }
 
+extension SentenceRow: Equatable {
+    nonisolated static func == (lhs: SentenceRow, rhs: SentenceRow) -> Bool {
+        lhs.segment == rhs.segment
+            && lhs.currentID == rhs.currentID
+            && lhs.currentWordID == rhs.currentWordID
+            && lhs.focusedSegmentID == rhs.focusedSegmentID
+            && lhs.focusedWordID == rhs.focusedWordID
+            && lhs.textSource == rhs.textSource
+            && lhs.gloss == rhs.gloss
+            && lhs.isTranslating == rhs.isTranslating
+            && lhs.languageLabel == rhs.languageLabel
+            && lhs.studyOverlayEnabled == rhs.studyOverlayEnabled
+            && lhs.studyLanguageKey == rhs.studyLanguageKey
+            && lhs.studyLearningLemmas == rhs.studyLearningLemmas
+            && lhs.studyKnownLemmas == rhs.studyKnownLemmas
+            && lhs.type.body == rhs.type.body
+            && lhs.type.word == rhs.type.word
+            && lhs.type.line == rhs.type.line
+            && lhs.type.font == rhs.type.font
+            && lhs.type.bold == rhs.type.bold
+    }
+}
+
 private struct WordToken: View {
     let word: TranscriptWord
     let isCurrent: Bool
@@ -2101,10 +2267,13 @@ private struct WordToken: View {
     var fontSize: CGFloat = 22
     var font: ReaderFontChoice = .newYork
     var bold = false
-    let onSeek: () -> Void
-    let onPlayFrom: () -> Void
-    let onInspect: () -> Void
-    let onSave: () -> Void
+    var studyOverlayEnabled = false
+    var familiarity: WordFamiliarity = .unknown
+    let onSeek: MainActorAction
+    let onPlayFrom: MainActorAction
+    let onInspect: MainActorAction
+    let onSave: MainActorAction
+    var onMarkKnown = MainActorAction()
 
     var body: some View {
         Text(word.text)
@@ -2116,12 +2285,32 @@ private struct WordToken: View {
                 RoundedRectangle(cornerRadius: 4)
                     .fill(isCurrent ? Palette.gold : Color.clear)
             )
-            .onTapGesture { onSeek(); onInspect() }
-            .contextMenu {
-                Button("Play from here", action: onPlayFrom)
-                Button("Look up", action: onInspect)
-                Button("Add to vocabulary", action: onSave)
+            .overlay(alignment: .bottom) {
+                if studyOverlayEnabled, familiarity != .known {
+                    Rectangle()
+                        .fill(Palette.terracotta)
+                        .frame(height: familiarity == .learning ? 1 : 1.5)
+                        .padding(.horizontal, isCurrent ? 4 : 0)
+                        .opacity((familiarity == .learning ? 0.7 : 1) * (dimmed ? 0.55 : 1))
+                }
             }
+            .onTapGesture { onSeek(); onInspect() }
+            .accessibilityValue(overlayAccessibilityValue)
+            .contextMenu {
+                Button("Play from here") { onPlayFrom() }
+                Button("Look up") { onInspect() }
+                Button("Add to vocabulary") { onSave() }
+                Button("Mark known") { onMarkKnown() }
+            }
+    }
+
+    private var overlayAccessibilityValue: String {
+        guard studyOverlayEnabled else { return "" }
+        switch familiarity {
+        case .learning: return "learning"
+        case .unknown: return "unknown"
+        case .known: return ""
+        }
     }
 }
 
@@ -2295,6 +2484,18 @@ private struct WordInspector: View {
 
                         if let seg = contextSegment {
                             let isSaved = state.isInVocabulary(word: word)
+                            let isKnown = state.isMarkedKnown(word)
+                            Button {
+                                state.markKnown(word, known: !isKnown)
+                            } label: {
+                                Label(isKnown ? "Mark unknown" : "Mark known", systemImage: isKnown ? "eye.slash" : "eye")
+                                    .inspectorActionLabel()
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .accessibilityLabel(isKnown ? "Mark \(word.text) unknown" : "Mark \(word.text) known")
+
                             Button {
                                 state.addVocab(word: word, segment: seg)
                             } label: {

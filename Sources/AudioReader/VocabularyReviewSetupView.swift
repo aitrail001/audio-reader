@@ -30,6 +30,21 @@ struct VocabularyReviewSetupView: View {
         NavigationStack {
             List {
                 Section {
+                    Picker("Card face", selection: $state.vocabReviewPrompt) {
+                        ForEach(VocabReviewPrompt.allCases) { prompt in
+                            Text(prompt.title).tag(prompt)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: state.settings.vocabReviewPrompt) { _, _ in
+                        state.persistSettings()
+                    }
+                    .accessibilityLabel("Card face")
+                } footer: {
+                    Text("Recognition shows the word. Cloze hides it in the original sentence. Reverse asks you to recall the word from a translation or definition.")
+                }
+
+                Section {
                     learnListNavigation(
                         title: "All learn-list items",
                         symbol: "star.fill",

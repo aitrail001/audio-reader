@@ -45,6 +45,30 @@ struct VocabularyReviewTests {
         #expect(nextReview.timeIntervalSince(now) == expectedDays * 86_400)
     }
 
+    @Test("Cloze sessions still record review quality on the same scheduler")
+    func clozeSessionStillAppliesSchedulerQuality() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let card = entry(id: "cloze", category: .word)
+        #expect(VocabCloze.blankedSentence(for: card).contains(VocabCloze.blank))
+
+        let reviewed = VocabReviewScheduler.applying(.remember, to: card, at: now)
+
+        #expect(reviewed.reviewCount == 1)
+        #expect(reviewed.lastReviewQuality == .remember)
+        #expect(reviewed.reviewIntervalDays == 7)
+    }
+
+    @Test("Cloze blanks a whole word instead of a substring")
+    func clozeUsesWholeWordMatch() {
+        var card = entry(id: "whole-word", category: .word)
+        card.word = "he"
+        card.context = "The forest he entered."
+
+        #expect(VocabCloze.blankedSentence(for: card) == "The forest ____ entered.")
+        let range = StudyTextMatch.firstWholeTokenRange(of: "he", in: card.context)
+        #expect(range.map { String(card.context[$0]) } == "he")
+    }
+
     @Test("Remembering expands the previous interval and forgetting resets it")
     func adjustsLaterReviews() throws {
         let firstReview = Date(timeIntervalSince1970: 2_000_000)
@@ -99,6 +123,19 @@ struct VocabularyReviewTests {
         )
 
         #expect(decoded.isInLearnList)
+    }
+
+    @Test("Audiobook source language survives vocabulary persistence encoding")
+    func sourceLanguageRoundTrips() throws {
+        var original = entry()
+        original.sourceLanguage = "es"
+
+        let decoded = try JSONDecoder.iso.decode(
+            VocabEntry.self,
+            from: JSONEncoder.iso.encode(original)
+        )
+
+        #expect(decoded.sourceLanguage == "es")
     }
 
     @Test("Review scopes select due items by book, category, and learn-list membership")

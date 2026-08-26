@@ -36,6 +36,10 @@ struct PlatformParityContractTests {
         #expect(reviewSetupView.contains(".accessibilityLabel("))
         #expect(reviewSetupView.contains(#"\(bookID)::\(category.rawValue)"#))
         #expect(reviewView.contains("Button(\"Show answer\")"))
+        #expect(reviewSetupView.contains("Card face"))
+        #expect(reviewSetupView.contains("VocabReviewPrompt.allCases"))
+        #expect(reviewView.contains("VocabCloze.blankedSentence"))
+        #expect(reviewView.contains("VocabReversePrompt.promptText"))
         #expect(reviewView.contains("ForEach(VocabReviewQuality.allCases)"))
         #expect(reviewView.contains("dynamicTypeSize.isAccessibilitySize"))
         #expect(reviewView.contains("reviewCardMinimumHeight"))
@@ -192,7 +196,7 @@ struct PlatformParityContractTests {
 
     @Test("Provider availability is shared while ChatGPT-plan auth is explicitly macOS-only")
     func providerPlatformDifferenceIsExplicit() throws {
-        #expect(LLMProvider.allCases == [.grok, .qwenCloud, .openAI])
+        #expect(LLMProvider.allCases == [.grok, .qwenCloud, .openAI, .appleFoundation])
 
         let appState = try source("Sources/AudioReader/AppState.swift")
         let settingsView = try source("Sources/AudioReader/SettingsView.swift")
@@ -210,6 +214,10 @@ struct PlatformParityContractTests {
         #expect(settingsView.contains("value: $draft.openAIEndpoint"))
         #expect(codexClient.contains("return \"ChatGPT-plan access through Codex is available on macOS only.\""))
         #expect(codexClient.contains("throw LLMError.codexUnavailable"))
+        #expect(settingsView.contains("appleFoundationSettings"))
+        #expect(!settingsView.contains("Using an Apple Intelligence"))
+        #expect(!appState.contains("#if os(macOS)\n        case .appleFoundation"))
+        #expect(LLMConnectionChoice.appleFoundation.menuLabel.contains("Apple Intelligence"))
     }
 
     @Test("API credentials use an encrypted vault and never settings JSON or plaintext files")
@@ -299,6 +307,9 @@ struct PlatformParityContractTests {
 
         #expect(playerView.contains(".navigationTitle(readerNavigationTitle)"))
         #expect(playerView.contains("private var readerNavigationTitle: String"))
+        #expect(playerView.contains("ReaderWindowTitle.make("))
+        #expect(!playerView.contains("chapterCoverageCaption"))
+        #expect(!playerView.contains(".navigationSubtitle"))
         #expect(!desktopHeader.contains("state.selectedBook?.title"))
         #expect(!desktopHeader.contains("state.selectedChapter?.title"))
         #expect(desktopHeader.contains("ViewThatFits(in: .horizontal)"))
@@ -311,8 +322,8 @@ struct PlatformParityContractTests {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
         let controls = try section(
             in: playerView,
-            from: "    private var controls: some View",
-            to: "#if os(macOS)\n    private var desktopExpandedPlaybackControls"
+            from: "    var body: some View",
+            to: "    private var ebookMissingNotice"
         )
         let iPadPlayback = try section(
             in: playerView,
@@ -544,6 +555,7 @@ struct PlatformParityContractTests {
     func sharesOnDeviceChapterChatDictation() throws {
         let dictation = try source("Sources/AudioReader/ChapterChatDictation.swift")
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
+        let interaction = try source("Sources/AudioReader/MainThreadInteraction.swift")
         let macPlist = try source("Xcode/Info-macOS.plist")
         let iPadPlist = try source("Xcode/Info-iOS.plist")
 
@@ -551,27 +563,40 @@ struct PlatformParityContractTests {
         #expect(dictation.contains("SpeechTranscriber"))
         #expect(dictation.contains("DictationTranscriber"))
         #expect(dictation.contains("AssetInventory.assetInstallationRequest"))
+        #expect(dictation.contains("actor SpeechAssetSupport"))
         #expect(dictation.contains("Apple on-device speech recognition is not available"))
         #expect(dictation.contains("ChapterChatAudioTap.install("))
         #expect(dictation.contains("levelContinuation.yield(ChapterChatVoiceLevel.normalized(buffer))"))
-        let mainActorDictation = try section(
+        let session = try section(
             in: dictation,
-            from: "@MainActor\n@Observable\nfinal class ChapterChatDictation",
+            from: "@MainActor\nfinal class ChapterChatDictation",
             to: "private func completeFinalization"
         )
-        #expect(!mainActorDictation.contains(".installTap("))
+        #expect(!dictation.contains("@Observable\nfinal class ChapterChatDictation"))
+        #expect(dictation.contains("@MainActor\nfinal class ChapterChatDictation"))
+        #expect(dictation.contains("struct VoiceCaptureStatus"))
+        #expect(!session.contains(".installTap("))
+        #expect(!session.contains("downloadAndInstall()"))
+        #expect(session.contains("SpeechAssetSupport.shared.installIfNeeded"))
         #expect(!dictation.contains("SFSpeechRecognizer"))
         #expect(!dictation.contains("requiresOnDeviceRecognition"))
-        #expect(playerView.contains("Button(action: toggleDictation)"))
+        #expect(playerView.contains("PlatformTap("))
+        #expect(playerView.contains("action: toggleDictation"))
+        #expect(!playerView.contains("Button(action: toggleDictation)"))
+        #expect(playerView.contains("MainActorAction { onSeek(word.start) }"))
+        #expect(!interaction.contains("@unchecked Sendable"))
+        #expect(!interaction.contains("nonisolated(unsafe)"))
         #expect(playerView.contains("\"Stop voice input\""))
         #expect(playerView.contains("\"Start voice input\""))
         #expect(playerView.contains("Text(\"Listening on device…\")"))
-        #expect(playerView.contains("ChapterChatVoiceWaveform(levels: dictation.audioLevels)"))
+        #expect(playerView.contains("ChapterChatVoiceWaveform(levels: voice.audioLevels)"))
         #expect(playerView.contains("accessibilityLabel(\"Voice input is listening\")"))
         #expect(!playerView.contains("#if os(macOS)\n                            ChapterChatVoiceWaveform"))
         #expect(!playerView.contains("#if os(macOS)\n                            Button(action: toggleDictation)"))
         #expect(macPlist.contains("NSMicrophoneUsageDescription"))
         #expect(iPadPlist.contains("NSMicrophoneUsageDescription"))
+        #expect(!macPlist.contains("SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE"))
+        #expect(!iPadPlist.contains("SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE"))
     }
 
     private func source(_ relativePath: String) throws -> String {

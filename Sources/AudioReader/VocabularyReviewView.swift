@@ -59,7 +59,7 @@ struct VocabularyReviewView: View {
                 HStack {
                     Text("Card \(currentIndex + 1) of \(entryIDs.count)")
                     Spacer()
-                    Text(entry.category.title)
+                    Text("\(prompt(for: entry).title) · \(entry.category.title)")
                 }
                 .font(.caption.weight(.medium))
                 .foregroundStyle(Palette.dim)
@@ -104,17 +104,32 @@ struct VocabularyReviewView: View {
             isRevealed = true
         } label: {
             VStack(alignment: .leading, spacing: 22) {
-                Text(entry.word)
-                    .font(.system(.largeTitle, design: .serif, weight: .semibold))
-                    .foregroundStyle(Palette.ink)
-                    .textSelection(.enabled)
-
-                highlightedSentence(entry)
-                    .font(.system(.title3, design: .serif))
-                    .foregroundStyle(Palette.ink)
-                    .lineSpacing(5)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
+                switch prompt(for: entry) {
+                case .recognition:
+                    Text(entry.word)
+                        .font(.system(.largeTitle, design: .serif, weight: .semibold))
+                        .foregroundStyle(Palette.ink)
+                        .textSelection(.enabled)
+                    highlightedSentence(entry)
+                        .font(.system(.title3, design: .serif))
+                        .foregroundStyle(Palette.ink)
+                        .lineSpacing(5)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                case .cloze:
+                    Text(VocabCloze.blankedSentence(for: entry))
+                        .font(.system(.title, design: .serif, weight: .semibold))
+                        .foregroundStyle(Palette.ink)
+                        .lineSpacing(5)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                case .reverse:
+                    Text(VocabReversePrompt.promptText(for: entry) ?? entry.word)
+                        .font(.system(.title, design: .serif, weight: .semibold))
+                        .foregroundStyle(Palette.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
 
                 Divider()
 
@@ -267,6 +282,10 @@ struct VocabularyReviewView: View {
         isRevealed = false
         showDictionaryEntry = false
         dictHeight = 160
+    }
+
+    private func prompt(for entry: VocabEntry) -> VocabReviewPrompt {
+        VocabReversePrompt.effectivePrompt(for: entry, requested: state.vocabReviewPrompt)
     }
 
     private func highlightedSentence(_ entry: VocabEntry) -> Text {

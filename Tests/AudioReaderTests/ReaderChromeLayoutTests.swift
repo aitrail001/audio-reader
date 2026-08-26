@@ -161,6 +161,38 @@ struct ReaderChromeLayoutTests {
         #expect(playerView.contains("inspectorActionLabel()"))
         #expect(playerView.contains("Label(\"Sentence meaning\", systemImage: \"globe\")"))
         #expect(playerView.contains(".accessibilityLabel(\"This-sentence meaning"))
+        #expect(playerView.contains("Toggle(\"Study overlay\""))
+        #expect(playerView.components(separatedBy: "Toggle(\"Study overlay\"").count - 1 == 3)
+        #expect(playerView.contains("desktopExpandedHeaderControls"))
+        let expandedHeader = try section(
+            in: playerView,
+            from: "    private var desktopExpandedHeaderControls",
+            to: "    private var desktopCompactHeaderControls"
+        )
+        #expect(expandedHeader.contains("Toggle(\"Study overlay\""))
+        #expect(expandedHeader.contains("Button(\"Chapter words\")"))
+        #expect(!expandedHeader.contains("chapterCoverageCaption"))
+        #expect(!expandedHeader.contains("This chapter"))
+        #expect(expandedHeader.contains("readingAppearanceMenuContent"))
+        #expect(playerView.contains("Chapter words"))
+        #expect(playerView.contains("Mark known"))
+        #expect(playerView.contains("ReaderWindowTitle.make("))
+        #expect(!playerView.contains("chapterCoverageCaption"))
+        #expect(!playerView.contains("chapterCoverageSubtitle"))
+        #expect(!playerView.contains(".navigationSubtitle"))
+        #expect(!playerView.contains("coverageCaption"))
+        #expect(!playbackBar.contains("Study overlay"))
+        #expect(!playbackBar.contains("% known"))
+        #expect(!playbackBar.contains("This chapter"))
+        #expect(!playerView.contains("ToolbarItem(placement: .primaryAction) {\n            Toggle(\"Study overlay\""))
+        let sentenceRow = try section(
+            in: playerView,
+            from: "private struct SentenceRow: View",
+            to: "private struct WordToken: View"
+        )
+        #expect(!sentenceRow.contains("chapterCoverage"))
+        #expect(!sentenceRow.contains("This chapter"))
+        #expect(sentenceRow.contains("lhs.languageLabel == rhs.languageLabel"))
     }
 
     private func source(_ relativePath: String) throws -> String {

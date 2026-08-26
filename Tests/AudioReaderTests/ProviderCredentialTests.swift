@@ -8,7 +8,7 @@ struct ProviderCredentialTests {
     @Test("Top-bar connections distinguish provider-managed sign-in from API keys")
     func topBarConnectionChoices() {
         #expect(LLMConnectionChoice.allCases == [
-            .grokBuild, .grokAPIKey, .qwenAPIKey, .chatGPTPlan, .openAIAPIKey
+            .grokBuild, .grokAPIKey, .qwenAPIKey, .chatGPTPlan, .openAIAPIKey, .appleFoundation
         ])
 
         var settings = AppSettings.default
@@ -24,7 +24,7 @@ struct ProviderCredentialTests {
         #expect(LLMConnectionChoice.availableOnCurrentPlatform == LLMConnectionChoice.allCases)
 #else
         #expect(LLMConnectionChoice.availableOnCurrentPlatform == [
-            .grokAPIKey, .qwenAPIKey, .openAIAPIKey
+            .grokAPIKey, .qwenAPIKey, .openAIAPIKey, .appleFoundation
         ])
 #endif
     }

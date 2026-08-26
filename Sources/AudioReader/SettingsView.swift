@@ -249,21 +249,38 @@ struct SettingsView: View {
                         }
                     }
                     .labelsHidden()
-                    .pickerStyle(.segmented)
+                    .pickerStyle(.menu)
                 }
 
                 Divider().overlay(Palette.line)
 
-                if draftProvider == .grok {
+                switch draftProvider {
+                case .grok:
                     grokSettings
-                } else if draftProvider == .qwenCloud {
+                case .qwenCloud:
                     qwenSettings
-                } else {
+                case .openAI:
                     openAISettings
+                case .appleFoundation:
+                    appleFoundationSettings
                 }
             }
             .padding(12)
         }
+    }
+
+    private var appleFoundationSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            helper("On-device Apple Intelligence. No API key, endpoint, or vault credential. Requires Apple Intelligence on this Mac or iPad.")
+            settingRow("Connection") {
+                connectionStatus(
+                    state.appleIntelligenceAvailability.shortLabel,
+                    ready: state.appleIntelligenceAvailability.isReady
+                )
+            }
+            alignedHelper(state.appleIntelligenceAvailability.userMessage, muted: true)
+        }
+        .onAppear { state.refreshAppleIntelligenceAvailability() }
     }
 
     private var grokSettings: some View {
@@ -799,6 +816,8 @@ struct SettingsView: View {
                 draft.openAIModel = state.settings.openAIModel
             case .openAI where draftOpenAIAuthentication == .chatGPT:
                 await state.refreshCodexLoginStatus()
+            case .appleFoundation:
+                state.refreshAppleIntelligenceAvailability()
             default:
                 break
             }

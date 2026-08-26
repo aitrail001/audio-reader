@@ -167,6 +167,7 @@ private enum ChapterChatAudioTap {
 private enum ChapterChatDictationError: LocalizedError {
     case unsupportedLocale(String)
     case audioFormat
+    case assetInstallFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -174,25 +175,74 @@ private enum ChapterChatDictationError: LocalizedError {
             "Apple on-device speech recognition is not available for \(language) on this device."
         case .audioFormat:
             "The microphone audio format is not supported."
+        case .assetInstallFailed(let message):
+            "Apple speech assets could not be installed. \(message)"
         }
     }
 }
 
-@MainActor
-@Observable
-final class ChapterChatDictation {
-    private(set) var isListening = false
-    private(set) var isRequestingPermission = false
-    private(set) var isFinalizing = false
-    private(set) var preparationMessage: String?
-    private(set) var unavailableMessage: String?
-    private(set) var audioLevels = ChapterChatVoiceLevelHistory().samples
+enum VoiceCaptureKind: Equatable, Sendable {
+    /// Spoken questions about the chapter. Uses the Mac/iPad language already
+    /// installed for dictation — not the audiobook language.
+    case chapterQuestion
+    /// Repeating the current sentence. Uses the audiobook speech locale.
+    case sentenceShadowing
+}
+
+enum VoiceCaptureLocale {
+    static func speechLocale(for language: TranscriptionLanguage) -> Locale {
+        language.locale
+    }
+
+    static func speechLocale(
+        for kind: VoiceCaptureKind,
+        audiobook: TranscriptionLanguage
+    ) -> Locale {
+        switch kind {
+        case .chapterQuestion:
+            .autoupdatingCurrent
+        case .sentenceShadowing:
+            audiobook.locale
+        }
+    }
+
+    static func isUsable(sampleRate: Double, channelCount: AVAudioChannelCount) -> Bool {
+        sampleRate >= 8_000 && channelCount >= 1
+    }
+}
+
+/// Speech asset downloads must not run on the main actor. Doing so can freeze
+/// or crash the Mac app the first time a new audiobook language is used.
+actor SpeechAssetSupport {
+    static let shared = SpeechAssetSupport()
+
+    func installIfNeeded(modules: [any SpeechModule]) async throws {
+        guard let request = try await AssetInventory.assetInstallationRequest(supporting: modules) else {
+            return
+        }
+        try await request.downloadAndInstall()
+    }
+}
+
+struct VoiceCaptureStatus: Equatable, Sendable {
+    var isListening = false
+    var isRequestingPermission = false
+    var isFinalizing = false
+    var preparationMessage: String?
+    var unavailableMessage: String?
+    var audioLevels: [Double] = Array(repeating: 0, count: 24)
 
     var canStart: Bool {
         !isListening && !isRequestingPermission && !isFinalizing
     }
+}
 
-    private let requestedLocale: Locale
+/// Main-actor-owned live capture session. Views observe value snapshots rather
+/// than the reference type so capture state never crosses isolation domains.
+@MainActor
+final class ChapterChatDictation {
+    private var status = VoiceCaptureStatus()
+    private var requestedLocale: Locale
     private let audioEngine = AVAudioEngine()
     private var analyzer: SpeechAnalyzer?
     private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
@@ -204,6 +254,7 @@ final class ChapterChatDictation {
     private var inputTapInstalled = false
     private var levelHistory = ChapterChatVoiceLevelHistory()
     private var transcript = ChapterChatDictationTranscript(prefix: "")
+    private var onStatus: (@MainActor (VoiceCaptureStatus) -> Void)?
     private var onTextUpdate: (@MainActor (String) -> Void)?
     private var onWillRecord: (@MainActor () -> Void)?
 
@@ -213,29 +264,37 @@ final class ChapterChatDictation {
 
     func start(
         existingText: String,
+        locale: Locale? = nil,
+        onStatus: @escaping @MainActor (VoiceCaptureStatus) -> Void,
         onWillRecord: @escaping @MainActor () -> Void,
         onTextUpdate: @escaping @MainActor (String) -> Void
     ) {
-        guard canStart else { return }
-        unavailableMessage = nil
-        preparationMessage = "Preparing Apple on-device speech…"
+        guard status.canStart else { return }
+        if let locale {
+            requestedLocale = locale
+        }
+        self.onStatus = onStatus
+        status.unavailableMessage = nil
+        status.preparationMessage = "Preparing Apple on-device speech…"
+        status.isRequestingPermission = true
         resetAudioLevels()
+        publish()
         transcript = ChapterChatDictationTranscript(prefix: existingText)
         self.onWillRecord = onWillRecord
         self.onTextUpdate = onTextUpdate
-        isRequestingPermission = true
         permissionTask = Task { [weak self] in
             await self?.prepareAndStart()
         }
     }
 
     func stop() {
-        guard isListening else { return }
+        guard status.isListening else { return }
         stopAudioCapture()
         inputContinuation?.finish()
-        isListening = false
-        isFinalizing = true
-        preparationMessage = "Finishing voice input…"
+        status.isListening = false
+        status.isFinalizing = true
+        status.preparationMessage = "Finishing voice input…"
+        publish()
 
         let analyzer = analyzer
         finalizationTask = Task { [weak self] in
@@ -260,37 +319,44 @@ final class ChapterChatDictation {
         Task { await analyzer?.cancelAndFinishNow() }
     }
 
+    private func publish() {
+        onStatus?(status)
+    }
+
     private func prepareAndStart() async {
         defer {
             permissionTask = nil
-            isRequestingPermission = false
-            if !isListening { preparationMessage = nil }
+            status.isRequestingPermission = false
+            if !status.isListening { status.preparationMessage = nil }
+            publish()
         }
 
         do {
             let transcriber = try await makeTranscriber()
             try Task.checkCancellation()
 
-            if let installer = try await AssetInventory.assetInstallationRequest(
-                supporting: transcriber.modules
-            ) {
-                preparationMessage = "Installing Apple speech assets…"
-                try await installer.downloadAndInstall()
+            status.preparationMessage = "Preparing Apple speech…"
+            publish()
+            do {
+                try await SpeechAssetSupport.shared.installIfNeeded(modules: transcriber.modules)
+            } catch {
+                throw ChapterChatDictationError.assetInstallFailed(error.localizedDescription)
             }
             try Task.checkCancellation()
 
             let microphoneAllowed = await AVCaptureDevice.requestAccess(for: .audio)
             try Task.checkCancellation()
             guard microphoneAllowed else {
-                unavailableMessage = "Allow microphone access in System Settings to use voice input."
+                status.unavailableMessage = "Allow microphone access in System Settings to use voice input."
                 return
             }
 
-            try await beginRecognition(with: transcriber)
+            let ready = try await makeTranscriber()
+            try await beginRecognition(with: ready)
         } catch is CancellationError {
             return
         } catch {
-            unavailableMessage = "Voice input could not start: \(error.localizedDescription)"
+            status.unavailableMessage = "Voice input could not start: \(error.localizedDescription)"
             await cancelPreparedAnalyzer()
         }
     }
@@ -311,12 +377,38 @@ final class ChapterChatDictation {
     private func beginRecognition(with transcriber: ChapterChatLiveTranscriber) async throws {
 #if os(iOS)
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.record, mode: .measurement)
+        try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker])
         try session.setActive(true)
 #endif
 
+        let needsReset = audioEngine.isRunning || inputTapInstalled
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
+        if inputTapInstalled {
+            audioEngine.inputNode.removeTap(onBus: 0)
+            inputTapInstalled = false
+        }
+        if needsReset {
+            audioEngine.reset()
+        }
+
         let inputNode = audioEngine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
+        var inputFormat = inputNode.outputFormat(forBus: 0)
+        if !VoiceCaptureLocale.isUsable(
+            sampleRate: inputFormat.sampleRate,
+            channelCount: inputFormat.channelCount
+        ) {
+            audioEngine.reset()
+            audioEngine.prepare()
+            inputFormat = inputNode.outputFormat(forBus: 0)
+        }
+        guard VoiceCaptureLocale.isUsable(
+            sampleRate: inputFormat.sampleRate,
+            channelCount: inputFormat.channelCount
+        ) else {
+            throw ChapterChatDictationError.audioFormat
+        }
         guard let analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(
             compatibleWith: transcriber.modules,
             considering: inputFormat
@@ -353,9 +445,10 @@ final class ChapterChatDictation {
         onWillRecord?()
         audioEngine.prepare()
         try audioEngine.start()
-        isListening = true
-        preparationMessage = nil
-        unavailableMessage = nil
+        status.isListening = true
+        status.preparationMessage = nil
+        status.unavailableMessage = nil
+        publish()
     }
 
     private func startResultTask(for transcriber: ChapterChatLiveTranscriber) {
@@ -376,15 +469,17 @@ final class ChapterChatDictation {
             } catch is CancellationError {
                 return
             } catch {
-                guard let self, isListening || isFinalizing else { return }
-                unavailableMessage = "Voice input stopped: \(error.localizedDescription)"
+                guard let self, status.isListening || status.isFinalizing else { return }
+                status.unavailableMessage = "Voice input stopped: \(error.localizedDescription)"
+                publish()
                 cancel()
             }
         }
     }
 
     private func receive(_ text: String, isFinal: Bool) {
-        onTextUpdate?(transcript.receive(text, isFinal: isFinal))
+        let update = transcript.receive(text, isFinal: isFinal)
+        onTextUpdate?(update)
     }
 
     private func startLevelTask(_ levels: AsyncStream<Double>) {
@@ -392,19 +487,20 @@ final class ChapterChatDictation {
             for await level in levels {
                 guard let self else { return }
                 levelHistory.append(level)
-                audioLevels = levelHistory.samples
+                status.audioLevels = levelHistory.samples
+                publish()
             }
         }
     }
 
     private func resetAudioLevels() {
         levelHistory = ChapterChatVoiceLevelHistory()
-        audioLevels = levelHistory.samples
+        status.audioLevels = levelHistory.samples
     }
 
     private func completeFinalization(error: Error? = nil) {
         if let error {
-            unavailableMessage = "Voice input stopped: \(error.localizedDescription)"
+            status.unavailableMessage = "Voice input stopped: \(error.localizedDescription)"
         }
         clearSession()
     }
@@ -418,7 +514,9 @@ final class ChapterChatDictation {
             inputTapInstalled = false
         }
 #if os(iOS)
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .spokenAudio)
+        try? session.setActive(true)
 #endif
     }
 
@@ -438,12 +536,13 @@ final class ChapterChatDictation {
         finalizationTask = nil
         levelContinuation = nil
         levelTask = nil
-        isListening = false
-        isRequestingPermission = false
-        isFinalizing = false
-        preparationMessage = nil
+        let unavailable = status.unavailableMessage
+        status = VoiceCaptureStatus()
+        status.unavailableMessage = unavailable
         resetAudioLevels()
+        publish()
         onTextUpdate = nil
         onWillRecord = nil
+        onStatus = nil
     }
 }
