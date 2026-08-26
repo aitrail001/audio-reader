@@ -156,6 +156,41 @@ struct LocalSchemaV2MigrationTests {
         #expect(try store.loadReceipt()?.schemaVersion == LocalSchemaV2.version)
     }
 
+    @Test("empty strings bind as TEXT not NULL")
+    func emptyStringsRoundTripAsEmptyText() throws {
+        let fixture = try IsolatedLocalStoreFixture()
+        defer { fixture.remove() }
+        try seedLegacyV1(
+            at: fixture.sqliteURL,
+            transcripts: [],
+            vocab: [Self.emptyStringVocabJSON],
+            glosses: [Self.emptyStringGlossJSON]
+        )
+
+        let store = LocalSQLiteStore(fileURL: fixture.sqliteURL)
+        let receipt = try store.migrateLegacyData(from: fixture.sources)
+
+        #expect(receipt.vocabularyCount == 1)
+        #expect(receipt.assistantResultCount == 1)
+        #expect(try store.loadReceipt() != nil)
+
+        let vocab = try #require(try store.loadVocabulary().first)
+        #expect(vocab.surface == "")
+        #expect(vocab.context == "")
+        #expect(vocab.definition == "")
+        #expect(vocab.dictionaryHTML == "")
+        #expect(vocab.bookTitle == "")
+        #expect(vocab.chapterTitle == "")
+
+        let chapter = try #require(try store.loadBooks().first?.chapters.first)
+        #expect(chapter.title == "")
+
+        let gloss = try #require(try store.loadAssistantResults().first)
+        #expect(gloss.source == "")
+        #expect(gloss.text == "")
+        #expect(gloss.context == "")
+    }
+
     private static let transcriptJSON = """
         {
           "chapterID": "chapter-loomings",
@@ -273,6 +308,37 @@ struct LocalSchemaV2MigrationTests {
           "timestamp": 1.2,
           "createdAt": "2023-11-14T22:13:20Z",
           "decidedAt": "2023-11-14T22:20:00Z"
+        }
+        """
+
+    private static let emptyStringVocabJSON = """
+        {
+          "id": "vocab-empty",
+          "word": "",
+          "category": "word",
+          "definition": "",
+          "dictionaryHTML": "",
+          "context": "",
+          "bookID": "book-empty",
+          "bookTitle": "",
+          "chapterID": "chapter-empty",
+          "chapterTitle": "",
+          "timestamp": 0,
+          "addedAt": "2023-11-14T22:13:20Z"
+        }
+        """
+
+    private static let emptyStringGlossJSON = """
+        {
+          "id": "gloss-empty",
+          "kind": "sentence",
+          "language": "zh-Hans",
+          "source": "",
+          "context": "",
+          "text": "",
+          "status": "pending",
+          "model": "",
+          "createdAt": "2023-11-14T22:13:20Z"
         }
         """
 }

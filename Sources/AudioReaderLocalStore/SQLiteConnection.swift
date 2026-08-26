@@ -2,6 +2,7 @@ import Foundation
 import SQLite3
 
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+private let sqliteStatic = unsafeBitCast(0, to: sqlite3_destructor_type.self)
 
 final class SQLiteConnection: @unchecked Sendable {
     private var db: OpaquePointer?
@@ -92,6 +93,10 @@ final class SQLiteConnection: @unchecked Sendable {
             return
         }
         let bytes = Array(value.utf8)
+        if bytes.isEmpty {
+            sqlite3_bind_text(stmt, index, "", 0, sqliteStatic)
+            return
+        }
         _ = bytes.withUnsafeBytes { raw in
             sqlite3_bind_text(
                 stmt,
