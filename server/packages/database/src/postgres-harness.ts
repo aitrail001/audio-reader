@@ -17,6 +17,8 @@ export type PostgresSession = {
 };
 
 const PSQL_ARGS = ["-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-t", "-A", "-q"];
+const DOCKER_PSQL_HOST = ["-h", "127.0.0.1"];
+const READY_LOG = "database system is ready to accept connections";
 
 const DOCKER_IMAGE = "postgres:18-alpine";
 const PG_BIN_CANDIDATES = [
@@ -30,8 +32,19 @@ const PG_BIN_CANDIDATES = [
   "/usr/local/opt/postgresql@15/bin",
 ];
 
+export function dockerPsqlArgs(containerName: string): string[] {
+  return ["exec", "-i", containerName, "psql", ...DOCKER_PSQL_HOST, ...PSQL_ARGS];
+}
+
+export function isTransientPostgresError(text: string): boolean {
+  return /connection to server.*failed|could not connect to server|connection refused|connection reset|the database system is starting up|the database system is shutting down|server closed the connection/i.test(
+    text,
+  );
+}
+
 export async function startPostgres(): Promise<PostgresSession> {
-  const docker = await tryDockerPostgres();
+  const dockerReasons: string[] = [];
+  const docker = await tryDockerPostgres(dockerReasons);
   if (docker !== undefined) {
     return docker;
   }
@@ -39,49 +52,56 @@ export async function startPostgres(): Promise<PostgresSession> {
   if (local !== undefined) {
     return local;
   }
+  const detail = dockerReasons.length > 0 ? ` Docker: ${dockerReasons.join("; ")}.` : "";
   throw new Error(
-    "PostgreSQL 15+ is required for RLS tests. Install Docker and pull postgres:18-alpine, or install postgresql@18.",
+    `PostgreSQL 15+ is required for RLS tests. Install Docker and pull ${DOCKER_IMAGE}, or install postgresql@18.${detail}`,
   );
 }
 
-async function tryDockerPostgres(): Promise<PostgresSession | undefined> {
-  if (!commandExists("docker") || !dockerEngineReady()) {
+async function tryDockerPostgres(reasons: string[]): Promise<PostgresSession | undefined> {
+  if (!commandExists("docker")) {
+    reasons.push("docker not on PATH");
+    return undefined;
+  }
+  if (!(await dockerEngineReady())) {
+    reasons.push("docker info failed");
     return undefined;
   }
   const name = `audio-reader-rls-${String(process.pid)}-${String(Date.now())}`;
-  const run = execCaptured(
-    "docker",
-    [
-      "run",
-      "-d",
-      "--rm",
-      "--name",
-      name,
-      "-e",
-      "POSTGRES_HOST_AUTH_METHOD=trust",
-      "-e",
-      "POSTGRES_USER=postgres",
-      "-e",
-      "POSTGRES_DB=postgres",
-      DOCKER_IMAGE,
-    ],
-    { timeout: 180_000 },
-  );
+  const runArgs = [
+    "run",
+    "-d",
+    "--rm",
+    "--name",
+    name,
+    "-e",
+    "POSTGRES_HOST_AUTH_METHOD=trust",
+    "-e",
+    "POSTGRES_USER=postgres",
+    "-e",
+    "POSTGRES_DB=postgres",
+    DOCKER_IMAGE,
+  ];
+  let run = execCaptured("docker", runArgs, { timeout: 180_000 });
   if (!run.ok) {
+    const pull = execCaptured("docker", ["pull", DOCKER_IMAGE], { timeout: 180_000 });
+    if (!pull.ok) {
+      reasons.push(pull.stderr || pull.stdout || "docker pull failed");
+      return undefined;
+    }
+    run = execCaptured("docker", runArgs, { timeout: 180_000 });
+  }
+  if (!run.ok) {
+    reasons.push(run.stderr || run.stdout || "docker run failed");
     return undefined;
   }
   try {
-    await waitFor(() => {
-      const ready = execCaptured("docker", ["exec", name, "pg_isready", "-U", "postgres"], {
-        timeout: 5_000,
-      });
-      return ready.ok;
-    }, 60_000);
+    await waitUntilDockerPostgresAcceptsQueries(name);
   } catch (error) {
     execCaptured("docker", ["rm", "-f", name], { timeout: 15_000 });
     throw error;
   }
-  return makeSession("docker", ["exec", "-i", name, "psql", ...PSQL_ARGS], () => {
+  return makeSession("docker", dockerPsqlArgs(name), () => {
     execCaptured("docker", ["rm", "-f", name], { timeout: 15_000 });
     return Promise.resolve();
   });
@@ -169,12 +189,12 @@ async function tryLocalPostgres(): Promise<PostgresSession | undefined> {
 function makeSession(file: string, args: string[], stop: () => Promise<void>): PostgresSession {
   return {
     exec(sql: string): SqlResult {
-      return execCaptured(file, args, { input: sql, timeout: 30_000 });
+      return execWithRetry(file, args, sql, 60_000);
     },
     start(sql: string, options: { timeout?: number } = {}) {
       return spawnCaptured(file, args, {
         input: sql,
-        timeout: options.timeout ?? 30_000,
+        timeout: options.timeout ?? 60_000,
       });
     },
     stop,
@@ -202,9 +222,76 @@ function commandExists(name: string): boolean {
   }
 }
 
-function dockerEngineReady(): boolean {
-  const result = execCaptured("docker", ["info"], { timeout: 2_000 });
-  return result.ok;
+async function dockerEngineReady(): Promise<boolean> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const result = execCaptured("docker", ["info"], { timeout: 10_000 });
+    if (result.ok) {
+      return true;
+    }
+    const detail = `${result.stderr}\n${result.stdout}`;
+    if (/cannot connect to the docker daemon/i.test(detail)) {
+      return false;
+    }
+    await delay(500);
+  }
+  return false;
+}
+
+async function waitUntilDockerPostgresAcceptsQueries(name: string): Promise<void> {
+  const timeoutMs = 90_000;
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (dockerReadyLogCount(name) >= 2 && dockerQueryOk(name)) {
+      return;
+    }
+    await delay(250);
+  }
+  // Images that omit the English ready log still need a server that survives
+  // the initdb restart before migrations run.
+  if (dockerQueryOk(name)) {
+    await delay(1_000);
+    if (dockerQueryOk(name)) {
+      return;
+    }
+  }
+  throw new Error(`timed out after ${String(timeoutMs)}ms waiting for postgres in ${name}`);
+}
+
+function dockerReadyLogCount(name: string): number {
+  const logs = execCaptured("docker", ["logs", name], { timeout: 5_000 });
+  const text = `${logs.stdout}\n${logs.stderr}`;
+  if (!text.includes(READY_LOG)) {
+    return 0;
+  }
+  return text.split(READY_LOG).length - 1;
+}
+
+function dockerQueryOk(name: string): boolean {
+  return execCaptured("docker", dockerPsqlArgs(name), {
+    input: "SELECT 1;",
+    timeout: 5_000,
+  }).ok;
+}
+
+function execWithRetry(file: string, args: string[], sql: string, timeout: number): SqlResult {
+  const started = Date.now();
+  let last = execCaptured(file, args, { input: sql, timeout });
+  while (
+    !last.ok &&
+    isTransientPostgresError(`${last.stderr}\n${last.stdout}`) &&
+    Date.now() - started < timeout
+  ) {
+    sleepSync(250);
+    last = execCaptured(file, args, { input: sql, timeout });
+  }
+  return last;
+}
+
+function sleepSync(ms: number): void {
+  execFileSync("sleep", [(ms / 1000).toFixed(3)], {
+    stdio: "ignore",
+    timeout: ms + 1_000,
+  });
 }
 
 function allocatePort(): Promise<number> {
