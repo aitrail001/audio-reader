@@ -11,6 +11,7 @@ export default defineConfig(
       "**/.wrangler/**",
       "**/coverage/**",
       "**/.vite/**",
+      "packages/contract/src/generated/**",
     ],
   },
   eslint.configs.recommended,

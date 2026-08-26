@@ -10,9 +10,13 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "generate": "node --experimental-strip-types --disable-warning=ExperimentalWarning ./scripts/codegen.ts generate",
+    "check": "node --experimental-strip-types --disable-warning=ExperimentalWarning ./scripts/codegen.ts check"
   },
   "devDependencies": {
+    "@types/node": "catalog:",
+    "openapi-typescript": "7.13.0",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

@@ -2,7 +2,7 @@
 
 Pinned Node/pnpm workspace for the Cloudflare API worker, job worker, admin console, and shared TypeScript packages.
 
-This tree is a compile-and-test scaffold. Health routes, OpenAPI codegen, Qwen calls, and auth logic are out of scope here.
+This tree is a compile-and-test scaffold. Health routes, Qwen calls, and auth logic are out of scope here. TypeScript types are generated from `contracts/openapi-v1.yaml` into `@audio-reader/contract`.
 
 ## Requirements
 
@@ -30,9 +30,13 @@ pnpm test
 pnpm lint
 pnpm typecheck
 pnpm format:check
+pnpm contract:generate
+pnpm contract:check
 ```
 
 `pnpm format` rewrites files with Prettier.
+
+`pnpm contract:generate` writes TypeScript request/response types from the repo-root OpenAPI document into `packages/contract/src/generated/openapi.ts`. Commit that file. `pnpm contract:check` regenerates in memory and fails if the working copy differs.
 
 ## Layout
 
@@ -43,7 +47,7 @@ server/
     job-worker/     Cloudflare Worker queue consumer stub
     admin-web/      React + TypeScript + Vite stub
   packages/
-    contract/       Generated API types (later)
+    contract/       Generated API types from OpenAPI v1
     domain/         Shared domain types and rules
     database/       Persistence adapters
     auth/           Session/JWT validation

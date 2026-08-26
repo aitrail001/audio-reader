@@ -1,0 +1,3494 @@
+export interface paths {
+    "/v1/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Check API health */
+        get: operations["getHealth"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/bootstrap": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Bootstrap profile and device after authentication */
+        post: operations["bootstrapSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/email-otp/request": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Request an email one-time code */
+        post: operations["requestEmailOtp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/email-otp/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Verify an email one-time code */
+        post: operations["verifyEmailOtp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get current profile */
+        get: operations["getProfile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update current profile */
+        patch: operations["patchProfile"];
+        trace?: never;
+    };
+    "/v1/me/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get portable user settings */
+        get: operations["getUserSettings"];
+        /** Replace portable user settings */
+        put: operations["putUserSettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/me/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List signed-in devices */
+        get: operations["listDevices"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/me/devices/{deviceId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke a device */
+        delete: operations["revokeDevice"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/books": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List user books */
+        get: operations["listBooks"];
+        put?: never;
+        /** Register a local book and chapters */
+        post: operations["createBook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/books/{bookId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a book */
+        get: operations["getBook"];
+        put?: never;
+        post?: never;
+        /** Delete a user book */
+        delete: operations["deleteBook"];
+        options?: never;
+        head?: never;
+        /** Update book metadata */
+        patch: operations["patchBook"];
+        trace?: never;
+    };
+    "/v1/books/{bookId}/chapters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List chapters for a book */
+        get: operations["listBookChapters"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/chapters/{chapterId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a chapter */
+        get: operations["getChapter"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/uploads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create a signed upload ticket */
+        post: operations["createUpload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/uploads/{uploadId}/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Complete and verify an upload */
+        post: operations["completeUpload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/assets/{assetId}/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create a short-lived signed download */
+        post: operations["createAssetDownload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/progress/{chapterId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get chapter reading progress */
+        get: operations["getReadingProgress"];
+        /** Upsert chapter reading progress */
+        put: operations["putReadingProgress"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/vocabulary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List vocabulary occurrences */
+        get: operations["listVocabulary"];
+        put?: never;
+        /** Create a contextual vocabulary occurrence */
+        post: operations["createVocabulary"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/vocabulary/{vocabularyId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a vocabulary occurrence */
+        get: operations["getVocabulary"];
+        put?: never;
+        post?: never;
+        /** Delete a vocabulary occurrence */
+        delete: operations["deleteVocabulary"];
+        options?: never;
+        head?: never;
+        /** Update a vocabulary occurrence */
+        patch: operations["patchVocabulary"];
+        trace?: never;
+    };
+    "/v1/reviews/due": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List due review schedules */
+        get: operations["listDueReviews"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/reviews": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Submit append-only review events */
+        post: operations["submitReviews"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/chapters/{chapterId}/transcript": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get active transcript for a chapter */
+        get: operations["getActiveTranscript"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/transcripts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Upload a local transcript version */
+        post: operations["createTranscript"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ai/translations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Get a cached or generated contextual translation
+         * @description The server owns Qwen credentials and policy. Shared cache is eligible only for non-personal exact requests.
+         */
+        post: operations["createTranslation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ai/chapter-summaries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Get a cached or generated chapter summary */
+        post: operations["createChapterSummary"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ai/chat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create a private chapter chat message */
+        post: operations["createChapterChatMessage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/sync/push": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Push an idempotent mutation batch */
+        post: operations["pushSyncMutations"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/sync/pull": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Pull ordered account changes */
+        get: operations["pullSyncChanges"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/exports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create an account export job */
+        post: operations["createAccountExport"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/exports/{exportId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get account export status */
+        get: operations["getAccountExport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/me/deletion": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Request account deletion */
+        post: operations["requestAccountDeletion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List users for support and operations
+         * @description Requires an admin capability; ordinary JWTs receive 403.
+         */
+        get: operations["adminListUsers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get support-safe user metadata */
+        get: operations["adminGetUser"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users/{userId}/suspend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Suspend a user account */
+        post: operations["adminSuspendUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users/{userId}/unsuspend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Unsuspend a user account */
+        post: operations["adminUnsuspendUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users/{userId}/revoke-sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revoke all user sessions */
+        post: operations["adminRevokeUserSessions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/llm/policies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Qwen task policies */
+        get: operations["adminListLlmPolicies"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/llm/policies/{policyId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update or roll out a Qwen task policy */
+        patch: operations["adminPatchLlmPolicy"];
+        trace?: never;
+    };
+    "/v1/admin/cache": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List derived cache metadata */
+        get: operations["adminListCacheEntries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/cache/{cacheId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get derived cache metadata */
+        get: operations["adminGetCacheEntry"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/cache/{cacheId}/actions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Quarantine, activate, expire, purge, or regenerate a cache entry */
+        post: operations["adminActOnCacheEntry"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List background jobs */
+        get: operations["adminListJobs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/jobs/{jobId}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retry a failed job */
+        post: operations["adminRetryJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/jobs/{jobId}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel a queued or running job */
+        post: operations["adminCancelJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get operational metrics snapshot */
+        get: operations["adminGetMetrics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/audit-events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List immutable admin audit events */
+        get: operations["adminListAuditEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+}
+export type webhooks = Record<string, never>;
+export interface components {
+    schemas: {
+        Problem: {
+            /** Format: uri-reference */
+            type: string;
+            title: string;
+            status: number;
+            code: string;
+            detail?: string | null;
+            traceId: string;
+            retryAfterSeconds?: number | null;
+            fieldErrors?: {
+                field: string;
+                message: string;
+            }[];
+        };
+        Health: {
+            /** @enum {string} */
+            status: "ok" | "degraded";
+            version: string;
+            /** Format: date-time */
+            time: string;
+            dependencies?: {
+                [key: string]: string;
+            };
+        };
+        AuthBootstrapRequest: {
+            /** Format: uuid */
+            deviceId: string;
+            /** @enum {string} */
+            platform: "macos" | "ios" | "ipados";
+            deviceName?: string | null;
+            appVersion: string;
+            buildNumber?: string;
+            locale?: string;
+            timeZone?: string;
+        };
+        EmailOtpRequest: {
+            /** Format: email */
+            email: string;
+            redirectUri?: string | null;
+        };
+        EmailOtpVerifyRequest: {
+            /** Format: email */
+            email: string;
+            code: string;
+            /** Format: uuid */
+            deviceId: string;
+        };
+        TokenPair: {
+            accessToken: string;
+            refreshToken: string;
+            /** Format: date-time */
+            expiresAt: string;
+            /** @constant */
+            tokenType?: "Bearer";
+        };
+        Profile: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            accountId: string;
+            /** Format: email */
+            email: string;
+            displayName?: string | null;
+            avatarUrl?: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+            deletionPendingAt?: string | null;
+        };
+        ProfilePatch: {
+            displayName?: string | null;
+            avatarUrl?: string | null;
+        };
+        Device: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            platform: "macos" | "ios" | "ipados";
+            name?: string | null;
+            appVersion: string;
+            buildNumber?: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            lastSeenAt: string;
+            revoked: boolean;
+            revokedAt?: string | null;
+        };
+        FeatureFlag: {
+            key: string;
+            enabled: boolean;
+            variant?: string | null;
+        };
+        Quota: {
+            key: string;
+            used: number;
+            limit: number;
+            /** Format: date-time */
+            periodEndsAt: string;
+        };
+        BootstrapResponse: {
+            profile: components["schemas"]["Profile"];
+            device: components["schemas"]["Device"];
+            settings: components["schemas"]["UserSettings"];
+            featureFlags: components["schemas"]["FeatureFlag"][];
+            quotas: components["schemas"]["Quota"][];
+            syncCursor: string;
+        };
+        UserSettings: {
+            revision: number;
+            sourceLanguage: string;
+            targetLanguage: string;
+            /** @enum {string} */
+            readerLevel: "beginner" | "elementary" | "intermediate" | "upper_intermediate" | "advanced";
+            playbackRate: number;
+            skipSeconds: number;
+            /** @enum {string} */
+            appearance: "system" | "light" | "dark";
+            preferredDictionary?: string | null;
+            reader?: {
+                font?: string;
+                fontScale?: number;
+                bold?: boolean;
+                lineSpacing?: number;
+                wordSpacing?: number;
+                margin?: number;
+            };
+            review?: {
+                preferredFaces?: ("recognition" | "cloze" | "reverse" | "listening" | "dictation" | "shadowing" | "sequencing")[];
+                dailyLimit?: number;
+            };
+            /** @enum {string} */
+            syncPolicy?: "learning_data_only" | "learning_data_and_transcripts" | "learning_data_transcripts_and_assets";
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        /** @description Full replacement payload; clients must send the latest revision. */
+        UserSettingsPatch: components["schemas"]["UserSettings"];
+        Book: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            accountId: string;
+            workId?: string | null;
+            editionId?: string | null;
+            title: string;
+            author?: string | null;
+            coverAssetId?: string | null;
+            editionFingerprint: string;
+            fingerprintVersion: number;
+            audioManifestHash?: string | null;
+            ebookTextHash?: string | null;
+            /** @enum {string} */
+            source: "local_folder" | "files" | "device_audiobooks" | "remote_backup";
+            chapterCount: number;
+            revision: number;
+            deletedAt?: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        BookCreate: {
+            /** Format: uuid */
+            clientId: string;
+            title: string;
+            author?: string | null;
+            editionFingerprint: string;
+            fingerprintVersion: number;
+            audioManifestHash?: string | null;
+            ebookTextHash?: string | null;
+            /** @enum {string} */
+            source: "local_folder" | "files" | "device_audiobooks" | "remote_backup";
+            chapters: components["schemas"]["ChapterCreate"][];
+        };
+        BookPatch: {
+            baseRevision: number;
+            title?: string;
+            author?: string | null;
+            coverAssetId?: string | null;
+        };
+        Chapter: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            bookId: string;
+            index: number;
+            title: string;
+            chapterFingerprint: string;
+            durationSeconds: number;
+            startSeconds?: number;
+            audioAssetId?: string | null;
+            revision: number;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        ChapterCreate: {
+            /** Format: uuid */
+            clientId: string;
+            index: number;
+            title: string;
+            chapterFingerprint: string;
+            durationSeconds: number;
+            startSeconds?: number;
+        };
+        Asset: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            kind: "audio" | "ebook" | "cover" | "transcript_export" | "account_export";
+            contentType: string;
+            sizeBytes: number;
+            sha256: string;
+            /** @enum {string} */
+            status: "pending" | "ready" | "failed" | "deleting";
+            /** Format: date-time */
+            createdAt: string;
+            deletedAt?: string | null;
+        };
+        UploadCreate: {
+            /** @enum {string} */
+            kind: "audio" | "ebook" | "cover";
+            contentType: string;
+            sizeBytes: number;
+            sha256: string;
+            fileName: string;
+            bookId?: string | null;
+        };
+        UploadTicket: {
+            /** Format: uuid */
+            uploadId: string;
+            /** Format: uuid */
+            assetId: string;
+            /** @enum {string} */
+            method: "PUT" | "POST";
+            /** Format: uri */
+            url: string;
+            /** Format: date-time */
+            expiresAt: string;
+            headers: {
+                [key: string]: string;
+            };
+            multipart?: boolean;
+        };
+        UploadComplete: {
+            parts: {
+                partNumber: number;
+                etag: string;
+            }[];
+        };
+        SignedDownload: {
+            /** Format: uri */
+            url: string;
+            /** Format: date-time */
+            expiresAt: string;
+        };
+        ReadingProgress: {
+            /** Format: uuid */
+            chapterId: string;
+            positionSeconds: number;
+            segmentId?: string | null;
+            wordId?: string | null;
+            completed: boolean;
+            explicitSeek?: boolean;
+            revision: number;
+            /** Format: uuid */
+            deviceId: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        ReadingProgressUpsert: {
+            positionSeconds: number;
+            segmentId?: string | null;
+            wordId?: string | null;
+            completed: boolean;
+            baseRevision: number;
+            explicitSeek: boolean;
+            /** Format: date-time */
+            occurredAt: string;
+        };
+        VocabularyOccurrence: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            bookId: string;
+            /** Format: uuid */
+            chapterId: string;
+            segmentId?: string | null;
+            wordId?: string | null;
+            surface: string;
+            lemma: string;
+            senseKey?: string | null;
+            /** @enum {string} */
+            category: "word" | "phrase" | "sentence";
+            context: string;
+            previousContext?: string | null;
+            nextContext?: string | null;
+            timestampSeconds: number;
+            clipStartSeconds?: number | null;
+            clipEndSeconds?: number | null;
+            definition?: string | null;
+            translationId?: string | null;
+            note?: string | null;
+            tags?: string[];
+            /** @enum {string} */
+            state: "unknown" | "learning" | "known" | "ignored";
+            revision: number;
+            deletedAt?: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        VocabularyCreate: {
+            /** Format: uuid */
+            clientId: string;
+            /** Format: uuid */
+            bookId: string;
+            /** Format: uuid */
+            chapterId: string;
+            segmentId?: string | null;
+            wordId?: string | null;
+            surface: string;
+            lemma: string;
+            senseKey?: string | null;
+            /** @enum {string} */
+            category: "word" | "phrase" | "sentence";
+            context: string;
+            previousContext?: string | null;
+            nextContext?: string | null;
+            timestampSeconds: number;
+            definition?: string | null;
+            translationId?: string | null;
+            note?: string | null;
+            tags?: string[];
+            /** @enum {string} */
+            state: "unknown" | "learning" | "known" | "ignored";
+        };
+        VocabularyPatch: {
+            baseRevision: number;
+            definition?: string | null;
+            translationId?: string | null;
+            note?: string | null;
+            tags?: string[];
+            /** @enum {string} */
+            state?: "unknown" | "learning" | "known" | "ignored";
+        };
+        ReviewEvent: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            vocabularyId: string;
+            /** @enum {string} */
+            face: "recognition" | "cloze" | "reverse" | "listening" | "dictation" | "shadowing" | "sequencing";
+            rating: number;
+            responseTimeMs?: number | null;
+            /** Format: date-time */
+            reviewedAt: string;
+            /** Format: uuid */
+            deviceId: string;
+        };
+        ReviewSchedule: {
+            /** Format: uuid */
+            vocabularyId: string;
+            /** Format: date-time */
+            dueAt: string;
+            stability: number;
+            difficulty: number;
+            reviewCount: number;
+            lastReviewedAt?: string | null;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        ReviewSubmitRequest: {
+            events: components["schemas"]["ReviewEvent"][];
+        };
+        ReviewSubmitResponse: {
+            schedules: components["schemas"]["ReviewSchedule"][];
+        };
+        TranscriptWord: {
+            id: string;
+            text: string;
+            startSeconds: number;
+            endSeconds: number;
+            confidence?: number | null;
+        };
+        TranscriptSegment: {
+            id: string;
+            startSeconds: number;
+            endSeconds: number;
+            words: components["schemas"]["TranscriptWord"][];
+            spokenText: string;
+            ebookText?: string | null;
+            alignmentScore?: number | null;
+            individualEbookMatchTrusted?: boolean | null;
+        };
+        Transcript: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            chapterId: string;
+            version: number;
+            engine: string;
+            engineVersion?: string | null;
+            locale: string;
+            chapterFingerprint: string;
+            segments: components["schemas"]["TranscriptSegment"][];
+            quality: {
+                [key: string]: unknown;
+            };
+            ebookAlignment?: {
+                [key: string]: unknown;
+            } | null;
+            active: boolean;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        TranscriptCreate: {
+            /** Format: uuid */
+            clientId: string;
+            /** Format: uuid */
+            chapterId: string;
+            engine: string;
+            engineVersion?: string | null;
+            locale: string;
+            chapterFingerprint: string;
+            segments: components["schemas"]["TranscriptSegment"][];
+            quality: {
+                [key: string]: unknown;
+            };
+            ebookAlignment?: {
+                [key: string]: unknown;
+            } | null;
+        };
+        TranslationRequest: {
+            /** @enum {string} */
+            task: "word_context" | "sentence" | "chapter_batch";
+            sourceLanguage: string;
+            targetLanguage: string;
+            learnerLevel: string;
+            source: string;
+            contextBefore?: string | null;
+            contextAfter?: string | null;
+            editionFingerprint: string;
+            chapterFingerprint: string;
+            targetId?: string | null;
+            promptVersion: string;
+        };
+        LearningNote: {
+            source: string;
+            /** @enum {string} */
+            category: "phrasal_verb" | "phrase" | "idiom" | "challenging_word" | "challenging_combination" | "concept" | "grammar";
+            explanation: string;
+        };
+        TranslationResult: {
+            /** Format: uuid */
+            id: string;
+            translation: string;
+            notes: components["schemas"]["LearningNote"][];
+            /** @enum {string} */
+            provenance: "cache_shared_exact" | "cache_account" | "generated";
+            cacheKeyVersion?: number;
+            modelLabel?: string;
+            policyVersion: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ChapterSummaryRequest: {
+            /** Format: uuid */
+            chapterId: string;
+            sourceLanguage: string;
+            targetLanguage: string;
+            learnerLevel: string;
+            editionFingerprint: string;
+            chapterFingerprint: string;
+            segments?: string[];
+        };
+        ChapterSummary: {
+            /** Format: uuid */
+            id: string;
+            overview: string;
+            keyPoints: string[];
+            charactersOrIdeas?: string[];
+            keyConcepts: {
+                name: string;
+                explanation: string;
+            }[];
+            themes: string[];
+            /** @enum {string} */
+            provenance: "cache_shared_exact" | "cache_account" | "generated";
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ChatMessage: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            role: "user" | "assistant";
+            text: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ChatRequest: {
+            threadId?: string | null;
+            /** Format: uuid */
+            chapterId: string;
+            question: string;
+            sourceLanguage: string;
+            targetLanguage: string;
+            learnerLevel: string;
+            contextSegments?: string[];
+        };
+        ChatAccepted: {
+            /** Format: uuid */
+            threadId: string;
+            /** Format: uuid */
+            messageId: string;
+            /** Format: uri-reference */
+            streamUrl: string;
+        };
+        SyncMutation: {
+            /** Format: uuid */
+            mutationId: string;
+            /** @enum {string} */
+            entityType: "settings" | "book" | "chapter" | "progress" | "vocabulary" | "lexeme_state" | "review_event" | "transcript" | "transcript_overlay" | "translation_decision" | "summary_decision" | "chat_message" | "study_activity";
+            entityId: string;
+            /** @enum {string} */
+            operation: "upsert" | "delete" | "append";
+            baseRevision: number;
+            /** Format: date-time */
+            occurredAt: string;
+            payload: {
+                [key: string]: unknown;
+            };
+        };
+        SyncPushRequest: {
+            /** Format: uuid */
+            deviceId: string;
+            /** Format: uuid */
+            batchId: string;
+            baseCursor?: string | null;
+            mutations: components["schemas"]["SyncMutation"][];
+        };
+        SyncMutationResult: {
+            /** Format: uuid */
+            mutationId: string;
+            /** @enum {string} */
+            status: "applied" | "duplicate" | "conflict" | "rejected";
+            entityRevision?: number | null;
+            problem?: components["schemas"]["Problem"] | null;
+        };
+        SyncPushResponse: {
+            /** Format: uuid */
+            batchId: string;
+            results: components["schemas"]["SyncMutationResult"][];
+            cursor: string;
+        };
+        SyncChange: {
+            sequence: number;
+            entityType: string;
+            entityId: string;
+            /** @enum {string} */
+            operation: "upsert" | "delete" | "append";
+            revision: number;
+            /** Format: date-time */
+            changedAt: string;
+            payload: {
+                [key: string]: unknown;
+            };
+        };
+        SyncPullResponse: {
+            changes: components["schemas"]["SyncChange"][];
+            cursor: string;
+            hasMore: boolean;
+        };
+        ExportCreate: {
+            /** @enum {string} */
+            format: "zip_json" | "csv" | "anki_package";
+            include: ("profile" | "settings" | "books" | "progress" | "vocabulary" | "reviews" | "transcripts" | "translations" | "summaries" | "chat" | "study_activity")[];
+        };
+        ExportJob: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            status: "queued" | "running" | "ready" | "failed" | "expired";
+            format: string;
+            assetId?: string | null;
+            error?: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            completedAt?: string | null;
+            expiresAt?: string | null;
+        };
+        DeletionRequest: {
+            /** @constant */
+            confirmation: "DELETE MY ACCOUNT";
+            reason: string;
+            /** @default true */
+            exportFirst: boolean;
+        };
+        Job: {
+            /** Format: uuid */
+            id: string;
+            accountId?: string | null;
+            kind: string;
+            /** @enum {string} */
+            status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "dead_letter";
+            attempts: number;
+            maxAttempts?: number;
+            lastError?: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+            startedAt?: string | null;
+            finishedAt?: string | null;
+        };
+        AdminUser: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            accountId: string;
+            /** Format: email */
+            email: string;
+            displayName?: string | null;
+            /** @enum {string} */
+            status: "active" | "suspended" | "deletion_pending" | "deleted";
+            deviceCount: number;
+            bookCount: number;
+            storageBytes: number;
+            /** Format: date-time */
+            createdAt: string;
+            lastSeenAt: string | null;
+        };
+        AdminAction: {
+            reason: string;
+            until?: string | null;
+        };
+        LlmPolicy: {
+            /** Format: uuid */
+            id: string;
+            task: string;
+            region: string;
+            model: string;
+            promptVersion: string;
+            schemaVersion: string;
+            policyVersion: string;
+            enabled: boolean;
+            canaryPercent?: number;
+            maxInputTokens?: number;
+            maxOutputTokens?: number;
+            timeoutMs?: number;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        LlmPolicyPatch: {
+            reason: string;
+            enabled?: boolean;
+            canaryPercent?: number;
+            model?: string;
+            promptVersion?: string;
+            schemaVersion?: string;
+            maxInputTokens?: number;
+            maxOutputTokens?: number;
+            timeoutMs?: number;
+        };
+        CacheEntry: {
+            /** Format: uuid */
+            id: string;
+            task: string;
+            /** @enum {string} */
+            state: "active" | "quarantined" | "superseded" | "expired" | "purged";
+            sourceLanguage: string;
+            targetLanguage: string;
+            editionFingerprint?: string;
+            policyVersion: string;
+            hitCount: number;
+            acceptCount?: number;
+            rejectCount?: number;
+            /** Format: date-time */
+            createdAt: string;
+            lastHitAt?: string | null;
+        };
+        CacheAction: {
+            /** @enum {string} */
+            action: "quarantine" | "activate" | "expire" | "purge" | "regenerate";
+            reason: string;
+        };
+        AuditEvent: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            actorId: string;
+            action: string;
+            resourceType: string;
+            resourceId: string;
+            reason: string;
+            traceId?: string;
+            metadata?: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            createdAt: string;
+        };
+        MetricsSnapshot: {
+            /** Format: date-time */
+            from: string;
+            /** Format: date-time */
+            to: string;
+            users: {
+                [key: string]: unknown;
+            };
+            sync: {
+                [key: string]: unknown;
+            };
+            llm: {
+                [key: string]: unknown;
+            };
+            storage: {
+                [key: string]: unknown;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        CursorPageBooks: {
+            items: components["schemas"]["Book"][];
+            nextCursor: string | null;
+        };
+        CursorPageVocabulary: {
+            items: components["schemas"]["VocabularyOccurrence"][];
+            nextCursor: string | null;
+        };
+        CursorPageReviews: {
+            items: components["schemas"]["ReviewSchedule"][];
+            nextCursor: string | null;
+        };
+        CursorPageAdminUsers: {
+            items: components["schemas"]["AdminUser"][];
+            nextCursor: string | null;
+        };
+        CursorPageJobs: {
+            items: components["schemas"]["Job"][];
+            nextCursor: string | null;
+        };
+        CursorPageCache: {
+            items: components["schemas"]["CacheEntry"][];
+            nextCursor: string | null;
+        };
+        CursorPageAudit: {
+            items: components["schemas"]["AuditEvent"][];
+            nextCursor: string | null;
+        };
+    };
+    responses: {
+        /** @description Bad request */
+        BadRequest: {
+            headers: {
+                "X-Request-Id"?: string;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Problem"];
+            };
+        };
+        /** @description Authentication required */
+        Unauthorized: {
+            headers: {
+                "X-Request-Id"?: string;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Problem"];
+            };
+        };
+        /** @description Forbidden */
+        Forbidden: {
+            headers: {
+                "X-Request-Id"?: string;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Problem"];
+            };
+        };
+        /** @description Not found */
+        NotFound: {
+            headers: {
+                "X-Request-Id"?: string;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Problem"];
+            };
+        };
+        /** @description Conflict */
+        Conflict: {
+            headers: {
+                "X-Request-Id"?: string;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Problem"];
+            };
+        };
+        /** @description Unprocessable entity */
+        Unprocessable: {
+            headers: {
+                "X-Request-Id"?: string;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Problem"];
+            };
+        };
+        /** @description Rate limited */
+        RateLimited: {
+            headers: {
+                "X-Request-Id"?: string;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Problem"];
+            };
+        };
+        /** @description Internal server error */
+        InternalError: {
+            headers: {
+                "X-Request-Id"?: string;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Problem"];
+            };
+        };
+    };
+    parameters: {
+        /** @description Stable device UUID stored in Keychain. */
+        DeviceId: string;
+        /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+        IdempotencyKey: string;
+        Cursor: string;
+        Limit: number;
+        BookId: string;
+        ChapterId: string;
+        DevicePathId: string;
+        VocabularyId: string;
+        UploadId: string;
+        AssetId: string;
+        ExportId: string;
+        UserId: string;
+        PolicyId: string;
+        CacheId: string;
+        JobId: string;
+    };
+    requestBodies: never;
+    headers: never;
+    pathItems: never;
+}
+export type $defs = Record<string, never>;
+export interface operations {
+    getHealth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Health status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Health"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    bootstrapSession: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthBootstrapRequest"];
+            };
+        };
+        responses: {
+            /** @description Bootstrap state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootstrapResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    requestEmailOtp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EmailOtpRequest"];
+            };
+        };
+        responses: {
+            /** @description Code accepted for delivery */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    verifyEmailOtp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EmailOtpVerifyRequest"];
+            };
+        };
+        responses: {
+            /** @description Tokens */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenPair"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Profile */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Profile"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    patchProfile: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProfilePatch"];
+            };
+        };
+        responses: {
+            /** @description Updated profile */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Profile"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getUserSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserSettings"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    putUserSettings: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserSettingsPatch"];
+            };
+        };
+        responses: {
+            /** @description Updated settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserSettings"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listDevices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Devices */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Device"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    revokeDevice: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                deviceId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Device revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listBooks: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Book page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CursorPageBooks"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createBook: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BookCreate"];
+            };
+        };
+        responses: {
+            /** @description Created book */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Book"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getBook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bookId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Book */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Book"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteBook: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                bookId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Book deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    patchBook: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                bookId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BookPatch"];
+            };
+        };
+        responses: {
+            /** @description Updated book */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Book"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listBookChapters: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bookId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Chapters */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Chapter"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getChapter: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                chapterId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Chapter */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Chapter"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createUpload: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UploadCreate"];
+            };
+        };
+        responses: {
+            /** @description Upload ticket */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UploadTicket"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    completeUpload: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                uploadId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UploadComplete"];
+            };
+        };
+        responses: {
+            /** @description Ready asset */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Asset"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createAssetDownload: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                assetId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Signed download */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SignedDownload"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getReadingProgress: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                chapterId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reading progress */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadingProgress"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    putReadingProgress: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                chapterId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReadingProgressUpsert"];
+            };
+        };
+        responses: {
+            /** @description Updated progress */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadingProgress"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listVocabulary: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+                bookId?: string;
+                state?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Vocabulary page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CursorPageVocabulary"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createVocabulary: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VocabularyCreate"];
+            };
+        };
+        responses: {
+            /** @description Created vocabulary occurrence */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VocabularyOccurrence"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getVocabulary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                vocabularyId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Vocabulary occurrence */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VocabularyOccurrence"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteVocabulary: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                vocabularyId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Vocabulary occurrence deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    patchVocabulary: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                vocabularyId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VocabularyPatch"];
+            };
+        };
+        responses: {
+            /** @description Updated vocabulary occurrence */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VocabularyOccurrence"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listDueReviews: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Due review page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CursorPageReviews"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    submitReviews: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReviewSubmitRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated schedules */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewSubmitResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getActiveTranscript: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                chapterId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Transcript */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Transcript"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createTranscript: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TranscriptCreate"];
+            };
+        };
+        responses: {
+            /** @description Created transcript */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Transcript"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createTranslation: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TranslationRequest"];
+            };
+        };
+        responses: {
+            /** @description Translation result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TranslationResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createChapterSummary: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChapterSummaryRequest"];
+            };
+        };
+        responses: {
+            /** @description Chapter summary */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChapterSummary"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createChapterChatMessage: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChatRequest"];
+            };
+        };
+        responses: {
+            /** @description Chat accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatAccepted"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    pushSyncMutations: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SyncPushRequest"];
+            };
+        };
+        responses: {
+            /** @description Push result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncPushResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    pullSyncChanges: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+            };
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Change page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncPullResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createAccountExport: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExportCreate"];
+            };
+        };
+        responses: {
+            /** @description Export queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExportJob"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getAccountExport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                exportId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Export status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExportJob"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    requestAccountDeletion: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeletionRequest"];
+            };
+        };
+        responses: {
+            /** @description Deletion queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminListUsers: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+                query?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description User page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CursorPageAdminUsers"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminGetUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description User metadata */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUser"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminSuspendUser: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminAction"];
+            };
+        };
+        responses: {
+            /** @description Updated user */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUser"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminUnsuspendUser: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminAction"];
+            };
+        };
+        responses: {
+            /** @description Updated user */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUser"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminRevokeUserSessions: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminAction"];
+            };
+        };
+        responses: {
+            /** @description Revocation job queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminListLlmPolicies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Policies */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LlmPolicy"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminPatchLlmPolicy: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                policyId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LlmPolicyPatch"];
+            };
+        };
+        responses: {
+            /** @description Updated policy */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LlmPolicy"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminListCacheEntries: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+                task?: string;
+                state?: string;
+                editionFingerprint?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cache page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CursorPageCache"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminGetCacheEntry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                cacheId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cache entry */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CacheEntry"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminActOnCacheEntry: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                cacheId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CacheAction"];
+            };
+        };
+        responses: {
+            /** @description Cache action accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminListJobs: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+                status?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Job page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CursorPageJobs"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminRetryJob: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                jobId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminAction"];
+            };
+        };
+        responses: {
+            /** @description Retry queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminCancelJob: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                jobId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminAction"];
+            };
+        };
+        responses: {
+            /** @description Cancellation accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminGetMetrics: {
+        parameters: {
+            query: {
+                from: string;
+                to: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Metrics snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetricsSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminListAuditEvents: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+                actorId?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Audit page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CursorPageAudit"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+}

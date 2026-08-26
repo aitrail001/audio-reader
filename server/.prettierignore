@@ -1,3 +1,4 @@
+packages/contract/src/generated/
 pnpm-lock.yaml
 node_modules
 dist
@@ -5,3 +6,4 @@ dist
 coverage
 .vite
 *.tsbuildinfo
+
