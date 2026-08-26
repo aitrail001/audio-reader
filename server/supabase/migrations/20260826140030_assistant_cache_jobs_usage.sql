@@ -77,6 +77,8 @@ create table public.user_assistant_results (
     foreign key (user_id, book_id) references public.books (user_id, id) on delete set null,
   constraint user_assistant_results_user_chapter_fkey
     foreign key (user_id, chapter_id) references public.chapters (user_id, id) on delete set null,
+  constraint user_assistant_results_book_chapter_fkey
+    foreign key (book_id, chapter_id) references public.chapters (book_id, id) on delete set null,
   constraint user_assistant_results_user_id_id_key unique (user_id, id)
 );
 

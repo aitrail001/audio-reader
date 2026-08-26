@@ -301,6 +301,13 @@ describe("multi-user postgres schema migrations", () => {
         refTable: "user_assistant_results",
         refColumns: ["user_id", "id"],
       },
+      {
+        table: "user_assistant_results",
+        columns: ["book_id", "chapter_id"],
+        refTable: "chapters",
+        refColumns: ["book_id", "id"],
+        onDelete: "set null",
+      },
     ] as const;
     for (const fk of required) {
       expect(hasForeignKey(schema, fk), `${fk.table} (${fk.columns.join(", ")})`).toBe(true);
