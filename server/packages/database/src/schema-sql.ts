@@ -16,6 +16,7 @@ export type ForeignKey = {
   refTable: string;
   refColumns: string[];
   onDelete: string | undefined;
+  onDeleteColumns: string[] | undefined;
 };
 
 export type IndexDefinition = {
@@ -212,12 +213,14 @@ function parseForeignKeys(table: string, sql: string, implicitColumns?: string[]
     const columns = splitIdentifierList(match[1] ?? "");
     const refTable = match[2];
     if (refTable !== undefined && columns.length > 0) {
+      const onDelete = parseOnDelete(sql);
       keys.push({
         table,
         columns,
         refTable,
         refColumns: splitIdentifierList(match[3] ?? columns.join(", ")),
-        onDelete: parseOnDelete(sql),
+        onDelete: onDelete?.action,
+        onDeleteColumns: onDelete?.columns,
       });
     }
     match = tableLevel.exec(sql);
@@ -230,12 +233,14 @@ function parseForeignKeys(table: string, sql: string, implicitColumns?: string[]
   while (match !== null) {
     const refTable = match[1];
     if (refTable !== undefined) {
+      const onDelete = parseOnDelete(sql);
       keys.push({
         table,
         columns: implicitColumns ?? [],
         refTable,
         refColumns: splitIdentifierList(match[2] ?? ""),
-        onDelete: parseOnDelete(sql),
+        onDelete: onDelete?.action,
+        onDeleteColumns: onDelete?.columns,
       });
     }
     match = columnLevel.exec(sql);
@@ -255,9 +260,19 @@ function parseUniqueConstraint(sql: string): UniqueConstraint | undefined {
   };
 }
 
-function parseOnDelete(sql: string): string | undefined {
-  const match = /on\s+delete\s+(cascade|set\s+null|set\s+default|restrict|no\s+action)/i.exec(sql);
-  return match?.[1]?.toLowerCase().replace(/\s+/g, " ");
+function parseOnDelete(sql: string): { action: string; columns: string[] | undefined } | undefined {
+  const match =
+    /on\s+delete\s+(cascade|restrict|no\s+action|set\s+null|set\s+default)(?:\s*\(([^)]+)\))?/i.exec(
+      sql,
+    );
+  if (match?.[1] === undefined) {
+    return undefined;
+  }
+  const action = match[1].toLowerCase().replace(/\s+/g, " ");
+  if (match[2] === undefined || (action !== "set null" && action !== "set default")) {
+    return { action, columns: undefined };
+  }
+  return { action, columns: splitIdentifierList(match[2]) };
 }
 
 function splitIdentifierList(value: string): string[] {

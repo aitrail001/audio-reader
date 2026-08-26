@@ -84,13 +84,13 @@ create table public.book_assets (
 alter table public.books
   add constraint books_cover_asset_user_fkey
   foreign key (user_id, cover_asset_id) references public.book_assets (user_id, id)
-  on delete set null
+  on delete set null (cover_asset_id)
   deferrable initially deferred;
 
 alter table public.books
   add constraint books_cover_asset_book_fkey
   foreign key (id, cover_asset_id) references public.book_assets (book_id, id)
-  on delete set null
+  on delete set null (cover_asset_id)
   deferrable initially deferred;
 
 create table public.chapters (
@@ -116,10 +116,10 @@ create table public.chapters (
     foreign key (user_id, book_id) references public.books (user_id, id) on delete cascade,
   constraint chapters_user_audio_asset_fkey
     foreign key (user_id, audio_asset_id) references public.book_assets (user_id, id)
-    on delete set null,
+    on delete set null (audio_asset_id),
   constraint chapters_book_audio_asset_fkey
     foreign key (book_id, audio_asset_id) references public.book_assets (book_id, id)
-    on delete set null,
+    on delete set null (audio_asset_id),
   constraint chapters_user_id_id_key unique (user_id, id),
   constraint chapters_book_id_id_key unique (book_id, id),
   constraint chapters_book_index_deleted_at_key
@@ -154,7 +154,8 @@ create table public.reading_progress (
   constraint reading_progress_book_chapter_fkey
     foreign key (book_id, chapter_id) references public.chapters (book_id, id) on delete cascade,
   constraint reading_progress_user_device_fkey
-    foreign key (user_id, device_id) references public.devices (user_id, id) on delete set null
+    foreign key (user_id, device_id) references public.devices (user_id, id)
+    on delete set null (device_id)
 );
 
 create index books_user_id_updated_idx

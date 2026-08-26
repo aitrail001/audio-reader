@@ -195,9 +195,11 @@ create table public.review_events (
     foreign key (user_id, vocabulary_id) references public.vocabulary_occurrences (user_id, id)
     on delete cascade,
   constraint review_events_user_card_fkey
-    foreign key (user_id, card_id) references public.review_cards (user_id, id) on delete set null,
+    foreign key (user_id, card_id) references public.review_cards (user_id, id)
+    on delete set null (card_id),
   constraint review_events_user_device_fkey
-    foreign key (user_id, device_id) references public.devices (user_id, id) on delete set null
+    foreign key (user_id, device_id) references public.devices (user_id, id)
+    on delete set null (device_id)
 );
 
 create unique index transcript_revisions_chapter_version_uidx

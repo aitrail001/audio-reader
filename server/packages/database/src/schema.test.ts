@@ -35,6 +35,14 @@ function loadMigrationSql(): string {
   return files.map((name) => readFileSync(join(migrationsDir, name), "utf8")).join("\n");
 }
 
+function columnIsNotNull(definition: string | undefined): boolean {
+  if (definition === undefined) {
+    return false;
+  }
+  const sql = definition.toLowerCase();
+  return /\bnot null\b/.test(sql) || /\bprimary key\b/.test(sql);
+}
+
 function sameColumns(left: readonly string[], right: readonly string[]): boolean {
   return (
     left.length === right.length &&
@@ -311,6 +319,35 @@ describe("multi-user postgres schema migrations", () => {
     ] as const;
     for (const fk of required) {
       expect(hasForeignKey(schema, fk), `${fk.table} (${fk.columns.join(", ")})`).toBe(true);
+    }
+  });
+
+  it("composite set-null fks only null nullable columns", () => {
+    const schema = parsePostgresSchema(loadMigrationSql());
+    const mixed = schema.foreignKeys.filter(
+      (fk) => fk.onDelete === "set null" && fk.columns.length > 1,
+    );
+    expect(mixed.length).toBeGreaterThan(0);
+    for (const fk of mixed) {
+      const table = schema.tables.get(fk.table);
+      expect(table, fk.table).toBeDefined();
+      if (table === undefined) {
+        continue;
+      }
+      const notNullColumns = fk.columns.filter((column) =>
+        columnIsNotNull(table.columns.get(column)),
+      );
+      const label = `${fk.table} (${fk.columns.join(", ")})`;
+      if (notNullColumns.length === 0) {
+        continue;
+      }
+      expect(fk.onDeleteColumns, label).toBeDefined();
+      const named = fk.onDeleteColumns ?? [];
+      expect(named.length, label).toBeGreaterThan(0);
+      for (const column of named) {
+        expect(fk.columns, `${label} SET NULL ${column}`).toContain(column);
+        expect(notNullColumns, `${label} SET NULL ${column} is NOT NULL`).not.toContain(column);
+      }
     }
   });
 

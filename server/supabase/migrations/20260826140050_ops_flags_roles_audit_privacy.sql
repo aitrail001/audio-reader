@@ -97,7 +97,8 @@ create table public.privacy_requests (
   constraint privacy_requests_format_check
     check (format is null or format in ('zip_json', 'csv', 'anki_package')),
   constraint privacy_requests_user_asset_fkey
-    foreign key (user_id, asset_id) references public.book_assets (user_id, id) on delete set null
+    foreign key (user_id, asset_id) references public.book_assets (user_id, id)
+    on delete set null (asset_id)
 );
 
 create unique index admin_roles_user_role_uidx

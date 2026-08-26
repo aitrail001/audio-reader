@@ -74,9 +74,11 @@ create table public.user_assistant_results (
     check (status in ('pending', 'accepted', 'rejected')),
   constraint user_assistant_results_server_version_check check (server_version >= 0),
   constraint user_assistant_results_user_book_fkey
-    foreign key (user_id, book_id) references public.books (user_id, id) on delete set null,
+    foreign key (user_id, book_id) references public.books (user_id, id)
+    on delete set null (book_id),
   constraint user_assistant_results_user_chapter_fkey
-    foreign key (user_id, chapter_id) references public.chapters (user_id, id) on delete set null,
+    foreign key (user_id, chapter_id) references public.chapters (user_id, id)
+    on delete set null (chapter_id),
   constraint user_assistant_results_book_chapter_fkey
     foreign key (book_id, chapter_id) references public.chapters (book_id, id) on delete set null,
   constraint user_assistant_results_user_id_id_key unique (user_id, id)
@@ -100,7 +102,7 @@ create table public.usage_ledger (
 alter table public.vocabulary_occurrences
   add constraint vocabulary_occurrences_translation_id_fkey
   foreign key (user_id, translation_id) references public.user_assistant_results (user_id, id)
-  on delete set null;
+  on delete set null (translation_id);
 
 create index assistant_cache_entries_task_state_idx
   on public.assistant_cache_entries (task_type, state, created_at desc);
