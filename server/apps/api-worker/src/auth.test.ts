@@ -4,7 +4,10 @@ import { describe, expect, it } from "vitest";
 import { createApiAppFromEnv, createTestApp } from "./app";
 
 const DEVICE_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+const DEVICE_B = "3fa85f64-5717-4562-b3fc-2c963f66afa7";
 const EMAIL = "reader@example.com";
+const ALICE_EMAIL = "alice@example.com";
+const BOB_EMAIL = "bob@example.com";
 const UNKNOWN_EMAIL = "unknown@example.com";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -40,6 +43,52 @@ function createAuthApp(options: { now?: () => Date; generateOtp?: () => string }
 
 function bearer(token: string): Record<string, string> {
   return { authorization: `Bearer ${token}` };
+}
+
+function accessToken(tokens: unknown): string {
+  if (!isRecord(tokens) || typeof tokens.accessToken !== "string") {
+    throw new Error("expected token pair");
+  }
+  return tokens.accessToken;
+}
+
+function refreshToken(tokens: unknown): string {
+  if (!isRecord(tokens) || typeof tokens.refreshToken !== "string") {
+    throw new Error("expected token pair");
+  }
+  return tokens.refreshToken;
+}
+
+async function signIn(
+  app: { fetch(request: Request): Promise<Response> },
+  email: string,
+  deviceId: string,
+): Promise<{ accessToken: string; refreshToken: string }> {
+  await app.fetch(jsonPost("/v1/auth/email-otp/request", { email }));
+  const verified = await app.fetch(
+    jsonPost("/v1/auth/email-otp/verify", { email, code: "123456", deviceId }),
+  );
+  const tokens = await readJson(verified);
+  return { accessToken: accessToken(tokens), refreshToken: refreshToken(tokens) };
+}
+
+async function bootstrapDevice(
+  app: { fetch(request: Request): Promise<Response> },
+  access: string,
+  deviceId: string,
+  idempotencyKey: string,
+): Promise<Response> {
+  return app.fetch(
+    jsonPost(
+      "/v1/auth/bootstrap",
+      { deviceId, platform: "macos", appVersion: "1.0.0" },
+      {
+        ...bearer(access),
+        "X-Device-Id": deviceId,
+        "Idempotency-Key": idempotencyKey,
+      },
+    ),
+  );
 }
 
 async function pkcePair(): Promise<{ verifier: string; challenge: string }> {
@@ -365,5 +414,100 @@ describe("product authentication API", () => {
       }),
     );
     expect(otpVerify.status).toBe(503);
+  });
+
+  it("lists only the signed-in user's devices and cannot revoke another user's device", async () => {
+    const { app } = createAuthApp();
+    const alice = await signIn(app, ALICE_EMAIL, DEVICE_ID);
+    const bob = await signIn(app, BOB_EMAIL, DEVICE_B);
+    expect(
+      (await bootstrapDevice(app, alice.accessToken, DEVICE_ID, "idempotency-alice-01")).status,
+    ).toBe(200);
+    expect(
+      (await bootstrapDevice(app, bob.accessToken, DEVICE_B, "idempotency-bob-01")).status,
+    ).toBe(200);
+
+    const aliceList = await app.fetch(
+      new Request("http://localhost/v1/me/devices", { headers: bearer(alice.accessToken) }),
+    );
+    expect(aliceList.status).toBe(200);
+    const aliceDevices = await readJson(aliceList);
+    expect(aliceDevices).toEqual([
+      expect.objectContaining({ id: DEVICE_ID, revoked: false, platform: "macos" }),
+    ]);
+
+    const steal = await app.fetch(
+      new Request(`http://localhost/v1/me/devices/${DEVICE_B}`, {
+        method: "DELETE",
+        headers: {
+          ...bearer(alice.accessToken),
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-alice-revoke-bob",
+        },
+      }),
+    );
+    expect(steal.status).toBe(404);
+    const stealBody = await readJson(steal);
+    expect(isRecord(stealBody) && stealBody.code).toBe("not_found");
+
+    const bobList = await app.fetch(
+      new Request("http://localhost/v1/me/devices", { headers: bearer(bob.accessToken) }),
+    );
+    const bobDevices = await readJson(bobList);
+    expect(bobDevices).toEqual([expect.objectContaining({ id: DEVICE_B, revoked: false })]);
+
+    const bobRefresh = await app.fetch(
+      jsonPost("/v1/auth/token/refresh", { refreshToken: bob.refreshToken }),
+    );
+    expect(bobRefresh.status).toBe(200);
+  });
+
+  it("rejects refresh after the device is revoked", async () => {
+    const { app } = createAuthApp();
+    const session = await signIn(app, EMAIL, DEVICE_ID);
+    expect(
+      (await bootstrapDevice(app, session.accessToken, DEVICE_ID, "idempotency-boot-01")).status,
+    ).toBe(200);
+
+    const revoked = await app.fetch(
+      new Request(`http://localhost/v1/me/devices/${DEVICE_ID}`, {
+        method: "DELETE",
+        headers: {
+          ...bearer(session.accessToken),
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-revoke-self",
+        },
+      }),
+    );
+    expect(revoked.status).toBe(204);
+
+    const listed = await app.fetch(
+      new Request("http://localhost/v1/me/devices", { headers: bearer(session.accessToken) }),
+    );
+    const devices = await readJson(listed);
+    expect(devices).toEqual([expect.objectContaining({ id: DEVICE_ID, revoked: true })]);
+
+    const refresh = await app.fetch(
+      jsonPost("/v1/auth/token/refresh", { refreshToken: session.refreshToken }),
+    );
+    expect(refresh.status).toBe(401);
+    const refreshBody = await readJson(refresh);
+    expect(isRecord(refreshBody) && refreshBody.code).toBe("unauthorized");
+  });
+
+  it("requires a session to list or revoke devices", async () => {
+    const { app } = createAuthApp();
+    const list = await app.fetch(new Request("http://localhost/v1/me/devices"));
+    expect(list.status).toBe(401);
+    const revoke = await app.fetch(
+      new Request(`http://localhost/v1/me/devices/${DEVICE_ID}`, {
+        method: "DELETE",
+        headers: {
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-anon-revoke",
+        },
+      }),
+    );
+    expect(revoke.status).toBe(401);
   });
 });

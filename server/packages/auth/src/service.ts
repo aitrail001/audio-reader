@@ -82,7 +82,11 @@ export type AuthFailureCode =
   | "expired"
   | "missing_subject"
   | "not_ready"
-  | "already_linked";
+  | "already_linked"
+  | "device_revoked"
+  | "not_found";
+
+export type DeviceRevokeResult = { ok: true } | { ok: false; code: "not_found" };
 
 export type AuthResult<T> = { ok: true; value: T } | { ok: false; code: AuthFailureCode };
 
@@ -100,6 +104,7 @@ export type OAuthExchangeInput = {
   codeVerifier: string;
   redirectUri: string;
   state?: string;
+  deviceId?: string;
 };
 
 export type LinkIdentityInput = {
@@ -134,7 +139,11 @@ export type AuthService = {
   canIssueSessions(): boolean;
   authenticate(request: Request): Promise<Principal | null>;
   requestEmailOtp(email: string): Promise<AuthResult<{ accepted: true }>>;
-  verifyEmailOtp(email: string, code: string): Promise<AuthResult<AuthenticatedSession>>;
+  verifyEmailOtp(
+    email: string,
+    code: string,
+    deviceId?: string,
+  ): Promise<AuthResult<AuthenticatedSession>>;
   authorizeOAuth(
     input: OAuthAuthorizeInput,
   ): Promise<AuthResult<{ authorizationUrl: string; state: string }>>;
@@ -144,7 +153,9 @@ export type AuthService = {
   ): Promise<AuthResult<{ tokens: SessionTokens; principal: Principal }>>;
   logout(refreshToken: string): Promise<void>;
   getProfile(principal: Principal): ProductProfile | undefined;
-  bootstrap(principal: Principal, input: BootstrapDeviceInput): BootstrapSession;
+  bootstrap(principal: Principal, input: BootstrapDeviceInput): AuthResult<BootstrapSession>;
+  listDevices(principal: Principal): ProductDevice[];
+  revokeDevice(principal: Principal, deviceId: string): DeviceRevokeResult;
   linkIdentity(
     principal: Principal,
     input: LinkIdentityInput,
@@ -181,6 +192,8 @@ type OAuthCodeRecord = {
 type RefreshRecord = {
   subject: string;
   expiresAtMs: number;
+  // Bound at login so revoke can kill this device's session without logging out others.
+  deviceId?: string;
 };
 
 const encoder = new TextEncoder();
@@ -272,9 +285,31 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
     return account;
   }
 
+  function deviceKey(accountId: string, deviceId: string): string {
+    return `${accountId}:${deviceId}`;
+  }
+
+  function dropRefreshTokens(subject: string, deviceId: string): void {
+    for (const [token, record] of refreshTokens) {
+      if (record.subject === subject && record.deviceId === deviceId) {
+        refreshTokens.delete(token);
+      }
+    }
+  }
+
+  function reactivateDevice(accountId: string, deviceId: string): void {
+    const existing = devices.get(deviceKey(accountId, deviceId));
+    if (existing?.revoked) {
+      existing.revoked = false;
+      existing.revokedAt = null;
+      existing.lastSeenAt = currentIso();
+    }
+  }
+
   async function issueSession(
     account: AccountRecord,
     email: string,
+    deviceId?: string,
   ): Promise<AuthenticatedSession> {
     const profile = profiles.get(account.profileId);
     if (profile === undefined) {
@@ -283,9 +318,13 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
     const expires = new Date(now().getTime() + (options.jwt.accessTokenTtlSeconds ?? 3600) * 1000);
     const accessToken = await signAccessToken({ sub: account.subject, email }, options.jwt, now());
     const refreshToken = randomToken();
+    if (deviceId !== undefined) {
+      reactivateDevice(account.id, deviceId);
+    }
     refreshTokens.set(refreshToken, {
       subject: account.subject,
       expiresAtMs: now().getTime() + refreshTtlSeconds * 1000,
+      ...(deviceId === undefined ? {} : { deviceId }),
     });
     return {
       tokens: {
@@ -382,7 +421,7 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
       return Promise.resolve({ ok: true as const, value: { accepted: true as const } });
     },
 
-    async verifyEmailOtp(email, code) {
+    async verifyEmailOtp(email, code, deviceId) {
       if (!allowLocalIssuance) {
         return { ok: false, code: "not_ready" };
       }
@@ -393,7 +432,7 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
       }
       otps.delete(normalized);
       const account = accountForIdentity("email", normalized, normalized);
-      return { ok: true, value: await issueSession(account, normalized) };
+      return { ok: true, value: await issueSession(account, normalized, deviceId) };
     },
 
     authorizeOAuth(input) {
@@ -451,7 +490,10 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
         record.identity.providerSubject,
         record.identity.email,
       );
-      return { ok: true, value: await issueSession(account, record.identity.email) };
+      return {
+        ok: true,
+        value: await issueSession(account, record.identity.email, input.deviceId),
+      };
     },
 
     async refresh(refreshToken) {
@@ -459,14 +501,22 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
       if (record === undefined || record.expiresAtMs <= now().getTime()) {
         return { ok: false, code: "invalid_refresh" };
       }
-      refreshTokens.delete(refreshToken);
       const accountId = subjects.get(record.subject);
       const account = accountId === undefined ? undefined : getAccount(accountId);
       const profile = account === undefined ? undefined : profiles.get(account.profileId);
       if (account === undefined || profile === undefined) {
+        refreshTokens.delete(refreshToken);
         return { ok: false, code: "invalid_refresh" };
       }
-      const session = await issueSession(account, profile.email);
+      if (record.deviceId !== undefined) {
+        const device = devices.get(deviceKey(account.id, record.deviceId));
+        if (device?.revoked) {
+          refreshTokens.delete(refreshToken);
+          return { ok: false, code: "invalid_refresh" };
+        }
+      }
+      refreshTokens.delete(refreshToken);
+      const session = await issueSession(account, profile.email, record.deviceId);
       return { ok: true, value: { tokens: session.tokens, principal: session.principal } };
     },
 
@@ -482,8 +532,11 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
     bootstrap(principal, input) {
       const profile = ensureProfile(principal);
       const timestamp = currentIso();
-      const deviceKey = `${profile.accountId}:${input.deviceId}`;
-      const existing = devices.get(deviceKey);
+      const key = deviceKey(profile.accountId, input.deviceId);
+      const existing = devices.get(key);
+      if (existing?.revoked) {
+        return { ok: false, code: "device_revoked" };
+      }
       const device: ProductDevice = {
         id: input.deviceId,
         platform: input.platform,
@@ -497,7 +550,7 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
       if (input.buildNumber !== undefined) {
         device.buildNumber = input.buildNumber;
       }
-      devices.set(deviceKey, device);
+      devices.set(key, device);
       let userSettings = settings.get(profile.accountId);
       if (userSettings === undefined) {
         userSettings = {
@@ -513,13 +566,44 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
         settings.set(profile.accountId, userSettings);
       }
       return {
-        profile,
-        device,
-        settings: userSettings,
-        featureFlags: [],
-        quotas: [],
-        syncCursor: "0",
+        ok: true,
+        value: {
+          profile,
+          device,
+          settings: userSettings,
+          featureFlags: [],
+          quotas: [],
+          syncCursor: "0",
+        },
       };
+    },
+
+    listDevices(principal) {
+      const prefix = `${principal.accountId}:`;
+      const listed: ProductDevice[] = [];
+      for (const [key, device] of devices) {
+        if (key.startsWith(prefix)) {
+          listed.push({ ...device });
+        }
+      }
+      listed.sort((left, right) => {
+        const created = left.createdAt.localeCompare(right.createdAt);
+        return created === 0 ? left.id.localeCompare(right.id) : created;
+      });
+      return listed;
+    },
+
+    revokeDevice(principal, deviceId) {
+      const existing = devices.get(deviceKey(principal.accountId, deviceId));
+      if (existing === undefined) {
+        return { ok: false, code: "not_found" };
+      }
+      if (!existing.revoked) {
+        existing.revoked = true;
+        existing.revokedAt = currentIso();
+      }
+      dropRefreshTokens(principal.subject, deviceId);
+      return { ok: true };
     },
 
     linkIdentity(principal, input) {

@@ -4,6 +4,20 @@ import { createMemoryAuthService } from "./service";
 
 const EMAIL = "reader@example.com";
 const UNKNOWN_EMAIL = "unknown@example.com";
+const ALICE_EMAIL = "alice@example.com";
+const BOB_EMAIL = "bob@example.com";
+const DEVICE_A = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+const DEVICE_B = "3fa85f64-5717-4562-b3fc-2c963f66afa7";
+const DEVICE_C = "3fa85f64-5717-4562-b3fc-2c963f66afa8";
+
+function macosDevice(deviceId: string, name?: string) {
+  return {
+    deviceId,
+    platform: "macos" as const,
+    appVersion: "1.0.0",
+    ...(name === undefined ? {} : { deviceName: name }),
+  };
+}
 
 function base64Url(bytes: Uint8Array): string {
   let binary = "";
@@ -284,5 +298,109 @@ describe("memory auth service", () => {
     const afterLogout = await auth.refresh(refreshed.value.tokens.refreshToken);
     expect(afterLogout).toEqual({ ok: false, code: "invalid_refresh" });
     await expect(auth.logout(refreshed.value.tokens.refreshToken)).resolves.toBeUndefined();
+  });
+
+  it("registers devices on bootstrap and lists only the caller's devices", async () => {
+    const auth = createMemoryAuthService({
+      jwt: LOCAL_JWT_CONFIG,
+      generateOtp: () => "444444",
+    });
+    await auth.requestEmailOtp(ALICE_EMAIL);
+    const alice = await auth.verifyEmailOtp(ALICE_EMAIL, "444444", DEVICE_A);
+    expect(alice.ok).toBe(true);
+    if (!alice.ok) {
+      return;
+    }
+    await auth.requestEmailOtp(BOB_EMAIL);
+    const bob = await auth.verifyEmailOtp(BOB_EMAIL, "444444", DEVICE_B);
+    expect(bob.ok).toBe(true);
+    if (!bob.ok) {
+      return;
+    }
+
+    const aliceBoot = auth.bootstrap(alice.value.principal, macosDevice(DEVICE_A, "Alice Mac"));
+    const bobBoot = auth.bootstrap(bob.value.principal, macosDevice(DEVICE_B, "Bob Mac"));
+    expect(aliceBoot.ok).toBe(true);
+    expect(bobBoot.ok).toBe(true);
+    if (!aliceBoot.ok || !bobBoot.ok) {
+      return;
+    }
+    expect(aliceBoot.value.device.id).toBe(DEVICE_A);
+    expect(aliceBoot.value.device.revoked).toBe(false);
+
+    const aliceDevices = auth.listDevices(alice.value.principal);
+    const bobDevices = auth.listDevices(bob.value.principal);
+    expect(aliceDevices.map((device) => device.id)).toEqual([DEVICE_A]);
+    expect(bobDevices.map((device) => device.id)).toEqual([DEVICE_B]);
+    expect(aliceDevices[0]?.name).toBe("Alice Mac");
+  });
+
+  it("does not let one user list or revoke another user's devices", async () => {
+    const auth = createMemoryAuthService({
+      jwt: LOCAL_JWT_CONFIG,
+      generateOtp: () => "555555",
+    });
+    await auth.requestEmailOtp(ALICE_EMAIL);
+    const alice = await auth.verifyEmailOtp(ALICE_EMAIL, "555555", DEVICE_A);
+    await auth.requestEmailOtp(BOB_EMAIL);
+    const bob = await auth.verifyEmailOtp(BOB_EMAIL, "555555", DEVICE_B);
+    expect(alice.ok && bob.ok).toBe(true);
+    if (!alice.ok || !bob.ok) {
+      return;
+    }
+    expect(auth.bootstrap(alice.value.principal, macosDevice(DEVICE_A)).ok).toBe(true);
+    expect(auth.bootstrap(bob.value.principal, macosDevice(DEVICE_B)).ok).toBe(true);
+
+    expect(auth.listDevices(alice.value.principal).some((device) => device.id === DEVICE_B)).toBe(
+      false,
+    );
+    expect(auth.revokeDevice(alice.value.principal, DEVICE_B)).toEqual({
+      ok: false,
+      code: "not_found",
+    });
+    expect(auth.listDevices(bob.value.principal)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: DEVICE_B, revoked: false })]),
+    );
+    const bobRefresh = await auth.refresh(bob.value.tokens.refreshToken);
+    expect(bobRefresh.ok).toBe(true);
+  });
+
+  it("rejects refresh after the bound device is revoked", async () => {
+    const auth = createMemoryAuthService({
+      jwt: LOCAL_JWT_CONFIG,
+      generateOtp: () => "666666",
+    });
+    await auth.requestEmailOtp(EMAIL);
+    const first = await auth.verifyEmailOtp(EMAIL, "666666", DEVICE_A);
+    expect(first.ok).toBe(true);
+    if (!first.ok) {
+      return;
+    }
+    expect(auth.bootstrap(first.value.principal, macosDevice(DEVICE_A)).ok).toBe(true);
+    await auth.requestEmailOtp(EMAIL);
+    const second = await auth.verifyEmailOtp(EMAIL, "666666", DEVICE_C);
+    expect(second.ok).toBe(true);
+    if (!second.ok) {
+      return;
+    }
+    expect(auth.bootstrap(second.value.principal, macosDevice(DEVICE_C)).ok).toBe(true);
+
+    expect(auth.revokeDevice(first.value.principal, DEVICE_A)).toEqual({ ok: true });
+    const revokedRefresh = await auth.refresh(first.value.tokens.refreshToken);
+    expect(revokedRefresh).toEqual({ ok: false, code: "invalid_refresh" });
+
+    const otherRefresh = await auth.refresh(second.value.tokens.refreshToken);
+    expect(otherRefresh.ok).toBe(true);
+
+    const listed = auth.listDevices(first.value.principal);
+    expect(listed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: DEVICE_A, revoked: true }),
+        expect.objectContaining({ id: DEVICE_C, revoked: false }),
+      ]),
+    );
+
+    const rebootstrap = auth.bootstrap(first.value.principal, macosDevice(DEVICE_A));
+    expect(rebootstrap).toEqual({ ok: false, code: "device_revoked" });
   });
 });

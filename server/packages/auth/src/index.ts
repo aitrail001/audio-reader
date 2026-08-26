@@ -23,6 +23,7 @@ export {
   type AuthenticatedSession,
   type BootstrapDeviceInput,
   type BootstrapSession,
+  type DeviceRevokeResult,
   type IdentityProvider,
   type LinkIdentityInput,
   type MemoryAuthServiceOptions,

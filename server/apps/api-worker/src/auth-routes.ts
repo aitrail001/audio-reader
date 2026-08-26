@@ -31,7 +31,28 @@ const AUTH_METHODS: Record<string, readonly string[]> = {
   "/v1/auth/logout": ["POST"],
   "/v1/auth/bootstrap": ["POST"],
   "/v1/me": ["GET", "HEAD"],
+  "/v1/me/devices": ["GET", "HEAD"],
+  "/v1/me/devices/{deviceId}": ["DELETE"],
 };
+
+const DEVICE_REVOKE_PATH = /^\/v1\/me\/devices\/([^/]+)$/;
+
+type ResolvedAuthPath = {
+  route: string;
+  deviceId?: string;
+};
+
+function resolveAuthPath(path: string): ResolvedAuthPath | undefined {
+  if (path in AUTH_METHODS) {
+    return { route: path };
+  }
+  const match = DEVICE_REVOKE_PATH.exec(path);
+  const deviceId = match?.[1];
+  if (deviceId !== undefined) {
+    return { route: "/v1/me/devices/{deviceId}", deviceId };
+  }
+  return undefined;
+}
 
 export type AuthRouteContext = {
   request: Request;
@@ -42,7 +63,7 @@ export type AuthRouteContext = {
 };
 
 export function isAuthPath(path: string): boolean {
-  return path in AUTH_METHODS;
+  return resolveAuthPath(path) !== undefined;
 }
 
 export function authMethodError(
@@ -50,7 +71,11 @@ export function authMethodError(
   method: string,
   requestId: string,
 ): Response | undefined {
-  const allowed = AUTH_METHODS[path];
+  const resolved = resolveAuthPath(path);
+  if (resolved === undefined) {
+    return undefined;
+  }
+  const allowed = AUTH_METHODS[resolved.route];
   if (allowed === undefined || allowed.includes(method.toUpperCase())) {
     return undefined;
   }
@@ -59,7 +84,11 @@ export function authMethodError(
 
 export async function handleAuthRoute(context: AuthRouteContext): Promise<Response | undefined> {
   const path = new URL(context.request.url).pathname;
-  const allowed = AUTH_METHODS[path];
+  const resolved = resolveAuthPath(path);
+  if (resolved === undefined) {
+    return undefined;
+  }
+  const allowed = AUTH_METHODS[resolved.route];
   if (allowed === undefined) {
     return undefined;
   }
@@ -68,7 +97,7 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<Respon
     return methodNotAllowed(context.requestId, allowed);
   }
 
-  switch (path) {
+  switch (resolved.route) {
     case "/v1/auth/config":
       return asHead(context.request, jsonResponse(authConfig()));
     case "/v1/auth/email-otp/request":
@@ -87,6 +116,10 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<Respon
       return bootstrapSession(context);
     case "/v1/me":
       return getProfile(context);
+    case "/v1/me/devices":
+      return listDevices(context);
+    case "/v1/me/devices/{deviceId}":
+      return revokeDevice(context, resolved.deviceId ?? "");
     default:
       return undefined;
   }
@@ -149,7 +182,7 @@ async function verifyEmailOtp(context: AuthRouteContext): Promise<Response> {
   if (!UUID_PATTERN.test(deviceId)) {
     return fieldError(context.requestId, "deviceId", "deviceId must be a UUID.");
   }
-  const result = await auth.verifyEmailOtp(email, code);
+  const result = await auth.verifyEmailOtp(email, code, deviceId);
   if (!result.ok) {
     if (result.code === "not_ready") {
       return issuanceUnavailable(context.requestId);
@@ -253,12 +286,14 @@ async function exchangeOAuth(context: AuthRouteContext): Promise<Response> {
     return fieldError(context.requestId, "codeVerifier", "codeVerifier must be a PKCE verifier.");
   }
   const state = optionalString(body.value.state);
+  const deviceHeader = context.request.headers.get("X-Device-Id")?.trim() ?? "";
   const result = await auth.exchangeOAuth({
     provider,
     code,
     codeVerifier,
     redirectUri,
     ...(state === undefined ? {} : { state }),
+    ...(UUID_PATTERN.test(deviceHeader) ? { deviceId: deviceHeader } : {}),
   });
   if (!result.ok) {
     if (result.code === "not_ready") {
@@ -353,13 +388,19 @@ async function bootstrapSession(context: AuthRouteContext): Promise<Response> {
         ...(locale === undefined ? {} : { locale }),
         ...(timeZone === undefined ? {} : { timeZone }),
       });
+      if (!bootstrapped.ok) {
+        if (bootstrapped.code === "device_revoked") {
+          return forbidden(context.requestId, "This device has been revoked.");
+        }
+        return unauthorized(context.requestId, "Authentication required.");
+      }
       const payload: BootstrapResponse = {
-        profile: toProfile(bootstrapped.profile),
-        device: bootstrapped.device,
-        settings: bootstrapped.settings,
-        featureFlags: [...bootstrapped.featureFlags],
-        quotas: [...bootstrapped.quotas],
-        syncCursor: bootstrapped.syncCursor,
+        profile: toProfile(bootstrapped.value.profile),
+        device: bootstrapped.value.device,
+        settings: bootstrapped.value.settings,
+        featureFlags: [...bootstrapped.value.featureFlags],
+        quotas: [...bootstrapped.value.quotas],
+        syncCursor: bootstrapped.value.syncCursor,
       };
       return jsonResponse(payload);
     },
@@ -376,6 +417,55 @@ async function getProfile(context: AuthRouteContext): Promise<Response> {
   const stored = context.auth?.getProfile(principal);
   const profile = stored ?? profileFromPrincipal(principal);
   return asHead(context.request, jsonResponse(toProfile(profile)));
+}
+
+async function listDevices(context: AuthRouteContext): Promise<Response> {
+  const principal = await requirePrincipal(context);
+  if (principal instanceof Response) {
+    return principal;
+  }
+  const auth = requireAuthService(context);
+  if (auth instanceof Response) {
+    return auth;
+  }
+  return asHead(context.request, jsonResponse(auth.listDevices(principal)));
+}
+
+async function revokeDevice(context: AuthRouteContext, deviceId: string): Promise<Response> {
+  const principal = await requirePrincipal(context);
+  if (principal instanceof Response) {
+    return principal;
+  }
+  const auth = requireAuthService(context);
+  if (auth instanceof Response) {
+    return auth;
+  }
+  if (!UUID_PATTERN.test(deviceId)) {
+    return fieldError(context.requestId, "deviceId", "deviceId must be a UUID.");
+  }
+  const deviceIdHeader = context.request.headers.get("X-Device-Id")?.trim() ?? "";
+  if (!UUID_PATTERN.test(deviceIdHeader)) {
+    return problemResponse({
+      status: 400,
+      code: "bad_request",
+      title: "Bad request",
+      detail: "X-Device-Id must be a UUID.",
+      traceId: context.requestId,
+    });
+  }
+  return withIdempotency(
+    context.idempotencyStore,
+    context.request,
+    () => {
+      const result = auth.revokeDevice(principal, deviceId);
+      if (!result.ok) {
+        return Promise.resolve(notFound(context.requestId, "Device not found."));
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    },
+    context.requestId,
+    principal,
+  );
 }
 
 async function requirePrincipal(context: AuthRouteContext): Promise<Principal | Response> {
@@ -541,6 +631,26 @@ function unauthorized(requestId: string, detail: string): Response {
     status: 401,
     code: "unauthorized",
     title: "Unauthorized",
+    detail,
+    traceId: requestId,
+  });
+}
+
+function forbidden(requestId: string, detail: string): Response {
+  return problemResponse({
+    status: 403,
+    code: "forbidden",
+    title: "Forbidden",
+    detail,
+    traceId: requestId,
+  });
+}
+
+function notFound(requestId: string, detail: string): Response {
+  return problemResponse({
+    status: 404,
+    code: "not_found",
+    title: "Not found",
     detail,
     traceId: requestId,
   });
