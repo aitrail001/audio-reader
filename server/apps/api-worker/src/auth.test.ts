@@ -609,4 +609,71 @@ describe("product authentication API", () => {
     );
     expect(rebootstrap.status).toBe(401);
   });
+
+  it("rebinds an OAuth login device to the bootstrap device", async () => {
+    const { app } = createAuthApp();
+    const pkce = await pkcePair();
+    const authorize = await app.fetch(
+      jsonPost("/v1/auth/oauth/authorize", {
+        provider: "google",
+        redirectUri: "http://localhost/callback",
+        codeChallenge: pkce.challenge,
+        state: "oauth-bootstrap-mismatch",
+      }),
+    );
+    const started = await readJson(authorize);
+    expect(isRecord(started)).toBe(true);
+    if (!isRecord(started)) {
+      return;
+    }
+    const exchanged = await app.fetch(
+      jsonPost(
+        "/v1/auth/oauth/exchange",
+        {
+          provider: "google",
+          code: new URL(String(started.authorizationUrl)).searchParams.get("code"),
+          codeVerifier: pkce.verifier,
+          redirectUri: "http://localhost/callback",
+        },
+        { "X-Device-Id": DEVICE_ID },
+      ),
+    );
+    expect(exchanged.status).toBe(200);
+    const tokens = await readJson(exchanged);
+    const session = {
+      accessToken: accessToken(tokens),
+      refreshToken: refreshToken(tokens),
+    };
+    expect(
+      (await bootstrapDevice(app, session.accessToken, DEVICE_B, "idempotency-oauth-boot-b"))
+        .status,
+    ).toBe(200);
+
+    const listed = await app.fetch(
+      new Request("http://localhost/v1/me/devices", { headers: bearer(session.accessToken) }),
+    );
+    expect(listed.status).toBe(200);
+    expect(await readJson(listed)).toEqual([
+      expect.objectContaining({ id: DEVICE_B, revoked: false }),
+    ]);
+
+    const revoked = await app.fetch(
+      new Request(`http://localhost/v1/me/devices/${DEVICE_B}`, {
+        method: "DELETE",
+        headers: {
+          ...bearer(session.accessToken),
+          "X-Device-Id": DEVICE_B,
+          "Idempotency-Key": "idempotency-oauth-revoke-b",
+        },
+      }),
+    );
+    expect(revoked.status).toBe(204);
+
+    const refresh = await app.fetch(
+      jsonPost("/v1/auth/token/refresh", { refreshToken: session.refreshToken }),
+    );
+    expect(refresh.status).toBe(401);
+    const refreshBody = await readJson(refresh);
+    expect(isRecord(refreshBody) && refreshBody.code).toBe("unauthorized");
+  });
 });

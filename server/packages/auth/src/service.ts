@@ -300,9 +300,20 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
     }
   }
 
-  function bindUnboundRefreshTokens(subject: string, deviceId: string): void {
+  // Claim login tokens that never became a listed device so they cannot outlive bootstrap.
+  function bindBootstrapRefreshTokens(principal: Principal, deviceId: string): void {
     for (const record of refreshTokens.values()) {
-      if (record.subject === subject && record.deviceId === undefined) {
+      if (record.subject !== principal.subject) {
+        continue;
+      }
+      if (record.deviceId === deviceId) {
+        continue;
+      }
+      if (record.deviceId === undefined) {
+        record.deviceId = deviceId;
+        continue;
+      }
+      if (devices.get(deviceKey(principal.accountId, record.deviceId)) === undefined) {
         record.deviceId = deviceId;
       }
     }
@@ -591,7 +602,7 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
         device.buildNumber = input.buildNumber;
       }
       devices.set(key, device);
-      bindUnboundRefreshTokens(principal.subject, input.deviceId);
+      bindBootstrapRefreshTokens(principal, input.deviceId);
       let userSettings = settings.get(profile.accountId);
       if (userSettings === undefined) {
         userSettings = {

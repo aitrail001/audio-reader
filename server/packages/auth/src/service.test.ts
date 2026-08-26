@@ -511,4 +511,42 @@ describe("memory auth service", () => {
       code: "invalid_refresh",
     });
   });
+
+  it("rebinds a login device to the bootstrap device so revoke of B kills the session", async () => {
+    const auth = createMemoryAuthService({ jwt: LOCAL_JWT_CONFIG });
+    const pkce = await pkcePair();
+    const started = await auth.authorizeOAuth({
+      provider: "google",
+      redirectUri: "http://localhost/callback",
+      codeChallenge: pkce.challenge,
+      state: "oauth-mismatch-state",
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) {
+      return;
+    }
+    const code = new URL(started.value.authorizationUrl).searchParams.get("code");
+    const exchanged = await auth.exchangeOAuth({
+      provider: "google",
+      code: code ?? "",
+      codeVerifier: pkce.verifier,
+      redirectUri: "http://localhost/callback",
+      deviceId: DEVICE_A,
+    });
+    expect(exchanged.ok).toBe(true);
+    if (!exchanged.ok) {
+      return;
+    }
+
+    expect(auth.bootstrap(exchanged.value.principal, macosDevice(DEVICE_B)).ok).toBe(true);
+    expect(auth.listDevices(exchanged.value.principal).map((device) => device.id)).toEqual([
+      DEVICE_B,
+    ]);
+
+    expect(auth.revokeDevice(exchanged.value.principal, DEVICE_B)).toEqual({ ok: true });
+    expect(await auth.refresh(exchanged.value.tokens.refreshToken)).toEqual({
+      ok: false,
+      code: "invalid_refresh",
+    });
+  });
 });
