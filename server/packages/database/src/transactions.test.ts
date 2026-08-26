@@ -347,6 +347,27 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
     );
     expect(hit.status).toBe("cache_hit");
     expect(hit.cache_entry_id).toBe(completed.cache_entry_id);
+    const userC = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    execOk(
+      session,
+      `insert into public.profiles (user_id, display_name, account_status)
+       values (${sqlString(userC)}::uuid, 'user c', 'active')`,
+    );
+    const hitC = callJson(
+      session,
+      `select public.claim_assistant_generation(
+        ${sqlString(userC)}::uuid, ${sqlString(cacheKey)}, 'translate'
+      )`,
+    );
+    expect(hitC.status).toBe("cache_hit");
+    expect(hitC.cache_entry_id).toBe(completed.cache_entry_id);
+    expect(
+      scalar(
+        session,
+        `select output_text from user_assistant_results
+         where id = ${sqlString(String(hitC.result_id))}`,
+      ),
+    ).toBe("你好");
 
     const failKey = `cache-key-${crypto.randomUUID()}`;
     const toFail = callJson(
@@ -362,6 +383,13 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
       )`,
     );
     expect(failed.status).toBe("failed");
+    const lateAttach = callJson(
+      session,
+      `select public.attach_user_assistant_result(
+        ${sqlString(USER_B)}::uuid, ${sqlString(String(toFail.job_id))}::uuid
+      )`,
+    );
+    expect(lateAttach.status).toBe("unavailable");
     const retry = callJson(
       session,
       `select public.claim_assistant_generation(
@@ -377,6 +405,39 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
       )`,
     );
     expect(dead.status).toBe("dead_letter");
+
+    const quarantinedKey = `cache-key-${crypto.randomUUID()}`;
+    const blocked = callJson(
+      session,
+      `select public.claim_assistant_generation(
+        ${sqlString(USER_A)}::uuid, ${sqlString(quarantinedKey)}, 'translate'
+      )`,
+    );
+    execOk(
+      session,
+      `insert into public.assistant_cache_entries (
+         cache_key, task_type, source_language, target_language, state, result
+       ) values (
+         ${sqlString(quarantinedKey)}, 'translate', 'en', 'zh', 'quarantined', '{"text":"stale"}'::jsonb
+       )`,
+    );
+    const refused = session.exec(
+      `select public.complete_assistant_job(
+         ${sqlString(String(blocked.job_id))}::uuid,
+         '{"text":"fresh"}'::jsonb,
+         'translate',
+         'en',
+         'zh'
+       )`,
+    );
+    expect(refused.ok).toBe(false);
+    expect(`${refused.stderr} ${refused.stdout}`).toMatch(/not active/i);
+    expect(
+      scalar(
+        session,
+        `select status from assistant_jobs where id = ${sqlString(String(blocked.job_id))}`,
+      ),
+    ).toBe("queued");
   });
 
   it("cache claim concurrency admits one owner", async () => {
@@ -442,6 +503,65 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
     ).toBe("2");
   }, 30_000);
 
+  it("attach waits for complete and copies cache output onto the new result", async () => {
+    const session = requireDb(db);
+    const cacheKey = `cache-key-${crypto.randomUUID()}`;
+    const claimed = callJson(
+      session,
+      `select public.claim_assistant_generation(
+        ${sqlString(USER_A)}::uuid, ${sqlString(cacheKey)}, 'translate'
+      )`,
+    );
+    const jobId = String(claimed.job_id);
+    const completing = session.start(
+      `
+      begin;
+      select public.complete_assistant_job(
+        ${sqlString(jobId)}::uuid,
+        '{"text":"copied"}'::jsonb,
+        'translate',
+        'en',
+        'zh'
+      )::text;
+      select pg_sleep(0.4);
+      commit;
+      `,
+      { timeout: 20_000 },
+    );
+    await delay(150);
+    const attaching = session.start(
+      `
+      begin;
+      select public.attach_user_assistant_result(
+        ${sqlString(USER_B)}::uuid, ${sqlString(jobId)}::uuid
+      )::text;
+      commit;
+      `,
+      { timeout: 20_000 },
+    );
+    const [completed, attached] = await Promise.all([completing, attaching]);
+    expect(completed.ok, completed.stderr || completed.stdout).toBe(true);
+    expect(attached.ok, attached.stderr || attached.stdout).toBe(true);
+    expect(parseJsonObject(completed.stdout).status).toBe("succeeded");
+    expect(parseJsonObject(attached.stdout).status).toBe("attached");
+    expect(
+      scalar(
+        session,
+        `select output_text from user_assistant_results
+         where user_id = ${sqlString(USER_B)}
+           and job_id = ${sqlString(jobId)}`,
+      ),
+    ).toBe("copied");
+    expect(
+      scalar(
+        session,
+        `select (cache_entry_id is not null)::text from user_assistant_results
+         where user_id = ${sqlString(USER_B)}
+           and job_id = ${sqlString(jobId)}`,
+      ),
+    ).toBe("true");
+  }, 30_000);
+
   it("appends an immutable redacted audit event", () => {
     const session = requireDb(db);
     const appended = callJson(
@@ -456,9 +576,16 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
         'unsafe_output',
         'req-123',
         'iphash-9f',
-        ${sqlJson({ note: "ok", api_key: "sk-live" })}::jsonb,
+        ${sqlJson({
+          note: "ok",
+          api_key: "sk-live",
+          apiKey: "sk-camel",
+          sourcePassage: "hello world",
+          accessToken: "tok",
+          privateKey: "pk",
+        })}::jsonb,
         ${sqlJson({ password: "hunter2", keep: 1 })}::jsonb,
-        ${sqlJson({ token: "abc", count: 2 })}::jsonb
+        ${sqlJson({ token: "abc", count: 2, spokenText: "hi" })}::jsonb
       )`,
     );
     expect(appended.id).toEqual(expect.any(String));
@@ -480,9 +607,16 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
     expect(row.reason_code).toBe("unsafe_output");
     expect(row.request_id).toBe("req-123");
     expect(row.source_ip_hash).toBe("iphash-9f");
-    expect(row.metadata).toEqual({ note: "ok", api_key: "<redacted>" });
+    expect(row.metadata).toEqual({
+      note: "ok",
+      api_key: "<redacted>",
+      apiKey: "<redacted>",
+      sourcePassage: "<redacted>",
+      accessToken: "<redacted>",
+      privateKey: "<redacted>",
+    });
     expect(row.before_metadata).toEqual({ password: "<redacted>", keep: 1 });
-    expect(row.after_metadata).toEqual({ token: "<redacted>", count: 2 });
+    expect(row.after_metadata).toEqual({ token: "<redacted>", count: 2, spokenText: "<redacted>" });
     const updated: SqlResult = session.exec(
       `update public.audit_events set reason = 'mutated' where id = ${sqlString(String(appended.id))}`,
     );

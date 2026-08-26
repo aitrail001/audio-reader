@@ -31,24 +31,23 @@ begin
   v_out := '{}'::jsonb;
   for v_key in select jsonb_object_keys(p_value)
   loop
-    v_normalized := lower(replace(v_key, '-', '_'));
+    v_normalized := regexp_replace(lower(v_key), '[-_]', '', 'g');
     if v_normalized in (
       'password',
       'secret',
       'token',
-      'api_key',
       'apikey',
       'authorization',
-      'access_token',
-      'refresh_token',
-      'id_token',
+      'accesstoken',
+      'refreshtoken',
+      'idtoken',
       'cookie',
-      'set_cookie',
-      'private_key',
-      'source_text',
-      'source_passage',
-      'spoken_text',
-      'raw_audio'
+      'setcookie',
+      'privatekey',
+      'sourcetext',
+      'sourcepassage',
+      'spokentext',
+      'rawaudio'
     ) then
       v_out := v_out || jsonb_build_object(v_key, '<redacted>');
     else
@@ -394,16 +393,34 @@ declare
   v_job public.assistant_jobs%rowtype;
   v_task text;
   v_result_id uuid;
+  v_cache_id uuid;
+  v_output text;
 begin
   select * into v_job
   from public.assistant_jobs
-  where id = p_job_id;
+  where id = p_job_id
+  for update;
 
   if not found then
     raise exception 'assistant job not found';
   end if;
 
+  if v_job.status not in ('queued', 'running', 'succeeded') then
+    return jsonb_build_object(
+      'status', 'unavailable',
+      'job_id', v_job.id,
+      'job_status', v_job.status
+    );
+  end if;
+
   v_task := coalesce(nullif(p_task_type, ''), v_job.kind);
+  v_cache_id := v_job.cache_entry_id;
+  if v_job.status = 'succeeded' and v_cache_id is not null then
+    select coalesce(result->>'text', result->>'output')
+    into v_output
+    from public.assistant_cache_entries
+    where id = v_cache_id;
+  end if;
 
   select id into v_result_id
   from public.user_assistant_results
@@ -417,11 +434,18 @@ begin
 
   if v_result_id is null then
     insert into public.user_assistant_results (
-      user_id, job_id, cache_entry_id, book_id, chapter_id, task_type, status
+      user_id, job_id, cache_entry_id, book_id, chapter_id, task_type, status, output_text
     ) values (
-      p_user_id, p_job_id, v_job.cache_entry_id, p_book_id, p_chapter_id, v_task, 'pending'
+      p_user_id, p_job_id, v_cache_id, p_book_id, p_chapter_id, v_task, 'pending', v_output
     )
     returning id into v_result_id;
+  elsif v_job.status = 'succeeded' then
+    update public.user_assistant_results
+    set
+      cache_entry_id = coalesce(v_cache_id, cache_entry_id),
+      output_text = coalesce(v_output, output_text),
+      updated_at = clock_timestamp()
+    where id = v_result_id;
   end if;
 
   return jsonb_build_object(
@@ -429,7 +453,8 @@ begin
     'job_id', v_job.id,
     'result_id', v_result_id,
     'job_status', v_job.status,
-    'cache_entry_id', v_job.cache_entry_id
+    'cache_entry_id', v_cache_id,
+    'output_text', v_output
   );
 end;
 $$;
@@ -483,6 +508,9 @@ begin
         v_out := public.attach_user_assistant_result(
           p_user_id, v_job.id, p_book_id, p_chapter_id, p_kind
         );
+        if v_out->>'status' = 'unavailable' then
+          continue;
+        end if;
         return v_out || jsonb_build_object(
           'status', 'cache_hit',
           'cache_entry_id', v_cache.id
@@ -490,9 +518,15 @@ begin
       end if;
 
       insert into public.user_assistant_results (
-        user_id, cache_entry_id, book_id, chapter_id, task_type, status
+        user_id, cache_entry_id, book_id, chapter_id, task_type, status, output_text
       ) values (
-        p_user_id, v_cache.id, p_book_id, p_chapter_id, p_kind, 'pending'
+        p_user_id,
+        v_cache.id,
+        p_book_id,
+        p_chapter_id,
+        p_kind,
+        'pending',
+        coalesce(v_cache.result->>'text', v_cache.result->>'output')
       )
       returning id into v_result_id;
 
@@ -501,7 +535,8 @@ begin
         'job_id', null,
         'result_id', v_result_id,
         'job_status', null,
-        'cache_entry_id', v_cache.id
+        'cache_entry_id', v_cache.id,
+        'output_text', coalesce(v_cache.result->>'text', v_cache.result->>'output')
       );
     end if;
 
@@ -512,9 +547,13 @@ begin
     limit 1;
 
     if found then
-      return public.attach_user_assistant_result(
+      v_out := public.attach_user_assistant_result(
         p_user_id, v_job.id, p_book_id, p_chapter_id, p_kind
       );
+      if v_out->>'status' = 'unavailable' then
+        continue;
+      end if;
+      return v_out;
     end if;
 
     begin
@@ -529,6 +568,9 @@ begin
     v_out := public.attach_user_assistant_result(
       p_user_id, v_job_id, p_book_id, p_chapter_id, p_kind
     );
+    if v_out->>'status' = 'unavailable' then
+      continue;
+    end if;
     return v_out || jsonb_build_object('status', 'claimed', 'job_status', 'queued');
   end loop;
 
@@ -552,6 +594,7 @@ declare
   v_job public.assistant_jobs%rowtype;
   v_task text;
   v_cache_id uuid;
+  v_cache_state text;
 begin
   select * into v_job
   from public.assistant_jobs
@@ -589,9 +632,16 @@ begin
     returning id into v_cache_id;
   exception
     when unique_violation then
-      select id into v_cache_id
+      select id, state into v_cache_id, v_cache_state
       from public.assistant_cache_entries
-      where cache_key = v_job.cache_key;
+      where cache_key = v_job.cache_key
+      for update;
+      if v_cache_id is null then
+        raise exception 'cache entry for % missing after unique conflict', v_job.cache_key;
+      end if;
+      if v_cache_state is distinct from 'active' then
+        raise exception 'cache entry % is not active (state %)', v_cache_id, v_cache_state;
+      end if;
   end;
 
   update public.assistant_jobs
