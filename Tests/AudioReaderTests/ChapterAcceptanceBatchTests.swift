@@ -16,7 +16,7 @@ struct ChapterAcceptanceBatchTests {
             duration: 2,
             startTime: nil
         )
-        let state = AppState()
+        let state = AppState(composition: .inMemory())
         state.settings.targetLanguage = "zh-Hans"
         state.books = [Book(
             id: "book",

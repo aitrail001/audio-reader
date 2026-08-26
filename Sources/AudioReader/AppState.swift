@@ -103,6 +103,7 @@ final class AppState {
     @ObservationIgnored private var credentialMigrationSession = LegacyCredentialMigrationSession()
     @ObservationIgnored private let vocabularyRepository: any VocabularyRepository
     @ObservationIgnored private let knownLemmaRepository: any KnownLemmaRepository
+    @ObservationIgnored private let usesLivePersistence: Bool
 
     var selectedBook: Book? {
         books.first { $0.id == selectedBookID }
@@ -306,6 +307,7 @@ final class AppState {
 
     func recordStudyActivity(now: Date = Date()) {
         studyActivityLog = studyActivityLog.recording(on: now)
+        guard usesLivePersistence else { return }
         Persistence.saveStudyActivityLog(studyActivityLog)
     }
 
@@ -663,37 +665,45 @@ final class AppState {
     init(composition: AppComposition = .live) {
         vocabularyRepository = composition.vocabulary
         knownLemmaRepository = composition.knownLemmas
-        settings = Persistence.loadSettings()
+        usesLivePersistence = composition.usesLivePersistence
+        if usesLivePersistence {
+            settings = Persistence.loadSettings()
 #if os(iOS)
-        // iOS data-container UUIDs can change after reinstalling an app, so a
-        // persisted absolute Documents path must never drive library scanning.
-        settings.libraryPath = Persistence.importedBooksURL.path
-        settings.openAIAuthentication = OpenAIAuthentication.apiKey.rawValue
-        settings.grokAuthentication = GrokAuthentication.apiKey.rawValue
-        if let normalizedDictionary = DictionaryLookup.recommendedName(
-            language: StudyLanguage(rawValue: settings.targetLanguage) ?? .zhHans,
-            installedNames: DictionaryLookup.installedNames()
-        ), settings.preferredDictionary != normalizedDictionary {
-            settings.preferredDictionary = normalizedDictionary
-            Persistence.saveSettings(settings)
-        }
+            // iOS data-container UUIDs can change after reinstalling an app, so a
+            // persisted absolute Documents path must never drive library scanning.
+            settings.libraryPath = Persistence.importedBooksURL.path
+            settings.openAIAuthentication = OpenAIAuthentication.apiKey.rawValue
+            settings.grokAuthentication = GrokAuthentication.apiKey.rawValue
+            if let normalizedDictionary = DictionaryLookup.recommendedName(
+                language: StudyLanguage(rawValue: settings.targetLanguage) ?? .zhHans,
+                installedNames: DictionaryLookup.installedNames()
+            ), settings.preferredDictionary != normalizedDictionary {
+                settings.preferredDictionary = normalizedDictionary
+                Persistence.saveSettings(settings)
+            }
 #endif
+        } else {
+            settings = .default
+        }
         vocab = ((try? vocabularyRepository.loadVocabulary()) ?? []).map { stored in
             var copy = VocabEntry(stored)
             copy.sanitizeDictionaryFields()
             return copy
         }
         knownLemmas = ((try? knownLemmaRepository.loadKnownLemmas()) ?? []).map(KnownLemmaRecord.init)
-        studyActivityLog = Persistence.loadStudyActivityLog()
         appleIntelligenceAvailability = AppleIntelligenceAvailability.current()
-        glosses = Persistence.loadGlosses()
-        chapterTranslationCheckpoints = Persistence.loadChapterTranslationCheckpoints()
-        chapterSummaries = Persistence.loadChapterSummaries()
+        if usesLivePersistence {
+            studyActivityLog = Persistence.loadStudyActivityLog()
+            glosses = Persistence.loadGlosses()
+            chapterTranslationCheckpoints = Persistence.loadChapterTranslationCheckpoints()
+            chapterSummaries = Persistence.loadChapterSummaries()
+        }
         selectedDictionaryName = settings.preferredDictionary
         if let raw = TextSource(rawValue: settings.textSource) {
             textSource = raw
         }
         player.rate = Float(settings.playbackRate)
+        guard usesLivePersistence else { return }
         importGlossesIntoVocab()
         if vocab.contains(where: { DictionaryLookup.looksLikeMarkup($0.definition ?? "") }) {
             persistVocabulary()
@@ -1359,6 +1369,7 @@ final class AppState {
     func persistSettings() {
         settings.playbackRate = Double(player.rate)
         settings.textSource = textSource.rawValue
+        guard usesLivePersistence else { return }
         Persistence.saveSettings(settings)
     }
 
@@ -2167,8 +2178,11 @@ final class AppState {
             let glossSnapshot = glosses
             let vocabulary = vocabularyRepository
             let storedVocabUpdates = result.upserts.map(StoredVocabularyOccurrence.init)
+            let persistLiveGlosses = usesLivePersistence
             await Task.detached(priority: .utility) {
-                Persistence.saveGlossUpdates(accepted, allItems: glossSnapshot)
+                if persistLiveGlosses {
+                    Persistence.saveGlossUpdates(accepted, allItems: glossSnapshot)
+                }
                 try? vocabulary.upsertVocabulary(storedVocabUpdates)
             }.value
             guard chapterAcceptanceID == operationID else { return }
@@ -2218,6 +2232,7 @@ final class AppState {
         } else {
             chapterTranslationCheckpoints.append(checkpoint)
         }
+        guard usesLivePersistence else { return }
         Persistence.saveChapterTranslationCheckpoints(chapterTranslationCheckpoints)
     }
 
@@ -2338,7 +2353,9 @@ final class AppState {
         } else {
             chapterSummaries.append(summary)
         }
-        Persistence.saveChapterSummaries(chapterSummaries)
+        if usesLivePersistence {
+            Persistence.saveChapterSummaries(chapterSummaries)
+        }
         if isSelected(origin) {
             chapterSummary = summary.status == .rejected ? nil : summary
         }
@@ -2481,7 +2498,9 @@ final class AppState {
     private func saveGlosses(_ entries: [GlossEntry]) {
         guard !entries.isEmpty else { return }
         glosses = GlossBatch.merging(entries, into: glosses)
-        Persistence.saveGlosses(glosses)
+        if usesLivePersistence {
+            Persistence.saveGlosses(glosses)
+        }
         var vocabularyChanged = false
         for entry in entries where entry.status == .accepted {
             let changed = autoreleasepool {

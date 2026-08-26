@@ -8,14 +8,13 @@ struct AppCompositionTests {
 
     @Test("Live composition uses local adapters and no network")
     func liveCompositionUsesLocalAdaptersWithoutNetwork() throws {
-        let composition = AppComposition.live
-        #expect(composition.vocabulary is LibraryStoreVocabularyRepository)
-        #expect(composition.knownLemmas is PersistenceKnownLemmaRepository)
-
         let compositionSource = try source("Sources/AudioReader/AppComposition.swift")
         let app = try source("Sources/AudioReader/AudioReaderApp.swift")
         let appState = try source("Sources/AudioReader/AppState.swift")
 
+        #expect(compositionSource.contains("LibraryStoreVocabularyRepository(store: .shared)"))
+        #expect(compositionSource.contains("PersistenceKnownLemmaRepository()"))
+        #expect(compositionSource.contains("usesLivePersistence: true"))
         #expect(!compositionSource.contains("#if os("))
         #expect(!compositionSource.contains("URLSession"))
         #expect(!compositionSource.contains("http"))
@@ -26,6 +25,20 @@ struct AppCompositionTests {
         #expect(!appState.contains("Persistence.saveVocab"))
         #expect(!appState.contains("Persistence.loadKnownLemmas"))
         #expect(!appState.contains("Persistence.saveKnownLemmas"))
+    }
+
+    @MainActor
+    @Test("In-memory composition does not load live Persistence or LibraryStore")
+    func inMemoryCompositionDoesNotLoadLiveStore() throws {
+        let state = AppState(composition: .inMemory())
+
+        #expect(state.glosses.isEmpty)
+        #expect(state.vocab.isEmpty)
+        #expect(state.knownLemmas.isEmpty)
+        #expect(state.studyActivityLog == .empty)
+        #expect(state.settings.playbackRate == AppSettings.default.playbackRate)
+        #expect(state.settings.libraryPath == AppSettings.default.libraryPath)
+        #expect(!state.settings.showStudyOverlay)
     }
 
     @MainActor
@@ -45,8 +58,10 @@ struct AppCompositionTests {
             composition: AppComposition(vocabulary: vocabulary, knownLemmas: knownLemmas)
         )
 
-        #expect(state.vocab.contains { $0.id == token && $0.word == token })
-        #expect(state.knownLemmas.contains { $0.form == token && $0.language == "en" })
+        #expect(state.vocab.map(\.id) == [token])
+        #expect(state.vocab.map(\.word) == [token])
+        #expect(state.knownLemmas.map(\.form) == [token])
+        #expect(state.glosses.isEmpty)
     }
 
     @MainActor
@@ -111,25 +126,41 @@ struct AppCompositionTests {
             composition: AppComposition(vocabulary: vocabulary, knownLemmas: knownLemmas)
         )
         state.settings.transcriptionLanguage = TranscriptionLanguage.englishUS.rawValue
-        state.knownLemmas = []
+        state.settings.libraryPath = token
+        state.persistSettings()
+        state.recordStudyActivity(now: occurredAt)
         let word = TranscriptWord(id: "w-isolated", text: token, start: 0, end: 0.4, confidence: nil)
         state.markKnown(word, known: true)
         state.setVocabularyLearnList(token, included: true)
         state.removeVocab(try #require(state.vocab.first { $0.id == token }))
 
         #expect(try knownLemmas.loadKnownLemmas().map(\.form) == [token])
-        #expect(try vocabulary.loadVocabulary().allSatisfy { $0.id.rawValue != token })
+        #expect(try vocabulary.loadVocabulary().isEmpty)
+        #expect(state.glosses.isEmpty)
+        #expect(!applicationSupportContains(token))
+    }
 
+    private func applicationSupportContains(_ token: String) -> Bool {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("AudioReader", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: support.path) else { return false }
         let needle = Data(token.utf8)
-        for name in ["vocab.json", "lexicon.json"] {
+        let names = [
+            "vocab.json",
+            "lexicon.json",
+            "glosses.json",
+            "settings.json",
+            "study-activity.json",
+            "library.sqlite"
+        ]
+        for name in names {
             let url = support.appendingPathComponent(name)
             guard FileManager.default.fileExists(atPath: url.path),
                   let data = try? Data(contentsOf: url)
             else { continue }
-            #expect(data.range(of: needle) == nil)
+            if data.range(of: needle) != nil { return true }
         }
+        return false
     }
 
     private func source(_ relativePath: String) throws -> String {
