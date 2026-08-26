@@ -100,6 +100,21 @@ export const SERVER_ONLY_TABLES = [
   ...JWT_DENIED_TABLES,
 ] as const;
 
+/** Privileged transaction RPCs; EXECUTE is service_role only. */
+export const TRANSACTION_FUNCTIONS = [
+  "claim_idempotency_record",
+  "record_idempotency_response",
+  "abort_idempotency_record",
+  "append_sync_change",
+  "claim_assistant_generation",
+  "attach_user_assistant_result",
+  "complete_assistant_job",
+  "fail_assistant_job",
+  "append_audit_event",
+] as const;
+
+export const AUDIT_ACTOR_TYPES = ["user", "admin", "system"] as const;
+
 export const SYNC_COLUMNS = [
   "id",
   "user_id",

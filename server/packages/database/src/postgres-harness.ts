@@ -12,8 +12,11 @@ export type SqlResult = {
 
 export type PostgresSession = {
   exec(sql: string): SqlResult;
+  start(sql: string, options?: { timeout?: number }): Promise<SqlResult>;
   stop(): Promise<void>;
 };
+
+const PSQL_ARGS = ["-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-t", "-A", "-q"];
 
 const DOCKER_IMAGE = "postgres:18-alpine";
 const PG_BIN_CANDIDATES = [
@@ -78,33 +81,10 @@ async function tryDockerPostgres(): Promise<PostgresSession | undefined> {
     execCaptured("docker", ["rm", "-f", name], { timeout: 15_000 });
     throw error;
   }
-  return {
-    exec(sql: string): SqlResult {
-      return execCaptured(
-        "docker",
-        [
-          "exec",
-          "-i",
-          name,
-          "psql",
-          "-U",
-          "postgres",
-          "-d",
-          "postgres",
-          "-v",
-          "ON_ERROR_STOP=1",
-          "-t",
-          "-A",
-          "-q",
-        ],
-        { input: sql, timeout: 30_000 },
-      );
-    },
-    stop() {
-      execCaptured("docker", ["rm", "-f", name], { timeout: 15_000 });
-      return Promise.resolve();
-    },
-  };
+  return makeSession("docker", ["exec", "-i", name, "psql", ...PSQL_ARGS], () => {
+    execCaptured("docker", ["rm", "-f", name], { timeout: 15_000 });
+    return Promise.resolve();
+  });
 }
 
 async function tryLocalPostgres(): Promise<PostgresSession | undefined> {
@@ -176,32 +156,28 @@ async function tryLocalPostgres(): Promise<PostgresSession | undefined> {
       cause: error,
     });
   }
-  return {
-    exec(sql: string): SqlResult {
-      return execCaptured(
-        join(bin, "psql"),
-        [
-          "-h",
-          "127.0.0.1",
-          "-p",
-          String(port),
-          "-U",
-          "postgres",
-          "-d",
-          "postgres",
-          "-v",
-          "ON_ERROR_STOP=1",
-          "-t",
-          "-A",
-          "-q",
-        ],
-        { input: sql, timeout: 30_000 },
-      );
-    },
-    async stop() {
+  return makeSession(
+    join(bin, "psql"),
+    ["-h", "127.0.0.1", "-p", String(port), ...PSQL_ARGS],
+    async () => {
       await stopChild(child);
       rmSync(dataDir, { recursive: true, force: true });
     },
+  );
+}
+
+function makeSession(file: string, args: string[], stop: () => Promise<void>): PostgresSession {
+  return {
+    exec(sql: string): SqlResult {
+      return execCaptured(file, args, { input: sql, timeout: 30_000 });
+    },
+    start(sql: string, options: { timeout?: number } = {}) {
+      return spawnCaptured(file, args, {
+        input: sql,
+        timeout: options.timeout ?? 30_000,
+      });
+    },
+    stop,
   };
 }
 
@@ -295,6 +271,45 @@ function isExecFailure(error: unknown): error is ExecFailure {
     return false;
   }
   return typeof error.stdout === "string" && typeof error.stderr === "string";
+}
+
+function spawnCaptured(
+  file: string,
+  args: string[],
+  options: { input: string; timeout: number },
+): Promise<SqlResult> {
+  return new Promise((resolve) => {
+    const child = spawn(file, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const stdoutChunks: string[] = [];
+    const stderrChunks: string[] = [];
+    child.stdout.on("data", (chunk: unknown) => {
+      stdoutChunks.push(String(chunk));
+    });
+    child.stderr.on("data", (chunk: unknown) => {
+      stderrChunks.push(String(chunk));
+    });
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+    }, options.timeout);
+    const finish = (ok: boolean, stderr: string): void => {
+      clearTimeout(timer);
+      resolve({
+        ok,
+        stdout: stdoutChunks.join(""),
+        stderr,
+      });
+    };
+    child.on("error", (error: unknown) => {
+      finish(false, String(error));
+    });
+    child.on("close", (code) => {
+      finish(code === 0, stderrChunks.join(""));
+    });
+    child.stdin.on("error", () => {
+      // Process may exit before stdin is fully written.
+    });
+    child.stdin.end(options.input);
+  });
 }
 
 function execCaptured(

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CORE_TABLES, createFakeDatabaseClient, packageId } from "./index";
+import { CORE_TABLES, TRANSACTION_FUNCTIONS, createFakeDatabaseClient, packageId } from "./index";
 
 describe("@audio-reader/database", () => {
   it("identifies the database package", () => {
@@ -10,6 +10,12 @@ describe("@audio-reader/database", () => {
     expect(CORE_TABLES).toHaveLength(26);
     expect(CORE_TABLES).toContain("profiles");
     expect(CORE_TABLES).toContain("assistant_cache_entries");
+  });
+
+  it("exports privileged transaction function names", () => {
+    expect(TRANSACTION_FUNCTIONS).toContain("claim_idempotency_record");
+    expect(TRANSACTION_FUNCTIONS).toContain("claim_assistant_generation");
+    expect(TRANSACTION_FUNCTIONS).toContain("append_audit_event");
   });
 
   it("creates a ready fake database client", async () => {

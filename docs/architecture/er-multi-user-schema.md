@@ -1,16 +1,17 @@
 # Multi-user PostgreSQL schema
 
-Phase 4.1 system of record plus Phase 4.2 row-level isolation. Tables and
-policies come from versioned SQL in `server/supabase/migrations/`.
+Phase 4.1 system of record, Phase 4.2 row-level isolation, and Phase 4.3/4.4
+transaction functions. Tables, policies, and RPCs come from versioned SQL in
+`server/supabase/migrations/`.
 
 ## Ownership
 
-| Scope | Tables |
-| --- | --- |
+| Scope                 | Tables                                                                                                                                                                                                                                             |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Private, synchronized | `profiles`, `devices`, `user_settings`, `books`, `book_assets`, `chapters`, `reading_progress`, `transcript_revisions`, `transcript_segments`, `vocabulary_occurrences`, `known_lemmas`, `review_cards`, `review_events`, `user_assistant_results` |
-| Private, user-filed | `privacy_requests` (authenticated JWT may CRUD own rows) |
-| Private, server-owned | `assistant_jobs`, `usage_ledger`, `sync_changes`, `idempotency_records`, `admin_roles` |
-| Global / operational | `canonical_works`, `canonical_editions`, `assistant_cache_entries`, `feature_flags`, `model_policies`, `audit_events` |
+| Private, user-filed   | `privacy_requests` (authenticated JWT may CRUD own rows)                                                                                                                                                                                           |
+| Private, server-owned | `assistant_jobs`, `usage_ledger`, `sync_changes`, `idempotency_records`, `admin_roles`                                                                                                                                                             |
+| Global / operational  | `canonical_works`, `canonical_editions`, `assistant_cache_entries`, `feature_flags`, `model_policies`, `audit_events`                                                                                                                              |
 
 Synchronized private rows carry `id`, `user_id`, `created_at`, `updated_at`,
 `server_version`, `deleted_at`, and `last_mutation_id`. Authorization fields are
@@ -70,3 +71,25 @@ cannot read or write rows. Users cannot insert `admin_roles` or write
 `service_role` has `BYPASSRLS` and is for server-side Workers only. Clients never
 receive this key. Privileged behavior is exposed through the API, not by handing
 a service-role JWT to a browser or native app.
+
+## Transaction functions
+
+Server-only `SECURITY DEFINER` RPCs. EXECUTE is granted to `service_role` only.
+
+- `claim_idempotency_record` / `record_idempotency_response` / `abort_idempotency_record`:
+  claim, store, and replay idempotent HTTP responses
+- `append_sync_change`: lock the profile, bump `server_version`, append the next
+  per-user sequence
+- `claim_assistant_generation`: insert one in-flight job per `cache_key`, or
+  attach when the unique index rejects a second owner
+- `attach_user_assistant_result`: point another user's private result at an
+  existing job
+- `complete_assistant_job` / `fail_assistant_job`: finish a job atomically
+  (cache write + linked results, or failed/dead-letter)
+- `append_audit_event`: append an audit row with actor `user`/`admin`/`system`,
+  action, resource type/ID, reason, request ID, source IP hash, and redacted
+  before/after metadata
+
+`audit_events` are immutable: a before-row trigger stamps `created_at`, redacts
+sensitive metadata, and rejects update/delete. The partial unique index
+`assistant_jobs_inflight_cache_key_uidx` is the final single-flight guarantee.

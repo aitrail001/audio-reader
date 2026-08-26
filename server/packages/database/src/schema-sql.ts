@@ -39,6 +39,16 @@ export type PolicyDefinition = {
   withCheck: string | undefined;
 };
 
+export type FunctionDefinition = {
+  schema: string;
+  name: string;
+};
+
+export type TriggerDefinition = {
+  name: string;
+  table: string;
+};
+
 export type ParsedSchema = {
   tables: Map<string, TableDefinition>;
   foreignKeys: ForeignKey[];
@@ -46,6 +56,8 @@ export type ParsedSchema = {
   rlsEnabled: Set<string>;
   rlsForced: Set<string>;
   policies: PolicyDefinition[];
+  functions: FunctionDefinition[];
+  triggers: TriggerDefinition[];
   hasUnique(table: string, columns: readonly string[]): boolean;
   hasIndex(table: string, columns: readonly string[]): boolean;
   hasCheck(table: string, column: string): boolean;
@@ -62,8 +74,22 @@ export function parsePostgresSchema(sql: string): ParsedSchema {
   const rlsEnabled = new Set<string>();
   const rlsForced = new Set<string>();
   const policies: PolicyDefinition[] = [];
+  const functions: FunctionDefinition[] = [];
+  const triggers: TriggerDefinition[] = [];
 
   for (const statement of statements) {
+    const fn = parseFunction(statement);
+    if (fn !== undefined) {
+      functions.push(fn);
+      continue;
+    }
+
+    const trigger = parseTrigger(statement);
+    if (trigger !== undefined) {
+      triggers.push(trigger);
+      continue;
+    }
+
     const createTable =
       /^create\s+table(?:\s+if\s+not\s+exists)?\s+(?:public\.)?([a-z_][a-z0-9_]*)\s*\(/i.exec(
         statement,
@@ -131,6 +157,8 @@ export function parsePostgresSchema(sql: string): ParsedSchema {
     rlsEnabled,
     rlsForced,
     policies,
+    functions,
+    triggers,
     hasUnique(table, columns) {
       return hasColumnList(uniqueColumnLists(tables.get(table), indexes, table), columns);
     },
@@ -274,6 +302,34 @@ function parseForeignKeys(table: string, sql: string, implicitColumns?: string[]
     match = columnLevel.exec(sql);
   }
   return keys;
+}
+
+function parseFunction(statement: string): FunctionDefinition | undefined {
+  const match =
+    /^create(?:\s+or\s+replace)?\s+function\s+(?:([a-z_][a-z0-9_]*)\.)?([a-z_][a-z0-9_]*)\s*\(/i.exec(
+      statement,
+    );
+  if (match?.[2] === undefined) {
+    return undefined;
+  }
+  return {
+    schema: (match[1] ?? "public").toLowerCase(),
+    name: match[2].toLowerCase(),
+  };
+}
+
+function parseTrigger(statement: string): TriggerDefinition | undefined {
+  const match =
+    /^create(?:\s+or\s+replace)?(?:\s+constraint)?\s+trigger\s+"?([a-z_][a-z0-9_]*)"?\s+(?:before|after|instead\s+of)\b.*?\bon\s+(?:public\.)?([a-z_][a-z0-9_]*)/is.exec(
+      statement,
+    );
+  if (match?.[1] === undefined || match[2] === undefined) {
+    return undefined;
+  }
+  return {
+    name: match[1].toLowerCase(),
+    table: match[2].toLowerCase(),
+  };
 }
 
 function parsePolicy(statement: string): PolicyDefinition | undefined {

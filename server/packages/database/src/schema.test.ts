@@ -10,6 +10,7 @@ import {
   SYNC_COLUMNS,
   SYNC_TABLES,
   TENANT_PARENT_TABLES,
+  TRANSACTION_FUNCTIONS,
 } from "./schema";
 import { parsePostgresSchema, type ForeignKey } from "./schema-sql";
 
@@ -192,6 +193,20 @@ describe("multi-user postgres schema migrations", () => {
       true,
     );
     expect(schema.hasUnique("model_policies", ["task", "region", "policy_version"])).toBe(true);
+  });
+
+  it("parses create function and trigger names", () => {
+    const schema = parsePostgresSchema(`
+      create function public.claim_assistant_generation(p_user_id uuid)
+      returns jsonb
+      language sql
+      as $$ select jsonb_build_object('status', 'claimed'); $$;
+      create trigger audit_events_protect
+        before update or delete on public.audit_events
+        for each row execute function public.protect_audit_events();
+    `);
+    expect(schema.functions).toEqual([{ schema: "public", name: "claim_assistant_generation" }]);
+    expect(schema.triggers).toEqual([{ name: "audit_events_protect", table: "audit_events" }]);
   });
 
   it("parses NULLS NOT DISTINCT unique indexes", () => {
@@ -456,5 +471,33 @@ describe("multi-user postgres schema migrations", () => {
     }
     expect(notes).toContain("user_id");
     expect(notes).toContain("server_version");
+    expect(notes).toMatch(/claim_assistant_generation/);
+    expect(notes).toMatch(/append_audit_event/);
+    expect(notes).toMatch(/immutable/i);
+  });
+
+  it("declares privileged transaction functions for idempotency, cache claims, sync, and audit", () => {
+    const sql = loadMigrationSql();
+    const schema = parsePostgresSchema(sql);
+    const publicFunctions = new Set(
+      schema.functions.filter((fn) => fn.schema === "public").map((fn) => fn.name),
+    );
+    for (const name of TRANSACTION_FUNCTIONS) {
+      expect(publicFunctions.has(name), name).toBe(true);
+      expect(sql).toMatch(new RegExp(`function\\s+public\\.${name}`, "i"));
+      expect(sql).toMatch(new RegExp(`revoke\\s+all\\s+on\\s+function\\s+public\\.${name}`, "i"));
+      expect(sql).toMatch(
+        new RegExp(
+          `grant\\s+execute\\s+on\\s+function\\s+public\\.${name}\\s+to\\s+service_role`,
+          "i",
+        ),
+      );
+    }
+    for (const table of SYNC_TABLES) {
+      expect(sql, table).toContain(`'${table}'`);
+    }
+    expect(schema.triggers.some((trigger) => trigger.table === "audit_events")).toBe(true);
+    expect(sql).toMatch(/audit_events are immutable/i);
+    expect(sql).toMatch(/security\s+definer/i);
   });
 });

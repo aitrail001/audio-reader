@@ -3,6 +3,7 @@ import type { ReadinessStatus } from "@audio-reader/domain";
 export const packageId = "@audio-reader/database" as const;
 export type { ReadinessStatus };
 export {
+  AUDIT_ACTOR_TYPES,
   CORE_TABLES,
   GLOBAL_TABLES,
   JWT_DENIED_TABLES,
@@ -12,6 +13,7 @@ export {
   SYNC_COLUMNS,
   SYNC_TABLES,
   TENANT_PARENT_TABLES,
+  TRANSACTION_FUNCTIONS,
   USER_OWNED_TABLES,
   USER_READ_OWN_TABLES,
 } from "./schema";
