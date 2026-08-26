@@ -1,0 +1,76 @@
+export const CORE_TABLES = [
+  "profiles",
+  "devices",
+  "user_settings",
+  "books",
+  "book_assets",
+  "canonical_works",
+  "canonical_editions",
+  "chapters",
+  "reading_progress",
+  "transcript_revisions",
+  "transcript_segments",
+  "vocabulary_occurrences",
+  "known_lemmas",
+  "review_cards",
+  "review_events",
+  "user_assistant_results",
+  "assistant_cache_entries",
+  "assistant_jobs",
+  "usage_ledger",
+  "sync_changes",
+  "idempotency_records",
+  "feature_flags",
+  "model_policies",
+  "admin_roles",
+  "audit_events",
+  "privacy_requests",
+] as const;
+
+export type CoreTable = (typeof CORE_TABLES)[number];
+
+export const SYNC_TABLES = [
+  "profiles",
+  "devices",
+  "user_settings",
+  "books",
+  "book_assets",
+  "chapters",
+  "reading_progress",
+  "transcript_revisions",
+  "transcript_segments",
+  "vocabulary_occurrences",
+  "known_lemmas",
+  "review_cards",
+  "review_events",
+  "user_assistant_results",
+] as const;
+
+export const PRIVATE_TABLES = [
+  ...SYNC_TABLES,
+  "assistant_jobs",
+  "usage_ledger",
+  "sync_changes",
+  "idempotency_records",
+  "admin_roles",
+  "privacy_requests",
+] as const;
+
+export const GLOBAL_TABLES = [
+  "canonical_works",
+  "canonical_editions",
+  "assistant_cache_entries",
+  "feature_flags",
+  "model_policies",
+  "audit_events",
+] as const;
+
+export const SYNC_COLUMNS = [
+  "id",
+  "user_id",
+  "created_at",
+  "updated_at",
+  "server_version",
+  "deleted_at",
+  "last_mutation_id",
+] as const;

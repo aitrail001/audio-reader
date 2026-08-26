@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { createFakeDatabaseClient, packageId } from "./index";
+import { CORE_TABLES, createFakeDatabaseClient, packageId } from "./index";
 
 describe("@audio-reader/database", () => {
   it("identifies the database package", () => {
     expect(packageId).toBe("@audio-reader/database");
+  });
+
+  it("exports the core multi-user table contract", () => {
+    expect(CORE_TABLES).toHaveLength(26);
+    expect(CORE_TABLES).toContain("profiles");
+    expect(CORE_TABLES).toContain("assistant_cache_entries");
   });
 
   it("creates a ready fake database client", async () => {

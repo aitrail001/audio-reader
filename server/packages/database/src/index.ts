@@ -2,6 +2,8 @@ import type { ReadinessStatus } from "@audio-reader/domain";
 
 export const packageId = "@audio-reader/database" as const;
 export type { ReadinessStatus };
+export { CORE_TABLES, GLOBAL_TABLES, PRIVATE_TABLES, SYNC_COLUMNS, SYNC_TABLES } from "./schema";
+export type { CoreTable } from "./schema";
 
 export type DatabaseClient = {
   ping(): Promise<ReadinessStatus>;

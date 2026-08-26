@@ -2,7 +2,7 @@
 
 Pinned Node/pnpm workspace for the Cloudflare API worker, job worker, admin console, and shared TypeScript packages.
 
-TypeScript types are generated from `contracts/openapi-v1.yaml` into `@audio-reader/contract`. The API worker implements health/readiness, request correlation, CORS, body validation, `application/problem+json` errors, and the product authentication API (email OTP, Google/Microsoft OAuth PKCE, JWT sessions, refresh/logout, bootstrap, and `GET /v1/me`). Qwen inference and Postgres schema are out of scope here.
+TypeScript types are generated from `contracts/openapi-v1.yaml` into `@audio-reader/contract`. The API worker implements health/readiness, request correlation, CORS, body validation, `application/problem+json` errors, and the product authentication API (email OTP, Google/Microsoft OAuth PKCE, JWT sessions, refresh/logout, bootstrap, and `GET /v1/me`). Versioned Postgres migrations live in `supabase/migrations/`. Row Level Security and Qwen inference are later PRs.
 
 ## Requirements
 
@@ -83,10 +83,10 @@ server/
   packages/
     contract/       Generated API types from OpenAPI v1
     domain/         Shared domain types and rules
-    database/       Persistence adapters (fake ping for local/test)
+    database/       Persistence adapters and schema contract constants
     auth/           JWT validation, email OTP, OAuth PKCE, profile mapping
     qwen/           Managed Qwen client (fake ping for local/test)
     observability/  Logging and tracing
   scripts/          Local db, API worker runner, full test suites
-  supabase/         Supabase CLI config
+  supabase/         Supabase CLI config and versioned Postgres migrations
 ```
