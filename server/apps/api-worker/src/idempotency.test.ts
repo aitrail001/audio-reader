@@ -213,4 +213,29 @@ describe("route-level idempotency middleware", () => {
     expect(await b.text()).toBe("ok");
     expect(started).toBe(1);
   });
+
+  it("serializes retries so three in-flight 500s never overlap next()", async () => {
+    const store = createMemoryIdempotencyStore();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let calls = 0;
+    const handler = async (): Promise<Response> => {
+      calls += 1;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 25);
+      });
+      inFlight -= 1;
+      return new Response("err", { status: 500 });
+    };
+    const results = await Promise.all([
+      withIdempotency(store, writeRequest(), handler, "trace-9"),
+      withIdempotency(store, writeRequest(), handler, "trace-9"),
+      withIdempotency(store, writeRequest(), handler, "trace-9"),
+    ]);
+    expect(results.map((response) => response.status)).toEqual([500, 500, 500]);
+    expect(maxInFlight).toBe(1);
+    expect(calls).toBe(3);
+  });
 });

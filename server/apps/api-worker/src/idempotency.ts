@@ -123,14 +123,7 @@ export async function withIdempotency(
   });
   const fingerprint = await fingerprintRequest(request, principalId);
 
-  let claim = await store.claim(storageKey, fingerprint);
-  if (claim.status === "in_progress") {
-    const waited = await claim.wait();
-    if (waited !== undefined) {
-      return replay(waited);
-    }
-    claim = await store.claim(storageKey, fingerprint);
-  }
+  const claim = await settleClaim(store, storageKey, fingerprint);
   if (claim.status === "conflict") {
     return problemResponse({
       status: 409,
@@ -161,6 +154,23 @@ export async function withIdempotency(
   } catch (error: unknown) {
     await store.abort(storageKey);
     throw error;
+  }
+}
+
+async function settleClaim(
+  store: IdempotencyStore,
+  storageKey: string,
+  fingerprint: string,
+): Promise<Exclude<IdempotencyClaim, { status: "in_progress" }>> {
+  for (;;) {
+    const claim = await store.claim(storageKey, fingerprint);
+    if (claim.status !== "in_progress") {
+      return claim;
+    }
+    const waited = await claim.wait();
+    if (waited !== undefined) {
+      return { status: "replay", record: waited };
+    }
   }
 }
 
