@@ -21,9 +21,14 @@ const erNotesPath = join(serverRoot, "..", "docs", "architecture", "er-multi-use
 const USER_A = "11111111-1111-4111-8111-111111111111";
 const USER_B = "22222222-2222-4222-8222-222222222222";
 const USER_SUSPENDED = "33333333-3333-4333-8333-333333333333";
-const GUESSED = "99999999-9999-4999-8999-999999999999";
+const USER_GUESSED = "99999999-9999-4999-8999-999999999999";
+const PROFILE_ONLY = "44444444-4444-4444-8444-444444444444";
+const FRESH_PROFILE = "55555555-5555-4555-8555-555555555555";
 
 const PRIVATE_WITH_OWNER = [...PRIVATE_TABLES, ...OPTIONAL_OWNER_TABLES] as const;
+const INSERTABLE_PRIVATE = PRIVATE_WITH_OWNER.filter(
+  (table) => table !== "profiles" && table !== "user_settings",
+);
 
 const DML_COMMANDS = ["select", "insert", "update", "delete"] as const;
 
@@ -152,6 +157,40 @@ describe("row level isolation policies", () => {
     expect(sql).toMatch(/auth\.uid\s*\(/i);
   });
 
+  it("counts only RLS 42501 and hidden rows as denial, not unique or FK errors", () => {
+    expect(
+      denied({
+        ok: false,
+        stdout: "",
+        stderr: 'ERROR:  duplicate key value violates unique constraint "profiles_user_id_key"',
+      }),
+    ).toBe(false);
+    expect(
+      denied({
+        ok: false,
+        stdout: "",
+        stderr:
+          'ERROR:  insert or update on table "devices" violates foreign key constraint "devices_user_id_fkey"',
+      }),
+    ).toBe(false);
+    expect(
+      denied({
+        ok: false,
+        stdout: "",
+        stderr: 'ERROR:  new row violates row-level security policy for table "books"',
+      }),
+    ).toBe(true);
+    expect(
+      denied({
+        ok: false,
+        stdout: "",
+        stderr: "ERROR:  42501: permission denied for table admin_roles",
+      }),
+    ).toBe(true);
+    expect(denied({ ok: true, stdout: "AR_RLS:0\n", stderr: "" })).toBe(true);
+    expect(denied({ ok: true, stdout: "AR_RLS:1\n", stderr: "" })).toBe(false);
+  });
+
   it("documents that service_role is server-side only", () => {
     expect(existsSync(erNotesPath)).toBe(true);
     const notes = readFileSync(erNotesPath, "utf8");
@@ -160,6 +199,8 @@ describe("row level isolation policies", () => {
     expect(notes).toMatch(/service_role/);
     expect(notes).toMatch(/server-side/i);
     expect(notes).toMatch(/BYPASSRLS|bypass row-level/i);
+    expect(notes).toMatch(/Private, user-filed[^\n]*privacy_requests/);
+    expect(notes).not.toMatch(/Private, server-owned[^\n]*privacy_requests/);
     const wrangler = readFileSync(join(serverRoot, "apps", "api-worker", "wrangler.toml"), "utf8");
     expect(wrangler).not.toMatch(/SERVICE_ROLE/);
     const admin = readFileSync(join(serverRoot, "apps", "admin-web", "src", "app.tsx"), "utf8");
@@ -173,6 +214,7 @@ describe("row level isolation (postgres)", () => {
   let db: PostgresSession | undefined;
   let idsA: TenantIds;
   let idsB: TenantIds;
+  let idsGuessed: TenantIds;
   let idsSuspended: TenantIds;
 
   beforeAll(async () => {
@@ -187,6 +229,7 @@ describe("row level isolation (postgres)", () => {
     }
     idsA = loadTenantIds(db, USER_A);
     idsB = loadTenantIds(db, USER_B);
+    idsGuessed = loadTenantIds(db, USER_GUESSED);
     idsSuspended = loadTenantIds(db, USER_SUSPENDED);
   }, 180_000);
 
@@ -219,16 +262,48 @@ describe("row level isolation (postgres)", () => {
   it.each(PRIVATE_WITH_OWNER)("guessed UUIDs do not open %s", (table) => {
     const session = requireDb(db);
     const foreignId = idsB[idKey(table)];
+    const guessedId = idsGuessed[idKey(table)];
     expect(denied(countAs(session, USER_A, rowsById(table, foreignId)))).toBe(true);
-    expect(denied(countAs(session, USER_A, rowsById(table, GUESSED)))).toBe(true);
+    expect(denied(countAs(session, USER_A, rowsById(table, guessedId)))).toBe(true);
     expect(denied(countAs(session, USER_A, updateById(table, foreignId)))).toBe(true);
-    expect(denied(countAs(session, USER_A, updateById(table, GUESSED)))).toBe(true);
+    expect(denied(countAs(session, USER_A, updateById(table, guessedId)))).toBe(true);
     expect(denied(countAs(session, USER_A, deleteById(table, foreignId)))).toBe(true);
-    expect(denied(countAs(session, USER_A, deleteById(table, GUESSED)))).toBe(true);
-    expect(denied(countAs(session, USER_A, insertReturning(insertSql(table, idsB))))).toBe(true);
+    expect(denied(countAs(session, USER_A, deleteById(table, guessedId)))).toBe(true);
+  });
+
+  it.each(INSERTABLE_PRIVATE)(
+    "user A cannot insert a non-colliding %s row for another user",
+    (table) => {
+      const session = requireDb(db);
+      expect(denied(countAs(session, USER_A, insertReturning(insertSql(table, idsB))))).toBe(true);
+      expect(denied(countAs(session, USER_A, insertReturning(insertSql(table, idsGuessed))))).toBe(
+        true,
+      );
+    },
+  );
+
+  it("does not let a user insert a profile or settings for another uid", () => {
+    const session = requireDb(db);
     expect(
       denied(
-        countAs(session, USER_A, insertReturning(insertSql(table, { ...idsB, userId: GUESSED }))),
+        countAs(
+          session,
+          USER_A,
+          insertReturning(
+            `insert into profiles (user_id, display_name) values (${sqlString(FRESH_PROFILE)}, 'hijack')`,
+          ),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      denied(
+        countAs(
+          session,
+          USER_A,
+          insertReturning(
+            `insert into user_settings (user_id) values (${sqlString(PROFILE_ONLY)})`,
+          ),
+        ),
       ),
     ).toBe(true);
   });
@@ -313,7 +388,7 @@ describe("row level isolation (postgres)", () => {
       `SELECT 'AR_RLS:' || (select count(*)::text from books)`,
     );
     expect(books.ok, books.stderr).toBe(true);
-    expect(parseMarker(books.stdout)).toBeGreaterThanOrEqual(3);
+    expect(parseMarker(books.stdout)).toBeGreaterThanOrEqual(4);
     const cache = countAsRole(
       session,
       "service_role",
@@ -353,6 +428,7 @@ type TenantIds = {
   bookId: string;
   assetId: string;
   chapterId: string;
+  extraChapterId: string;
   progressId: string;
   revisionId: string;
   segmentId: string;
@@ -406,6 +482,20 @@ function requireDb(db: PostgresSession | undefined): PostgresSession {
   return db;
 }
 
+function chapterAt(db: PostgresSession, userId: string, index: number): string {
+  const result = db.exec(
+    `select id::text from chapters where user_id = ${sqlString(userId)} and index = ${String(index)} limit 1;`,
+  );
+  if (!result.ok) {
+    throw new Error(`chapter ${String(index)}: ${result.stderr || result.stdout}`);
+  }
+  const id = result.stdout.trim().split("\n").at(-1)?.trim();
+  if (id === undefined || id.length === 0) {
+    throw new Error(`no chapter ${String(index)} for ${userId}`);
+  }
+  return id;
+}
+
 function loadTenantIds(db: PostgresSession, userId: string): TenantIds {
   const one = (table: string): string => {
     const result = db.exec(
@@ -427,7 +517,8 @@ function loadTenantIds(db: PostgresSession, userId: string): TenantIds {
     settingsId: one("user_settings"),
     bookId: one("books"),
     assetId: one("book_assets"),
-    chapterId: one("chapters"),
+    chapterId: chapterAt(db, userId, 0),
+    extraChapterId: chapterAt(db, userId, 2),
     progressId: one("reading_progress"),
     revisionId: one("transcript_revisions"),
     segmentId: one("transcript_segments"),
@@ -455,18 +546,26 @@ function parseMarker(stdout: string): number | undefined {
 
 function denied(result: SqlResult): boolean {
   if (!result.ok) {
-    const text = `${result.stderr} ${result.stdout}`.toLowerCase();
-    return (
-      text.includes("permission denied") ||
-      text.includes("row-level security") ||
-      text.includes("42501") ||
-      text.includes("new row violates") ||
-      text.includes("violates foreign key") ||
-      text.includes("duplicate key") ||
-      text.includes("unique constraint")
-    );
+    return isRlsDeniedError(`${result.stderr} ${result.stdout}`);
   }
   return parseMarker(result.stdout) === 0;
+}
+
+function isRlsDeniedError(message: string): boolean {
+  const text = message.toLowerCase();
+  if (
+    text.includes("duplicate key") ||
+    text.includes("unique constraint") ||
+    text.includes("violates foreign key") ||
+    text.includes("violates unique")
+  ) {
+    return false;
+  }
+  return (
+    text.includes("42501") ||
+    text.includes("row-level security") ||
+    text.includes("permission denied")
+  );
 }
 
 function countAs(db: PostgresSession, userId: string, statement: string): SqlResult {
@@ -548,6 +647,7 @@ function insertSql(table: string, owner: TenantIds): string {
   const revision = sqlString(owner.revisionId);
   const vocab = sqlString(owner.vocabId);
   const card = sqlString(owner.cardId);
+  const extraChapter = sqlString(owner.extraChapterId);
   switch (table) {
     case "profiles":
       return `insert into profiles (user_id, display_name) values (${u}, 'hijack')`;
@@ -566,7 +666,7 @@ function insertSql(table: string, owner: TenantIds): string {
         values (${u}, ${book}, 1, 'h', 'ch-h', 1)`;
     case "reading_progress":
       return `insert into reading_progress (user_id, book_id, chapter_id)
-        values (${u}, ${book}, ${chapter})`;
+        values (${u}, ${book}, ${extraChapter})`;
     case "transcript_revisions":
       return `insert into transcript_revisions
         (user_id, book_id, chapter_id, version, engine, locale, chapter_fingerprint)
@@ -644,6 +744,9 @@ begin
   values (p_user, v_book, 0, 'Ch 1', 'chfp-' || p_user::text, 60)
   returning id into v_chapter;
 
+  insert into public.chapters (user_id, book_id, index, title, chapter_fingerprint, duration_seconds)
+  values (p_user, v_book, 2, 'Ch 2', 'chfp2-' || p_user::text, 30);
+
   insert into public.reading_progress (user_id, book_id, chapter_id)
   values (p_user, v_book, v_chapter);
 
@@ -697,7 +800,11 @@ $$;
 
 select public._seed_user(${sqlString(USER_A)}::uuid, 'active');
 select public._seed_user(${sqlString(USER_B)}::uuid, 'active');
+select public._seed_user(${sqlString(USER_GUESSED)}::uuid, 'active');
 select public._seed_user(${sqlString(USER_SUSPENDED)}::uuid, 'suspended');
+
+insert into public.profiles (user_id, display_name, account_status)
+values (${sqlString(PROFILE_ONLY)}::uuid, 'settings target', 'active');
 
 insert into public.canonical_works (normalized_title, normalized_author)
 values ('seed title', 'seed author');

@@ -8,7 +8,8 @@ policies come from versioned SQL in `server/supabase/migrations/`.
 | Scope | Tables |
 | --- | --- |
 | Private, synchronized | `profiles`, `devices`, `user_settings`, `books`, `book_assets`, `chapters`, `reading_progress`, `transcript_revisions`, `transcript_segments`, `vocabulary_occurrences`, `known_lemmas`, `review_cards`, `review_events`, `user_assistant_results` |
-| Private, server-owned | `assistant_jobs`, `usage_ledger`, `sync_changes`, `idempotency_records`, `admin_roles`, `privacy_requests` |
+| Private, user-filed | `privacy_requests` (authenticated JWT may CRUD own rows) |
+| Private, server-owned | `assistant_jobs`, `usage_ledger`, `sync_changes`, `idempotency_records`, `admin_roles` |
 | Global / operational | `canonical_works`, `canonical_editions`, `assistant_cache_entries`, `feature_flags`, `model_policies`, `audit_events` |
 
 Synchronized private rows carry `id`, `user_id`, `created_at`, `updated_at`,
