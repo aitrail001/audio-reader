@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import openapiTS, { astToString } from "openapi-typescript";
+import openapiTS, { COMMENT_HEADER, astToString } from "openapi-typescript";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = join(packageRoot, "..", "..", "..");
@@ -23,7 +23,7 @@ export type ContractCheckResult = { ok: true } | { ok: false; message: string };
 
 export async function generateContractTypes(specPath = defaultSpecPath): Promise<string> {
   const ast = await openapiTS(pathToFileURL(resolve(specPath)), { silent: true });
-  return astToString(ast);
+  return `${COMMENT_HEADER}${astToString(ast)}`;
 }
 
 export async function writeContractTypes(
