@@ -41,9 +41,22 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.58</string>
+	<string>1.0.59</string>
 	<key>CFBundleVersion</key>
-	<string>59</string>
+	<string>60</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.johnsonzhang.AudioReader.auth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>audioreader</string>
+			</array>
+		</dict>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIFileSharingEnabled</key>

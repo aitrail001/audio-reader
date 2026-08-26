@@ -3,6 +3,9 @@ import SwiftUI
 #if os(macOS)
 import AppKit
 #endif
+#if canImport(AudioReaderNetworking)
+import AudioReaderNetworking
+#endif
 
 @MainActor
 @Observable
@@ -59,6 +62,7 @@ final class AppState {
     var translationError: String?
     var vocabularyNotice: String?
     var showSettings = false
+    var account: AccountSession
     var credentialMigrationWarning: String?
     var codexLoginStatus = "Codex login status not checked"
     var isCheckingCodexLogin = false
@@ -662,10 +666,17 @@ final class AppState {
         }
     }
 
-    init(composition: AppComposition = .live) {
+    init(composition: AppComposition = .live, account: AccountSession? = nil) {
         vocabularyRepository = composition.vocabulary
         knownLemmaRepository = composition.knownLemmas
         usesLivePersistence = composition.usesLivePersistence
+        if let account {
+            self.account = account
+        } else if usesLivePersistence {
+            self.account = AccountSession.live()
+        } else {
+            self.account = AccountSession.isolated()
+        }
         if usesLivePersistence {
             settings = Persistence.loadSettings()
 #if os(iOS)
@@ -712,6 +723,7 @@ final class AppState {
     }
 
     func boot() async {
+        await account.restore()
         await rescan()
         if let first = books.first {
             selectedBookID = first.id

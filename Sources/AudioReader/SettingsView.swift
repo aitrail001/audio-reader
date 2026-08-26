@@ -41,6 +41,7 @@ struct SettingsView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
+                    accountSection
                     appearanceSection
                     dictionarySection
                     languageSection
@@ -93,6 +94,13 @@ struct SettingsView: View {
 #else
         nil
 #endif
+    }
+
+    private var accountSection: some View {
+        GroupBox("Account") {
+            AccountSessionView(session: state.account)
+                .padding(12)
+        }
     }
 
     private var appearanceSection: some View {

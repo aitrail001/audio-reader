@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .library(name: "AudioReaderDomain", targets: ["AudioReaderDomain"]),
         .library(name: "AudioReaderLocalStore", targets: ["AudioReaderLocalStore"]),
+        .library(name: "AudioReaderNetworking", targets: ["AudioReaderNetworking"]),
         .executable(name: "AudioReader", targets: ["AudioReader"])
     ],
     dependencies: [
@@ -30,11 +31,22 @@ let package = Package(
                 .linkedLibrary("sqlite3")
             ]
         ),
+        .target(
+            name: "AudioReaderNetworking",
+            dependencies: [
+                "AudioReaderDomain"
+            ],
+            path: "Sources/AudioReaderNetworking",
+            linkerSettings: [
+                .linkedFramework("Security")
+            ]
+        ),
         .executableTarget(
             name: "AudioReader",
             dependencies: [
                 "AudioReaderDomain",
                 "AudioReaderLocalStore",
+                "AudioReaderNetworking",
                 .product(name: "ZIPFoundation", package: "ZIPFoundation")
             ],
             path: "Sources/AudioReader",
@@ -43,6 +55,7 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedFramework("Security"),
+                .linkedFramework("AuthenticationServices"),
                 .linkedFramework("LocalAuthentication", .when(platforms: [.macOS])),
                 .linkedFramework("Speech"),
                 .linkedFramework("FoundationModels"),
@@ -71,11 +84,18 @@ let package = Package(
             ]
         ),
         .testTarget(
+            name: "AudioReaderNetworkingTests",
+            dependencies: [
+                "AudioReaderNetworking"
+            ]
+        ),
+        .testTarget(
             name: "AudioReaderTests",
             dependencies: [
                 "AudioReader",
                 "AudioReaderDomain",
                 "AudioReaderLocalStore",
+                "AudioReaderNetworking",
                 .product(name: "ZIPFoundation", package: "ZIPFoundation")
             ]
         )

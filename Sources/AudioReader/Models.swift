@@ -7,6 +7,9 @@ import CryptoKit
 #if canImport(AudioReaderLocalStore)
 @_exported import AudioReaderLocalStore
 #endif
+#if canImport(AudioReaderNetworking)
+@_exported import AudioReaderNetworking
+#endif
 
 enum AppVersion {
     static var marketing: String {
