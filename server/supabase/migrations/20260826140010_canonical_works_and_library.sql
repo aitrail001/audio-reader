@@ -50,13 +50,14 @@ create table public.books (
     check (source in ('local_folder', 'files', 'device_audiobooks', 'remote_backup')),
   constraint books_fingerprint_version_check check (fingerprint_version >= 1),
   constraint books_chapter_count_check check (chapter_count >= 0),
-  constraint books_server_version_check check (server_version >= 0)
+  constraint books_server_version_check check (server_version >= 0),
+  constraint books_user_id_id_key unique (user_id, id)
 );
 
 create table public.book_assets (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles (user_id) on delete cascade,
-  book_id uuid not null references public.books (id) on delete cascade,
+  book_id uuid not null,
   kind text not null,
   content_type text not null,
   size_bytes bigint not null,
@@ -73,25 +74,35 @@ create table public.book_assets (
   constraint book_assets_status_check
     check (status in ('pending', 'ready', 'failed', 'deleting')),
   constraint book_assets_size_bytes_check check (size_bytes >= 0),
-  constraint book_assets_server_version_check check (server_version >= 0)
+  constraint book_assets_server_version_check check (server_version >= 0),
+  constraint book_assets_user_book_fkey
+    foreign key (user_id, book_id) references public.books (user_id, id) on delete cascade,
+  constraint book_assets_user_id_id_key unique (user_id, id),
+  constraint book_assets_book_id_id_key unique (book_id, id)
 );
 
 alter table public.books
-  add constraint books_cover_asset_id_fkey
-  foreign key (cover_asset_id) references public.book_assets (id)
+  add constraint books_cover_asset_user_fkey
+  foreign key (user_id, cover_asset_id) references public.book_assets (user_id, id)
+  on delete set null
+  deferrable initially deferred;
+
+alter table public.books
+  add constraint books_cover_asset_book_fkey
+  foreign key (id, cover_asset_id) references public.book_assets (book_id, id)
   on delete set null
   deferrable initially deferred;
 
 create table public.chapters (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles (user_id) on delete cascade,
-  book_id uuid not null references public.books (id) on delete cascade,
+  book_id uuid not null,
   index integer not null,
   title text not null,
   chapter_fingerprint text not null,
   duration_seconds numeric not null,
   start_seconds numeric,
-  audio_asset_id uuid references public.book_assets (id) on delete set null,
+  audio_asset_id uuid,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   server_version bigint not null default 0,
@@ -100,21 +111,34 @@ create table public.chapters (
   constraint chapters_index_check check (index >= 0),
   constraint chapters_duration_seconds_check check (duration_seconds >= 0),
   constraint chapters_start_seconds_check check (start_seconds is null or start_seconds >= 0),
-  constraint chapters_server_version_check check (server_version >= 0)
+  constraint chapters_server_version_check check (server_version >= 0),
+  constraint chapters_user_book_fkey
+    foreign key (user_id, book_id) references public.books (user_id, id) on delete cascade,
+  constraint chapters_user_audio_asset_fkey
+    foreign key (user_id, audio_asset_id) references public.book_assets (user_id, id)
+    on delete set null,
+  constraint chapters_book_audio_asset_fkey
+    foreign key (book_id, audio_asset_id) references public.book_assets (book_id, id)
+    on delete set null,
+  constraint chapters_user_id_id_key unique (user_id, id),
+  constraint chapters_book_id_id_key unique (book_id, id),
+  constraint chapters_book_index_deleted_at_key
+    unique nulls not distinct (book_id, index, deleted_at)
+    deferrable initially deferred
 );
 
 create table public.reading_progress (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles (user_id) on delete cascade,
-  book_id uuid not null references public.books (id) on delete cascade,
-  chapter_id uuid not null references public.chapters (id) on delete cascade,
+  book_id uuid not null,
+  chapter_id uuid not null,
   position_seconds numeric not null default 0,
   segment_id text,
   word_id text,
   completed boolean not null default false,
   completed_at timestamptz,
   explicit_seek boolean not null default false,
-  device_id uuid references public.devices (id) on delete set null,
+  device_id uuid,
   last_interaction_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -122,7 +146,15 @@ create table public.reading_progress (
   deleted_at timestamptz,
   last_mutation_id uuid,
   constraint reading_progress_position_seconds_check check (position_seconds >= 0),
-  constraint reading_progress_server_version_check check (server_version >= 0)
+  constraint reading_progress_server_version_check check (server_version >= 0),
+  constraint reading_progress_user_book_fkey
+    foreign key (user_id, book_id) references public.books (user_id, id) on delete cascade,
+  constraint reading_progress_user_chapter_fkey
+    foreign key (user_id, chapter_id) references public.chapters (user_id, id) on delete cascade,
+  constraint reading_progress_book_chapter_fkey
+    foreign key (book_id, chapter_id) references public.chapters (book_id, id) on delete cascade,
+  constraint reading_progress_user_device_fkey
+    foreign key (user_id, device_id) references public.devices (user_id, id) on delete set null
 );
 
 create index books_user_id_updated_idx
@@ -148,13 +180,6 @@ create index book_assets_user_book_idx
 create unique index book_assets_object_key_uidx
   on public.book_assets (object_key)
   where object_key is not null;
-
-create unique index chapters_book_index_uidx
-  on public.chapters (book_id, index);
-
-create index chapters_book_id_idx
-  on public.chapters (book_id, index)
-  where deleted_at is null;
 
 create unique index reading_progress_user_chapter_uidx
   on public.reading_progress (user_id, chapter_id);

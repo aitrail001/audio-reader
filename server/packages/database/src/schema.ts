@@ -48,12 +48,24 @@ export const SYNC_TABLES = [
 
 export const PRIVATE_TABLES = [
   ...SYNC_TABLES,
-  "assistant_jobs",
   "usage_ledger",
   "sync_changes",
   "idempotency_records",
   "admin_roles",
   "privacy_requests",
+] as const;
+
+export const OPTIONAL_OWNER_TABLES = ["assistant_jobs"] as const;
+
+export const TENANT_PARENT_TABLES = [
+  "books",
+  "book_assets",
+  "chapters",
+  "devices",
+  "vocabulary_occurrences",
+  "transcript_revisions",
+  "review_cards",
+  "user_assistant_results",
 ] as const;
 
 export const GLOBAL_TABLES = [

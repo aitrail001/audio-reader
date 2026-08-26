@@ -1,6 +1,13 @@
+export type UniqueConstraint = {
+  columns: string[];
+  nullsNotDistinct: boolean;
+  deferrable: boolean;
+};
+
 export type TableDefinition = {
   columns: Map<string, string>;
   constraints: string[];
+  uniques: UniqueConstraint[];
 };
 
 export type ForeignKey = {
@@ -8,6 +15,7 @@ export type ForeignKey = {
   columns: string[];
   refTable: string;
   refColumns: string[];
+  onDelete: string | undefined;
 };
 
 export type IndexDefinition = {
@@ -16,6 +24,7 @@ export type IndexDefinition = {
   unique: boolean;
   columns: string[];
   where: string | undefined;
+  nullsNotDistinct: boolean;
 };
 
 export type ParsedSchema = {
@@ -66,15 +75,15 @@ export function parsePostgresSchema(sql: string): ParsedSchema {
       for (const fk of parseForeignKeys(tableName, alter[2])) {
         foreignKeys.push(fk);
       }
-      const uniqueCols = parseUniqueColumns(alter[2]);
-      if (uniqueCols !== undefined && table !== undefined) {
-        table.constraints.push(`unique (${uniqueCols.join(", ")})`);
+      const unique = parseUniqueConstraint(alter[2]);
+      if (unique !== undefined && table !== undefined) {
+        table.uniques.push(unique);
       }
       continue;
     }
 
     const index =
-      /^create\s+(unique\s+)?index(?:\s+if\s+not\s+exists)?\s+([a-z_][a-z0-9_]*)\s+on\s+(?:public\.)?([a-z_][a-z0-9_]*)\s*\(([^)]*)\)(?:\s+where\s+(.*))?$/is.exec(
+      /^create\s+(unique\s+)?index(?:\s+if\s+not\s+exists)?\s+([a-z_][a-z0-9_]*)\s+on\s+(?:public\.)?([a-z_][a-z0-9_]*)\s*\(([^)]*)\)(?:\s+nulls\s+(not\s+)?distinct)?(?:\s+where\s+(.*))?$/is.exec(
         statement,
       );
     if (index?.[2] !== undefined && index[3] !== undefined && index[4] !== undefined) {
@@ -83,7 +92,8 @@ export function parsePostgresSchema(sql: string): ParsedSchema {
         table: index[3],
         unique: Boolean(index[1]),
         columns: splitIdentifierList(index[4]),
-        where: index[5]?.trim(),
+        where: index[6]?.trim(),
+        nullsNotDistinct: /\bnulls\s+not\s+distinct\b/i.test(statement),
       });
     }
   }
@@ -132,11 +142,8 @@ function uniqueColumnLists(
         lists.push([name]);
       }
     }
-    for (const constraint of table.constraints) {
-      const unique = parseUniqueColumns(constraint);
-      if (unique !== undefined) {
-        lists.push(unique);
-      }
+    for (const unique of table.uniques) {
+      lists.push(unique.columns);
     }
   }
   for (const index of indexes) {
@@ -161,6 +168,7 @@ function hasColumnList(lists: string[][], columns: readonly string[]): boolean {
 function parseTableBody(body: string): TableDefinition {
   const columns = new Map<string, string>();
   const constraints: string[] = [];
+  const uniques: UniqueConstraint[] = [];
   for (const part of splitTopLevel(body, ",")) {
     const item = collapse(part);
     if (item.length === 0) {
@@ -168,6 +176,10 @@ function parseTableBody(body: string): TableDefinition {
     }
     if (CONSTRAINT_START.test(item)) {
       constraints.push(item);
+      const unique = parseUniqueConstraint(item);
+      if (unique !== undefined) {
+        uniques.push(unique);
+      }
       continue;
     }
     const name = item.match(/^[a-z_][a-z0-9_]*/i)?.[0];
@@ -177,7 +189,7 @@ function parseTableBody(body: string): TableDefinition {
     }
     columns.set(name, item.slice(name.length).trim());
   }
-  return { columns, constraints };
+  return { columns, constraints, uniques };
 }
 
 function tableForeignKeys(table: string, definition: TableDefinition): ForeignKey[] {
@@ -205,6 +217,7 @@ function parseForeignKeys(table: string, sql: string, implicitColumns?: string[]
         columns,
         refTable,
         refColumns: splitIdentifierList(match[3] ?? columns.join(", ")),
+        onDelete: parseOnDelete(sql),
       });
     }
     match = tableLevel.exec(sql);
@@ -222,6 +235,7 @@ function parseForeignKeys(table: string, sql: string, implicitColumns?: string[]
         columns: implicitColumns ?? [],
         refTable,
         refColumns: splitIdentifierList(match[2] ?? ""),
+        onDelete: parseOnDelete(sql),
       });
     }
     match = columnLevel.exec(sql);
@@ -229,12 +243,21 @@ function parseForeignKeys(table: string, sql: string, implicitColumns?: string[]
   return keys;
 }
 
-function parseUniqueColumns(sql: string): string[] | undefined {
-  const match = /\bunique\s*(?:\s+[a-z_][a-z0-9_]*)?\s*\(([^)]+)\)/i.exec(sql);
+function parseUniqueConstraint(sql: string): UniqueConstraint | undefined {
+  const match = /\bunique(?:\s+nulls\s+(?:not\s+)?distinct)?\s*\(([^)]+)\)/i.exec(sql);
   if (match?.[1] === undefined) {
     return undefined;
   }
-  return splitIdentifierList(match[1]);
+  return {
+    columns: splitIdentifierList(match[1]),
+    nullsNotDistinct: /\bnulls\s+not\s+distinct\b/i.test(sql),
+    deferrable: /\bdeferrable\b/i.test(sql),
+  };
+}
+
+function parseOnDelete(sql: string): string | undefined {
+  const match = /on\s+delete\s+(cascade|set\s+null|set\s+default|restrict|no\s+action)/i.exec(sql);
+  return match?.[1]?.toLowerCase().replace(/\s+/g, " ");
 }
 
 function splitIdentifierList(value: string): string[] {

@@ -42,9 +42,6 @@ create unique index sync_changes_user_mutation_uidx
   on public.sync_changes (user_id, mutation_id)
   where mutation_id is not null;
 
-create index sync_changes_user_sequence_idx
-  on public.sync_changes (user_id, sequence);
-
 create index idempotency_records_expires_idx
   on public.idempotency_records (expires_at)
   where expires_at is not null;

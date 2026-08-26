@@ -31,7 +31,7 @@ create table public.assistant_cache_entries (
 
 create table public.assistant_jobs (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references public.profiles (user_id) on delete cascade,
+  user_id uuid references public.profiles (user_id) on delete set null,
   cache_key text,
   cache_entry_id uuid references public.assistant_cache_entries (id) on delete set null,
   kind text not null,
@@ -54,8 +54,8 @@ create table public.user_assistant_results (
   user_id uuid not null references public.profiles (user_id) on delete cascade,
   cache_entry_id uuid references public.assistant_cache_entries (id) on delete set null,
   job_id uuid references public.assistant_jobs (id) on delete set null,
-  book_id uuid references public.books (id) on delete set null,
-  chapter_id uuid references public.chapters (id) on delete set null,
+  book_id uuid,
+  chapter_id uuid,
   task_type text not null,
   status text not null,
   thread_id uuid,
@@ -72,7 +72,12 @@ create table public.user_assistant_results (
   last_mutation_id uuid,
   constraint user_assistant_results_status_check
     check (status in ('pending', 'accepted', 'rejected')),
-  constraint user_assistant_results_server_version_check check (server_version >= 0)
+  constraint user_assistant_results_server_version_check check (server_version >= 0),
+  constraint user_assistant_results_user_book_fkey
+    foreign key (user_id, book_id) references public.books (user_id, id) on delete set null,
+  constraint user_assistant_results_user_chapter_fkey
+    foreign key (user_id, chapter_id) references public.chapters (user_id, id) on delete set null,
+  constraint user_assistant_results_user_id_id_key unique (user_id, id)
 );
 
 create table public.usage_ledger (
@@ -92,7 +97,7 @@ create table public.usage_ledger (
 
 alter table public.vocabulary_occurrences
   add constraint vocabulary_occurrences_translation_id_fkey
-  foreign key (translation_id) references public.user_assistant_results (id)
+  foreign key (user_id, translation_id) references public.user_assistant_results (user_id, id)
   on delete set null;
 
 create index assistant_cache_entries_task_state_idx

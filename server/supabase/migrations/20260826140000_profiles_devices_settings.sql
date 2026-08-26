@@ -41,7 +41,8 @@ create table public.devices (
   deleted_at timestamptz,
   last_mutation_id uuid,
   constraint devices_platform_check check (platform in ('macos', 'ios', 'ipados')),
-  constraint devices_server_version_check check (server_version >= 0)
+  constraint devices_server_version_check check (server_version >= 0),
+  constraint devices_user_id_id_key unique (user_id, id)
 );
 
 create table public.user_settings (

@@ -14,8 +14,10 @@ absent here and belong to the following schema PR.
 
 Synchronized private rows carry `id`, `user_id`, `created_at`, `updated_at`,
 `server_version`, `deleted_at`, and `last_mutation_id`. Authorization fields are
-relational columns, not JSON. `assistant_cache_entries` stores no `user_id` and
-no source passage.
+relational columns, not JSON. Child rows use composite tenant FKs such as
+`(user_id, book_id) REFERENCES books (user_id, id)`. `assistant_cache_entries`
+stores no `user_id` and no source passage. In-flight `assistant_jobs` keep their
+`cache_key` claim if the first requester is deleted (`user_id` is `ON DELETE SET NULL`).
 
 ## Entity relationship
 

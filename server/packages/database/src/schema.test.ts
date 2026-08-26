@@ -2,8 +2,16 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { CORE_TABLES, GLOBAL_TABLES, PRIVATE_TABLES, SYNC_COLUMNS, SYNC_TABLES } from "./schema";
-import { parsePostgresSchema } from "./schema-sql";
+import {
+  CORE_TABLES,
+  GLOBAL_TABLES,
+  OPTIONAL_OWNER_TABLES,
+  PRIVATE_TABLES,
+  SYNC_COLUMNS,
+  SYNC_TABLES,
+  TENANT_PARENT_TABLES,
+} from "./schema";
+import { parsePostgresSchema, type ForeignKey } from "./schema-sql";
 
 const serverRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 const migrationsDir = join(serverRoot, "supabase", "migrations");
@@ -25,6 +33,33 @@ function loadMigrationSql(): string {
     .filter((name) => name.endsWith(".sql"))
     .sort();
   return files.map((name) => readFileSync(join(migrationsDir, name), "utf8")).join("\n");
+}
+
+function sameColumns(left: readonly string[], right: readonly string[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((column, index) => column.toLowerCase() === (right[index] ?? "").toLowerCase())
+  );
+}
+
+function hasForeignKey(
+  schema: ReturnType<typeof parsePostgresSchema>,
+  wanted: {
+    table: string;
+    columns: readonly string[];
+    refTable: string;
+    refColumns: readonly string[];
+    onDelete?: string;
+  },
+): boolean {
+  return schema.foreignKeys.some(
+    (fk: ForeignKey) =>
+      fk.table === wanted.table &&
+      fk.refTable === wanted.refTable &&
+      sameColumns(fk.columns, wanted.columns) &&
+      sameColumns(fk.refColumns, wanted.refColumns) &&
+      (wanted.onDelete === undefined || fk.onDelete === wanted.onDelete),
+  );
 }
 
 describe("multi-user postgres schema migrations", () => {
@@ -77,6 +112,12 @@ describe("multi-user postgres schema migrations", () => {
       expect(userId, `${tableName}.user_id`).toBeDefined();
       expect(userId?.toLowerCase()).toMatch(/\buuid\b/);
       expect(userId?.toLowerCase()).toMatch(/\bnot null\b/);
+    }
+    for (const tableName of OPTIONAL_OWNER_TABLES) {
+      const userId = schema.tables.get(tableName)?.columns.get("user_id");
+      expect(userId, `${tableName}.user_id`).toBeDefined();
+      expect(userId?.toLowerCase()).toMatch(/\buuid\b/);
+      expect(userId?.toLowerCase()).not.toMatch(/\bnot null\b/);
     }
   });
 
@@ -139,6 +180,154 @@ describe("multi-user postgres schema migrations", () => {
     expect(schema.hasUnique("feature_flags", ["key"])).toBe(true);
     expect(schema.hasUnique("reading_progress", ["user_id", "chapter_id"])).toBe(true);
     expect(schema.hasUnique("known_lemmas", ["user_id", "language", "lemma"])).toBe(true);
+    expect(schema.hasUnique("canonical_works", ["normalized_title", "normalized_author"])).toBe(
+      true,
+    );
+    expect(schema.hasUnique("model_policies", ["task", "region", "policy_version"])).toBe(true);
+  });
+
+  it("parses NULLS NOT DISTINCT unique indexes", () => {
+    const schema = parsePostgresSchema(`
+      create table public.canonical_works (id uuid primary key);
+      create unique index canonical_works_title_author_uidx
+        on public.canonical_works (normalized_title, normalized_author)
+        nulls not distinct;
+    `);
+    const index = schema.indexes.find((item) => item.name === "canonical_works_title_author_uidx");
+    expect(index?.unique).toBe(true);
+    expect(index?.nullsNotDistinct).toBe(true);
+    expect(index?.columns).toEqual(["normalized_title", "normalized_author"]);
+    expect(schema.hasUnique("canonical_works", ["normalized_title", "normalized_author"])).toBe(
+      true,
+    );
+  });
+
+  it("keeps chapter order unique deferrable so tombstones do not occupy slots", () => {
+    const schema = parsePostgresSchema(loadMigrationSql());
+    const chapters = schema.tables.get("chapters");
+    expect(chapters).toBeDefined();
+    const ordering = chapters?.uniques.find((unique) =>
+      sameColumns(unique.columns, ["book_id", "index", "deleted_at"]),
+    );
+    expect(ordering?.nullsNotDistinct).toBe(true);
+    expect(ordering?.deferrable).toBe(true);
+    const blocking = schema.indexes.find(
+      (index) =>
+        index.table === "chapters" &&
+        index.unique &&
+        sameColumns(index.columns, ["book_id", "index"]) &&
+        index.where === undefined,
+    );
+    expect(blocking).toBeUndefined();
+  });
+
+  it("uses composite tenant foreign keys onto UNIQUE (user_id, id) parents", () => {
+    const schema = parsePostgresSchema(loadMigrationSql());
+    for (const tableName of TENANT_PARENT_TABLES) {
+      expect(schema.hasUnique(tableName, ["user_id", "id"]), tableName).toBe(true);
+    }
+    expect(schema.hasUnique("book_assets", ["book_id", "id"])).toBe(true);
+    expect(schema.hasUnique("chapters", ["book_id", "id"])).toBe(true);
+    const required = [
+      {
+        table: "books",
+        columns: ["user_id", "cover_asset_id"],
+        refTable: "book_assets",
+        refColumns: ["user_id", "id"],
+      },
+      {
+        table: "book_assets",
+        columns: ["user_id", "book_id"],
+        refTable: "books",
+        refColumns: ["user_id", "id"],
+      },
+      {
+        table: "chapters",
+        columns: ["user_id", "book_id"],
+        refTable: "books",
+        refColumns: ["user_id", "id"],
+      },
+      {
+        table: "chapters",
+        columns: ["book_id", "audio_asset_id"],
+        refTable: "book_assets",
+        refColumns: ["book_id", "id"],
+      },
+      {
+        table: "reading_progress",
+        columns: ["user_id", "chapter_id"],
+        refTable: "chapters",
+        refColumns: ["user_id", "id"],
+      },
+      {
+        table: "transcript_revisions",
+        columns: ["user_id", "chapter_id"],
+        refTable: "chapters",
+        refColumns: ["user_id", "id"],
+      },
+      {
+        table: "transcript_segments",
+        columns: ["user_id", "revision_id"],
+        refTable: "transcript_revisions",
+        refColumns: ["user_id", "id"],
+      },
+      {
+        table: "vocabulary_occurrences",
+        columns: ["user_id", "chapter_id"],
+        refTable: "chapters",
+        refColumns: ["user_id", "id"],
+      },
+      {
+        table: "review_cards",
+        columns: ["user_id", "vocabulary_id"],
+        refTable: "vocabulary_occurrences",
+        refColumns: ["user_id", "id"],
+      },
+      {
+        table: "review_events",
+        columns: ["user_id", "vocabulary_id"],
+        refTable: "vocabulary_occurrences",
+        refColumns: ["user_id", "id"],
+      },
+      {
+        table: "privacy_requests",
+        columns: ["user_id", "asset_id"],
+        refTable: "book_assets",
+        refColumns: ["user_id", "id"],
+      },
+      {
+        table: "vocabulary_occurrences",
+        columns: ["user_id", "translation_id"],
+        refTable: "user_assistant_results",
+        refColumns: ["user_id", "id"],
+      },
+    ] as const;
+    for (const fk of required) {
+      expect(hasForeignKey(schema, fk), `${fk.table} (${fk.columns.join(", ")})`).toBe(true);
+    }
+  });
+
+  it("does not cascade-delete in-flight assistant jobs with the claiming profile", () => {
+    const schema = parsePostgresSchema(loadMigrationSql());
+    expect(
+      hasForeignKey(schema, {
+        table: "assistant_jobs",
+        columns: ["user_id"],
+        refTable: "profiles",
+        refColumns: ["user_id"],
+        onDelete: "set null",
+      }),
+    ).toBe(true);
+  });
+
+  it("does not keep non-unique indexes that duplicate unique keys", () => {
+    const schema = parsePostgresSchema(loadMigrationSql());
+    const names = new Set(schema.indexes.map((index) => index.name));
+    expect(names.has("transcript_revisions_chapter_idx")).toBe(false);
+    expect(names.has("transcript_segments_revision_id_idx")).toBe(false);
+    expect(names.has("sync_changes_user_sequence_idx")).toBe(false);
+    expect(names.has("chapters_book_index_uidx")).toBe(false);
+    expect(names.has("chapters_book_id_idx")).toBe(false);
   });
 
   it("indexes expected pull, due-review, and library lookup paths", () => {
@@ -154,6 +343,7 @@ describe("multi-user postgres schema migrations", () => {
     expect(schema.hasIndex("assistant_jobs", ["user_id", "status"])).toBe(true);
     expect(schema.hasIndex("usage_ledger", ["user_id", "metric_key"])).toBe(true);
     expect(schema.hasIndex("audit_events", ["created_at"])).toBe(true);
+    expect(schema.hasIndex("model_policies", ["task", "region"])).toBe(true);
   });
 
   it("uses a partial unique index so only one in-flight job owns a cache_key", () => {

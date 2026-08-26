@@ -1,8 +1,8 @@
 create table public.transcript_revisions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles (user_id) on delete cascade,
-  book_id uuid not null references public.books (id) on delete cascade,
-  chapter_id uuid not null references public.chapters (id) on delete cascade,
+  book_id uuid not null,
+  chapter_id uuid not null,
   version integer not null,
   engine text not null,
   engine_version text,
@@ -18,14 +18,22 @@ create table public.transcript_revisions (
   deleted_at timestamptz,
   last_mutation_id uuid,
   constraint transcript_revisions_version_check check (version >= 1),
-  constraint transcript_revisions_server_version_check check (server_version >= 0)
+  constraint transcript_revisions_server_version_check check (server_version >= 0),
+  constraint transcript_revisions_user_book_fkey
+    foreign key (user_id, book_id) references public.books (user_id, id) on delete cascade,
+  constraint transcript_revisions_user_chapter_fkey
+    foreign key (user_id, chapter_id) references public.chapters (user_id, id) on delete cascade,
+  constraint transcript_revisions_book_chapter_fkey
+    foreign key (book_id, chapter_id) references public.chapters (book_id, id) on delete cascade,
+  constraint transcript_revisions_user_id_id_key unique (user_id, id),
+  constraint transcript_revisions_chapter_id_id_key unique (chapter_id, id)
 );
 
 create table public.transcript_segments (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles (user_id) on delete cascade,
-  revision_id uuid not null references public.transcript_revisions (id) on delete cascade,
-  chapter_id uuid not null references public.chapters (id) on delete cascade,
+  revision_id uuid not null,
+  chapter_id uuid not null,
   sequence integer not null,
   start_seconds numeric not null,
   end_seconds numeric not null,
@@ -45,14 +53,22 @@ create table public.transcript_segments (
   constraint transcript_segments_end_seconds_check check (end_seconds >= start_seconds),
   constraint transcript_segments_alignment_score_check
     check (alignment_score is null or (alignment_score >= 0 and alignment_score <= 1)),
-  constraint transcript_segments_server_version_check check (server_version >= 0)
+  constraint transcript_segments_server_version_check check (server_version >= 0),
+  constraint transcript_segments_user_revision_fkey
+    foreign key (user_id, revision_id) references public.transcript_revisions (user_id, id)
+    on delete cascade,
+  constraint transcript_segments_user_chapter_fkey
+    foreign key (user_id, chapter_id) references public.chapters (user_id, id) on delete cascade,
+  constraint transcript_segments_chapter_revision_fkey
+    foreign key (chapter_id, revision_id) references public.transcript_revisions (chapter_id, id)
+    on delete cascade
 );
 
 create table public.vocabulary_occurrences (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles (user_id) on delete cascade,
-  book_id uuid not null references public.books (id) on delete cascade,
-  chapter_id uuid not null references public.chapters (id) on delete cascade,
+  book_id uuid not null,
+  chapter_id uuid not null,
   segment_id text,
   word_id text,
   surface text not null,
@@ -85,7 +101,14 @@ create table public.vocabulary_occurrences (
     check (clip_start_seconds is null or clip_start_seconds >= 0),
   constraint vocabulary_occurrences_clip_end_seconds_check
     check (clip_end_seconds is null or clip_end_seconds >= 0),
-  constraint vocabulary_occurrences_server_version_check check (server_version >= 0)
+  constraint vocabulary_occurrences_server_version_check check (server_version >= 0),
+  constraint vocabulary_occurrences_user_book_fkey
+    foreign key (user_id, book_id) references public.books (user_id, id) on delete cascade,
+  constraint vocabulary_occurrences_user_chapter_fkey
+    foreign key (user_id, chapter_id) references public.chapters (user_id, id) on delete cascade,
+  constraint vocabulary_occurrences_book_chapter_fkey
+    foreign key (book_id, chapter_id) references public.chapters (book_id, id) on delete cascade,
+  constraint vocabulary_occurrences_user_id_id_key unique (user_id, id)
 );
 
 create table public.known_lemmas (
@@ -107,7 +130,7 @@ create table public.known_lemmas (
 create table public.review_cards (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles (user_id) on delete cascade,
-  vocabulary_id uuid not null references public.vocabulary_occurrences (id) on delete cascade,
+  vocabulary_id uuid not null,
   face text not null,
   due_at timestamptz,
   stability numeric not null default 0,
@@ -132,19 +155,23 @@ create table public.review_cards (
   constraint review_cards_stability_check check (stability >= 0),
   constraint review_cards_difficulty_check check (difficulty >= 0),
   constraint review_cards_review_count_check check (review_count >= 0),
-  constraint review_cards_server_version_check check (server_version >= 0)
+  constraint review_cards_server_version_check check (server_version >= 0),
+  constraint review_cards_user_vocabulary_fkey
+    foreign key (user_id, vocabulary_id) references public.vocabulary_occurrences (user_id, id)
+    on delete cascade,
+  constraint review_cards_user_id_id_key unique (user_id, id)
 );
 
 create table public.review_events (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles (user_id) on delete cascade,
-  vocabulary_id uuid not null references public.vocabulary_occurrences (id) on delete cascade,
-  card_id uuid references public.review_cards (id) on delete set null,
+  vocabulary_id uuid not null,
+  card_id uuid,
   face text not null,
   rating integer not null,
   response_time_ms integer,
   reviewed_at timestamptz not null,
-  device_id uuid references public.devices (id) on delete set null,
+  device_id uuid,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   server_version bigint not null default 0,
@@ -163,7 +190,14 @@ create table public.review_events (
   constraint review_events_rating_check check (rating >= 1 and rating <= 4),
   constraint review_events_response_time_ms_check
     check (response_time_ms is null or response_time_ms >= 0),
-  constraint review_events_server_version_check check (server_version >= 0)
+  constraint review_events_server_version_check check (server_version >= 0),
+  constraint review_events_user_vocabulary_fkey
+    foreign key (user_id, vocabulary_id) references public.vocabulary_occurrences (user_id, id)
+    on delete cascade,
+  constraint review_events_user_card_fkey
+    foreign key (user_id, card_id) references public.review_cards (user_id, id) on delete set null,
+  constraint review_events_user_device_fkey
+    foreign key (user_id, device_id) references public.devices (user_id, id) on delete set null
 );
 
 create unique index transcript_revisions_chapter_version_uidx
@@ -177,13 +211,7 @@ create unique index transcript_revisions_object_key_uidx
   on public.transcript_revisions (object_key)
   where object_key is not null;
 
-create index transcript_revisions_chapter_idx
-  on public.transcript_revisions (chapter_id, version);
-
 create unique index transcript_segments_revision_seq_uidx
-  on public.transcript_segments (revision_id, sequence);
-
-create index transcript_segments_revision_id_idx
   on public.transcript_segments (revision_id, sequence);
 
 create index transcript_segments_sentence_hash_idx

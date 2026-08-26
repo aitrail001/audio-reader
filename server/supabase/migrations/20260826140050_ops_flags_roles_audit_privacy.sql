@@ -35,7 +35,7 @@ create table public.model_policies (
     check (max_output_tokens is null or max_output_tokens >= 1),
   constraint model_policies_timeout_ms_check
     check (timeout_ms is null or timeout_ms >= 1000),
-  constraint model_policies_task_policy_version_key unique (task, policy_version)
+  constraint model_policies_task_region_policy_version_key unique (task, region, policy_version)
 );
 
 create table public.admin_roles (
@@ -82,7 +82,7 @@ create table public.privacy_requests (
   status text not null,
   format text,
   include text[] not null default '{}',
-  asset_id uuid references public.book_assets (id) on delete set null,
+  asset_id uuid,
   confirmation text,
   reason text,
   export_first boolean not null default true,
@@ -95,7 +95,9 @@ create table public.privacy_requests (
   constraint privacy_requests_status_check
     check (status in ('queued', 'running', 'ready', 'failed', 'expired', 'cancelled')),
   constraint privacy_requests_format_check
-    check (format is null or format in ('zip_json', 'csv', 'anki_package'))
+    check (format is null or format in ('zip_json', 'csv', 'anki_package')),
+  constraint privacy_requests_user_asset_fkey
+    foreign key (user_id, asset_id) references public.book_assets (user_id, id) on delete set null
 );
 
 create unique index admin_roles_user_role_uidx
@@ -120,5 +122,9 @@ create index privacy_requests_user_id_idx
 create index privacy_requests_status_idx
   on public.privacy_requests (status, created_at);
 
-create index model_policies_task_enabled_idx
-  on public.model_policies (task, enabled);
+create unique index model_policies_one_enabled_uidx
+  on public.model_policies (task, region)
+  where enabled;
+
+create index model_policies_task_region_enabled_idx
+  on public.model_policies (task, region, enabled);
