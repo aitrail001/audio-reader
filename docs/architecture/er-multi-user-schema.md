@@ -1,8 +1,7 @@
 # Multi-user PostgreSQL schema
 
-Phase 4.1 system of record. Tables come from versioned SQL in
-`server/supabase/migrations/`. Row Level Security policies are intentionally
-absent here and belong to the following schema PR.
+Phase 4.1 system of record plus Phase 4.2 row-level isolation. Tables and
+policies come from versioned SQL in `server/supabase/migrations/`.
 
 ## Ownership
 
@@ -50,3 +49,23 @@ erDiagram
 ```
 
 Operational tables with no user FK: `feature_flags`, `model_policies`, `audit_events`.
+
+## Row Level Security
+
+Every core table has `ENABLE ROW LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY`.
+
+Authenticated JWTs are scoped with `auth.uid()` and `public.current_user_is_active()`:
+
+- Synchronized private tables and `privacy_requests`: select/insert/update/delete own rows
+- `assistant_jobs`, `usage_ledger`, and `sync_changes`: select own rows only
+- `assistant_cache_entries`, `model_policies`, `admin_roles`, `audit_events`,
+  `idempotency_records`, `feature_flags`, `canonical_works`, and
+  `canonical_editions`: no JWT policies (normal clients cannot query them)
+
+Suspended profiles (`account_status` other than `active`, or `deleted_at` set)
+cannot read or write rows. Users cannot insert `admin_roles` or write
+`usage_ledger`; quota and role assignment are server-assigned.
+
+`service_role` has `BYPASSRLS` and is for server-side Workers only. Clients never
+receive this key. Privileged behavior is exposed through the API, not by handing
+a service-role JWT to a browser or native app.

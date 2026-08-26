@@ -1,4 +1,4 @@
--- Phase 4.1 identity tables. RLS policies are a later PR.
+-- Phase 4.1 identity tables. RLS policies are in a later migration.
 
 create table public.profiles (
   id uuid primary key default gen_random_uuid(),

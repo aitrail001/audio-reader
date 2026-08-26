@@ -420,13 +420,6 @@ describe("multi-user postgres schema migrations", () => {
     expect(cache?.columns.has("user_id")).toBe(false);
   });
 
-  it("does not implement RLS policies in this schema PR", () => {
-    const sql = loadMigrationSql().toLowerCase();
-    expect(sql).not.toMatch(/enable row level security/);
-    expect(sql).not.toMatch(/create policy/);
-    expect(sql).not.toMatch(/force row level security/);
-  });
-
   it("does not persist provider secrets as columns", () => {
     const schema = parsePostgresSchema(loadMigrationSql());
     for (const [tableName, table] of schema.tables) {

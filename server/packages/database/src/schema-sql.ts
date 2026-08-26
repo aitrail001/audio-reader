@@ -28,10 +28,24 @@ export type IndexDefinition = {
   nullsNotDistinct: boolean;
 };
 
+export type PolicyCommand = "all" | "select" | "insert" | "update" | "delete";
+
+export type PolicyDefinition = {
+  name: string;
+  table: string;
+  command: PolicyCommand;
+  roles: string[];
+  using: string | undefined;
+  withCheck: string | undefined;
+};
+
 export type ParsedSchema = {
   tables: Map<string, TableDefinition>;
   foreignKeys: ForeignKey[];
   indexes: IndexDefinition[];
+  rlsEnabled: Set<string>;
+  rlsForced: Set<string>;
+  policies: PolicyDefinition[];
   hasUnique(table: string, columns: readonly string[]): boolean;
   hasIndex(table: string, columns: readonly string[]): boolean;
   hasCheck(table: string, column: string): boolean;
@@ -45,6 +59,9 @@ export function parsePostgresSchema(sql: string): ParsedSchema {
   const tables = new Map<string, TableDefinition>();
   const foreignKeys: ForeignKey[] = [];
   const indexes: IndexDefinition[] = [];
+  const rlsEnabled = new Set<string>();
+  const rlsForced = new Set<string>();
+  const policies: PolicyDefinition[] = [];
 
   for (const statement of statements) {
     const createTable =
@@ -62,6 +79,14 @@ export function parsePostgresSchema(sql: string): ParsedSchema {
       }
       continue;
     }
+
+    const policy = parsePolicy(statement);
+    if (policy !== undefined) {
+      policies.push(policy);
+      continue;
+    }
+
+    applyRlsAlter(statement, rlsEnabled, rlsForced);
 
     const alter =
       /^alter\s+table(?:\s+only)?\s+(?:public\.)?([a-z_][a-z0-9_]*)\s+add(?:\s+constraint\s+[a-z_][a-z0-9_]*)?\s+(.*)$/is.exec(
@@ -103,6 +128,9 @@ export function parsePostgresSchema(sql: string): ParsedSchema {
     tables,
     foreignKeys,
     indexes,
+    rlsEnabled,
+    rlsForced,
+    policies,
     hasUnique(table, columns) {
       return hasColumnList(uniqueColumnLists(tables.get(table), indexes, table), columns);
     },
@@ -246,6 +274,59 @@ function parseForeignKeys(table: string, sql: string, implicitColumns?: string[]
     match = columnLevel.exec(sql);
   }
   return keys;
+}
+
+function parsePolicy(statement: string): PolicyDefinition | undefined {
+  const header =
+    /^create\s+policy\s+"?([a-z_][a-z0-9_]*)"?\s+on\s+(?:public\.)?([a-z_][a-z0-9_]*)\s+(.*)$/is.exec(
+      statement,
+    );
+  if (header?.[1] === undefined || header[2] === undefined) {
+    return undefined;
+  }
+  const rest = header[3] ?? "";
+  const commandMatch = /\bfor\s+(all|select|insert|update|delete)\b/i.exec(rest);
+  const command = (commandMatch?.[1]?.toLowerCase() ?? "all") as PolicyCommand;
+  const toMatch = /\bto\s+(.+?)(?=\s+using\b|\s+with\s+check\b|$)/is.exec(rest);
+  const roles = (toMatch?.[1] ?? "public")
+    .split(",")
+    .map((role) => role.trim().toLowerCase().replaceAll('"', ""))
+    .filter((role) => role.length > 0);
+  return {
+    name: header[1].toLowerCase(),
+    table: header[2].toLowerCase(),
+    command,
+    roles,
+    using: extractParenClause(rest, String.raw`using`),
+    withCheck: extractParenClause(rest, String.raw`with\s+check`),
+  };
+}
+
+function extractParenClause(sql: string, keyword: string): string | undefined {
+  const match = new RegExp(String.raw`\b${keyword}\s*\(`, "i").exec(sql);
+  if (match === null) {
+    return undefined;
+  }
+  const open = sql.indexOf("(", match.index);
+  if (open < 0) {
+    return undefined;
+  }
+  return collapse(sql.slice(open + 1, matchingParen(sql, open)));
+}
+
+function applyRlsAlter(statement: string, rlsEnabled: Set<string>, rlsForced: Set<string>): void {
+  const match = /^alter\s+table(?:\s+only)?\s+(?:public\.)?([a-z_][a-z0-9_]*)\s+(.*)$/is.exec(
+    statement,
+  );
+  if (match?.[1] === undefined || match[2] === undefined) {
+    return;
+  }
+  if (/\benable\s+row\s+level\s+security\b/i.test(match[2])) {
+    rlsEnabled.add(match[1]);
+  }
+  if (/\bforce\s+row\s+level\s+security\b/i.test(match[2])) {
+    rlsForced.add(match[1]);
+  }
 }
 
 function parseUniqueConstraint(sql: string): UniqueConstraint | undefined {

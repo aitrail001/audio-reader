@@ -5,11 +5,15 @@ export type { ReadinessStatus };
 export {
   CORE_TABLES,
   GLOBAL_TABLES,
+  JWT_DENIED_TABLES,
   OPTIONAL_OWNER_TABLES,
   PRIVATE_TABLES,
+  SERVER_ONLY_TABLES,
   SYNC_COLUMNS,
   SYNC_TABLES,
   TENANT_PARENT_TABLES,
+  USER_OWNED_TABLES,
+  USER_READ_OWN_TABLES,
 } from "./schema";
 export type { CoreTable } from "./schema";
 

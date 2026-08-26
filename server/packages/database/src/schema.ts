@@ -77,6 +77,29 @@ export const GLOBAL_TABLES = [
   "audit_events",
 ] as const;
 
+/** Synchronized private rows plus user-filed privacy requests. */
+export const USER_OWNED_TABLES = [...SYNC_TABLES, "privacy_requests"] as const;
+
+/** Server-written private rows a user JWT may read for themselves only. */
+export const USER_READ_OWN_TABLES = ["assistant_jobs", "usage_ledger", "sync_changes"] as const;
+
+/** Named tables a normal user JWT must not read or write. */
+export const JWT_DENIED_TABLES = [
+  "assistant_cache_entries",
+  "model_policies",
+  "admin_roles",
+  "audit_events",
+] as const;
+
+/** RLS enabled, no authenticated policies. Includes JWT-denied tables. */
+export const SERVER_ONLY_TABLES = [
+  "idempotency_records",
+  "canonical_works",
+  "canonical_editions",
+  "feature_flags",
+  ...JWT_DENIED_TABLES,
+] as const;
+
 export const SYNC_COLUMNS = [
   "id",
   "user_id",
