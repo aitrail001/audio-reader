@@ -3,6 +3,9 @@ import SQLite3
 #if canImport(AudioReaderDomain)
 import AudioReaderDomain
 #endif
+#if canImport(AudioReaderLocalStore)
+import AudioReaderLocalStore
+#endif
 
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
@@ -33,6 +36,8 @@ final class LibraryStore: @unchecked Sendable {
         migrateSchema()
         if importLegacyJSON {
             importLegacyJSONIfNeeded()
+            let sources = LegacyLocalDataSources(sqliteURL: url, persistenceRoot: Persistence.root)
+            _ = try? LocalSQLiteStore(fileURL: url).migrateLegacyData(from: sources)
         }
     }
 

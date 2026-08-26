@@ -25,7 +25,10 @@ let package = Package(
             dependencies: [
                 "AudioReaderDomain"
             ],
-            path: "Sources/AudioReaderLocalStore"
+            path: "Sources/AudioReaderLocalStore",
+            linkerSettings: [
+                .linkedLibrary("sqlite3")
+            ]
         ),
         .executableTarget(
             name: "AudioReader",
