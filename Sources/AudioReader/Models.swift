@@ -1,7 +1,8 @@
 import Foundation
 import CryptoKit
 #if canImport(AudioReaderDomain)
-import AudioReaderDomain
+// Re-export so other AudioReader files see Domain IDs under SPM; Xcode compiles those sources into this module.
+@_exported import AudioReaderDomain
 #endif
 
 enum AppVersion {

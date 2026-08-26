@@ -13,6 +13,11 @@ struct PlatformParityContractTests {
         #expect(project.contains("name = \"AudioReader-iOS\";"))
         #expect(project.components(separatedBy: "100000000000000000000020 /* Sources/AudioReader */,").count - 1 == 3)
         #expect(project.components(separatedBy: "100000000000000000000025 /* Sources/AudioReaderDomain */,").count - 1 == 3)
+
+        let models = try source("Sources/AudioReader/Models.swift")
+        #expect(models.contains("#if canImport(AudioReaderDomain)"))
+        #expect(models.contains("@_exported import AudioReaderDomain"))
+        #expect(!project.contains("/* AudioReaderDomain in Frameworks */"))
     }
 
     @Test("Vocabulary review cards use one shared workflow on macOS and iPadOS")
