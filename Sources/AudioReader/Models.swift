@@ -1,5 +1,8 @@
 import Foundation
 import CryptoKit
+#if canImport(AudioReaderDomain)
+import AudioReaderDomain
+#endif
 
 enum AppVersion {
     static var marketing: String {
@@ -28,6 +31,11 @@ struct Book: Identifiable, Hashable, Codable, Sendable {
     var ebookPath: String?
     var chapters: [Chapter]
     var source: BookSource = .localFolder
+
+    var bookID: BookID {
+        get { BookID(rawValue: id) }
+        set { id = newValue.rawValue }
+    }
 }
 
 struct Chapter: Identifiable, Hashable, Codable, Sendable {
@@ -39,6 +47,11 @@ struct Chapter: Identifiable, Hashable, Codable, Sendable {
     var startTime: TimeInterval?
 
     var audioStart: TimeInterval { startTime ?? 0 }
+
+    var chapterID: ChapterID {
+        get { ChapterID(rawValue: id) }
+        set { id = newValue.rawValue }
+    }
 }
 
 struct TranscriptWord: Identifiable, Hashable, Codable, Sendable {

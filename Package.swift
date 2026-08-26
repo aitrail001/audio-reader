@@ -8,15 +8,21 @@ let package = Package(
         .iOS(.v26)
     ],
     products: [
+        .library(name: "AudioReaderDomain", targets: ["AudioReaderDomain"]),
         .executable(name: "AudioReader", targets: ["AudioReader"])
     ],
     dependencies: [
         .package(url: "https://github.com/weichsel/ZIPFoundation.git", exact: "0.9.20")
     ],
     targets: [
+        .target(
+            name: "AudioReaderDomain",
+            path: "Sources/AudioReaderDomain"
+        ),
         .executableTarget(
             name: "AudioReader",
             dependencies: [
+                "AudioReaderDomain",
                 .product(name: "ZIPFoundation", package: "ZIPFoundation")
             ],
             path: "Sources/AudioReader",
@@ -41,9 +47,16 @@ let package = Package(
             ]
         ),
         .testTarget(
+            name: "AudioReaderDomainTests",
+            dependencies: [
+                "AudioReaderDomain"
+            ]
+        ),
+        .testTarget(
             name: "AudioReaderTests",
             dependencies: [
                 "AudioReader",
+                "AudioReaderDomain",
                 .product(name: "ZIPFoundation", package: "ZIPFoundation")
             ]
         )

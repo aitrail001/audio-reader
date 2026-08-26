@@ -1173,12 +1173,12 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.54")
-        #expect(plist["CFBundleVersion"] as? String == "55")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.54")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "55")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.54;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 55;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.55")
+        #expect(plist["CFBundleVersion"] as? String == "56")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.55")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "56")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.55;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 56;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
     }
