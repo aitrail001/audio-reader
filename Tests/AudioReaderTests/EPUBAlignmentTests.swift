@@ -529,7 +529,7 @@ struct EPUBAlignmentTests {
         segment.individualEbookMatchTrusted = true
         segment.documentEbookUseAllowed = false
         let chapter = Chapter(id: "chapter", index: 0, title: "One", audioPath: "/tmp/book.m4b")
-        let state = AppState()
+        let state = AppState(composition: .inMemory())
         state.books = [Book(
             id: "book", title: "Book", author: nil, folderPath: "/tmp", coverPath: nil,
             ebookPath: "/tmp/book.epub", chapters: [chapter]

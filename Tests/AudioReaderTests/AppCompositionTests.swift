@@ -25,6 +25,21 @@ struct AppCompositionTests {
         #expect(!appState.contains("Persistence.saveVocab"))
         #expect(!appState.contains("Persistence.loadKnownLemmas"))
         #expect(!appState.contains("Persistence.saveKnownLemmas"))
+
+        let persistence = try source("Sources/AudioReader/Persistence.swift")
+        let defaultPath = try section(
+            in: persistence,
+            from: "    private static var defaultLibraryPath: String {",
+            to: "\n    init("
+        )
+        #expect(!defaultPath.contains("importedBooksURL"))
+        #expect(!defaultPath.contains("Persistence.root"))
+    }
+
+    private func section(in source: String, from start: String, to end: String) throws -> String {
+        let startRange = try #require(source.range(of: start))
+        let endRange = try #require(source.range(of: end, range: startRange.upperBound..<source.endIndex))
+        return String(source[startRange.lowerBound..<endRange.lowerBound])
     }
 
     @MainActor

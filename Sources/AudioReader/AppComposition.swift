@@ -1,7 +1,7 @@
 struct AppComposition: Sendable {
     var vocabulary: any VocabularyRepository
     var knownLemmas: any KnownLemmaRepository
-    /// When false, AppState must not read or write Persistence.root / LibraryStore.shared.
+    /// When false, AppState skips live settings, gloss, checkpoint, summary, and study-activity I/O and does not open LibraryStore.shared during init.
     var usesLivePersistence: Bool
 
     init(

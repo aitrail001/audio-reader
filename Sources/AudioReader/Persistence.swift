@@ -375,7 +375,9 @@ struct AppSettings: Codable, Equatable {
 #if os(macOS)
         "/Users/johnsonzhang/Documents/books"
 #else
-        Persistence.importedBooksURL.path
+        // Path only: do not create folders or the Application Support tree.
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ImportedBooks", isDirectory: true).path
 #endif
     }
 
