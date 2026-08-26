@@ -1,5 +1,6 @@
 .build/
 .swiftpm/
+node_modules/
 AudioReader.app/
 *.xcodeproj/xcuserdata/
 **/*.xcworkspace/xcuserdata/
