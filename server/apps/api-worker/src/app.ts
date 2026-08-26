@@ -1,5 +1,6 @@
 import {
   LOCAL_JWT_CONFIG,
+  LOCAL_PASSWORDLESS_HMAC_SECRET,
   createCloudflareTurnstileVerifier,
   createFakePrincipal,
   createMemoryAuthService,
@@ -20,6 +21,7 @@ import {
   parseOriginList,
   parsePositiveInt,
   resolveJwtSigningConfig,
+  resolvePasswordlessHmacSecret,
   type AppEnvironment,
   type WorkerEnv,
 } from "./env";
@@ -46,6 +48,7 @@ export type AppOptions = {
   idempotencyStore?: IdempotencyStore;
   passwordlessLimiter?: PasswordlessLimiter;
   verifyTurnstile?: TurnstileVerifier;
+  hmacSecret?: string;
 };
 
 export type ApiApp = {
@@ -59,9 +62,13 @@ export function createApiApp(options: AppOptions): ApiApp {
   const idempotencyStore = options.idempotencyStore ?? createMemoryIdempotencyStore();
   const passwordlessLimiter =
     options.passwordlessLimiter ??
-    (options.verifyTurnstile === undefined
-      ? createDefaultPasswordlessLimiter(options.environment)
-      : createDefaultPasswordlessLimiter(options.environment, options.verifyTurnstile));
+    createDefaultPasswordlessLimiter({
+      environment: options.environment,
+      ...(options.verifyTurnstile === undefined
+        ? {}
+        : { verifyTurnstile: options.verifyTurnstile }),
+      hmacSecret: options.hmacSecret ?? LOCAL_PASSWORDLESS_HMAC_SECRET,
+    });
 
   async function authenticate(request: Request): Promise<Principal | null> {
     const principal = await options.authenticate?.(request);
@@ -120,6 +127,27 @@ export function createApiAppFromEnv(env: WorkerEnv): ApiApp {
   const auth =
     jwt === undefined ? undefined : createMemoryAuthService({ jwt, allowLocalIssuance: useFakes });
   const turnstileSecret = env.TURNSTILE_SECRET_KEY?.trim() ?? "";
+  const hmac = resolvePasswordlessHmacSecret(env);
+  if (!useFakes && !hmac.fromEnv) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: "passwordless_hmac_secret_missing",
+        detail:
+          "PASSWORDLESS_HMAC_SECRET (or CACHE_HMAC_SECRET) is unset; hashes use the local-dev pepper.",
+      }),
+    );
+  }
+  if (!useFakes && turnstileSecret === "") {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: "turnstile_secret_missing",
+        detail:
+          "Passwordless Turnstile challenge is disabled; lockout-only. Set TURNSTILE_SECRET_KEY with wrangler secret put TURNSTILE_SECRET_KEY.",
+      }),
+    );
+  }
   return createApiApp({
     environment,
     version: version === undefined || version === "" ? "1.0.0-draft.1" : version,
@@ -131,23 +159,29 @@ export function createApiAppFromEnv(env: WorkerEnv): ApiApp {
     qwen: useFakes ? createFakeQwenClient() : unavailableProbe(),
     ...(auth === undefined ? {} : { auth }),
     authenticate: auth === undefined ? () => null : (request) => auth.authenticate(request),
+    hmacSecret: hmac.secret,
     ...(turnstileSecret === ""
       ? {}
       : { verifyTurnstile: createCloudflareTurnstileVerifier({ secretKey: turnstileSecret }) }),
   });
 }
 
-function createDefaultPasswordlessLimiter(
-  environment: AppEnvironment,
-  verifyTurnstile?: TurnstileVerifier,
-): PasswordlessLimiter {
+function createDefaultPasswordlessLimiter(input: {
+  environment: AppEnvironment;
+  verifyTurnstile?: TurnstileVerifier;
+  hmacSecret: string;
+}): PasswordlessLimiter {
+  // Isolate-local Maps. Durable Objects, KV, or the Rate Limiting API should replace this
+  // before treating the buckets as production protection.
+  const local = input.environment === "local" || input.environment === "test";
+  const enableChallenge = local || input.verifyTurnstile !== undefined;
   const verifier: TurnstileVerifier =
-    verifyTurnstile ??
-    (environment === "local" || environment === "test"
-      ? (token) => Promise.resolve(token === "turnstile-ok")
-      : () => Promise.resolve(false));
+    input.verifyTurnstile ??
+    (local ? (token) => Promise.resolve(token === "turnstile-ok") : () => Promise.resolve(false));
   return createMemoryPasswordlessLimiter({
     verifyTurnstile: verifier,
+    hmacSecret: input.hmacSecret,
+    enableChallenge,
     onSecurityEvent: (event) => {
       logSecurityEvent({
         message: event.type,

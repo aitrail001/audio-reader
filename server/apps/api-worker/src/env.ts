@@ -1,4 +1,8 @@
-import { LOCAL_JWT_CONFIG, type JwtSigningConfig } from "@audio-reader/auth";
+import {
+  LOCAL_JWT_CONFIG,
+  LOCAL_PASSWORDLESS_HMAC_SECRET,
+  type JwtSigningConfig,
+} from "@audio-reader/auth";
 
 export type AppEnvironment = "local" | "test" | "staging" | "production";
 
@@ -12,6 +16,8 @@ export type WorkerEnv = {
   SUPABASE_JWT_SECRET?: string;
   SUPABASE_JWT_AUDIENCE?: string;
   TURNSTILE_SECRET_KEY?: string;
+  PASSWORDLESS_HMAC_SECRET?: string;
+  CACHE_HMAC_SECRET?: string;
 };
 
 export function parseEnvironment(value: string | undefined): AppEnvironment {
@@ -59,6 +65,21 @@ export function resolveJwtSigningConfig(
     };
   }
   return undefined;
+}
+
+export function resolvePasswordlessHmacSecret(env: WorkerEnv): {
+  secret: string;
+  fromEnv: boolean;
+} {
+  const dedicated = env.PASSWORDLESS_HMAC_SECRET?.trim() ?? "";
+  if (dedicated !== "") {
+    return { secret: dedicated, fromEnv: true };
+  }
+  const cache = env.CACHE_HMAC_SECRET?.trim() ?? "";
+  if (cache !== "") {
+    return { secret: cache, fromEnv: true };
+  }
+  return { secret: LOCAL_PASSWORDLESS_HMAC_SECRET, fromEnv: false };
 }
 
 export function parsePositiveInt(value: string | undefined, fallback: number): number {

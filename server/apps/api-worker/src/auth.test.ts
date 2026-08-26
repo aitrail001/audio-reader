@@ -362,6 +362,54 @@ describe("product authentication API", () => {
     ).toBe(202);
   });
 
+  it("uses lockout-only passwordless limits in production when Turnstile is unset", async () => {
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const auth = createMemoryAuthService({
+        jwt: LOCAL_JWT_CONFIG,
+        generateOtp: () => "123456",
+      });
+      const app = createTestApp({
+        environment: "production",
+        auth,
+        authenticate: (request) => auth.authenticate(request),
+      });
+      await app.fetch(jsonPost("/v1/auth/email-otp/request", { email: EMAIL }));
+      for (let index = 0; index < 3; index += 1) {
+        const wrong = await app.fetch(
+          jsonPost("/v1/auth/email-otp/verify", {
+            email: EMAIL,
+            code: "000000",
+            deviceId: DEVICE_ID,
+          }),
+        );
+        expect(wrong.status).toBe(401);
+      }
+      const fourth = await app.fetch(
+        jsonPost("/v1/auth/email-otp/verify", {
+          email: EMAIL,
+          code: "000000",
+          deviceId: DEVICE_ID,
+        }),
+      );
+      expect(fourth.status).toBe(401);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("warns at startup when production has no Turnstile or HMAC secret", () => {
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      createApiAppFromEnv({ ENVIRONMENT: "production" });
+      const logged = spy.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(logged).toContain("turnstile_secret_missing");
+      expect(logged).toContain("passwordless_hmac_secret_missing");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("logs passwordless security events without raw email", async () => {
     const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
@@ -601,10 +649,15 @@ describe("product authentication API", () => {
   });
 
   it("fails closed in production without a JWT secret", async () => {
-    const app = createApiAppFromEnv({ ENVIRONMENT: "production" });
-    const response = await app.fetch(new Request("http://localhost/v1/me"));
-    expect(response.status).toBe(401);
-    await expect(app.authenticate(new Request("http://localhost/v1/me"))).resolves.toBeNull();
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const app = createApiAppFromEnv({ ENVIRONMENT: "production" });
+      const response = await app.fetch(new Request("http://localhost/v1/me"));
+      expect(response.status).toBe(401);
+      await expect(app.authenticate(new Request("http://localhost/v1/me"))).resolves.toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("validates production JWTs without minting stub OAuth or OTP sessions", async () => {
@@ -615,12 +668,14 @@ describe("product authentication API", () => {
       accessTokenTtlSeconds: 3600,
       clockSkewSeconds: 0,
     };
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const app = createApiAppFromEnv({
       ENVIRONMENT: "production",
       SUPABASE_URL: "https://example.supabase.co",
       SUPABASE_JWT_SECRET: "super-secret",
       SUPABASE_JWT_AUDIENCE: "authenticated",
     });
+    spy.mockRestore();
     const token = await signAccessToken({ sub: "user-prod", email: EMAIL }, jwt);
     const me = await app.fetch(new Request("http://localhost/v1/me", { headers: bearer(token) }));
     expect(me.status).toBe(200);

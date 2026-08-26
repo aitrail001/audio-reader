@@ -2,12 +2,21 @@ import { createFakePrincipal } from "@audio-reader/auth";
 import { createFakeDatabaseClient } from "@audio-reader/database";
 import { REQUEST_ID_HEADER } from "@audio-reader/observability";
 import { createFakeQwenClient } from "@audio-reader/qwen";
-import { describe, expect, it } from "vitest";
-import { createApiAppFromEnv, createTestApp } from "./app";
+import { describe, expect, it, vi } from "vitest";
+import { createApiAppFromEnv, createTestApp, type WorkerEnv } from "./app";
 import { DEFAULT_MAX_BODY_BYTES } from "./body";
 import { createFakeObjectStore } from "./object-store";
 
 const HEALTH_PATHS = ["/v1/health", "/healthz", "/readyz"] as const;
+
+function createQuietApiAppFromEnv(env: WorkerEnv) {
+  const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  try {
+    return createApiAppFromEnv(env);
+  } finally {
+    spy.mockRestore();
+  }
+}
 
 async function readJson(response: Response): Promise<unknown> {
   return JSON.parse(await response.text()) as unknown;
@@ -267,7 +276,7 @@ describe("api-worker HTTP contract", () => {
       principal,
     );
 
-    const production = createApiAppFromEnv({
+    const production = createQuietApiAppFromEnv({
       ENVIRONMENT: "production",
       APP_VERSION: "1.0.0-draft.1",
     });
@@ -277,7 +286,7 @@ describe("api-worker HTTP contract", () => {
   });
 
   it("createApiAppFromEnv production reports degraded health and unreadiness", async () => {
-    const app = createApiAppFromEnv({
+    const app = createQuietApiAppFromEnv({
       ENVIRONMENT: "production",
       APP_VERSION: "1.0.0-draft.1",
     });
@@ -303,7 +312,7 @@ describe("api-worker HTTP contract", () => {
   it("fails closed when ENVIRONMENT is missing or unknown", async () => {
     const envs = [{}, { ENVIRONMENT: "" }, { ENVIRONMENT: "prod" }] as const;
     for (const env of envs) {
-      const app = createApiAppFromEnv(env);
+      const app = createQuietApiAppFromEnv(env);
       const health = await app.fetch(new Request("http://localhost/v1/health"));
       const payload = await readJson(health);
       expect(isRecord(payload) && payload.status).toBe("degraded");

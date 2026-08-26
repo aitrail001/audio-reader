@@ -90,15 +90,29 @@ export type MemoryPasswordlessLimiterOptions = {
   verifyTurnstile?: TurnstileVerifier;
   limits?: Partial<PasswordlessLimits>;
   onSecurityEvent?: (event: PasswordlessSecurityEvent) => void;
+  hmacSecret?: string;
+  enableChallenge?: boolean;
 };
 
 const encoder = new TextEncoder();
 const MAX_BLOCKED_ATTEMPTS = 100;
 const TURNSTILE_SITEVERIFY = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
-export async function hashIdentifier(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
-  return toHex(new Uint8Array(digest));
+export const LOCAL_PASSWORDLESS_HMAC_SECRET = "local-dev-only-passwordless-hmac";
+
+export async function hashIdentifier(
+  value: string,
+  secret: string = LOCAL_PASSWORDLESS_HMAC_SECRET,
+): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(value));
+  return toHex(new Uint8Array(signature));
 }
 
 export function createCloudflareTurnstileVerifier(options: {
@@ -139,13 +153,18 @@ export function createMemoryPasswordlessLimiter(
   const limits = { ...DEFAULT_PASSWORDLESS_LIMITS, ...options.limits };
   const verifyTurnstile = options.verifyTurnstile ?? (() => Promise.resolve(false));
   const onSecurityEvent = options.onSecurityEvent;
+  const hmacSecret = options.hmacSecret ?? LOCAL_PASSWORDLESS_HMAC_SECRET;
+  const enableChallenge = options.enableChallenge ?? true;
+  // Isolate-local Maps plus a mutex so concurrent awaits on this isolate cannot skip a slot.
+  // Other Worker isolates do not share these buckets.
   const hits = new Map<string, number[]>();
   const requestCooldowns = new Map<string, number>();
   const blockedAttempts: BlockedAttempt[] = [];
+  const withLock = createLock();
 
   async function identities(attempt: Pick<PasswordlessAttempt, "email" | "ip" | "deviceId">) {
-    const emailHash = await hashIdentifier(normalizeEmail(attempt.email));
-    const ipHash = await hashIdentifier(attempt.ip);
+    const emailHash = await hashIdentifier(normalizeEmail(attempt.email), hmacSecret);
+    const ipHash = await hashIdentifier(attempt.ip, hmacSecret);
     return {
       emailHash,
       ipHash,
@@ -262,85 +281,82 @@ export function createMemoryPasswordlessLimiter(
   async function decide(
     action: PasswordlessAction,
     attempt: PasswordlessAttempt,
-    recordOnAllow: boolean,
   ): Promise<PasswordlessDecision> {
     const ids = await identities(attempt);
-    const buckets = action === "email_otp_request" ? requestBuckets(ids) : verifyBuckets(ids);
-    const windowMs =
-      (action === "email_otp_request" ? limits.requestWindowSeconds : limits.verifyWindowSeconds) *
-      1000;
-    const nowMs = now().getTime();
-    const tracked = {
-      emailHash: ids.emailHash,
-      ipHash: ids.ipHash,
-      deviceId: ids.deviceId,
-      ...(attempt.requestId === undefined ? {} : { requestId: attempt.requestId }),
-    };
+    return withLock(async () => {
+      const buckets = action === "email_otp_request" ? requestBuckets(ids) : verifyBuckets(ids);
+      const windowMs =
+        (action === "email_otp_request"
+          ? limits.requestWindowSeconds
+          : limits.verifyWindowSeconds) * 1000;
+      const nowMs = now().getTime();
+      const tracked = {
+        emailHash: ids.emailHash,
+        ipHash: ids.ipHash,
+        deviceId: ids.deviceId,
+        ...(attempt.requestId === undefined ? {} : { requestId: attempt.requestId }),
+      };
 
-    if (action === "email_otp_request") {
-      const cooldownUntil = requestCooldowns.get(ids.emailHash) ?? 0;
-      if (nowMs < cooldownUntil) {
-        return deny(
-          action,
-          "rate_limited",
-          tracked,
-          Math.max(1, Math.ceil((cooldownUntil - nowMs) / 1000)),
+      if (action === "email_otp_request") {
+        const cooldownUntil = requestCooldowns.get(ids.emailHash) ?? 0;
+        if (nowMs < cooldownUntil) {
+          return deny(
+            action,
+            "rate_limited",
+            tracked,
+            Math.max(1, Math.ceil((cooldownUntil - nowMs) / 1000)),
+          );
+        }
+      }
+
+      const counts = snapshot(buckets, windowMs, nowMs);
+      const overMax = counts.filter((entry) => entry.count >= entry.limit.max);
+      if (overMax.length > 0) {
+        const seconds = Math.max(
+          ...overMax.map((entry) => retryAfter(entry.timestamps, windowMs, nowMs)),
         );
+        return deny(action, "rate_limited", tracked, seconds);
       }
-    }
 
-    const counts = snapshot(buckets, windowMs, nowMs);
-    const overMax = counts.filter((entry) => entry.count >= entry.limit.max);
-    if (overMax.length > 0) {
-      const seconds = Math.max(
-        ...overMax.map((entry) => retryAfter(entry.timestamps, windowMs, nowMs)),
-      );
-      return deny(action, "rate_limited", tracked, seconds);
-    }
-
-    const needsChallenge = counts.some((entry) => entry.count >= entry.limit.challengeAfter);
-    if (needsChallenge) {
-      const token = attempt.turnstileToken?.trim() ?? "";
-      const accepted = token !== "" && (await verifyTurnstile(token, attempt.ip));
-      if (!accepted) {
-        return deny(action, "challenge_required", tracked);
+      if (enableChallenge) {
+        const needsChallenge = counts.some((entry) => entry.count >= entry.limit.challengeAfter);
+        if (needsChallenge) {
+          const token = attempt.turnstileToken?.trim() ?? "";
+          const accepted = token !== "" && (await verifyTurnstile(token, attempt.ip));
+          if (!accepted) {
+            return deny(action, "challenge_required", tracked);
+          }
+        }
       }
-    }
 
-    if (recordOnAllow) {
       for (const bucket of buckets) {
         increment(bucket.key, windowMs, nowMs);
       }
-      requestCooldowns.set(ids.emailHash, nowMs + limits.requestCooldownSeconds * 1000);
-    }
-    return { ok: true };
+      if (action === "email_otp_request") {
+        requestCooldowns.set(ids.emailHash, nowMs + limits.requestCooldownSeconds * 1000);
+      }
+      return { ok: true as const };
+    });
   }
 
   return {
     hashEmail(email) {
-      return hashIdentifier(normalizeEmail(email));
+      return hashIdentifier(normalizeEmail(email), hmacSecret);
     },
 
     checkRequest(attempt) {
-      return decide("email_otp_request", attempt, true);
+      return decide("email_otp_request", attempt);
     },
 
     checkVerify(attempt) {
-      return decide("email_otp_verify", attempt, false);
+      return decide("email_otp_verify", attempt);
     },
 
     async recordVerifyFailure(attempt) {
       const ids = await identities(attempt);
       const nowMs = now().getTime();
       const windowMs = limits.verifyWindowSeconds * 1000;
-      const buckets = verifyBuckets(ids);
-      let emailCount = 0;
-      for (const bucket of buckets) {
-        const next = increment(bucket.key, windowMs, nowMs);
-        if (bucket.key === `ver:email:${ids.emailHash}`) {
-          emailCount = next.length;
-        }
-      }
+      const emailCount = current(`ver:email:${ids.emailHash}`, windowMs, nowMs).length;
       if (emailCount >= limits.verifyEmail.challengeAfter) {
         onSecurityEvent?.({
           type: "passwordless_repeated_failure",
@@ -356,7 +372,7 @@ export function createMemoryPasswordlessLimiter(
     },
 
     async recordVerifySuccess(attempt) {
-      const emailHash = await hashIdentifier(normalizeEmail(attempt.email));
+      const emailHash = await hashIdentifier(normalizeEmail(attempt.email), hmacSecret);
       hits.delete(`ver:email:${emailHash}`);
       // A successful login is a new session, not a resend of the outstanding code.
       requestCooldowns.delete(emailHash);
@@ -365,6 +381,23 @@ export function createMemoryPasswordlessLimiter(
     listBlockedAttempts() {
       return blockedAttempts.map((item) => ({ ...item }));
     },
+  };
+}
+
+function createLock(): <T>(task: () => Promise<T>) => Promise<T> {
+  let chain: Promise<void> = Promise.resolve();
+  return async (task) => {
+    const previous = chain;
+    let release = (): void => undefined;
+    chain = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await task();
+    } finally {
+      release();
+    }
   };
 }
 

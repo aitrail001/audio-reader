@@ -37,6 +37,7 @@ export {
 } from "./service";
 export {
   DEFAULT_PASSWORDLESS_LIMITS,
+  LOCAL_PASSWORDLESS_HMAC_SECRET,
   createCloudflareTurnstileVerifier,
   createMemoryPasswordlessLimiter,
   hashIdentifier,

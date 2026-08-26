@@ -1,6 +1,6 @@
-import { LOCAL_JWT_CONFIG } from "@audio-reader/auth";
+import { LOCAL_JWT_CONFIG, LOCAL_PASSWORDLESS_HMAC_SECRET } from "@audio-reader/auth";
 import { describe, expect, it } from "vitest";
-import { parseEnvironment, resolveJwtSigningConfig } from "./env";
+import { parseEnvironment, resolveJwtSigningConfig, resolvePasswordlessHmacSecret } from "./env";
 
 describe("parseEnvironment", () => {
   it("preserves known environments", () => {
@@ -67,6 +67,31 @@ describe("resolveJwtSigningConfig", () => {
       issuer: "https://example.supabase.co/auth/v1",
       audience: "authenticated",
       secret: "super-secret",
+    });
+  });
+});
+
+describe("resolvePasswordlessHmacSecret", () => {
+  it("prefers PASSWORDLESS_HMAC_SECRET over CACHE_HMAC_SECRET", () => {
+    expect(
+      resolvePasswordlessHmacSecret({
+        PASSWORDLESS_HMAC_SECRET: "dedicated",
+        CACHE_HMAC_SECRET: "cache",
+      }),
+    ).toEqual({ secret: "dedicated", fromEnv: true });
+  });
+
+  it("falls back to CACHE_HMAC_SECRET when the dedicated secret is missing", () => {
+    expect(resolvePasswordlessHmacSecret({ CACHE_HMAC_SECRET: "cache" })).toEqual({
+      secret: "cache",
+      fromEnv: true,
+    });
+  });
+
+  it("uses the local-dev pepper when no env secret is set", () => {
+    expect(resolvePasswordlessHmacSecret({})).toEqual({
+      secret: LOCAL_PASSWORDLESS_HMAC_SECRET,
+      fromEnv: false,
     });
   });
 });

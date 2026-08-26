@@ -50,6 +50,29 @@ describe("passwordless rate limits", () => {
     expect(expected).not.toContain("@");
   });
 
+  it("HMACs identifiers so unsalted SHA-256 of the email is not stored", async () => {
+    const hmac = await hashIdentifier(normalizeEmail(EMAIL), "pepper-a");
+    const otherPepper = await hashIdentifier(normalizeEmail(EMAIL), "pepper-b");
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(normalizeEmail(EMAIL)),
+    );
+    let unsalted = "";
+    for (const byte of new Uint8Array(digest)) {
+      unsalted += byte.toString(16).padStart(2, "0");
+    }
+    expect(hmac).not.toBe(otherPepper);
+    expect(hmac).not.toBe(unsalted);
+    const { limiter } = createLimiter({
+      hmacSecret: "pepper-a",
+      limits: { requestCooldownSeconds: 30 },
+    });
+    await limiter.checkRequest(attempt({ email: EMAIL }));
+    await limiter.checkRequest(attempt({ email: EMAIL }));
+    expect(limiter.listBlockedAttempts()[0]?.emailHash).toBe(hmac);
+    expect(JSON.stringify(limiter.listBlockedAttempts())).not.toContain(EMAIL);
+  });
+
   it("enforces a resend cooldown per email hash", async () => {
     const clock = { now: new Date("2026-01-01T00:00:00.000Z") };
     const { limiter, events } = createLimiter({
@@ -79,6 +102,38 @@ describe("passwordless rate limits", () => {
     expect(await limiter.checkRequest(attempt({ email: EMAIL }))).toEqual({ ok: true });
     await limiter.recordVerifySuccess({ email: EMAIL });
     expect(await limiter.checkRequest(attempt({ email: EMAIL }))).toEqual({ ok: true });
+  });
+
+  it("reserves verify slots atomically so a parallel burst cannot exceed max", async () => {
+    const { limiter } = createLimiter({
+      limits: {
+        verifyEmail: { max: 3, challengeAfter: 3 },
+      },
+    });
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => limiter.checkVerify(attempt({ email: EMAIL }))),
+    );
+    expect(results.filter((result) => result.ok)).toHaveLength(3);
+    expect(results.filter((result) => !result.ok && result.code === "rate_limited")).toHaveLength(
+      5,
+    );
+  });
+
+  it("skips Turnstile and only lockouts when challenge is disabled", async () => {
+    const { limiter, events } = createLimiter({
+      enableChallenge: false,
+      limits: {
+        verifyEmail: { max: 3, challengeAfter: 1 },
+      },
+    });
+    expect(await limiter.checkVerify(attempt({ email: EMAIL }))).toEqual({ ok: true });
+    expect(await limiter.checkVerify(attempt({ email: EMAIL }))).toEqual({ ok: true });
+    expect(await limiter.checkVerify(attempt({ email: EMAIL }))).toEqual({ ok: true });
+    expect(await limiter.checkVerify(attempt({ email: EMAIL }))).toMatchObject({
+      ok: false,
+      code: "rate_limited",
+    });
+    expect(events.map((event) => event.type)).not.toContain("passwordless_challenge_required");
   });
 
   it("rate limits brute-force OTP verification even when the code is later correct", async () => {
