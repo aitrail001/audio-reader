@@ -9,6 +9,7 @@ let package = Package(
     ],
     products: [
         .library(name: "AudioReaderDomain", targets: ["AudioReaderDomain"]),
+        .library(name: "AudioReaderLocalStore", targets: ["AudioReaderLocalStore"]),
         .executable(name: "AudioReader", targets: ["AudioReader"])
     ],
     dependencies: [
@@ -19,10 +20,18 @@ let package = Package(
             name: "AudioReaderDomain",
             path: "Sources/AudioReaderDomain"
         ),
+        .target(
+            name: "AudioReaderLocalStore",
+            dependencies: [
+                "AudioReaderDomain"
+            ],
+            path: "Sources/AudioReaderLocalStore"
+        ),
         .executableTarget(
             name: "AudioReader",
             dependencies: [
                 "AudioReaderDomain",
+                "AudioReaderLocalStore",
                 .product(name: "ZIPFoundation", package: "ZIPFoundation")
             ],
             path: "Sources/AudioReader",
@@ -53,10 +62,17 @@ let package = Package(
             ]
         ),
         .testTarget(
+            name: "AudioReaderLocalStoreTests",
+            dependencies: [
+                "AudioReaderLocalStore"
+            ]
+        ),
+        .testTarget(
             name: "AudioReaderTests",
             dependencies: [
                 "AudioReader",
                 "AudioReaderDomain",
+                "AudioReaderLocalStore",
                 .product(name: "ZIPFoundation", package: "ZIPFoundation")
             ]
         )

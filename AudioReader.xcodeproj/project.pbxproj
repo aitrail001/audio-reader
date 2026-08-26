@@ -37,6 +37,11 @@
 			path = Sources/AudioReaderDomain;
 			sourceTree = SOURCE_ROOT;
 		};
+		100000000000000000000026 /* Sources/AudioReaderLocalStore */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/AudioReaderLocalStore;
+			sourceTree = SOURCE_ROOT;
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -64,6 +69,7 @@
 			children = (
 				100000000000000000000020 /* Sources/AudioReader */,
 				100000000000000000000025 /* Sources/AudioReaderDomain */,
+				100000000000000000000026 /* Sources/AudioReaderLocalStore */,
 				100000000000000000000022 /* Xcode */,
 				100000000000000000000023 /* Resources */,
 				100000000000000000000024 /* Products */,
@@ -117,6 +123,7 @@
 			fileSystemSynchronizedGroups = (
 				100000000000000000000020 /* Sources/AudioReader */,
 				100000000000000000000025 /* Sources/AudioReaderDomain */,
+				100000000000000000000026 /* Sources/AudioReaderLocalStore */,
 			);
 			name = "AudioReader-macOS";
 			packageProductDependencies = (
@@ -141,6 +148,7 @@
 			fileSystemSynchronizedGroups = (
 				100000000000000000000020 /* Sources/AudioReader */,
 				100000000000000000000025 /* Sources/AudioReaderDomain */,
+				100000000000000000000026 /* Sources/AudioReaderLocalStore */,
 			);
 			name = "AudioReader-iOS";
 			packageProductDependencies = (
@@ -269,7 +277,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 56;
+				CURRENT_PROJECT_VERSION = 57;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Xcode/Info-macOS.plist";
@@ -278,7 +286,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.0.55;
+				MARKETING_VERSION = 1.0.56;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",
@@ -295,7 +303,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 56;
+				CURRENT_PROJECT_VERSION = 57;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Xcode/Info-macOS.plist";
@@ -304,7 +312,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.0.55;
+				MARKETING_VERSION = 1.0.56;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",
@@ -320,7 +328,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 56;
+				CURRENT_PROJECT_VERSION = 57;
 				DEVELOPMENT_TEAM = 9XV58LJ624;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Xcode/Info-iOS.plist";
@@ -329,7 +337,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.55;
+				MARKETING_VERSION = 1.0.56;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",
@@ -347,7 +355,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 56;
+				CURRENT_PROJECT_VERSION = 57;
 				DEVELOPMENT_TEAM = 9XV58LJ624;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Xcode/Info-iOS.plist";
@@ -356,7 +364,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.55;
+				MARKETING_VERSION = 1.0.56;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",

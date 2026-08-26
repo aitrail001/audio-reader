@@ -4,6 +4,9 @@ import CryptoKit
 // Re-export so other AudioReader files see Domain IDs under SPM; Xcode compiles those sources into this module.
 @_exported import AudioReaderDomain
 #endif
+#if canImport(AudioReaderLocalStore)
+@_exported import AudioReaderLocalStore
+#endif
 
 enum AppVersion {
     static var marketing: String {

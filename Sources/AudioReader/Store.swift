@@ -1,5 +1,8 @@
 import Foundation
 import SQLite3
+#if canImport(AudioReaderDomain)
+import AudioReaderDomain
+#endif
 
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
@@ -9,12 +12,26 @@ final class LibraryStore: @unchecked Sendable {
 
     private var db: OpaquePointer?
 
-    var url: URL { Persistence.root.appendingPathComponent("library.sqlite") }
+    let url: URL
 
-    private init() {
+    private convenience init() {
+        self.init(
+            url: Persistence.root.appendingPathComponent("library.sqlite"),
+            importLegacyJSON: true
+        )
+    }
+
+    convenience init(fileURL: URL) {
+        self.init(url: fileURL, importLegacyJSON: false)
+    }
+
+    private init(url: URL, importLegacyJSON: Bool) {
+        self.url = url
         open()
         migrateSchema()
-        importLegacyJSONIfNeeded()
+        if importLegacyJSON {
+            importLegacyJSONIfNeeded()
+        }
     }
 
     deinit {
@@ -231,7 +248,10 @@ final class LibraryStore: @unchecked Sendable {
     // MARK: - Open
 
     private func open() {
-        try? FileManager.default.createDirectory(at: Persistence.root, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
         if sqlite3_open(url.path, &db) != SQLITE_OK {
             db = nil
         }
@@ -365,6 +385,304 @@ final class LibraryStore: @unchecked Sendable {
         return NSError(domain: "AudioReader.Store", code: 1, userInfo: [
             NSLocalizedDescriptionKey: "SQLite \(context): \(msg)"
         ])
+    }
+}
+
+struct LibraryStoreTranscriptRepository: TranscriptRepository {
+    let store: LibraryStore
+
+    init(store: LibraryStore) {
+        self.store = store
+    }
+
+    func loadTranscript(chapterID: ChapterID) throws -> StoredTranscript? {
+        store.loadTranscript(chapterID: chapterID.rawValue).map(StoredTranscript.init)
+    }
+
+    func saveTranscript(_ transcript: StoredTranscript) throws {
+        try store.saveTranscript(Transcript(transcript))
+    }
+
+    func loadAllTranscripts() throws -> [StoredTranscript] {
+        store.loadAllTranscripts().map(StoredTranscript.init)
+    }
+}
+
+struct LibraryStoreVocabularyRepository: VocabularyRepository {
+    let store: LibraryStore
+
+    init(store: LibraryStore) {
+        self.store = store
+    }
+
+    func loadVocabulary() throws -> [StoredVocabularyOccurrence] {
+        store.loadVocab().map(StoredVocabularyOccurrence.init)
+    }
+
+    func saveVocabulary(_ entries: [StoredVocabularyOccurrence]) throws {
+        store.replaceVocab(entries.map(VocabEntry.init))
+    }
+
+    func upsertVocabulary(_ entries: [StoredVocabularyOccurrence]) throws {
+        store.upsertVocab(entries.map(VocabEntry.init))
+    }
+
+    func deleteVocabulary(id: VocabularyOccurrenceID) throws {
+        store.deleteVocab(id: id.rawValue)
+    }
+}
+
+struct LibraryStoreAssistantResultRepository: AssistantResultRepository {
+    let store: LibraryStore
+
+    init(store: LibraryStore) {
+        self.store = store
+    }
+
+    func loadAssistantResults() throws -> [StoredAssistantResult] {
+        store.loadGlosses().map(StoredAssistantResult.init)
+    }
+
+    func saveAssistantResult(_ result: StoredAssistantResult) throws {
+        store.upsertGloss(GlossEntry(result))
+    }
+
+    func replaceAssistantResults(_ results: [StoredAssistantResult]) throws {
+        store.replaceGlosses(results.map(GlossEntry.init))
+    }
+}
+
+extension StoredTranscript {
+    init(_ transcript: Transcript) {
+        self.init(
+            chapterID: ChapterID(rawValue: transcript.chapterID),
+            localMediaKey: transcript.audioPath,
+            chapterStart: transcript.chapterStart,
+            createdAt: transcript.createdAt,
+            locale: transcript.locale,
+            source: transcript.source,
+            ebookAligned: transcript.ebookAligned,
+            ebookAlignment: transcript.ebookAlignment.map {
+                StoredEPUBAlignment(status: $0.status.rawValue, reason: $0.reason)
+            },
+            ebookUseOverride: transcript.ebookUseOverride,
+            segments: transcript.segments.map(StoredTranscriptSegment.init)
+        )
+    }
+}
+
+extension StoredTranscriptSegment {
+    init(_ segment: TranscriptSegment) {
+        self.init(
+            id: segment.id,
+            start: segment.start,
+            end: segment.end,
+            words: segment.words.map(StoredTranscriptWord.init),
+            ebookText: segment.ebookText,
+            alignmentScore: segment.alignmentScore,
+            individualEbookMatchTrusted: segment.individualEbookMatchTrusted,
+            documentEbookUseAllowed: segment.documentEbookUseAllowed
+        )
+    }
+}
+
+extension StoredTranscriptWord {
+    init(_ word: TranscriptWord) {
+        self.init(
+            id: word.id,
+            text: word.text,
+            start: word.start,
+            end: word.end,
+            confidence: word.confidence
+        )
+    }
+}
+
+extension Transcript {
+    init(_ stored: StoredTranscript) {
+        self.init(
+            chapterID: stored.chapterID.rawValue,
+            audioPath: stored.localMediaKey,
+            chapterStart: stored.chapterStart,
+            createdAt: stored.createdAt,
+            locale: stored.locale,
+            segments: stored.segments.map(TranscriptSegment.init),
+            source: stored.source,
+            ebookAligned: stored.ebookAligned,
+            ebookAlignment: stored.ebookAlignment.map {
+                EPUBAlignmentAssessment(
+                    status: EPUBAlignmentStatus(rawValue: $0.status) ?? .uncertain,
+                    reason: $0.reason,
+                    metrics: .empty
+                )
+            },
+            ebookUseOverride: stored.ebookUseOverride
+        )
+    }
+}
+
+extension TranscriptSegment {
+    init(_ stored: StoredTranscriptSegment) {
+        self.init(
+            id: stored.id,
+            start: stored.start,
+            end: stored.end,
+            words: stored.words.map(TranscriptWord.init),
+            ebookText: stored.ebookText,
+            alignmentScore: stored.alignmentScore,
+            individualEbookMatchTrusted: stored.individualEbookMatchTrusted,
+            documentEbookUseAllowed: stored.documentEbookUseAllowed
+        )
+    }
+}
+
+extension TranscriptWord {
+    init(_ stored: StoredTranscriptWord) {
+        self.init(
+            id: stored.id,
+            text: stored.text,
+            start: stored.start,
+            end: stored.end,
+            confidence: stored.confidence
+        )
+    }
+}
+
+extension StoredVocabularyOccurrence {
+    init(_ entry: VocabEntry) {
+        self.init(
+            id: VocabularyOccurrenceID(rawValue: entry.id),
+            surface: entry.word,
+            category: entry.category.rawValue,
+            definition: entry.definition,
+            dictionaryName: entry.dictionaryName,
+            dictionaryHTML: entry.dictionaryHTML,
+            translation: entry.translation,
+            translationLanguage: entry.translationLanguage,
+            translationModel: entry.translationModel,
+            sourceLanguage: entry.sourceLanguage,
+            context: entry.context,
+            spokenText: entry.spokenText,
+            ebookText: entry.ebookText,
+            bookID: BookID(rawValue: entry.bookID),
+            bookTitle: entry.bookTitle,
+            chapterID: ChapterID(rawValue: entry.chapterID),
+            chapterTitle: entry.chapterTitle,
+            segmentID: entry.segmentID,
+            wordID: entry.wordID,
+            timestamp: entry.timestamp,
+            addedAt: entry.addedAt,
+            reviewCount: entry.reviewCount,
+            nextReview: entry.nextReview,
+            lastReviewedAt: entry.lastReviewedAt,
+            lastReviewQuality: entry.lastReviewQuality?.rawValue,
+            reviewIntervalDays: entry.reviewIntervalDays,
+            reviewEaseFactor: entry.reviewEaseFactor,
+            isInLearnList: entry.isInLearnList
+        )
+    }
+}
+
+extension VocabEntry {
+    init(_ stored: StoredVocabularyOccurrence) {
+        self.init(
+            id: stored.id.rawValue,
+            word: stored.surface,
+            category: VocabCategory(rawValue: stored.category) ?? .word,
+            definition: stored.definition,
+            dictionaryName: stored.dictionaryName,
+            dictionaryHTML: stored.dictionaryHTML,
+            translation: stored.translation,
+            translationLanguage: stored.translationLanguage,
+            translationModel: stored.translationModel,
+            sourceLanguage: stored.sourceLanguage,
+            context: stored.context,
+            spokenText: stored.spokenText,
+            ebookText: stored.ebookText,
+            bookID: stored.bookID.rawValue,
+            bookTitle: stored.bookTitle,
+            chapterID: stored.chapterID.rawValue,
+            chapterTitle: stored.chapterTitle,
+            segmentID: stored.segmentID,
+            wordID: stored.wordID,
+            timestamp: stored.timestamp,
+            addedAt: stored.addedAt,
+            reviewCount: stored.reviewCount,
+            nextReview: stored.nextReview,
+            lastReviewedAt: stored.lastReviewedAt,
+            lastReviewQuality: stored.lastReviewQuality.flatMap(VocabReviewQuality.init(rawValue:)),
+            reviewIntervalDays: stored.reviewIntervalDays,
+            reviewEaseFactor: stored.reviewEaseFactor,
+            isInLearnList: stored.isInLearnList
+        )
+    }
+}
+
+extension StoredAssistantResult {
+    init(_ gloss: GlossEntry) {
+        self.init(
+            id: gloss.id,
+            kind: gloss.kind == .word ? .wordGloss : .sentenceGloss,
+            status: AssistantResultStatus(gloss.status),
+            language: gloss.language,
+            model: gloss.model,
+            bookID: gloss.bookID.map(BookID.init(rawValue:)),
+            bookTitle: gloss.bookTitle,
+            chapterID: gloss.chapterID.map(ChapterID.init(rawValue:)),
+            chapterTitle: gloss.chapterTitle,
+            source: gloss.source,
+            text: gloss.text,
+            context: gloss.context,
+            timestamp: gloss.timestamp,
+            createdAt: gloss.createdAt,
+            decidedAt: gloss.decidedAt,
+            replacedText: gloss.replacedText,
+            replacedModel: gloss.replacedModel
+        )
+    }
+}
+
+extension GlossEntry {
+    init(_ stored: StoredAssistantResult) {
+        self.init(
+            id: stored.id,
+            kind: stored.kind == .wordGloss ? .word : .sentence,
+            language: stored.language,
+            source: stored.source,
+            context: stored.context,
+            text: stored.text,
+            status: GlossStatus(stored.status),
+            model: stored.model,
+            bookID: stored.bookID?.rawValue,
+            bookTitle: stored.bookTitle,
+            chapterID: stored.chapterID?.rawValue,
+            chapterTitle: stored.chapterTitle,
+            timestamp: stored.timestamp,
+            createdAt: stored.createdAt,
+            decidedAt: stored.decidedAt,
+            replacedText: stored.replacedText,
+            replacedModel: stored.replacedModel
+        )
+    }
+}
+
+private extension AssistantResultStatus {
+    init(_ status: GlossStatus) {
+        switch status {
+        case .pending: self = .pending
+        case .accepted: self = .accepted
+        case .rejected: self = .rejected
+        }
+    }
+}
+
+private extension GlossStatus {
+    init(_ status: AssistantResultStatus) {
+        switch status {
+        case .pending: self = .pending
+        case .accepted: self = .accepted
+        case .rejected: self = .rejected
+        }
     }
 }
 

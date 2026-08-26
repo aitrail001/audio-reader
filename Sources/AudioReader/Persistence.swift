@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(AudioReaderDomain)
+import AudioReaderDomain
+#endif
 
 enum Persistence {
     static var root: URL {
@@ -193,23 +196,34 @@ enum Persistence {
     }
 
     static func loadSettings() -> AppSettings {
-        guard let data = try? Data(contentsOf: settingsURL),
-              let settings = try? JSONDecoder().decode(AppSettings.self, from: data)
-        else {
-            return .default
-        }
-        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let settings = loadSettings(from: settingsURL)
+        if let data = try? Data(contentsOf: settingsURL),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            object["qwenEffortPolicyVersion"] == nil {
             saveSettings(settings)
         }
         return settings
     }
 
+    static func loadSettings(from url: URL) -> AppSettings {
+        guard let data = try? Data(contentsOf: url),
+              let settings = try? JSONDecoder().decode(AppSettings.self, from: data)
+        else {
+            return .default
+        }
+        return settings
+    }
+
     @discardableResult
     static func saveSettings(_ settings: AppSettings) -> Bool {
+        saveSettings(settings, to: settingsURL)
+    }
+
+    @discardableResult
+    static func saveSettings(_ settings: AppSettings, to url: URL) -> Bool {
         guard let data = try? JSONEncoder().encode(settings) else { return false }
         do {
-            try data.write(to: settingsURL, options: .atomic)
+            try data.write(to: url, options: .atomic)
             return true
         } catch {
             return false
@@ -512,5 +526,113 @@ extension JSONEncoder {
         e.dateEncodingStrategy = .iso8601
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
         return e
+    }
+}
+
+struct PersistenceSettingsRepository: SettingsRepository {
+    var url: URL
+
+    init(url: URL = Persistence.settingsURL) {
+        self.url = url
+    }
+
+    func loadSettings() throws -> StoredSettings {
+        StoredSettings(Persistence.loadSettings(from: url))
+    }
+
+    func saveSettings(_ settings: StoredSettings) throws {
+        var app = Persistence.loadSettings(from: url)
+        app.apply(settings)
+        guard Persistence.saveSettings(app, to: url) else {
+            throw LocalStoreError.saveFailed
+        }
+    }
+}
+
+struct PersistenceKnownLemmaRepository: KnownLemmaRepository {
+    var url: URL
+
+    init(url: URL = Persistence.knownLemmasURL) {
+        self.url = url
+    }
+
+    func loadKnownLemmas() throws -> [StoredKnownLemma] {
+        Persistence.loadKnownLemmas(from: url).map(StoredKnownLemma.init)
+    }
+
+    func saveKnownLemmas(_ lemmas: [StoredKnownLemma]) throws {
+        Persistence.saveKnownLemmas(lemmas.map(KnownLemmaRecord.init), to: url)
+    }
+}
+
+extension StoredSettings {
+    init(_ settings: AppSettings) {
+        self.init(
+            libraryPath: settings.libraryPath,
+            playbackRate: settings.playbackRate,
+            textSource: settings.textSource,
+            skipSeconds: settings.skipSeconds,
+            transcriptionLanguage: settings.transcriptionLanguage,
+            readerLanguageLevel: settings.readerLanguageLevel,
+            targetLanguage: settings.targetLanguage,
+            sentenceContextCount: settings.sentenceContextCount,
+            chapterTranslationBlockSize: settings.chapterTranslationBlockSize,
+            chatContextCount: settings.chatContextCount,
+            autoTranslate: settings.autoTranslate,
+            playOnSelect: settings.playOnSelect,
+            deepReadingMode: settings.deepReadingMode,
+            showStudyOverlay: settings.showStudyOverlay,
+            vocabReviewPrompt: settings.vocabReviewPrompt,
+            appearance: settings.appearance,
+            preferredDictionary: settings.preferredDictionary,
+            lookupPanelWidth: settings.lookupPanelWidth,
+            readerFontScale: settings.readerFontScale,
+            readerFont: settings.readerFont,
+            readerBold: settings.readerBold,
+            readerLineSpacing: settings.readerLineSpacing,
+            readerWordSpacing: settings.readerWordSpacing,
+            readerMargin: settings.readerMargin
+        )
+    }
+}
+
+extension AppSettings {
+    mutating func apply(_ stored: StoredSettings) {
+        libraryPath = stored.libraryPath
+        playbackRate = stored.playbackRate
+        textSource = stored.textSource
+        skipSeconds = stored.skipSeconds
+        transcriptionLanguage = stored.transcriptionLanguage
+        readerLanguageLevel = stored.readerLanguageLevel
+        targetLanguage = stored.targetLanguage
+        sentenceContextCount = stored.sentenceContextCount
+        chapterTranslationBlockSize = stored.chapterTranslationBlockSize
+        chatContextCount = stored.chatContextCount
+        autoTranslate = stored.autoTranslate
+        playOnSelect = stored.playOnSelect
+        deepReadingMode = stored.deepReadingMode
+        showStudyOverlay = stored.showStudyOverlay
+        vocabReviewPrompt = stored.vocabReviewPrompt
+        appearance = stored.appearance
+        preferredDictionary = stored.preferredDictionary
+        lookupPanelWidth = stored.lookupPanelWidth
+        readerFontScale = stored.readerFontScale
+        readerFont = stored.readerFont
+        readerBold = stored.readerBold
+        readerLineSpacing = stored.readerLineSpacing
+        readerWordSpacing = stored.readerWordSpacing
+        readerMargin = stored.readerMargin
+    }
+}
+
+extension StoredKnownLemma {
+    init(_ record: KnownLemmaRecord) {
+        self.init(language: record.language, form: record.form, updatedAt: record.updatedAt)
+    }
+}
+
+extension KnownLemmaRecord {
+    init(_ stored: StoredKnownLemma) {
+        self.init(language: stored.language, form: stored.form, updatedAt: stored.updatedAt)
     }
 }
