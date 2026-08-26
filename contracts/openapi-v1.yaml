@@ -147,6 +147,136 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/EmailOtpVerifyRequest'
+  /v1/auth/config:
+    get:
+      operationId: getAuthConfig
+      summary: List authentication providers
+      tags:
+      - Auth
+      responses:
+        '200':
+          description: Auth configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthConfig'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+      security: []
+  /v1/auth/oauth/authorize:
+    post:
+      operationId: authorizeOAuth
+      summary: Start Google or Microsoft OAuth with PKCE
+      tags:
+      - Auth
+      responses:
+        '200':
+          description: Authorization URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthOAuthAuthorizeResponse'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthOAuthAuthorizeRequest'
+  /v1/auth/oauth/exchange:
+    post:
+      operationId: exchangeOAuth
+      summary: Exchange an OAuth authorization code
+      tags:
+      - Auth
+      responses:
+        '200':
+          description: Tokens
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthOAuthExchangeRequest'
+  /v1/auth/token/refresh:
+    post:
+      operationId: refreshSession
+      summary: Refresh an access token
+      tags:
+      - Auth
+      responses:
+        '200':
+          description: Tokens
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthRefreshRequest'
+  /v1/auth/logout:
+    post:
+      operationId: logout
+      summary: Revoke a refresh token
+      tags:
+      - Auth
+      responses:
+        '204':
+          description: Logged out
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthLogoutRequest'
   /v1/me:
     get:
       operationId: getProfile
@@ -1862,6 +1992,111 @@ components:
         tokenType:
           type: string
           const: Bearer
+    AuthConfig:
+      type: object
+      additionalProperties: false
+      required:
+      - providers
+      properties:
+        providers:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuthProvider'
+    AuthProvider:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      properties:
+        id:
+          type: string
+          enum:
+          - google
+          - microsoft
+          - email_otp
+    AuthOAuthAuthorizeRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - provider
+      - redirectUri
+      - codeChallenge
+      - state
+      properties:
+        provider:
+          type: string
+          enum:
+          - google
+          - microsoft
+        redirectUri:
+          type: string
+          format: uri
+        codeChallenge:
+          type: string
+          minLength: 43
+          maxLength: 128
+        codeChallengeMethod:
+          type: string
+          const: S256
+        state:
+          type: string
+          minLength: 8
+          maxLength: 256
+    AuthOAuthAuthorizeResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - authorizationUrl
+      - state
+      properties:
+        authorizationUrl:
+          type: string
+          format: uri
+        state:
+          type: string
+    AuthOAuthExchangeRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - provider
+      - code
+      - codeVerifier
+      - redirectUri
+      properties:
+        provider:
+          type: string
+          enum:
+          - google
+          - microsoft
+        code:
+          type: string
+        codeVerifier:
+          type: string
+          minLength: 43
+          maxLength: 128
+        redirectUri:
+          type: string
+          format: uri
+        state:
+          type: string
+    AuthRefreshRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - refreshToken
+      properties:
+        refreshToken:
+          type: string
+          minLength: 16
+    AuthLogoutRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - refreshToken
+      properties:
+        refreshToken:
+          type: string
+          minLength: 16
     Profile:
       type: object
       additionalProperties: false

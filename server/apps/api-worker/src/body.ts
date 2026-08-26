@@ -54,6 +54,44 @@ export async function validateRequestBody(
   return undefined;
 }
 
+export async function readJsonObject(
+  request: Request,
+  requestId: string,
+): Promise<{ ok: true; value: Record<string, unknown> } | { ok: false; response: Response }> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await request.text()) as unknown;
+  } catch {
+    return {
+      ok: false,
+      response: problemResponse({
+        status: 400,
+        code: "bad_request",
+        title: "Bad request",
+        detail: "Request body must be valid JSON.",
+        traceId: requestId,
+      }),
+    };
+  }
+  if (!isJsonObject(parsed)) {
+    return {
+      ok: false,
+      response: problemResponse({
+        status: 400,
+        code: "bad_request",
+        title: "Bad request",
+        detail: "Request body must be a JSON object.",
+        traceId: requestId,
+      }),
+    };
+  }
+  return { ok: true, value: parsed };
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function payloadTooLarge(requestId: string): Response {
   return problemResponse({
     status: 413,

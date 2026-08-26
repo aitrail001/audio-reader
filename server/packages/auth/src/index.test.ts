@@ -10,7 +10,11 @@ describe("@audio-reader/auth", () => {
     const principal = createFakePrincipal({ subject: "user-test" });
     expect(principal.subject).toBe("user-test");
     expect(principal.role).toBe("user");
+    expect(principal.email).toBe("fake@example.com");
     expect(principal.profileId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    expect(principal.accountId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     );
   });

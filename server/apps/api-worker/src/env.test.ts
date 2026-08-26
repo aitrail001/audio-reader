@@ -1,5 +1,6 @@
+import { LOCAL_JWT_CONFIG } from "@audio-reader/auth";
 import { describe, expect, it } from "vitest";
-import { parseEnvironment } from "./env";
+import { parseEnvironment, resolveJwtSigningConfig } from "./env";
 
 describe("parseEnvironment", () => {
   it("preserves known environments", () => {
@@ -14,5 +15,34 @@ describe("parseEnvironment", () => {
     expect(parseEnvironment("")).toBe("production");
     expect(parseEnvironment("prod")).toBe("production");
     expect(parseEnvironment("Production")).toBe("production");
+  });
+});
+
+describe("resolveJwtSigningConfig", () => {
+  it("uses local defaults for local and test when no secret is set", () => {
+    expect(resolveJwtSigningConfig({}, "local")).toEqual(LOCAL_JWT_CONFIG);
+    expect(resolveJwtSigningConfig({}, "test")).toEqual(LOCAL_JWT_CONFIG);
+  });
+
+  it("fails closed in production without a JWT secret", () => {
+    expect(resolveJwtSigningConfig({}, "production")).toBeUndefined();
+    expect(resolveJwtSigningConfig({ SUPABASE_JWT_SECRET: "   " }, "staging")).toBeUndefined();
+  });
+
+  it("builds issuer and audience from Supabase env", () => {
+    expect(
+      resolveJwtSigningConfig(
+        {
+          SUPABASE_URL: "https://example.supabase.co/",
+          SUPABASE_JWT_SECRET: "super-secret",
+          SUPABASE_JWT_AUDIENCE: "authenticated",
+        },
+        "production",
+      ),
+    ).toMatchObject({
+      issuer: "https://example.supabase.co/auth/v1",
+      audience: "authenticated",
+      secret: "super-secret",
+    });
   });
 });

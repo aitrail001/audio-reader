@@ -1,3 +1,5 @@
+import { LOCAL_JWT_CONFIG, type JwtSigningConfig } from "@audio-reader/auth";
+
 export type AppEnvironment = "local" | "test" | "staging" | "production";
 
 export type WorkerEnv = {
@@ -6,6 +8,9 @@ export type WorkerEnv = {
   CORS_ALLOWED_ORIGINS?: string;
   ADMIN_ORIGIN?: string;
   MAX_BODY_BYTES?: string;
+  SUPABASE_URL?: string;
+  SUPABASE_JWT_SECRET?: string;
+  SUPABASE_JWT_AUDIENCE?: string;
 };
 
 export function parseEnvironment(value: string | undefined): AppEnvironment {
@@ -23,6 +28,29 @@ export function parseOriginList(value: string | undefined): string[] {
     .split(",")
     .map((origin) => origin.trim())
     .filter((origin) => origin !== "");
+}
+
+export function resolveJwtSigningConfig(
+  env: WorkerEnv,
+  environment: AppEnvironment,
+): JwtSigningConfig | undefined {
+  const secret = env.SUPABASE_JWT_SECRET?.trim() ?? "";
+  const url = env.SUPABASE_URL?.trim() ?? "";
+  const audience = env.SUPABASE_JWT_AUDIENCE?.trim() || "authenticated";
+  if (secret !== "") {
+    const issuer = url === "" ? LOCAL_JWT_CONFIG.issuer : `${url.replace(/\/$/, "")}/auth/v1`;
+    return {
+      issuer,
+      audience,
+      secret,
+      accessTokenTtlSeconds: 3600,
+      clockSkewSeconds: 0,
+    };
+  }
+  if (environment === "local" || environment === "test") {
+    return LOCAL_JWT_CONFIG;
+  }
+  return undefined;
 }
 
 export function parsePositiveInt(value: string | undefined, fallback: number): number {

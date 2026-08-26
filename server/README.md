@@ -2,7 +2,7 @@
 
 Pinned Node/pnpm workspace for the Cloudflare API worker, job worker, admin console, and shared TypeScript packages.
 
-TypeScript types are generated from `contracts/openapi-v1.yaml` into `@audio-reader/contract`. The API worker implements health/readiness, request correlation, CORS, body validation, and `application/problem+json` errors. Real auth, Qwen inference, and Postgres schema are out of scope here.
+TypeScript types are generated from `contracts/openapi-v1.yaml` into `@audio-reader/contract`. The API worker implements health/readiness, request correlation, CORS, body validation, `application/problem+json` errors, and the product authentication API (email OTP, Google/Microsoft OAuth PKCE, JWT sessions, refresh/logout, bootstrap, and `GET /v1/me`). Qwen inference and Postgres schema are out of scope here.
 
 ## Requirements
 
@@ -59,7 +59,7 @@ Error responses use RFC 7807 `application/problem+json` with the OpenAPI `Proble
 
 CORS origins come from `CORS_ALLOWED_ORIGINS` and `ADMIN_ORIGIN`. The `local` environment also allows localhost admin (`5173`) and worker (`8787`) origins. JSON writes require `Content-Type: application/json` and are capped at `MAX_BODY_BYTES` (default 1 MiB). Health paths accept `GET` and `HEAD`; other methods return `405` with `Allow: GET, HEAD` before body-content rules.
 
-Route-level idempotency is an interface (`withIdempotency` + `IdempotencyStore`) for later write routes. `createFakePrincipal` is for tests only; production/local env wiring does not authenticate.
+Route-level idempotency is an interface (`withIdempotency` + `IdempotencyStore`) used by `POST /v1/auth/bootstrap`. The Worker validates Supabase JWTs (issuer, audience, expiry, subject) and maps the subject to an in-memory product profile. Email OTP returns the same public `202` for existing and unknown addresses. Identities are not auto-merged by email; linking is explicit. `createFakePrincipal` remains available for tests that do not exercise JWT validation. Production without `SUPABASE_JWT_SECRET` fails closed (unauthenticated). Local and test environments use a non-production HS256 config so OTP/OAuth can issue verifiable tokens.
 
 ## Local development
 
@@ -84,7 +84,7 @@ server/
     contract/       Generated API types from OpenAPI v1
     domain/         Shared domain types and rules
     database/       Persistence adapters (fake ping for local/test)
-    auth/           Session/JWT validation (fake principal for tests)
+    auth/           JWT validation, email OTP, OAuth PKCE, profile mapping
     qwen/           Managed Qwen client (fake ping for local/test)
     observability/  Logging and tracing
   scripts/          Local db, API worker runner, full test suites

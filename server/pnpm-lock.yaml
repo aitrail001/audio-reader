@@ -150,6 +150,9 @@ importers:
         specifier: workspace:*
         version: link:../domain
     devDependencies:
+      '@cloudflare/workers-types':
+        specifier: 'catalog:'
+        version: 5.20260826.1
       typescript:
         specifier: 'catalog:'
         version: 6.0.3

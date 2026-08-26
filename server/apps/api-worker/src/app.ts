@@ -1,18 +1,27 @@
-import { createFakePrincipal, type Principal } from "@audio-reader/auth";
+import {
+  LOCAL_JWT_CONFIG,
+  createFakePrincipal,
+  createMemoryAuthService,
+  type AuthService,
+  type Principal,
+} from "@audio-reader/auth";
 import { createFakeDatabaseClient } from "@audio-reader/database";
 import { logUnhandledError, resolveRequestId } from "@audio-reader/observability";
 import { createFakeQwenClient } from "@audio-reader/qwen";
+import { authMethodError, handleAuthRoute, isAuthPath } from "./auth-routes";
 import { DEFAULT_MAX_BODY_BYTES, validateRequestBody } from "./body";
 import { applyCorsHeaders, resolveCorsAllowlist } from "./cors";
 import {
   parseEnvironment,
   parseOriginList,
   parsePositiveInt,
+  resolveJwtSigningConfig,
   type AppEnvironment,
   type WorkerEnv,
 } from "./env";
 import { buildHealth, unavailableProbe, type DependencyProbe } from "./health";
 import { asHead, jsonResponse, problemResponse, withRequestId } from "./http";
+import { createMemoryIdempotencyStore, type IdempotencyStore } from "./idempotency";
 import { createFakeObjectStore } from "./object-store";
 
 const HEALTH_PATHS = new Set(["/v1/health", "/healthz", "/readyz"]);
@@ -29,6 +38,8 @@ export type AppOptions = {
   r2: DependencyProbe;
   qwen: DependencyProbe;
   authenticate?: (request: Request) => Principal | Promise<Principal | null> | null;
+  auth?: AuthService;
+  idempotencyStore?: IdempotencyStore;
 };
 
 export type ApiApp = {
@@ -39,6 +50,7 @@ export type ApiApp = {
 export function createApiApp(options: AppOptions): ApiApp {
   const allowlist = resolveCorsAllowlist(options);
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  const idempotencyStore = options.idempotencyStore ?? createMemoryIdempotencyStore();
 
   async function authenticate(request: Request): Promise<Principal | null> {
     const principal = await options.authenticate?.(request);
@@ -48,7 +60,14 @@ export function createApiApp(options: AppOptions): ApiApp {
   async function handleFetch(request: Request): Promise<Response> {
     const requestId = resolveRequestId(request.headers.get("X-Request-Id"));
     try {
-      const response = await handleRequest(request, requestId, options, maxBodyBytes);
+      const response = await handleRequest(
+        request,
+        requestId,
+        options,
+        maxBodyBytes,
+        authenticate,
+        idempotencyStore,
+      );
       return applyCorsHeaders(request, withRequestId(response, requestId), allowlist);
     } catch (error: unknown) {
       logUnhandledError(requestId, error);
@@ -74,6 +93,7 @@ export function createTestApp(overrides: Partial<AppOptions> = {}): ApiApp {
     database: createFakeDatabaseClient(),
     r2: createFakeObjectStore(),
     qwen: createFakeQwenClient(),
+    auth: createMemoryAuthService({ jwt: LOCAL_JWT_CONFIG }),
     authenticate: () => createFakePrincipal(),
     ...overrides,
   });
@@ -84,6 +104,8 @@ export function createApiAppFromEnv(env: WorkerEnv): ApiApp {
   const useFakes = environment === "local" || environment === "test";
   const adminOrigin = env.ADMIN_ORIGIN?.trim();
   const version = env.APP_VERSION?.trim();
+  const jwt = resolveJwtSigningConfig(env, environment);
+  const auth = jwt === undefined ? undefined : createMemoryAuthService({ jwt });
   return createApiApp({
     environment,
     version: version === undefined || version === "" ? "1.0.0-draft.1" : version,
@@ -93,7 +115,8 @@ export function createApiAppFromEnv(env: WorkerEnv): ApiApp {
     database: useFakes ? createFakeDatabaseClient() : unavailableProbe(),
     r2: useFakes ? createFakeObjectStore() : unavailableProbe(),
     qwen: useFakes ? createFakeQwenClient() : unavailableProbe(),
-    authenticate: () => null,
+    ...(auth === undefined ? {} : { auth }),
+    authenticate: auth === undefined ? () => null : (request) => auth.authenticate(request),
   });
 }
 
@@ -102,6 +125,8 @@ async function handleRequest(
   requestId: string,
   options: AppOptions,
   maxBodyBytes: number,
+  authenticate: (request: Request) => Promise<Principal | null>,
+  idempotencyStore: IdempotencyStore,
 ): Promise<Response> {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204 });
@@ -142,9 +167,27 @@ async function handleRequest(
     return asHead(request, jsonResponse(health));
   }
 
+  const methodError = authMethodError(path, request.method, requestId);
+  if (methodError !== undefined) {
+    return methodError;
+  }
+
   const bodyError = await validateRequestBody(request, maxBodyBytes, requestId);
   if (bodyError !== undefined) {
     return bodyError;
+  }
+
+  if (isAuthPath(path)) {
+    const routed = await handleAuthRoute({
+      request,
+      requestId,
+      ...(options.auth === undefined ? {} : { auth: options.auth }),
+      authenticate,
+      idempotencyStore,
+    });
+    if (routed !== undefined) {
+      return routed;
+    }
   }
 
   return problemResponse({
