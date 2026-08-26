@@ -187,7 +187,7 @@ struct LocalRepositoryAdapterTests {
 
         #expect(store.loadTranscript(chapterID: chapterID) == nil)
         #expect(try repo.loadTranscript(chapterID: ChapterID(rawValue: chapterID)) == nil)
-        #expect(LibraryStore.shared.loadTranscript(chapterID: chapterID)?.segments[0].words[0].text == "PLANTED")
+        #expect(Persistence.loadTranscriptJSON(chapterID: chapterID)?.segments[0].words[0].text == "PLANTED")
     }
 
     @Test("assistant adapter round-trips sentence glosses and rejects summary kinds")
@@ -248,7 +248,6 @@ struct LocalRepositoryAdapterTests {
         defer { fixture.remove() }
         let store = LibraryStore(fileURL: fixture.sqliteURL)
         #expect(store.url != sharedSQLite)
-        #expect(store.url != LibraryStore.shared.url)
 
         let transcripts: any TranscriptRepository = LibraryStoreTranscriptRepository(store: store)
         let vocabulary: any VocabularyRepository = LibraryStoreVocabularyRepository(store: store)
@@ -277,7 +276,7 @@ struct LocalRepositoryAdapterTests {
         try vocabulary.saveVocabulary([sampleVocabulary(id: token, surface: token, addedAt: occurredAt)])
         try lemmas.saveKnownLemmas([StoredKnownLemma(language: "en", form: token, updatedAt: occurredAt)])
 
-        #expect(store.url != LibraryStore.shared.url)
+        #expect(store.url != sharedSQLite)
         #expect(FileManager.default.fileExists(atPath: fixture.sqliteURL.path))
         let isolatedLexicon = try Data(contentsOf: fixture.root.appendingPathComponent("lexicon.json"))
         #expect(isolatedLexicon.range(of: Data(token.utf8)) != nil)
