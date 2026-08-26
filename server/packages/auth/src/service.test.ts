@@ -403,4 +403,112 @@ describe("memory auth service", () => {
     const rebootstrap = auth.bootstrap(first.value.principal, macosDevice(DEVICE_A));
     expect(rebootstrap).toEqual({ ok: false, code: "device_revoked" });
   });
+
+  it("binds OAuth refresh tokens to a device so revoke blocks refresh", async () => {
+    const auth = createMemoryAuthService({ jwt: LOCAL_JWT_CONFIG });
+    const pkce = await pkcePair();
+    const started = await auth.authorizeOAuth({
+      provider: "google",
+      redirectUri: "http://localhost/callback",
+      codeChallenge: pkce.challenge,
+      state: "oauth-device-state",
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) {
+      return;
+    }
+    const code = new URL(started.value.authorizationUrl).searchParams.get("code");
+    const exchanged = await auth.exchangeOAuth({
+      provider: "google",
+      code: code ?? "",
+      codeVerifier: pkce.verifier,
+      redirectUri: "http://localhost/callback",
+      deviceId: DEVICE_A,
+    });
+    expect(exchanged.ok).toBe(true);
+    if (!exchanged.ok) {
+      return;
+    }
+    expect(auth.bootstrap(exchanged.value.principal, macosDevice(DEVICE_A)).ok).toBe(true);
+    expect(auth.revokeDevice(exchanged.value.principal, DEVICE_A)).toEqual({ ok: true });
+    expect(await auth.refresh(exchanged.value.tokens.refreshToken)).toEqual({
+      ok: false,
+      code: "invalid_refresh",
+    });
+  });
+
+  it("binds an OAuth refresh token at bootstrap when exchange omitted deviceId", async () => {
+    const auth = createMemoryAuthService({ jwt: LOCAL_JWT_CONFIG });
+    const pkce = await pkcePair();
+    const started = await auth.authorizeOAuth({
+      provider: "google",
+      redirectUri: "http://localhost/callback",
+      codeChallenge: pkce.challenge,
+      state: "oauth-unbound-state",
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) {
+      return;
+    }
+    const code = new URL(started.value.authorizationUrl).searchParams.get("code");
+    const exchanged = await auth.exchangeOAuth({
+      provider: "google",
+      code: code ?? "",
+      codeVerifier: pkce.verifier,
+      redirectUri: "http://localhost/callback",
+    });
+    expect(exchanged.ok).toBe(true);
+    if (!exchanged.ok) {
+      return;
+    }
+    expect(auth.bootstrap(exchanged.value.principal, macosDevice(DEVICE_A)).ok).toBe(true);
+    expect(auth.revokeDevice(exchanged.value.principal, DEVICE_A)).toEqual({ ok: true });
+    expect(await auth.refresh(exchanged.value.tokens.refreshToken)).toEqual({
+      ok: false,
+      code: "invalid_refresh",
+    });
+  });
+
+  it("reactivates a revoked device only after a new login, not refresh", async () => {
+    const auth = createMemoryAuthService({
+      jwt: LOCAL_JWT_CONFIG,
+      generateOtp: () => "777777",
+    });
+    await auth.requestEmailOtp(EMAIL);
+    const first = await auth.verifyEmailOtp(EMAIL, "777777", DEVICE_A);
+    expect(first.ok).toBe(true);
+    if (!first.ok) {
+      return;
+    }
+    expect(auth.bootstrap(first.value.principal, macosDevice(DEVICE_A)).ok).toBe(true);
+    expect(auth.revokeDevice(first.value.principal, DEVICE_A)).toEqual({ ok: true });
+
+    const revokedRequest = new Request("http://localhost/v1/me", {
+      headers: {
+        authorization: `Bearer ${first.value.tokens.accessToken}`,
+        "X-Device-Id": DEVICE_A,
+      },
+    });
+    await expect(auth.authenticate(revokedRequest)).resolves.toBeNull();
+    await expect(
+      auth.authenticate(
+        new Request("http://localhost/v1/me", {
+          headers: { authorization: `Bearer ${first.value.tokens.accessToken}` },
+        }),
+      ),
+    ).resolves.toEqual(expect.objectContaining({ accountId: first.value.principal.accountId }));
+
+    await auth.requestEmailOtp(EMAIL);
+    const relogin = await auth.verifyEmailOtp(EMAIL, "777777", DEVICE_A);
+    expect(relogin.ok).toBe(true);
+    if (!relogin.ok) {
+      return;
+    }
+    expect(auth.bootstrap(relogin.value.principal, macosDevice(DEVICE_A)).ok).toBe(true);
+    expect(await auth.refresh(relogin.value.tokens.refreshToken)).toMatchObject({ ok: true });
+    expect(await auth.refresh(first.value.tokens.refreshToken)).toEqual({
+      ok: false,
+      code: "invalid_refresh",
+    });
+  });
 });

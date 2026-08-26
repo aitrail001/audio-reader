@@ -296,12 +296,16 @@ describe("product authentication API", () => {
       const code = authorizationUrl.searchParams.get("code");
       expect(code).toEqual(expect.any(String));
       const exchanged = await app.fetch(
-        jsonPost("/v1/auth/oauth/exchange", {
-          provider,
-          code,
-          codeVerifier: pkce.verifier,
-          redirectUri: "http://localhost/callback",
-        }),
+        jsonPost(
+          "/v1/auth/oauth/exchange",
+          {
+            provider,
+            code,
+            codeVerifier: pkce.verifier,
+            redirectUri: "http://localhost/callback",
+          },
+          { "X-Device-Id": DEVICE_ID },
+        ),
       );
       expect(exchanged.status).toBe(200);
       const tokens = await readJson(exchanged);
@@ -509,5 +513,100 @@ describe("product authentication API", () => {
       }),
     );
     expect(revoke.status).toBe(401);
+  });
+
+  it("requires X-Device-Id to exchange an OAuth authorization code", async () => {
+    const { app } = createAuthApp();
+    const pkce = await pkcePair();
+    const authorize = await app.fetch(
+      jsonPost("/v1/auth/oauth/authorize", {
+        provider: "google",
+        redirectUri: "http://localhost/callback",
+        codeChallenge: pkce.challenge,
+        state: "oauth-missing-device",
+      }),
+    );
+    const started = await readJson(authorize);
+    expect(isRecord(started)).toBe(true);
+    if (!isRecord(started)) {
+      return;
+    }
+    const exchanged = await app.fetch(
+      jsonPost("/v1/auth/oauth/exchange", {
+        provider: "google",
+        code: new URL(String(started.authorizationUrl)).searchParams.get("code"),
+        codeVerifier: pkce.verifier,
+        redirectUri: "http://localhost/callback",
+      }),
+    );
+    expect(exchanged.status).toBe(400);
+    const body = await readJson(exchanged);
+    expect(isRecord(body) && body.code).toBe("bad_request");
+  });
+
+  it("rejects refresh after an OAuth device is revoked", async () => {
+    const { app } = createAuthApp();
+    const pkce = await pkcePair();
+    const authorize = await app.fetch(
+      jsonPost("/v1/auth/oauth/authorize", {
+        provider: "google",
+        redirectUri: "http://localhost/callback",
+        codeChallenge: pkce.challenge,
+        state: "oauth-revoke-state",
+      }),
+    );
+    const started = await readJson(authorize);
+    expect(isRecord(started)).toBe(true);
+    if (!isRecord(started)) {
+      return;
+    }
+    const exchanged = await app.fetch(
+      jsonPost(
+        "/v1/auth/oauth/exchange",
+        {
+          provider: "google",
+          code: new URL(String(started.authorizationUrl)).searchParams.get("code"),
+          codeVerifier: pkce.verifier,
+          redirectUri: "http://localhost/callback",
+        },
+        { "X-Device-Id": DEVICE_ID },
+      ),
+    );
+    expect(exchanged.status).toBe(200);
+    const tokens = await readJson(exchanged);
+    const session = {
+      accessToken: accessToken(tokens),
+      refreshToken: refreshToken(tokens),
+    };
+    expect(
+      (await bootstrapDevice(app, session.accessToken, DEVICE_ID, "idempotency-oauth-boot")).status,
+    ).toBe(200);
+
+    const revoked = await app.fetch(
+      new Request(`http://localhost/v1/me/devices/${DEVICE_ID}`, {
+        method: "DELETE",
+        headers: {
+          ...bearer(session.accessToken),
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-oauth-revoke",
+        },
+      }),
+    );
+    expect(revoked.status).toBe(204);
+
+    const refresh = await app.fetch(
+      jsonPost("/v1/auth/token/refresh", { refreshToken: session.refreshToken }),
+    );
+    expect(refresh.status).toBe(401);
+    const refreshBody = await readJson(refresh);
+    expect(isRecord(refreshBody) && refreshBody.code).toBe("unauthorized");
+
+    const rebootstrap = await bootstrapDevice(
+      app,
+      session.accessToken,
+      DEVICE_ID,
+      "idempotency-oauth-reboot",
+    );
+    expect(rebootstrap.status).toBe(401);
   });
 });

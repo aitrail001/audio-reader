@@ -286,14 +286,17 @@ async function exchangeOAuth(context: AuthRouteContext): Promise<Response> {
     return fieldError(context.requestId, "codeVerifier", "codeVerifier must be a PKCE verifier.");
   }
   const state = optionalString(body.value.state);
-  const deviceHeader = context.request.headers.get("X-Device-Id")?.trim() ?? "";
+  const deviceId = requireDeviceIdHeader(context.request, context.requestId);
+  if (deviceId instanceof Response) {
+    return deviceId;
+  }
   const result = await auth.exchangeOAuth({
     provider,
     code,
     codeVerifier,
     redirectUri,
+    deviceId,
     ...(state === undefined ? {} : { state }),
-    ...(UUID_PATTERN.test(deviceHeader) ? { deviceId: deviceHeader } : {}),
   });
   if (!result.ok) {
     if (result.code === "not_ready") {
@@ -342,15 +345,9 @@ async function bootstrapSession(context: AuthRouteContext): Promise<Response> {
   if (auth instanceof Response) {
     return auth;
   }
-  const deviceIdHeader = context.request.headers.get("X-Device-Id")?.trim() ?? "";
-  if (!UUID_PATTERN.test(deviceIdHeader)) {
-    return problemResponse({
-      status: 400,
-      code: "bad_request",
-      title: "Bad request",
-      detail: "X-Device-Id must be a UUID.",
-      traceId: context.requestId,
-    });
+  const deviceIdHeader = requireDeviceIdHeader(context.request, context.requestId);
+  if (deviceIdHeader instanceof Response) {
+    return deviceIdHeader;
   }
   return withIdempotency(
     context.idempotencyStore,
@@ -443,15 +440,9 @@ async function revokeDevice(context: AuthRouteContext, deviceId: string): Promis
   if (!UUID_PATTERN.test(deviceId)) {
     return fieldError(context.requestId, "deviceId", "deviceId must be a UUID.");
   }
-  const deviceIdHeader = context.request.headers.get("X-Device-Id")?.trim() ?? "";
-  if (!UUID_PATTERN.test(deviceIdHeader)) {
-    return problemResponse({
-      status: 400,
-      code: "bad_request",
-      title: "Bad request",
-      detail: "X-Device-Id must be a UUID.",
-      traceId: context.requestId,
-    });
+  const deviceIdHeader = requireDeviceIdHeader(context.request, context.requestId);
+  if (deviceIdHeader instanceof Response) {
+    return deviceIdHeader;
   }
   return withIdempotency(
     context.idempotencyStore,
@@ -591,6 +582,20 @@ function requiredUri(value: unknown, field: string, requestId: string): string |
     return fieldError(requestId, field, `${field} must be an http(s) URI.`);
   }
   return text;
+}
+
+function requireDeviceIdHeader(request: Request, requestId: string): string | Response {
+  const deviceIdHeader = request.headers.get("X-Device-Id")?.trim() ?? "";
+  if (!UUID_PATTERN.test(deviceIdHeader)) {
+    return problemResponse({
+      status: 400,
+      code: "bad_request",
+      title: "Bad request",
+      detail: "X-Device-Id must be a UUID.",
+      traceId: requestId,
+    });
+  }
+  return deviceIdHeader;
 }
 
 function requiredString(value: unknown, field: string, requestId: string): string | Response {

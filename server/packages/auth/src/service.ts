@@ -291,8 +291,19 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
 
   function dropRefreshTokens(subject: string, deviceId: string): void {
     for (const [token, record] of refreshTokens) {
-      if (record.subject === subject && record.deviceId === deviceId) {
+      if (
+        record.subject === subject &&
+        (record.deviceId === deviceId || record.deviceId === undefined)
+      ) {
         refreshTokens.delete(token);
+      }
+    }
+  }
+
+  function bindUnboundRefreshTokens(subject: string, deviceId: string): void {
+    for (const record of refreshTokens.values()) {
+      if (record.subject === subject && record.deviceId === undefined) {
+        record.deviceId = deviceId;
       }
     }
   }
@@ -306,11 +317,16 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
     }
   }
 
+  function isDeviceRevoked(accountId: string, deviceId: string): boolean {
+    return devices.get(deviceKey(accountId, deviceId))?.revoked === true;
+  }
+
   async function issueSession(
     account: AccountRecord,
     email: string,
-    deviceId?: string,
-  ): Promise<AuthenticatedSession> {
+    deviceId: string | undefined,
+    mode: "login" | "refresh",
+  ): Promise<AuthenticatedSession | undefined> {
     const profile = profiles.get(account.profileId);
     if (profile === undefined) {
       throw new Error("profile missing for account");
@@ -319,7 +335,11 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
     const accessToken = await signAccessToken({ sub: account.subject, email }, options.jwt, now());
     const refreshToken = randomToken();
     if (deviceId !== undefined) {
-      reactivateDevice(account.id, deviceId);
+      if (mode === "login") {
+        reactivateDevice(account.id, deviceId);
+      } else if (isDeviceRevoked(account.id, deviceId)) {
+        return undefined;
+      }
     }
     refreshTokens.set(refreshToken, {
       subject: account.subject,
@@ -336,6 +356,18 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
       principal: principalFor(account, email),
       profile,
     };
+  }
+
+  async function loginSession(
+    account: AccountRecord,
+    email: string,
+    deviceId?: string,
+  ): Promise<AuthenticatedSession> {
+    const session = await issueSession(account, email, deviceId, "login");
+    if (session === undefined) {
+      throw new Error("login session missing");
+    }
+    return session;
   }
 
   function principalFromSubject(subject: string, email: string): Principal {
@@ -403,10 +435,15 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
       if (!result.ok) {
         return null;
       }
-      return principalFromSubject(
+      const principal = principalFromSubject(
         result.claims.sub,
         result.claims.email ?? `${result.claims.sub}@users.invalid`,
       );
+      const deviceId = request.headers.get("X-Device-Id")?.trim() ?? "";
+      if (deviceId !== "" && isDeviceRevoked(principal.accountId, deviceId)) {
+        return null;
+      }
+      return principal;
     },
 
     requestEmailOtp(email) {
@@ -432,7 +469,7 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
       }
       otps.delete(normalized);
       const account = accountForIdentity("email", normalized, normalized);
-      return { ok: true, value: await issueSession(account, normalized, deviceId) };
+      return { ok: true, value: await loginSession(account, normalized, deviceId) };
     },
 
     authorizeOAuth(input) {
@@ -492,7 +529,7 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
       );
       return {
         ok: true,
-        value: await issueSession(account, record.identity.email, input.deviceId),
+        value: await loginSession(account, record.identity.email, input.deviceId),
       };
     },
 
@@ -516,7 +553,10 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
         }
       }
       refreshTokens.delete(refreshToken);
-      const session = await issueSession(account, profile.email, record.deviceId);
+      const session = await issueSession(account, profile.email, record.deviceId, "refresh");
+      if (session === undefined) {
+        return { ok: false, code: "invalid_refresh" };
+      }
       return { ok: true, value: { tokens: session.tokens, principal: session.principal } };
     },
 
@@ -551,6 +591,7 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
         device.buildNumber = input.buildNumber;
       }
       devices.set(key, device);
+      bindUnboundRefreshTokens(principal.subject, input.deviceId);
       let userSettings = settings.get(profile.accountId);
       if (userSettings === undefined) {
         userSettings = {
