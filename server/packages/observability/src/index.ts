@@ -11,3 +11,28 @@ export function resolveRequestId(header: string | null | undefined): string {
   }
   return crypto.randomUUID();
 }
+
+export function formatError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack ?? error.message;
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return "unknown_error";
+  }
+}
+
+export function logUnhandledError(requestId: string, error: unknown): void {
+  console.error(
+    JSON.stringify({
+      level: "error",
+      message: "unhandled_request_error",
+      requestId,
+      error: formatError(error),
+    }),
+  );
+}

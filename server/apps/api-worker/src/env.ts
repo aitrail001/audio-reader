@@ -9,10 +9,10 @@ export type WorkerEnv = {
 };
 
 export function parseEnvironment(value: string | undefined): AppEnvironment {
-  if (value === "production" || value === "staging" || value === "test" || value === "local") {
+  if (value === "local" || value === "test" || value === "staging" || value === "production") {
     return value;
   }
-  return "local";
+  return "production";
 }
 
 export function parseOriginList(value: string | undefined): string[] {

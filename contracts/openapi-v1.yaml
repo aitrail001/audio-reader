@@ -1653,7 +1653,7 @@ components:
     BadRequest:
       description: Bad request
       content:
-        application/json:
+        application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
       headers:
@@ -1663,7 +1663,7 @@ components:
     Unauthorized:
       description: Authentication required
       content:
-        application/json:
+        application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
       headers:
@@ -1673,7 +1673,7 @@ components:
     Forbidden:
       description: Forbidden
       content:
-        application/json:
+        application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
       headers:
@@ -1683,7 +1683,7 @@ components:
     NotFound:
       description: Not found
       content:
-        application/json:
+        application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
       headers:
@@ -1693,7 +1693,7 @@ components:
     Conflict:
       description: Conflict
       content:
-        application/json:
+        application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
       headers:
@@ -1703,7 +1703,7 @@ components:
     Unprocessable:
       description: Unprocessable entity
       content:
-        application/json:
+        application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
       headers:
@@ -1713,7 +1713,7 @@ components:
     RateLimited:
       description: Rate limited
       content:
-        application/json:
+        application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
       headers:
@@ -1723,7 +1723,7 @@ components:
     InternalError:
       description: Internal server error
       content:
-        application/json:
+        application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
       headers:

@@ -1,6 +1,6 @@
 import { createFakePrincipal, type Principal } from "@audio-reader/auth";
 import { createFakeDatabaseClient } from "@audio-reader/database";
-import { resolveRequestId } from "@audio-reader/observability";
+import { logUnhandledError, resolveRequestId } from "@audio-reader/observability";
 import { createFakeQwenClient } from "@audio-reader/qwen";
 import { DEFAULT_MAX_BODY_BYTES, validateRequestBody } from "./body";
 import { applyCorsHeaders, resolveCorsAllowlist } from "./cors";
@@ -12,8 +12,10 @@ import {
   type WorkerEnv,
 } from "./env";
 import { buildHealth, unavailableProbe, type DependencyProbe } from "./health";
-import { jsonResponse, problemResponse, withRequestId } from "./http";
+import { asHead, jsonResponse, problemResponse, withRequestId } from "./http";
 import { createFakeObjectStore } from "./object-store";
+
+const HEALTH_PATHS = new Set(["/v1/health", "/healthz", "/readyz"]);
 
 export type { WorkerEnv } from "./env";
 
@@ -48,7 +50,8 @@ export function createApiApp(options: AppOptions): ApiApp {
     try {
       const response = await handleRequest(request, requestId, options, maxBodyBytes);
       return applyCorsHeaders(request, withRequestId(response, requestId), allowlist);
-    } catch {
+    } catch (error: unknown) {
+      logUnhandledError(requestId, error);
       const response = problemResponse({
         status: 500,
         code: "internal_error",
@@ -104,20 +107,16 @@ async function handleRequest(
     return new Response(null, { status: 204 });
   }
 
-  const bodyError = await validateRequestBody(request, maxBodyBytes, requestId);
-  if (bodyError !== undefined) {
-    return bodyError;
-  }
-
   const path = new URL(request.url).pathname;
-  if (path === "/v1/health" || path === "/healthz" || path === "/readyz") {
-    if (request.method !== "GET") {
+  if (HEALTH_PATHS.has(path)) {
+    if (request.method !== "GET" && request.method !== "HEAD") {
       return problemResponse({
         status: 405,
         code: "method_not_allowed",
         title: "Method not allowed",
-        detail: "Health endpoints accept GET only.",
+        detail: "Health endpoints accept GET or HEAD.",
         traceId: requestId,
+        headers: { Allow: "GET, HEAD" },
       });
     }
     const includeDependencies = path !== "/healthz";
@@ -129,15 +128,23 @@ async function handleRequest(
       qwen: options.qwen,
     });
     if (path === "/readyz" && health.status !== "ok") {
-      return problemResponse({
-        status: 503,
-        code: "not_ready",
-        title: "Service unavailable",
-        detail: "One or more dependencies are unavailable.",
-        traceId: requestId,
-      });
+      return asHead(
+        request,
+        problemResponse({
+          status: 503,
+          code: "not_ready",
+          title: "Service unavailable",
+          detail: "One or more dependencies are unavailable.",
+          traceId: requestId,
+        }),
+      );
     }
-    return jsonResponse(health);
+    return asHead(request, jsonResponse(health));
+  }
+
+  const bodyError = await validateRequestBody(request, maxBodyBytes, requestId);
+  if (bodyError !== undefined) {
+    return bodyError;
   }
 
   return problemResponse({

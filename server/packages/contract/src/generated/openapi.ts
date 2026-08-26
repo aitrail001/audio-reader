@@ -1554,7 +1554,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["Problem"];
+                "application/problem+json": components["schemas"]["Problem"];
             };
         };
         /** @description Authentication required */
@@ -1564,7 +1564,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["Problem"];
+                "application/problem+json": components["schemas"]["Problem"];
             };
         };
         /** @description Forbidden */
@@ -1574,7 +1574,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["Problem"];
+                "application/problem+json": components["schemas"]["Problem"];
             };
         };
         /** @description Not found */
@@ -1584,7 +1584,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["Problem"];
+                "application/problem+json": components["schemas"]["Problem"];
             };
         };
         /** @description Conflict */
@@ -1594,7 +1594,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["Problem"];
+                "application/problem+json": components["schemas"]["Problem"];
             };
         };
         /** @description Unprocessable entity */
@@ -1604,7 +1604,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["Problem"];
+                "application/problem+json": components["schemas"]["Problem"];
             };
         };
         /** @description Rate limited */
@@ -1614,7 +1614,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["Problem"];
+                "application/problem+json": components["schemas"]["Problem"];
             };
         };
         /** @description Internal server error */
@@ -1624,7 +1624,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["Problem"];
+                "application/problem+json": components["schemas"]["Problem"];
             };
         };
     };

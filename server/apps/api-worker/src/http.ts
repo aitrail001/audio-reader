@@ -15,6 +15,7 @@ export type ProblemInput = {
   traceId: string;
   retryAfterSeconds?: number | null;
   fieldErrors?: NonNullable<Problem["fieldErrors"]>;
+  headers?: HeadersInit;
 };
 
 export function problemResponse(input: ProblemInput): Response {
@@ -28,11 +29,11 @@ export function problemResponse(input: ProblemInput): Response {
     retryAfterSeconds: input.retryAfterSeconds ?? null,
     fieldErrors: input.fieldErrors ?? [],
   };
+  const headers = new Headers(input.headers);
+  headers.set("content-type", PROBLEM_CONTENT_TYPE);
   return new Response(JSON.stringify(body), {
     status: input.status,
-    headers: {
-      "content-type": PROBLEM_CONTENT_TYPE,
-    },
+    headers,
   });
 }
 
@@ -52,5 +53,16 @@ export function withRequestId(response: Response, requestId: string): Response {
     status: response.status,
     statusText: response.statusText,
     headers,
+  });
+}
+
+export function asHead(request: Request, response: Response): Response {
+  if (request.method !== "HEAD") {
+    return response;
+  }
+  return new Response(null, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
   });
 }

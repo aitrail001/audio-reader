@@ -7,3 +7,17 @@ ENVIRONMENT = "local"
 APP_VERSION = "1.0.0-draft.1"
 CORS_ALLOWED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 MAX_BODY_BYTES = "1048576"
+
+[env.staging]
+name = "audio-reader-api-worker-staging"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+CORS_ALLOWED_ORIGINS = ""
+
+[env.production]
+name = "audio-reader-api-worker-production"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+CORS_ALLOWED_ORIGINS = ""

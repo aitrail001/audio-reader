@@ -275,4 +275,66 @@ describe("api-worker HTTP contract", () => {
       production.authenticate(new Request("http://localhost/v1/health")),
     ).resolves.toBeNull();
   });
+
+  it("createApiAppFromEnv production reports degraded health and unreadiness", async () => {
+    const app = createApiAppFromEnv({
+      ENVIRONMENT: "production",
+      APP_VERSION: "1.0.0-draft.1",
+    });
+    const health = await app.fetch(new Request("http://localhost/v1/health"));
+    expect(health.status).toBe(200);
+    const healthBody = await readJson(health);
+    expect(isRecord(healthBody)).toBe(true);
+    if (!isRecord(healthBody)) {
+      return;
+    }
+    expect(healthBody.status).toBe("degraded");
+    expect(healthBody.dependencies).toEqual({
+      database: "unavailable",
+      r2: "unavailable",
+      qwen: "unavailable",
+    });
+
+    const ready = await app.fetch(new Request("http://localhost/readyz"));
+    expect(ready.status).toBe(503);
+    expect(ready.headers.get("content-type")).toMatch(/application\/problem\+json/i);
+  });
+
+  it("fails closed when ENVIRONMENT is missing or unknown", async () => {
+    const envs = [{}, { ENVIRONMENT: "" }, { ENVIRONMENT: "prod" }] as const;
+    for (const env of envs) {
+      const app = createApiAppFromEnv(env);
+      const health = await app.fetch(new Request("http://localhost/v1/health"));
+      const payload = await readJson(health);
+      expect(isRecord(payload) && payload.status).toBe("degraded");
+      const ready = await app.fetch(new Request("http://localhost/readyz"));
+      expect(ready.status).toBe(503);
+      const cors = await app.fetch(
+        new Request("http://localhost/v1/health", {
+          headers: { origin: "http://localhost:5173" },
+        }),
+      );
+      expect(cors.headers.get("access-control-allow-origin")).toBeNull();
+    }
+  });
+
+  it("rejects POST /v1/health as method not allowed before content-type rules", async () => {
+    const response = await createTestApp().fetch(
+      new Request("http://localhost/v1/health", { method: "POST" }),
+    );
+    expect(response.status).toBe(405);
+    expect(response.headers.get("allow")).toMatch(/GET/);
+    expect(response.headers.get("allow")).toMatch(/HEAD/);
+    const payload = await readJson(response);
+    expect(isRecord(payload) && payload.code).toBe("method_not_allowed");
+  });
+
+  it("allows HEAD /v1/health without a body", async () => {
+    const response = await createTestApp().fetch(
+      new Request("http://localhost/v1/health", { method: "HEAD" }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("");
+    expect(response.headers.get("content-type")).toMatch(/application\/json/i);
+  });
 });

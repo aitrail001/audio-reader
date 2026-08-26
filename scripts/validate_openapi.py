@@ -202,13 +202,10 @@ def _response_is_problem(spec: Mapping[str, Any], response: Any) -> bool:
     content = resolved.get("content") or {}
     if not isinstance(content, Mapping):
         return False
-    for media_type in ("application/json", "application/problem+json"):
-        body = content.get(media_type)
-        if not isinstance(body, Mapping):
-            continue
-        if _schema_is_problem(spec, body.get("schema")):
-            return True
-    return False
+    body = content.get("application/problem+json")
+    if not isinstance(body, Mapping):
+        return False
+    return _schema_is_problem(spec, body.get("schema"))
 
 
 def assert_writes_declare_problem_response(spec: Mapping[str, Any]) -> None:

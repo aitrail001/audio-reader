@@ -53,11 +53,11 @@ OpenAPI documents product health as `GET /v1/health` (`operationId: getHealth`) 
 | `GET /healthz`   | Process liveness     | `200` `Health` without dependency checks. Stays `ok` even if adapters are down.                                 |
 | `GET /readyz`    | Dependency readiness | `200` `Health` when every dependency is `ok`; `503` `application/problem+json` otherwise.                       |
 
-Local and test environments use in-memory fake database, R2, and Qwen adapters so readiness succeeds without Docker. Staging/production wiring reports those dependencies as `unavailable` until later PRs attach real clients.
+Local and test environments use in-memory fake database, R2, and Qwen adapters so readiness succeeds without Docker. Staging/production wiring reports those dependencies as `unavailable` until later PRs attach real clients. Missing or unknown `ENVIRONMENT` values fail closed as `production` (unavailable probes, no localhost CORS). `wrangler.toml` sets `ENVIRONMENT = "local"` only in top-level `[vars]` for `wrangler dev`. Deploy with `wrangler deploy --env production` (or `--env staging`); those named environments override `ENVIRONMENT` and do not inherit the local CORS allowlist.
 
-Error responses use RFC 7807 `application/problem+json` with the OpenAPI `Problem` schema (`type`, `title`, `status`, `code`, `traceId`, optional `detail` / `retryAfterSeconds` / `fieldErrors`). The OpenAPI document currently lists those bodies as `application/json`; the worker emits `application/problem+json` for the same schema. Every response includes `X-Request-Id`, which is also `Problem.traceId`.
+Error responses use RFC 7807 `application/problem+json` with the OpenAPI `Problem` schema (`type`, `title`, `status`, `code`, `traceId`, optional `detail` / `retryAfterSeconds` / `fieldErrors`). Shared OpenAPI error responses declare the same media type. Every response includes `X-Request-Id`, which is also `Problem.traceId`.
 
-CORS origins come from `CORS_ALLOWED_ORIGINS` and `ADMIN_ORIGIN`. The `local` environment also allows localhost admin (`5173`) and worker (`8787`) origins. JSON writes require `Content-Type: application/json` and are capped at `MAX_BODY_BYTES` (default 1 MiB).
+CORS origins come from `CORS_ALLOWED_ORIGINS` and `ADMIN_ORIGIN`. The `local` environment also allows localhost admin (`5173`) and worker (`8787`) origins. JSON writes require `Content-Type: application/json` and are capped at `MAX_BODY_BYTES` (default 1 MiB). Health paths accept `GET` and `HEAD`; other methods return `405` with `Allow: GET, HEAD` before body-content rules.
 
 Route-level idempotency is an interface (`withIdempotency` + `IdempotencyStore`) for later write routes. `createFakePrincipal` is for tests only; production/local env wiring does not authenticate.
 
@@ -67,6 +67,8 @@ Route-level idempotency is an interface (`withIdempotency` + `IdempotencyStore`)
 pnpm dev:db    # supabase --workdir server start (requires the Supabase CLI)
 pnpm dev:api   # wrangler dev for @audio-reader/api-worker with fake adapters
 ```
+
+Production deploys must use `--env production` so they do not inherit local `ENVIRONMENT` or localhost CORS from top-level `[vars]`.
 
 `supabase/config.toml` is CLI config only: ports, schemas, and local auth settings. No JWT secrets, service-role keys, or provider client secrets.
 

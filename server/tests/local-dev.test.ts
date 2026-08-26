@@ -36,6 +36,14 @@ describe("local development workspace", () => {
     expect(script).toMatch(/wrangler|dev/);
   });
 
+  it("does not let production Wrangler inherit local ENVIRONMENT or CORS", () => {
+    const wrangler = read(join(serverRoot, "apps", "api-worker", "wrangler.toml"));
+    expect(wrangler).toMatch(/^ENVIRONMENT = "local"$/m);
+    expect(wrangler).toContain("[env.production.vars]");
+    expect(wrangler).toMatch(/\[env\.production\.vars\][\s\S]*ENVIRONMENT = "production"/);
+    expect(wrangler).toMatch(/\[env\.production\.vars\][\s\S]*CORS_ALLOWED_ORIGINS = ""/);
+  });
+
   it("exposes one command for contract, unit, and integration suites", () => {
     const pkg = JSON.parse(read(join(serverRoot, "package.json"))) as {
       scripts?: Record<string, string>;
