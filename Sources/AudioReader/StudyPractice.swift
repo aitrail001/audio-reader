@@ -312,7 +312,7 @@ enum ChapterQuizBuilder {
         for (rotation, catalogIndex) in spreadIndices(count: catalog.count, take: limit).enumerated() {
             let entry = catalog[catalogIndex]
             let sentence = entry.sentence
-            guard let range = sentence.range(of: entry.surface, options: [.caseInsensitive, .diacriticInsensitive]) else {
+            guard let range = StudyTextMatch.firstWholeTokenRange(of: entry.surface, in: sentence) else {
                 continue
             }
             let stem = String(sentence[..<range.lowerBound])

@@ -117,14 +117,29 @@ enum StudyTokenIndex {
     static func tokens(in segment: TranscriptSegment) -> [TranscriptWord] {
         if !segment.words.isEmpty { return segment.words }
         let source = segment.trustedEbookText ?? segment.spokenText
-        let parts = source.split { $0.isWhitespace || $0.isNewline }
+        return syntheticTokens(in: segment, text: source, idComponent: "spoken")
+    }
+
+    static func tokens(in segment: TranscriptSegment, source: TextSource) -> [TranscriptWord] {
+        guard source == .original, let ebookText = segment.trustedEbookText else {
+            return tokens(in: segment)
+        }
+        return syntheticTokens(in: segment, text: ebookText, idComponent: "ebook")
+    }
+
+    private static func syntheticTokens(
+        in segment: TranscriptSegment,
+        text: String,
+        idComponent: String
+    ) -> [TranscriptWord] {
+        let parts = text.split { $0.isWhitespace || $0.isNewline }
         guard !parts.isEmpty else { return [] }
         let duration = max(segment.end - segment.start, 0.01)
         let slice = duration / Double(parts.count)
         return parts.enumerated().map { index, part in
             let start = segment.start + (Double(index) * slice)
             return TranscriptWord(
-                id: "\(segment.id)-spoken-\(index)",
+                id: "\(segment.id)-\(idComponent)-\(index)",
                 text: String(part),
                 start: start,
                 end: start + slice,
@@ -227,8 +242,12 @@ struct StudyIndex: Equatable, Sendable {
 
 enum WordFamiliarityResolver {
     static func learningLemmas(from vocab: [VocabEntry], language: String) -> Set<StudyLemma> {
-        Set(vocab.compactMap { entry in
-            guard entry.category == .word else { return nil }
+        let language = StudyTokenIndex.languageKey(localeIdentifier: language)
+        return Set<StudyLemma>(vocab.compactMap { entry in
+            guard entry.category == .word,
+                  entry.sourceLanguage.map({ StudyTokenIndex.languageKey(localeIdentifier: $0) }) == language else {
+                return nil
+            }
             return StudyLemma.make(language: language, surface: entry.word)
         })
     }
@@ -262,6 +281,34 @@ enum WordFamiliarityResolver {
             learning: learningLemmas(from: vocab, language: language),
             known: knownLemmas(from: known, language: language)
         )
+    }
+}
+
+enum VocabSourceLanguageMigration {
+    static func migrated(
+        _ vocab: [VocabEntry],
+        books: [Book],
+        languageForBook: (Book) -> String
+    ) -> [VocabEntry] {
+        var booksByID: [String: Book] = [:]
+        for book in books {
+            booksByID[book.id] = book
+            booksByID[LibraryScanner.legacyAbsolutePathID(for: book)] = book
+        }
+        let booksByTitle = Dictionary(grouping: books) { $0.title.lowercased() }
+
+        return vocab.map { entry in
+            guard entry.sourceLanguage == nil else { return entry }
+            let titleMatches = booksByTitle[entry.bookTitle.lowercased()] ?? []
+            guard let book = booksByID[entry.bookID] ?? (titleMatches.count == 1 ? titleMatches[0] : nil) else {
+                return entry
+            }
+            var migrated = entry
+            migrated.sourceLanguage = StudyTokenIndex.languageKey(
+                localeIdentifier: languageForBook(book)
+            )
+            return migrated
+        }
     }
 }
 
@@ -311,13 +358,52 @@ enum ChapterPrimingList {
     }
 }
 
+enum StudyTextMatch {
+    static func firstWholeTokenRange(of rawTerm: String, in text: String) -> Range<String.Index>? {
+        let term = rawTerm.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return nil }
+        let needsWordBoundaries = term.unicodeScalars.contains { scalar in
+            (0x0041...0x024F).contains(scalar.value)
+                || (0x1E00...0x1EFF).contains(scalar.value)
+                || (0x0030...0x0039).contains(scalar.value)
+        }
+        var searchStart = text.startIndex
+        while searchStart < text.endIndex,
+              let range = text.range(
+                of: term,
+                options: [.caseInsensitive, .diacriticInsensitive],
+                range: searchStart..<text.endIndex
+              ) {
+            if !needsWordBoundaries || hasWordBoundaries(range, in: text) {
+                return range
+            }
+            searchStart = range.upperBound
+        }
+        return nil
+    }
+
+    private static func hasWordBoundaries(_ range: Range<String.Index>, in text: String) -> Bool {
+        let startsAtBoundary = range.lowerBound == text.startIndex
+            || !isWordCharacter(text[text.index(before: range.lowerBound)])
+        let endsAtBoundary = range.upperBound == text.endIndex
+            || !isWordCharacter(text[range.upperBound])
+        return startsAtBoundary && endsAtBoundary
+    }
+
+    private static func isWordCharacter(_ character: Character) -> Bool {
+        character == "_" || character.unicodeScalars.contains {
+            CharacterSet.alphanumerics.contains($0) || CharacterSet.nonBaseCharacters.contains($0)
+        }
+    }
+}
+
 enum VocabCloze {
     static let blank = "____"
 
     static func blankedSentence(for entry: VocabEntry) -> String {
         let word = entry.word.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !word.isEmpty else { return entry.context }
-        if let range = entry.context.range(of: word, options: [.caseInsensitive, .diacriticInsensitive]) {
+        if let range = StudyTextMatch.firstWholeTokenRange(of: word, in: entry.context) {
             return String(entry.context[..<range.lowerBound])
                 + blank
                 + String(entry.context[range.upperBound...])

@@ -46,13 +46,6 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<key>LSEnvironment</key>
-	<dict>
-		<key>SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE</key>
-		<string>nocrash</string>
-		<key>SWIFT_UNEXPECTED_EXECUTOR_LOG_LEVEL</key>
-		<string>1</string>
-	</dict>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
 	<key>NSAppleMusicUsageDescription</key>

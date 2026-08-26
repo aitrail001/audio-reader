@@ -6,7 +6,6 @@ struct AudioReaderApp: App {
     @State private var state = AppState()
 
     init() {
-        IsolationRuntimeGuard.install()
 #if os(macOS)
         let args = CommandLine.arguments
         if args.contains("--scan") {

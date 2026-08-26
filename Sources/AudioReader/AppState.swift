@@ -754,6 +754,7 @@ final class AppState {
             CoverImageCache.shared.preload(paths: coverPaths)
         }.value
         books = scanned
+        migrateVocabularySourceLanguages()
         let transcripts = await Task.detached(priority: .utility) {
             Persistence.loadAllTranscripts()
         }.value
@@ -786,6 +787,16 @@ final class AppState {
             }
         }
         readyChapterIDs = Persistence.readyChapterIDs(in: books, transcripts: transcripts)
+    }
+
+    private func migrateVocabularySourceLanguages() {
+        let migrated = VocabSourceLanguageMigration.migrated(vocab, books: books) { book in
+            StudyTokenIndex.languageKey(for: audiobookLanguage(for: book))
+        }
+        guard migrated != vocab else { return }
+        vocab = migrated
+        Persistence.saveVocab(vocab)
+        refreshStudyIndex()
     }
 
     func open(chapter: Chapter, in book: Book, autoplay: Bool) {
@@ -1181,6 +1192,7 @@ final class AppState {
             translation: (accepted?.status == .accepted ? accepted?.text : nil) ?? (gloss?.status == .accepted ? gloss?.text : nil),
             translationLanguage: accepted?.language ?? gloss?.language,
             translationModel: accepted?.model ?? gloss?.model,
+            sourceLanguage: StudyTokenIndex.languageKey(for: audiobookLanguage(for: book)),
             context: segment.displayText,
             spokenText: segment.spokenText,
             ebookText: segment.trustedEbookText,
@@ -2487,7 +2499,10 @@ final class AppState {
             chapterTitle: selectedChapter?.title ?? "",
             timestamp: currentSegment?.start ?? 0,
             segment: currentSegment,
-            wordID: selectedWord?.id
+            wordID: selectedWord?.id,
+            sourceLanguage: selectedBook.map {
+                StudyTokenIndex.languageKey(for: audiobookLanguage(for: $0))
+            }
         )
     }
 
@@ -2516,6 +2531,9 @@ final class AppState {
         } ?? currentSegment
         let original = gloss.context ?? gloss.source
         let dict = selectedDictionaryHit ?? dictionaryHits.first
+        let sourceLanguage = selectedBook.map {
+            StudyTokenIndex.languageKey(for: audiobookLanguage(for: $0))
+        }
         var changed = false
 
         if gloss.kind == .word {
@@ -2528,6 +2546,10 @@ final class AppState {
                     vocab[idx].translation = gloss.text
                     vocab[idx].translationLanguage = gloss.language
                     vocab[idx].translationModel = gloss.model
+                    changed = true
+                }
+                if vocab[idx].sourceLanguage == nil, let sourceLanguage {
+                    vocab[idx].sourceLanguage = sourceLanguage
                     changed = true
                 }
                 if vocab[idx].definition == nil || DictionaryLookup.looksLikeMarkup(vocab[idx].definition ?? "") {
@@ -2549,6 +2571,7 @@ final class AppState {
                         translation: gloss.text,
                         translationLanguage: gloss.language,
                         translationModel: gloss.model,
+                        sourceLanguage: sourceLanguage,
                         context: original,
                         spokenText: segment?.spokenText,
                         ebookText: segment?.trustedEbookText,
@@ -2585,6 +2608,7 @@ final class AppState {
                         translation: gloss.text,
                         translationLanguage: gloss.language,
                         translationModel: gloss.model,
+                        sourceLanguage: sourceLanguage,
                         context: gloss.source,
                         spokenText: segment?.spokenText,
                         ebookText: segment?.trustedEbookText,
@@ -2623,6 +2647,7 @@ final class AppState {
                         translation: phrase.meaning,
                         translationLanguage: gloss.language,
                         translationModel: gloss.model,
+                        sourceLanguage: sourceLanguage,
                         context: gloss.source,
                         spokenText: segment?.spokenText,
                         ebookText: segment?.trustedEbookText,

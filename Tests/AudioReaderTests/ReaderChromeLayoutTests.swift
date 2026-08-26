@@ -192,6 +192,7 @@ struct ReaderChromeLayoutTests {
         )
         #expect(!sentenceRow.contains("chapterCoverage"))
         #expect(!sentenceRow.contains("This chapter"))
+        #expect(sentenceRow.contains("lhs.languageLabel == rhs.languageLabel"))
     }
 
     private func source(_ relativePath: String) throws -> String {

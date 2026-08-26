@@ -2101,11 +2101,11 @@ private struct SentenceRow: View {
                     bold: type.bold,
                     studyOverlayEnabled: studyOverlayEnabled,
                     familiarity: familiarity(of: word),
-                    onSeek: UncheckedAction { onSeek(word.start) },
-                    onPlayFrom: UncheckedAction { onPlayFrom(word.start) },
-                    onInspect: UncheckedAction { onInspect(word) },
-                    onSave: UncheckedAction { onSave(word) },
-                    onMarkKnown: UncheckedAction { onMarkKnown(word) }
+                    onSeek: MainActorAction { onSeek(word.start) },
+                    onPlayFrom: MainActorAction { onPlayFrom(word.start) },
+                    onInspect: MainActorAction { onInspect(word) },
+                    onSave: MainActorAction { onSave(word) },
+                    onMarkKnown: MainActorAction { onMarkKnown(word) }
                 )
             }
         }
@@ -2151,7 +2151,10 @@ private struct SentenceRow: View {
                 let original = segment.trustedEbookText ?? (textSource == .original ? segment.spokenText : nil)
                 if let original {
                     if textSource == .original, studyOverlayEnabled {
-                        wordTokens(StudyTokenIndex.tokens(in: segment), dimmed: !isSelected)
+                        wordTokens(
+                            StudyTokenIndex.tokens(in: segment, source: .original),
+                            dimmed: !isSelected
+                        )
                     } else {
                         Text(original)
                             .font(type.font.font(size: textSource == .dual ? type.dual : type.body, bold: type.bold))
@@ -2244,6 +2247,7 @@ extension SentenceRow: Equatable {
             && lhs.textSource == rhs.textSource
             && lhs.gloss == rhs.gloss
             && lhs.isTranslating == rhs.isTranslating
+            && lhs.languageLabel == rhs.languageLabel
             && lhs.studyOverlayEnabled == rhs.studyOverlayEnabled
             && lhs.studyLanguageKey == rhs.studyLanguageKey
             && lhs.studyLearningLemmas == rhs.studyLearningLemmas
@@ -2265,11 +2269,11 @@ private struct WordToken: View {
     var bold = false
     var studyOverlayEnabled = false
     var familiarity: WordFamiliarity = .unknown
-    let onSeek: UncheckedAction
-    let onPlayFrom: UncheckedAction
-    let onInspect: UncheckedAction
-    let onSave: UncheckedAction
-    var onMarkKnown = UncheckedAction()
+    let onSeek: MainActorAction
+    let onPlayFrom: MainActorAction
+    let onInspect: MainActorAction
+    let onSave: MainActorAction
+    var onMarkKnown = MainActorAction()
 
     var body: some View {
         Text(word.text)

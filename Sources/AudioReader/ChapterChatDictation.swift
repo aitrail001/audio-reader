@@ -237,12 +237,10 @@ struct VoiceCaptureStatus: Equatable, Sendable {
     }
 }
 
-/// Live capture session. Not `@Observable` and not `@MainActor`: SwiftUI
-/// `View.body` and `Button` on macOS 26 crash inside
-/// `swift_task_isCurrentExecutorWithFlagsImpl` when they hop to MainActor
-/// during AppKit layout or gestures. Views keep a `VoiceCaptureStatus`
-/// snapshot in `@State` instead.
-final class ChapterChatDictation: @unchecked Sendable {
+/// Main-actor-owned live capture session. Views observe value snapshots rather
+/// than the reference type so capture state never crosses isolation domains.
+@MainActor
+final class ChapterChatDictation {
     private var status = VoiceCaptureStatus()
     private var requestedLocale: Locale
     private let audioEngine = AVAudioEngine()
@@ -256,9 +254,9 @@ final class ChapterChatDictation: @unchecked Sendable {
     private var inputTapInstalled = false
     private var levelHistory = ChapterChatVoiceLevelHistory()
     private var transcript = ChapterChatDictationTranscript(prefix: "")
-    private var onStatus: ((VoiceCaptureStatus) -> Void)?
-    private var onTextUpdate: ((String) -> Void)?
-    private var onWillRecord: (() -> Void)?
+    private var onStatus: (@MainActor (VoiceCaptureStatus) -> Void)?
+    private var onTextUpdate: (@MainActor (String) -> Void)?
+    private var onWillRecord: (@MainActor () -> Void)?
 
     init(locale: Locale = .autoupdatingCurrent) {
         requestedLocale = locale
@@ -267,9 +265,9 @@ final class ChapterChatDictation: @unchecked Sendable {
     func start(
         existingText: String,
         locale: Locale? = nil,
-        onStatus: @escaping (VoiceCaptureStatus) -> Void,
-        onWillRecord: @escaping () -> Void,
-        onTextUpdate: @escaping (String) -> Void
+        onStatus: @escaping @MainActor (VoiceCaptureStatus) -> Void,
+        onWillRecord: @escaping @MainActor () -> Void,
+        onTextUpdate: @escaping @MainActor (String) -> Void
     ) {
         guard status.canStart else { return }
         if let locale {
@@ -322,24 +320,7 @@ final class ChapterChatDictation: @unchecked Sendable {
     }
 
     private func publish() {
-        let snapshot = status
-        let boxed = UncheckedAction { [onStatus] in
-            onStatus?(snapshot)
-        }
-        if Thread.isMainThread {
-            boxed()
-        } else {
-            DispatchQueue.main.async { boxed() }
-        }
-    }
-
-    private func onMain(_ work: @escaping () -> Void) {
-        let boxed = UncheckedAction(work)
-        if Thread.isMainThread {
-            boxed()
-        } else {
-            DispatchQueue.main.async { boxed() }
-        }
+        onStatus?(status)
     }
 
     private func prepareAndStart() async {
@@ -371,18 +352,7 @@ final class ChapterChatDictation: @unchecked Sendable {
             }
 
             let ready = try await makeTranscriber()
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                DispatchQueue.main.async {
-                    Task {
-                        do {
-                            try await self.beginRecognition(with: ready)
-                            continuation.resume()
-                        } catch {
-                            continuation.resume(throwing: error)
-                        }
-                    }
-                }
-            }
+            try await beginRecognition(with: ready)
         } catch is CancellationError {
             return
         } catch {
@@ -422,7 +392,6 @@ final class ChapterChatDictation: @unchecked Sendable {
         if needsReset {
             audioEngine.reset()
         }
-        audioEngine.prepare()
 
         let inputNode = audioEngine.inputNode
         var inputFormat = inputNode.outputFormat(forBus: 0)
@@ -509,21 +478,17 @@ final class ChapterChatDictation: @unchecked Sendable {
     }
 
     private func receive(_ text: String, isFinal: Bool) {
-        onMain {
-            let update = self.transcript.receive(text, isFinal: isFinal)
-            self.onTextUpdate?(update)
-        }
+        let update = transcript.receive(text, isFinal: isFinal)
+        onTextUpdate?(update)
     }
 
     private func startLevelTask(_ levels: AsyncStream<Double>) {
         levelTask = Task { [weak self] in
             for await level in levels {
                 guard let self else { return }
-                self.onMain {
-                    self.levelHistory.append(level)
-                    self.status.audioLevels = self.levelHistory.samples
-                    self.publish()
-                }
+                levelHistory.append(level)
+                status.audioLevels = levelHistory.samples
+                publish()
             }
         }
     }

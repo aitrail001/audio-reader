@@ -15,8 +15,9 @@ private extension Double {
     }
 }
 
+@MainActor
 @Observable
-final class PlayerEngine: @unchecked Sendable {
+final class PlayerEngine {
     private var player: AVPlayer?
     private var observer: Any?
     private var endObserver: NSObjectProtocol?
@@ -66,7 +67,9 @@ final class PlayerEngine: @unchecked Sendable {
             forInterval: CMTime(seconds: 0.08, preferredTimescale: 600),
             queue: .main
         ) { [weak self] time in
-            self?.handleTick(time)
+            Task { @MainActor [weak self] in
+                self?.handleTick(time)
+            }
         }
 
         endObserver = NotificationCenter.default.addObserver(
@@ -74,7 +77,9 @@ final class PlayerEngine: @unchecked Sendable {
             object: item,
             queue: .main
         ) { [weak self] _ in
-            self?.isPlaying = false
+            Task { @MainActor [weak self] in
+                self?.isPlaying = false
+            }
         }
     }
 

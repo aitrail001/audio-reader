@@ -102,6 +102,52 @@ struct StudyLexiconTests {
 
         #expect(WordFamiliarityResolver.learningLemmas(from: [phrase], language: "en").isEmpty)
     }
+
+    @Test("Vocabulary only seeds the matching audiobook language")
+    func vocabularyDoesNotCrossLanguageBoundaries() {
+        var english = wordEntry("actual")
+        english.sourceLanguage = "en"
+        var spanish = wordEntry("bosque")
+        spanish.sourceLanguage = "es"
+
+        #expect(
+            WordFamiliarityResolver.learningLemmas(
+                from: [english, spanish],
+                language: "en"
+            ).map(\.form) == ["actual"]
+        )
+        #expect(
+            WordFamiliarityResolver.learningLemmas(
+                from: [english],
+                language: "es"
+            ).isEmpty
+        )
+    }
+
+    @Test("Legacy vocabulary is tagged only when its book can be identified")
+    func migratesLegacyVocabularyLanguage() {
+        var legacy = wordEntry("forest")
+        legacy.sourceLanguage = nil
+        let book = Book(
+            id: "book",
+            title: "Book",
+            folderPath: "/tmp/book",
+            chapters: []
+        )
+        var unknown = wordEntry("orphan")
+        unknown.bookID = "missing"
+        unknown.bookTitle = "Missing"
+        unknown.sourceLanguage = nil
+
+        let migrated = VocabSourceLanguageMigration.migrated(
+            [legacy, unknown],
+            books: [book],
+            languageForBook: { _ in "en-US" }
+        )
+
+        #expect(migrated[0].sourceLanguage == "en")
+        #expect(migrated[1].sourceLanguage == nil)
+    }
 }
 
 @Suite("Chapter coverage and priming")
@@ -240,6 +286,30 @@ struct ChapterStudyListTests {
         )
         #expect(index.coverage.contentCount == 2)
         #expect(index.priming.map(\.lemma.form) == ["forest", "canopy"])
+    }
+
+    @Test("Original-mode overlay tokens preserve trusted ebook wording")
+    func originalOverlayUsesTrustedEbookText() {
+        var segment = TranscriptSegment(
+            id: "different-wording",
+            start: 0,
+            end: 2,
+            words: [
+                TranscriptWord(id: "spoken-1", text: "ASR", start: 0, end: 1, confidence: nil),
+                TranscriptWord(id: "spoken-2", text: "wording", start: 1, end: 2, confidence: nil)
+            ],
+            ebookText: "Published prose",
+            alignmentScore: 0.9
+        )
+        segment.individualEbookMatchTrusted = true
+        segment.documentEbookUseAllowed = true
+
+        let spoken = StudyTokenIndex.tokens(in: segment, source: .spoken)
+        let original = StudyTokenIndex.tokens(in: segment, source: .original)
+
+        #expect(spoken.map(\.text) == ["ASR", "wording"])
+        #expect(original.map(\.text) == ["Published", "prose"])
+        #expect(original.allSatisfy { $0.id.contains("ebook") })
     }
 
     @Test("A single study index walk fills coverage and priming together")
@@ -448,6 +518,7 @@ private func wordEntry(_ word: String, context: String = "The forest encompasses
         id: word,
         word: word,
         category: .word,
+        sourceLanguage: "en",
         context: context,
         bookID: "book",
         bookTitle: "Book",

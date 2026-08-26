@@ -386,7 +386,7 @@ struct StudyOverlayChromeContractTests {
         #expect(!playerView.contains("locale: state.currentAudiobookLanguage.locale"))
         #expect(playerView.contains("player.pause()"))
         #expect(playerView.contains("voice.isListening"))
-        #expect(playerView.contains("UncheckedAction { onSeek(word.start) }"))
+        #expect(playerView.contains("MainActorAction { onSeek(word.start) }"))
         #expect(!playerView.contains("dictation.isListening"))
         #expect(!playerView.contains("ForEach(TextSource.allCases)"))
         #expect(playerView.contains("Text(TextSource.spoken.rawValue).tag(TextSource.spoken)"))

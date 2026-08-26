@@ -22,13 +22,6 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
-	<key>LSEnvironment</key>
-	<dict>
-		<key>SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE</key>
-		<string>nocrash</string>
-		<key>SWIFT_UNEXPECTED_EXECUTOR_LOG_LEVEL</key>
-		<string>1</string>
-	</dict>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>AudioReader reads local audiobook and ebook files from the folder you choose.</string>
 	<key>NSHighResolutionCapable</key>

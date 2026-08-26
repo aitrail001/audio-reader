@@ -555,6 +555,7 @@ struct PlatformParityContractTests {
     func sharesOnDeviceChapterChatDictation() throws {
         let dictation = try source("Sources/AudioReader/ChapterChatDictation.swift")
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
+        let interaction = try source("Sources/AudioReader/MainThreadInteraction.swift")
         let macPlist = try source("Xcode/Info-macOS.plist")
         let iPadPlist = try source("Xcode/Info-iOS.plist")
 
@@ -568,11 +569,11 @@ struct PlatformParityContractTests {
         #expect(dictation.contains("levelContinuation.yield(ChapterChatVoiceLevel.normalized(buffer))"))
         let session = try section(
             in: dictation,
-            from: "final class ChapterChatDictation: @unchecked Sendable",
+            from: "@MainActor\nfinal class ChapterChatDictation",
             to: "private func completeFinalization"
         )
         #expect(!dictation.contains("@Observable\nfinal class ChapterChatDictation"))
-        #expect(!dictation.contains("@MainActor\nfinal class ChapterChatDictation"))
+        #expect(dictation.contains("@MainActor\nfinal class ChapterChatDictation"))
         #expect(dictation.contains("struct VoiceCaptureStatus"))
         #expect(!session.contains(".installTap("))
         #expect(!session.contains("downloadAndInstall()"))
@@ -582,6 +583,9 @@ struct PlatformParityContractTests {
         #expect(playerView.contains("PlatformTap("))
         #expect(playerView.contains("action: toggleDictation"))
         #expect(!playerView.contains("Button(action: toggleDictation)"))
+        #expect(playerView.contains("MainActorAction { onSeek(word.start) }"))
+        #expect(!interaction.contains("@unchecked Sendable"))
+        #expect(!interaction.contains("nonisolated(unsafe)"))
         #expect(playerView.contains("\"Stop voice input\""))
         #expect(playerView.contains("\"Start voice input\""))
         #expect(playerView.contains("Text(\"Listening on device…\")"))
@@ -591,8 +595,8 @@ struct PlatformParityContractTests {
         #expect(!playerView.contains("#if os(macOS)\n                            Button(action: toggleDictation)"))
         #expect(macPlist.contains("NSMicrophoneUsageDescription"))
         #expect(iPadPlist.contains("NSMicrophoneUsageDescription"))
-        #expect(macPlist.contains("SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE"))
-        #expect(iPadPlist.contains("SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE"))
+        #expect(!macPlist.contains("SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE"))
+        #expect(!iPadPlist.contains("SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE"))
     }
 
     private func source(_ relativePath: String) throws -> String {

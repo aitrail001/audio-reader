@@ -9,6 +9,7 @@ enum ChapterAcceptanceBatch {
         var timestamp: TimeInterval
         var segment: TranscriptSegment?
         var wordID: String?
+        var sourceLanguage: String? = nil
 
         static let empty = Defaults(
             bookID: "",
@@ -17,7 +18,8 @@ enum ChapterAcceptanceBatch {
             chapterTitle: "",
             timestamp: 0,
             segment: nil,
-            wordID: nil
+            wordID: nil,
+            sourceLanguage: nil
         )
     }
 
@@ -97,10 +99,12 @@ enum ChapterAcceptanceBatch {
                     var entry = working[match]
                     if entry.translation != gloss.text
                         || entry.translationLanguage != gloss.language
-                        || entry.translationModel != gloss.model {
+                        || entry.translationModel != gloss.model
+                        || (entry.sourceLanguage == nil && defaults.sourceLanguage != nil) {
                         entry.translation = gloss.text
                         entry.translationLanguage = gloss.language
                         entry.translationModel = gloss.model
+                        entry.sourceLanguage = entry.sourceLanguage ?? defaults.sourceLanguage
                         working[match] = entry
                         recordUpsert(entry)
                     }
@@ -112,6 +116,7 @@ enum ChapterAcceptanceBatch {
                         translation: gloss.text,
                         translationLanguage: gloss.language,
                         translationModel: gloss.model,
+                        sourceLanguage: defaults.sourceLanguage,
                         context: original,
                         spokenText: segment?.spokenText,
                         ebookText: segment?.trustedEbookText,
@@ -151,6 +156,7 @@ enum ChapterAcceptanceBatch {
                         translation: gloss.text,
                         translationLanguage: gloss.language,
                         translationModel: gloss.model,
+                        sourceLanguage: defaults.sourceLanguage,
                         context: gloss.source,
                         spokenText: segment?.spokenText,
                         ebookText: segment?.trustedEbookText,
@@ -180,6 +186,7 @@ enum ChapterAcceptanceBatch {
                         translation: phrase.meaning,
                         translationLanguage: gloss.language,
                         translationModel: gloss.model,
+                        sourceLanguage: defaults.sourceLanguage,
                         context: gloss.source,
                         spokenText: segment?.spokenText,
                         ebookText: segment?.trustedEbookText,

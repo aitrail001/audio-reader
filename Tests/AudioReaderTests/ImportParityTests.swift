@@ -1164,17 +1164,23 @@ struct ImportParityTests {
         let plist = try #require(
             PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any]
         )
+        let iPadPlistData = try Data(contentsOf: repository.appendingPathComponent("Info-iPad.plist"))
+        let iPadPlist = try #require(
+            PropertyListSerialization.propertyList(from: iPadPlistData, format: nil) as? [String: Any]
+        )
         let project = try String(
             contentsOf: repository.appendingPathComponent("AudioReader.xcodeproj/project.pbxproj"),
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.52")
-        #expect(plist["CFBundleVersion"] as? String == "53")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.52;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 53;").count - 1 == 4)
-        let environment = plist["LSEnvironment"] as? [String: String]
-        #expect(environment?["SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE"] == "nocrash")
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.54")
+        #expect(plist["CFBundleVersion"] as? String == "55")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.54")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "55")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.54;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 55;").count - 1 == 4)
+        #expect(plist["LSEnvironment"] == nil)
+        #expect(iPadPlist["LSEnvironment"] == nil)
     }
 }
 

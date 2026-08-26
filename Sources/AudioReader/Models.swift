@@ -407,6 +407,7 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
     var translation: String?
     var translationLanguage: String?
     var translationModel: String?
+    var sourceLanguage: String?
     var context: String
     var spokenText: String?
     var ebookText: String?
@@ -428,7 +429,7 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case id, word, category, definition, dictionaryName, dictionaryHTML
-        case translation, translationLanguage, translationModel, context, spokenText, ebookText
+        case translation, translationLanguage, translationModel, sourceLanguage, context, spokenText, ebookText
         case bookID, bookTitle, chapterID, chapterTitle, segmentID, wordID
         case timestamp, addedAt, reviewCount, nextReview
         case lastReviewedAt, lastReviewQuality, reviewIntervalDays, reviewEaseFactor
@@ -445,6 +446,7 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
         translation: String? = nil,
         translationLanguage: String? = nil,
         translationModel: String? = nil,
+        sourceLanguage: String? = nil,
         context: String,
         spokenText: String? = nil,
         ebookText: String? = nil,
@@ -473,6 +475,7 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
         self.translation = translation
         self.translationLanguage = translationLanguage
         self.translationModel = translationModel
+        self.sourceLanguage = sourceLanguage
         self.context = context
         self.spokenText = spokenText
         self.ebookText = ebookText
@@ -504,6 +507,7 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
         translation = try c.decodeIfPresent(String.self, forKey: .translation)
         translationLanguage = try c.decodeIfPresent(String.self, forKey: .translationLanguage)
         translationModel = try c.decodeIfPresent(String.self, forKey: .translationModel)
+        sourceLanguage = try c.decodeIfPresent(String.self, forKey: .sourceLanguage)
         context = try c.decode(String.self, forKey: .context)
         spokenText = try c.decodeIfPresent(String.self, forKey: .spokenText)
         ebookText = try c.decodeIfPresent(String.self, forKey: .ebookText)
