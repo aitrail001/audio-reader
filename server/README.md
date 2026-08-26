@@ -64,11 +64,17 @@ Route-level idempotency is an interface (`withIdempotency` + `IdempotencyStore`)
 ## Local development
 
 ```bash
-pnpm dev:db    # supabase --workdir server start (requires the Supabase CLI)
-pnpm dev:api   # wrangler dev for @audio-reader/api-worker with fake adapters
+pnpm dev:db       # supabase --workdir server start (requires the Supabase CLI)
+pnpm dev:api      # wrangler dev for @audio-reader/api-worker with fake adapters
+pnpm dev:docker   # Postgres 18 + API worker in Docker, then HTTP e2e checks
+pnpm test:e2e-local
 ```
 
-Production deploys must use `--env production` so they do not inherit local `ENVIRONMENT` or localhost CORS from top-level `[vars]`.
+`pnpm dev:docker` publishes the API at `http://127.0.0.1:8787` (local OTP `123456`)
+and Postgres at `127.0.0.1:54329`. Native apps default to that API URL. Full
+build, deploy, operate, and end-to-end steps: [../docs/operations.md](../docs/operations.md).
+
+Production deploys must use `--env production` so they do not inherit local `ENVIRONMENT`, localhost CORS, or `LOCAL_DEV_OTP` from top-level `[vars]`.
 
 `supabase/config.toml` is CLI config only: ports, schemas, and local auth settings. No JWT secrets, service-role keys, or provider client secrets.
 

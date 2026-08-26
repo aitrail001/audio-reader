@@ -67,6 +67,11 @@
 	<string>AudioReader listens while you dictate a chapter question or speak a sentence for shadowing practice.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>AudioReader uses on-device speech recognition for chapter questions and for scoring how closely you spoke the current sentence.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIFileSharingEnabled</key>

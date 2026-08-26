@@ -41,9 +41,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.59</string>
+	<string>1.0.60</string>
 	<key>CFBundleVersion</key>
-	<string>60</string>
+	<string>61</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -71,6 +71,11 @@
 	<string>AudioReader listens while you dictate a chapter question or speak a sentence for shadowing practice.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>AudioReader uses on-device speech recognition for chapter questions and for scoring how closely you spoke the current sentence.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchScreen</key>

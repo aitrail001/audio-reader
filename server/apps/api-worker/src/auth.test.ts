@@ -137,6 +137,39 @@ async function pkcePair(): Promise<{ verifier: string; challenge: string }> {
 }
 
 describe("product authentication API", () => {
+  it("honors LOCAL_DEV_OTP when ENVIRONMENT is local", async () => {
+    const app = createApiAppFromEnv({ ENVIRONMENT: "local", LOCAL_DEV_OTP: "654321" });
+    const requested = await app.fetch(jsonPost("/v1/auth/email-otp/request", { email: EMAIL }));
+    expect(requested.status).toBe(202);
+    const wrong = await app.fetch(
+      jsonPost("/v1/auth/email-otp/verify", {
+        email: EMAIL,
+        code: "123456",
+        deviceId: DEVICE_ID,
+      }),
+    );
+    expect(wrong.status).toBe(401);
+    const verified = await app.fetch(
+      jsonPost("/v1/auth/email-otp/verify", {
+        email: EMAIL,
+        code: "654321",
+        deviceId: DEVICE_ID,
+      }),
+    );
+    expect(verified.status).toBe(200);
+  });
+
+  it("does not issue a local OTP code in production", async () => {
+    const app = createApiAppFromEnv({
+      ENVIRONMENT: "production",
+      LOCAL_DEV_OTP: "123456",
+      SUPABASE_URL: "https://example.supabase.co",
+      SUPABASE_JWT_SECRET: "super-secret",
+    });
+    const requested = await app.fetch(jsonPost("/v1/auth/email-otp/request", { email: EMAIL }));
+    expect(requested.status).toBe(503);
+  });
+
   it("GET /v1/auth/config lists Google, Microsoft, and email OTP", async () => {
     const response = await createTestApp().fetch(new Request("http://localhost/v1/auth/config"));
     expect(response.status).toBe(200);

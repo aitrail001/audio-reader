@@ -1173,14 +1173,18 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.59")
-        #expect(plist["CFBundleVersion"] as? String == "60")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.59")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "60")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.59;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 60;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.60")
+        #expect(plist["CFBundleVersion"] as? String == "61")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.60")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "61")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.60;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 61;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
+        let macATS = try #require(plist["NSAppTransportSecurity"] as? [String: Any])
+        let iPadATS = try #require(iPadPlist["NSAppTransportSecurity"] as? [String: Any])
+        #expect(macATS["NSAllowsLocalNetworking"] as? Bool == true)
+        #expect(iPadATS["NSAllowsLocalNetworking"] as? Bool == true)
     }
 }
 

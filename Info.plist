@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.59</string>
+	<string>1.0.60</string>
 	<key>CFBundleVersion</key>
-	<string>60</string>
+	<string>61</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -45,5 +45,10 @@
 	<string>AudioReader uses on-device speech recognition for chapter questions and for scoring how closely you spoke the current sentence.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>AudioReader reads local audiobook and ebook files from the folder you choose.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 </dict>
 </plist>

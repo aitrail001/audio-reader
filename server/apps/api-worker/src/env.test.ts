@@ -1,6 +1,11 @@
 import { LOCAL_JWT_CONFIG, LOCAL_PASSWORDLESS_HMAC_SECRET } from "@audio-reader/auth";
 import { describe, expect, it } from "vitest";
-import { parseEnvironment, resolveJwtSigningConfig, resolvePasswordlessHmacSecret } from "./env";
+import {
+  parseEnvironment,
+  parseLocalDevOtp,
+  resolveJwtSigningConfig,
+  resolvePasswordlessHmacSecret,
+} from "./env";
 
 describe("parseEnvironment", () => {
   it("preserves known environments", () => {
@@ -93,5 +98,21 @@ describe("resolvePasswordlessHmacSecret", () => {
       secret: LOCAL_PASSWORDLESS_HMAC_SECRET,
       fromEnv: false,
     });
+  });
+});
+
+describe("parseLocalDevOtp", () => {
+  it("returns a six-digit code in local and test", () => {
+    expect(parseLocalDevOtp({ LOCAL_DEV_OTP: "123456" }, "local")).toBe("123456");
+    expect(parseLocalDevOtp({ LOCAL_DEV_OTP: " 654321 " }, "test")).toBe("654321");
+  });
+
+  it("ignores LOCAL_DEV_OTP outside local and test", () => {
+    expect(parseLocalDevOtp({ LOCAL_DEV_OTP: "123456" }, "staging")).toBeUndefined();
+    expect(parseLocalDevOtp({ LOCAL_DEV_OTP: "123456" }, "production")).toBeUndefined();
+  });
+
+  it("rejects a non-digit local code", () => {
+    expect(() => parseLocalDevOtp({ LOCAL_DEV_OTP: "abcdef" }, "local")).toThrow(/6-digit/);
   });
 });

@@ -35,12 +35,14 @@ M4B chapter metadata is detected and exposed as separate playable and transcriba
 - SpeechAnalyzer assets for the selected audiobook language; AudioReader requests their installation on the first transcription
 - Optional: Apple Intelligence on this device, or a Grok, QwenCloud, OpenAI API, or ChatGPT plan account and network connection for translation, summaries, and chapter chat
 
+Build, device install, remote deploy, and a Docker local API for account
+end-to-end tests are documented in [docs/operations.md](docs/operations.md).
+
 ### Build and run on macOS
 
 Open `AudioReader.xcodeproj`, select the **AudioReader-macOS** scheme, and run it. You can also build the standalone app from Terminal:
 
 ```bash
-cd /Users/johnsonzhang/Documents/AI/Dataiku/src/audio-reader
 ./scripts/package_app.sh
 open AudioReader.app
 ```
@@ -52,7 +54,6 @@ Open `AudioReader.xcodeproj`, select the **AudioReader-iOS** scheme, choose a ph
 To package and install the Simulator build from Terminal:
 
 ```bash
-cd /Users/johnsonzhang/Documents/AI/Dataiku/src/audio-reader
 ./scripts/package_ipad_simulator.sh
 xcrun simctl install booted AudioReader-iPad.app
 xcrun simctl launch booted com.johnsonzhang.AudioReader
@@ -137,7 +138,7 @@ Core reading-assistant prompts and translation results are provider-neutral. Pro
 - **Saved API keys use an encrypted local vault.** Provider keys are AES-GCM encrypted and are not stored as Keychain items, in AudioReader settings, or in plaintext app files. One device-only Keychain item protects the vault's wrapping key. Environment-provided keys remain the responsibility of the environment configuration.
 - **ChatGPT-plan access requires an installed, signed-in Codex on macOS.** AudioReader does not bundle Codex or its OAuth credentials. The standalone Codex installer avoids a Node.js dependency, while AudioReader also supports npm installations by selecting their bundled native binary when available. ChatGPT-plan access is distinct from OpenAI API billing and is unavailable on iPadOS; use an OpenAI API key there. Model access and usage limits depend on the signed-in ChatGPT plan.
 - **Publisher permissions still apply.** Possessing an accessible audio file or RSS URL does not necessarily grant permission to transcribe, translate, summarise, or otherwise process it. Use AudioReader only with content you are authorized to process.
-- **Data is local to each installation.** There is no built-in cross-device library, transcript, vocabulary, or playback-position synchronization.
+- **Reading data stays on each installation.** Optional product sign-in registers the device with the account API. This version does not upload books or sync transcripts, vocabulary, or playback position. See [docs/operations.md](docs/operations.md) for the local Docker API and hosted deploy.
 - **Chapter summaries and chat history are session-only.** They are kept while the app is running but are not restored after relaunch. Accepted vocabulary translations and chapter-translation checkpoints are persisted.
 - **Background execution is platform-controlled.** Long transcription or chapter-AI work can be interrupted if the operating system suspends or terminates the app; retained progress is best effort.
 - **This is a development build.** It requires current Apple platform tooling and has not been presented as an App Store release.

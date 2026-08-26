@@ -38,10 +38,31 @@ describe("local development workspace", () => {
 
   it("does not let production Wrangler inherit local ENVIRONMENT or CORS", () => {
     const wrangler = read(join(serverRoot, "apps", "api-worker", "wrangler.toml"));
+    expect(wrangler).toMatch(/^main = "src\/worker.ts"$/m);
     expect(wrangler).toMatch(/^ENVIRONMENT = "local"$/m);
     expect(wrangler).toContain("[env.production.vars]");
     expect(wrangler).toMatch(/\[env\.production\.vars\][\s\S]*ENVIRONMENT = "production"/);
     expect(wrangler).toMatch(/\[env\.production\.vars\][\s\S]*CORS_ALLOWED_ORIGINS = ""/);
+    expect(wrangler).toMatch(/^LOCAL_DEV_OTP = "123456"$/m);
+    expect(wrangler).toMatch(/\[env\.production\.vars\][\s\S]*LOCAL_DEV_OTP = ""/);
+    expect(wrangler).toMatch(/\[env\.staging\.vars\][\s\S]*LOCAL_DEV_OTP = ""/);
+  });
+
+  it("provides a Docker Compose local API stack", () => {
+    const compose = read(join(serverRoot, "docker-compose.yml"));
+    expect(compose).toMatch(/postgres:18-alpine/);
+    expect(compose).toMatch(/8787:8787/);
+    expect(compose).toMatch(/LOCAL_DEV_OTP/);
+    expect(existsSync(join(serverRoot, "Dockerfile"))).toBe(true);
+    expect(existsSync(join(serverRoot, "scripts", "run-local-stack.sh"))).toBe(true);
+    expect(existsSync(join(serverRoot, "scripts", "e2e-local-api.sh"))).toBe(true);
+    expect(existsSync(join(serverRoot, "scripts", "apply-migrations.sh"))).toBe(true);
+    const script = read(join(serverRoot, "scripts", "run-local-stack.sh"));
+    expect(script).toMatch(/docker compose/);
+    expect(script).toMatch(/e2e-local-api/);
+    const worker = read(join(serverRoot, "apps", "api-worker", "src", "worker.ts"));
+    expect(worker).toMatch(/export default/);
+    expect(worker).not.toMatch(/packageId/);
   });
 
   it("exposes one command for contract, unit, and integration suites", () => {

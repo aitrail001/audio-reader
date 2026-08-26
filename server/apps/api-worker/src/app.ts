@@ -18,6 +18,7 @@ import { DEFAULT_MAX_BODY_BYTES, validateRequestBody } from "./body";
 import { applyCorsHeaders, resolveCorsAllowlist } from "./cors";
 import {
   parseEnvironment,
+  parseLocalDevOtp,
   parseOriginList,
   parsePositiveInt,
   resolveJwtSigningConfig,
@@ -124,8 +125,15 @@ export function createApiAppFromEnv(env: WorkerEnv): ApiApp {
   const adminOrigin = env.ADMIN_ORIGIN?.trim();
   const version = env.APP_VERSION?.trim();
   const jwt = resolveJwtSigningConfig(env, environment);
+  const localOtp = parseLocalDevOtp(env, environment);
   const auth =
-    jwt === undefined ? undefined : createMemoryAuthService({ jwt, allowLocalIssuance: useFakes });
+    jwt === undefined
+      ? undefined
+      : createMemoryAuthService({
+          jwt,
+          allowLocalIssuance: useFakes,
+          ...(localOtp === undefined ? {} : { generateOtp: () => localOtp }),
+        });
   const turnstileSecret = env.TURNSTILE_SECRET_KEY?.trim() ?? "";
   const hmac = resolvePasswordlessHmacSecret(env);
   if (!useFakes && !hmac.fromEnv) {

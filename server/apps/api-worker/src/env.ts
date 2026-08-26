@@ -18,6 +18,7 @@ export type WorkerEnv = {
   TURNSTILE_SECRET_KEY?: string;
   PASSWORDLESS_HMAC_SECRET?: string;
   CACHE_HMAC_SECRET?: string;
+  LOCAL_DEV_OTP?: string;
 };
 
 export function parseEnvironment(value: string | undefined): AppEnvironment {
@@ -80,6 +81,28 @@ export function resolvePasswordlessHmacSecret(env: WorkerEnv): {
     return { secret: cache, fromEnv: true };
   }
   return { secret: LOCAL_PASSWORDLESS_HMAC_SECRET, fromEnv: false };
+}
+
+export function parseLocalDevOtp(env: WorkerEnv, environment: AppEnvironment): string | undefined {
+  const raw = env.LOCAL_DEV_OTP?.trim() ?? "";
+  if (raw === "") {
+    return undefined;
+  }
+  const local = environment === "local" || environment === "test";
+  if (!local) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: "local_dev_otp_ignored",
+        detail: "LOCAL_DEV_OTP is honored only in local and test environments.",
+      }),
+    );
+    return undefined;
+  }
+  if (!/^[0-9]{6}$/.test(raw)) {
+    throw new Error("LOCAL_DEV_OTP must be a 6-digit code when set in local or test.");
+  }
+  return raw;
 }
 
 export function parsePositiveInt(value: string | undefined, fallback: number): number {
