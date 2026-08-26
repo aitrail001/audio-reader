@@ -26,6 +26,7 @@ public final class InMemoryAuthSessionStore: AuthSessionStoring, @unchecked Send
     private let lock = NSLock()
     private var session: PersistedAuthSession?
     private var storedDeviceID: String
+    public var saveError: Error?
 
     public init(deviceID: String = UUID().uuidString.lowercased()) {
         storedDeviceID = deviceID
@@ -39,8 +40,9 @@ public final class InMemoryAuthSessionStore: AuthSessionStoring, @unchecked Send
 
     public func save(_ session: PersistedAuthSession) throws {
         lock.lock()
+        defer { lock.unlock() }
+        if let saveError { throw saveError }
         self.session = session
-        lock.unlock()
     }
 
     public func clear() throws {
@@ -136,6 +138,16 @@ public struct KeychainAuthSessionStore: AuthSessionStoring, Sendable {
     }
 }
 
-public enum AuthSessionStoreError: Error, Equatable {
+public enum AuthSessionStoreError: Error, Equatable, LocalizedError {
     case keychain(OSStatus)
+    case saveFailed
+
+    public var errorDescription: String? {
+        switch self {
+        case .keychain:
+            "The account session could not be stored in Keychain."
+        case .saveFailed:
+            "The account session could not be saved."
+        }
+    }
 }

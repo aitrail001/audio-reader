@@ -32,6 +32,33 @@ struct AuthSessionClientTests {
         #expect(http.requests.allSatisfy { $0.headers["Content-Type"] == "application/json" })
     }
 
+    @Test("HTTP authorize sends the native audioreader callback URI")
+    func httpAuthorizeSendsNativeCallback() async throws {
+        let http = StubHTTPClient()
+        let client = ProductAuthClient(http: http, baseURL: ProductAPI.defaultBaseURL)
+        http.enqueue(
+            status: 200,
+            json: """
+            {"authorizationUrl":"https://auth.example.invalid/oauth/google?code=c&state=native-state","state":"native-state"}
+            """
+        )
+
+        let started = try await client.authorizeOAuth(
+            provider: .google,
+            redirectURI: ProductAPI.callbackURL,
+            codeChallenge: String(repeating: "a", count: 43),
+            state: "native-state"
+        )
+
+        #expect(started.state == "native-state")
+        #expect(http.requests[0].path == "/v1/auth/oauth/authorize")
+        let payload = try JSONDecoder().decode(
+            NativeCallbackAuthorizeBody.self,
+            from: try #require(http.requests[0].body)
+        )
+        #expect(payload.redirectUri == ProductAPI.callbackURL.absoluteString)
+    }
+
     @Test("HTTP client maps a revoked-device bootstrap to deviceRevoked")
     func revokedDeviceProblemMapsToClientError() async {
         let http = StubHTTPClient()
@@ -197,6 +224,112 @@ struct AuthSessionClientTests {
     }
 
     @MainActor
+    @Test("expired or missing access token refreshes instead of clearing Keychain")
+    func accessTokenFailureDoesNotClearRefreshSession() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: deviceID)
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test
+        )
+        await session.requestEmailCode(email)
+        await session.verifyEmailCode("123456")
+        let refresh = try #require(session.persistedRefreshToken)
+
+        session.forgetAccessToken()
+        await session.refreshDevices()
+        #expect(session.mode == .signedInSyncOff)
+        #expect(session.accessToken != nil)
+        #expect(try store.load()?.refreshToken != nil)
+        #expect(session.recoveryMessage == nil)
+
+        client.expireAccessTokens()
+        await session.refreshDevices()
+        #expect(session.mode == .signedInSyncOff)
+        #expect(try store.load() != nil)
+        #expect(session.persistedRefreshToken != refresh)
+        #expect(session.recoveryMessage == nil)
+    }
+
+    @MainActor
+    @Test("listing a revoked current device returns to local mode")
+    func listingRevokedCurrentDeviceReturnsToLocalMode() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: deviceID)
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test
+        )
+        await session.requestEmailCode(email)
+        await session.verifyEmailCode("123456")
+        #expect(session.mode == .signedInSyncOff)
+
+        client.markDeviceRevokedKeepingAccess(deviceID)
+        await session.refreshDevices()
+
+        #expect(session.mode == .local)
+        #expect(try store.load() == nil)
+        #expect(try store.deviceID() == deviceID)
+        #expect(session.recoveryMessage != nil)
+    }
+
+    @MainActor
+    @Test("enabling sync persists and restore keeps signed-in-sync-on")
+    func enablingSyncPersistsAcrossRestore() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: deviceID)
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test
+        )
+        await session.requestEmailCode(email)
+        await session.verifyEmailCode("123456")
+
+        session.setSyncEnabled(true)
+        #expect(session.mode == .signedInSyncOn)
+        #expect(try store.load()?.mode == .signedInSyncOn)
+        #expect(session.errorMessage == nil)
+
+        let restored = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test
+        )
+        await restored.restore()
+        #expect(restored.mode == .signedInSyncOn)
+        #expect(restored.profile?.email == email)
+    }
+
+    @MainActor
+    @Test("a failed sync preference save stays visible and does not change mode")
+    func failedSyncSaveIsVisible() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: deviceID)
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test
+        )
+        await session.requestEmailCode(email)
+        await session.verifyEmailCode("123456")
+        store.saveError = AuthSessionStoreError.saveFailed
+
+        session.setSyncEnabled(true)
+
+        #expect(session.mode == .signedInSyncOff)
+        #expect(try store.load()?.mode == .signedInSyncOff)
+        #expect(session.errorMessage == AuthSessionStoreError.saveFailed.errorDescription)
+    }
+
+    @MainActor
     @Test("Keychain session store keeps the device ID after logout")
     func keychainStoreSurvivesLogout() throws {
         let service = "com.johnsonzhang.AudioReader.account-session.tests.\(UUID().uuidString)"
@@ -228,6 +361,10 @@ struct AuthSessionClientTests {
         try store.clear()
         #expect(try store.load() == nil)
         #expect(try store.deviceID() == device)
+    }
+
+    private struct NativeCallbackAuthorizeBody: Decodable {
+        var redirectUri: String
     }
 
     @MainActor

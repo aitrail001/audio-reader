@@ -48,7 +48,7 @@ struct AccountSessionView: View {
         .disabled(session.isBusy)
         .task(id: session.mode) {
             if session.mode.isSignedIn {
-                await session.refreshDevices()
+                await session.refreshSession()
             }
         }
         .alert("Sign out of AudioReader?", isPresented: $confirmSignOut) {

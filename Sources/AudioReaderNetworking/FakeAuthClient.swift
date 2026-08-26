@@ -23,6 +23,21 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
         withLock { applyRevocationLocked(deviceID) }
     }
 
+    public func expireAccessTokens() {
+        withLock { accessTokens.removeAll() }
+    }
+
+    public func markDeviceRevokedKeepingAccess(_ deviceID: String) {
+        withLock {
+            revokedDeviceIDs.insert(deviceID)
+            if var device = devices[deviceID] {
+                device.revoked = true
+                device.revokedAt = Self.timestamp()
+                devices[deviceID] = device
+            }
+        }
+    }
+
     public func authConfig() async throws -> AuthConfig {
         AuthConfig(providers: [
             AuthProvider(id: "google"),
@@ -149,7 +164,8 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
 
     public func listDevices(accessToken: String, deviceID: String) async throws -> [AccountDevice] {
         try withLock {
-            _ = try sessionLocked(accessToken: accessToken, deviceID: deviceID)
+            _ = try requireAccessLocked(accessToken)
+            _ = deviceID
             return devices.values.sorted { $0.createdAt < $1.createdAt }
         }
     }
@@ -225,10 +241,15 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
         )
     }
 
-    private func sessionLocked(accessToken: String, deviceID: String) throws -> SessionRecord {
+    private func requireAccessLocked(_ accessToken: String) throws -> SessionRecord {
         guard let record = accessTokens[accessToken] else {
             throw AuthClientError.unauthorized("Authentication required.")
         }
+        return record
+    }
+
+    private func sessionLocked(accessToken: String, deviceID: String) throws -> SessionRecord {
+        let record = try requireAccessLocked(accessToken)
         if revokedDeviceIDs.contains(deviceID) || revokedDeviceIDs.contains(record.deviceID) {
             throw AuthClientError.deviceRevoked("This device has been revoked.")
         }

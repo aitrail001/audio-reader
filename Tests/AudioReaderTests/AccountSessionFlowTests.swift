@@ -42,6 +42,48 @@ struct AccountSessionFlowTests {
     }
 
     @MainActor
+    @Test("Signed-in sync on is persisted and does not drop local books")
+    func signedInSyncOnPersistsWithoutDroppingBooks() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "00000000-0000-4000-8000-000000000097")
+        let account = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test
+        )
+        let state = AppState(composition: .inMemory(), account: account)
+        state.books = [
+            Book(
+                id: "book-keep-3",
+                title: "Moby-Dick",
+                author: nil,
+                folderPath: "/tmp/audio-reader-keep/sync",
+                chapters: [
+                    Chapter(id: "ch-3", index: 0, title: "Loomings", audioPath: "/tmp/audio-reader-keep/sync/01.m4b")
+                ]
+            )
+        ]
+        await account.requestEmailCode("sync@example.com")
+        await account.verifyEmailCode("123456")
+        account.setSyncEnabled(true)
+
+        #expect(account.mode == .signedInSyncOn)
+        #expect(try store.load()?.mode == .signedInSyncOn)
+        #expect(state.books.map(\.id) == ["book-keep-3"])
+
+        let restored = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test
+        )
+        await restored.restore()
+        #expect(restored.mode == .signedInSyncOn)
+        #expect(state.books.map(\.id) == ["book-keep-3"])
+    }
+
+    @MainActor
     @Test("Revoked device recovery leaves local books in place")
     func revokedDeviceRecoveryLeavesLocalBooks() async throws {
         let deviceID = "00000000-0000-4000-8000-000000000098"

@@ -564,6 +564,56 @@ describe("product authentication API", () => {
     expect(Array.isArray(boot.quotas)).toBe(true);
   });
 
+  it("accepts the native audioreader OAuth callback scheme", async () => {
+    const { app } = createAuthApp();
+    const pkce = await pkcePair();
+    const authorize = await app.fetch(
+      jsonPost("/v1/auth/oauth/authorize", {
+        provider: "google",
+        redirectUri: "audioreader://auth/callback",
+        codeChallenge: pkce.challenge,
+        state: "oauth-native-callback",
+      }),
+    );
+    expect(authorize.status).toBe(200);
+    const started = await readJson(authorize);
+    expect(isRecord(started)).toBe(true);
+    if (!isRecord(started)) {
+      return;
+    }
+    const exchanged = await app.fetch(
+      jsonPost(
+        "/v1/auth/oauth/exchange",
+        {
+          provider: "google",
+          code: new URL(String(started.authorizationUrl)).searchParams.get("code"),
+          codeVerifier: pkce.verifier,
+          redirectUri: "audioreader://auth/callback",
+        },
+        { "X-Device-Id": DEVICE_ID },
+      ),
+    );
+    expect(exchanged.status).toBe(200);
+    const tokens = await readJson(exchanged);
+    expect(isRecord(tokens) && tokens.tokenType).toBe("Bearer");
+  });
+
+  it("rejects OAuth redirect URIs that are not http(s) or audioreader", async () => {
+    const { app } = createAuthApp();
+    const pkce = await pkcePair();
+    const authorize = await app.fetch(
+      jsonPost("/v1/auth/oauth/authorize", {
+        provider: "google",
+        redirectUri: "ftp://example.com/callback",
+        codeChallenge: pkce.challenge,
+        state: "oauth-bad-redirect",
+      }),
+    );
+    expect(authorize.status).toBe(400);
+    const body = await readJson(authorize);
+    expect(isRecord(body) && body.code).toBe("bad_request");
+  });
+
   it("completes Google and Microsoft OAuth PKCE and issues tokens", async () => {
     const { app } = createAuthApp();
     for (const provider of ["google", "microsoft"] as const) {

@@ -696,13 +696,21 @@ function requiredUri(value: unknown, field: string, requestId: string): string |
   }
   try {
     const parsed = new URL(text);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      return fieldError(requestId, field, `${field} must be an http(s) URI.`);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return text;
+    }
+    // Native ASWebAuthenticationSession cannot watch http(s).
+    if (parsed.protocol === "audioreader:" && parsed.host === "auth") {
+      return text;
     }
   } catch {
-    return fieldError(requestId, field, `${field} must be an http(s) URI.`);
+    // Invalid URI text falls through to the field error.
   }
-  return text;
+  return fieldError(
+    requestId,
+    field,
+    `${field} must be an http(s) URI or audioreader://auth callback.`,
+  );
 }
 
 function requireDeviceIdHeader(request: Request, requestId: string): string | Response {

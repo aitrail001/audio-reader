@@ -143,53 +143,44 @@ public final class AccountSession {
     }
 
     public func refreshSession() async {
-        guard let persisted = try? store.load() else { return }
+        guard (try? store.load()) != nil else { return }
         await run {
-            do {
-                let tokens = try await client.refresh(refreshToken: persisted.refreshToken)
-                accessToken = tokens.accessToken
-                try persist(tokens: tokens, profile: persisted.profile, mode: persisted.mode)
-                try await loadDevices()
-                recoveryMessage = nil
-                errorMessage = nil
-            } catch {
-                if isInvalidSession(error) {
-                    enterLocalAfterInvalidSession()
-                } else {
-                    throw error
-                }
-            }
+            try await refreshAccessTokenKeepingSession()
+            guard mode.isSignedIn else { return }
+            try await loadDevices()
         }
     }
 
     public func signOut() async {
-        let refreshToken = try? store.load()?.refreshToken
-        if let refreshToken {
-            try? await client.logout(refreshToken: refreshToken)
+        await run {
+            let refreshToken = try? store.load()?.refreshToken
+            if let refreshToken {
+                try? await client.logout(refreshToken: refreshToken)
+            }
+            clearLocalSession(recovery: nil)
         }
-        try? store.clear()
-        mode = .local
-        profile = nil
-        accessToken = nil
-        devices = []
-        pendingEmail = nil
-        pendingOAuth = nil
-        pendingAuthorizationURL = nil
-        recoveryMessage = nil
-        errorMessage = nil
     }
 
     public func setSyncEnabled(_ enabled: Bool) {
         guard mode.isSignedIn else { return }
+        let previous = mode
         mode = enabled ? .signedInSyncOn : .signedInSyncOff
-        if var persisted = try? store.load() {
+        do {
+            guard var persisted = try store.load() else {
+                throw AuthSessionStoreError.saveFailed
+            }
             persisted.mode = mode
-            try? store.save(persisted)
+            try store.save(persisted)
+            errorMessage = nil
+        } catch {
+            mode = previous
+            errorMessage = (error as? LocalizedError)?.errorDescription
+                ?? "Could not save the sync preference."
         }
     }
 
     public func refreshDevices() async {
-        guard accessToken != nil else { return }
+        guard mode.isSignedIn else { return }
         await run {
             try await loadDevices()
         }
@@ -197,19 +188,24 @@ public final class AccountSession {
 
     public func revokeDevice(_ device: AccountDevice) async {
         await run {
-            let access = try requireAccessToken()
             let currentID = try store.deviceID()
-            try await client.revokeDevice(
-                accessToken: access,
-                deviceID: currentID,
-                targetDeviceID: device.id
-            )
+            try await withAccessToken { access in
+                try await client.revokeDevice(
+                    accessToken: access,
+                    deviceID: currentID,
+                    targetDeviceID: device.id
+                )
+            }
             if device.id == currentID {
                 enterLocalAfterInvalidSession()
-            } else {
+            } else if mode.isSignedIn {
                 try await loadDevices()
             }
         }
+    }
+
+    func forgetAccessToken() {
+        accessToken = nil
     }
 
     public var currentDeviceID: String? {
@@ -267,19 +263,65 @@ public final class AccountSession {
     }
 
     private func loadDevices() async throws {
-        let access = try requireAccessToken()
-        devices = try await client.listDevices(accessToken: access, deviceID: try store.deviceID())
-            .filter { !$0.revoked }
+        let currentID = try store.deviceID()
+        let listed = try await withAccessToken { access in
+            try await client.listDevices(accessToken: access, deviceID: currentID)
+        }
+        guard mode.isSignedIn else { return }
+        let current = listed.first { $0.id == currentID }
+        if current == nil || current?.revoked == true {
+            enterLocalAfterInvalidSession()
+            return
+        }
+        devices = listed.filter { !$0.revoked }
     }
 
-    private func requireAccessToken() throws -> String {
+    private func withAccessToken<T>(_ operation: (String) async throws -> T) async throws -> T {
+        let first = try await resolvedAccessToken()
+        do {
+            return try await operation(first)
+        } catch {
+            guard isAccessTokenFailure(error), mode.isSignedIn, try store.load() != nil else {
+                throw error
+            }
+            try await refreshAccessTokenKeepingSession()
+            guard mode.isSignedIn, let retry = accessToken else { throw error }
+            return try await operation(retry)
+        }
+    }
+
+    private func resolvedAccessToken() async throws -> String {
+        if let accessToken { return accessToken }
+        try await refreshAccessTokenKeepingSession()
         guard let accessToken else {
-            throw AuthClientError.unauthorized("Authentication required.")
+            throw AuthClientError.invalidResponse
         }
         return accessToken
     }
 
+    private func refreshAccessTokenKeepingSession() async throws {
+        guard let persisted = try store.load() else {
+            throw AuthClientError.invalidResponse
+        }
+        do {
+            let tokens = try await client.refresh(refreshToken: persisted.refreshToken)
+            accessToken = tokens.accessToken
+            try persist(tokens: tokens, profile: persisted.profile, mode: persisted.mode)
+            recoveryMessage = nil
+            errorMessage = nil
+        } catch {
+            if isInvalidSession(error) {
+                enterLocalAfterInvalidSession()
+            }
+            throw error
+        }
+    }
+
     private func enterLocalAfterInvalidSession() {
+        clearLocalSession(recovery: Self.revokedDeviceRecoveryMessage)
+    }
+
+    private func clearLocalSession(recovery: String?) {
         try? store.clear()
         mode = .local
         profile = nil
@@ -289,7 +331,7 @@ public final class AccountSession {
         pendingAuthorizationURL = nil
         pendingEmail = nil
         errorMessage = nil
-        recoveryMessage = Self.revokedDeviceRecoveryMessage
+        recoveryMessage = recovery
     }
 
     private func isInvalidSession(_ error: Error) -> Bool {
@@ -297,6 +339,18 @@ public final class AccountSession {
             return auth.isSessionInvalid
         }
         return false
+    }
+
+    private func isAccessTokenFailure(_ error: Error) -> Bool {
+        guard let auth = error as? AuthClientError else { return false }
+        switch auth {
+        case .unauthorized, .deviceRevoked:
+            return true
+        case .problem(let status, _, _) where status == 401 || status == 403:
+            return true
+        default:
+            return false
+        }
     }
 
     private func run(_ operation: () async throws -> Void) async {
@@ -310,10 +364,7 @@ public final class AccountSession {
     }
 
     private func present(_ error: Error) {
-        if let auth = error as? AuthClientError, auth.isSessionInvalid, mode.isSignedIn {
-            enterLocalAfterInvalidSession()
-            return
-        }
+        guard recoveryMessage == nil else { return }
         errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 }
