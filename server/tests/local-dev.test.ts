@@ -51,6 +51,7 @@ describe("local development workspace", () => {
   it("provides a Docker Compose local API stack", () => {
     const compose = read(join(serverRoot, "docker-compose.yml"));
     expect(compose).toMatch(/postgres:18-alpine/);
+    expect(compose).toMatch(/postgres-data:\/var\/lib\/postgresql$/m);
     expect(compose).toMatch(/8787:8787/);
     expect(compose).toMatch(/LOCAL_DEV_OTP/);
     expect(existsSync(join(serverRoot, "Dockerfile"))).toBe(true);

@@ -10,11 +10,15 @@ TIMEOUT_SECONDS="${E2E_TIMEOUT_SECONDS:-90}"
 export API OTP EMAIL DEVICE_ID TIMEOUT_SECONDS
 
 python3 - <<'PY'
+import base64
+import hashlib
+import http.client
 import json
 import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 api = os.environ["API"].rstrip("/")
@@ -105,6 +109,37 @@ require(status == 200 and isinstance(payload, dict) and payload.get("email") == 
 
 status, payload, raw = request("GET", "/v1/me/devices", headers=auth)
 require(status == 200, f"GET /v1/me/devices failed: {status} {raw}")
+
+verifier_bytes = os.urandom(32)
+verifier = base64.urlsafe_b64encode(verifier_bytes).rstrip(b"=").decode()
+challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+status, payload, raw = request(
+    "POST",
+    "/v1/auth/oauth/authorize",
+    {
+        "provider": "google",
+        "redirectUri": "audioreader://auth/callback",
+        "codeChallenge": challenge,
+        "codeChallengeMethod": "S256",
+        "state": "oauth-e2e-state",
+    },
+)
+require(status == 200 and isinstance(payload, dict), f"OAuth authorize failed: {status} {raw}")
+authorization_url = payload.get("authorizationUrl")
+require(isinstance(authorization_url, str) and "/v1/auth/oauth/local-complete" in authorization_url, f"OAuth authorize URL was not local-complete: {raw}")
+parsed_api = urllib.parse.urlparse(api)
+parsed_auth = urllib.parse.urlparse(authorization_url)
+conn = http.client.HTTPConnection(parsed_api.hostname, parsed_api.port or 80, timeout=30)
+path = parsed_auth.path
+if parsed_auth.query:
+    path += "?" + parsed_auth.query
+conn.request("GET", path, headers={"X-Request-Id": "local-e2e"})
+oauth_response = conn.getresponse()
+location = oauth_response.getheader("Location")
+oauth_response.read()
+conn.close()
+require(oauth_response.status == 302, f"local OAuth complete status {oauth_response.status}")
+require(isinstance(location, str) and location.startswith("audioreader://auth/callback"), f"local OAuth complete location {location}")
 
 print(f"local API end-to-end checks passed against {api}")
 PY

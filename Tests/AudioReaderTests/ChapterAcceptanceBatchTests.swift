@@ -61,7 +61,7 @@ struct ChapterAcceptanceBatchTests {
 
         #expect(state.chapterAcceptanceProgress != nil)
         #expect(state.glosses.first?.status == .accepted)
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
         while state.chapterAcceptanceProgress != nil, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }

@@ -28,6 +28,7 @@ const AUTH_METHODS: Record<string, readonly string[]> = {
   "/v1/auth/email-otp/request": ["POST"],
   "/v1/auth/email-otp/verify": ["POST"],
   "/v1/auth/oauth/authorize": ["POST"],
+  "/v1/auth/oauth/local-complete": ["GET", "HEAD"],
   "/v1/auth/oauth/exchange": ["POST"],
   "/v1/auth/token/refresh": ["POST"],
   "/v1/auth/logout": ["POST"],
@@ -110,6 +111,8 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<Respon
       return verifyEmailOtp(context);
     case "/v1/auth/oauth/authorize":
       return authorizeOAuth(context);
+    case "/v1/auth/oauth/local-complete":
+      return completeLocalOAuth(context);
     case "/v1/auth/oauth/exchange":
       return exchangeOAuth(context);
     case "/v1/auth/token/refresh":
@@ -278,10 +281,61 @@ async function authorizeOAuth(context: AuthRouteContext): Promise<Response> {
     return unauthorized(context.requestId, "The OAuth request is invalid.");
   }
   const payload: AuthOAuthAuthorizeResponse = {
-    authorizationUrl: result.value.authorizationUrl,
+    authorizationUrl: localCompleteAuthorizationUrl(context.request, result.value.authorizationUrl),
     state: result.value.state,
   };
   return jsonResponse(payload);
+}
+
+function localCompleteAuthorizationUrl(request: Request, issued: string): string {
+  const issuedUrl = new URL(issued);
+  const complete = new URL("/v1/auth/oauth/local-complete", request.url);
+  for (const key of ["code", "state", "redirect_uri"] as const) {
+    const value = issuedUrl.searchParams.get(key);
+    if (value !== null && value !== "") {
+      complete.searchParams.set(key, value);
+    }
+  }
+  return complete.toString();
+}
+
+function completeLocalOAuth(context: AuthRouteContext): Response {
+  if (context.auth === undefined || !context.auth.canIssueSessions()) {
+    return new Response(null, { status: 404 });
+  }
+  const url = new URL(context.request.url);
+  const code = url.searchParams.get("code")?.trim() ?? "";
+  const state = url.searchParams.get("state")?.trim() ?? "";
+  const redirectUri = url.searchParams.get("redirect_uri")?.trim() ?? "";
+  if (code === "" || state === "" || !isAllowedLocalOAuthRedirect(redirectUri)) {
+    return fieldError(
+      context.requestId,
+      "redirect_uri",
+      "Local OAuth completion requires a bound audioreader or localhost redirect.",
+    );
+  }
+  const target = new URL(redirectUri);
+  target.searchParams.set("code", code);
+  target.searchParams.set("state", state);
+  return new Response(null, {
+    status: 302,
+    headers: { location: target.toString() },
+  });
+}
+
+function isAllowedLocalOAuthRedirect(uri: string): boolean {
+  try {
+    const parsed = new URL(uri);
+    if (parsed.protocol === "audioreader:" && parsed.host === "auth") {
+      return true;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return false;
+    }
+    return parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+  } catch {
+    return false;
+  }
 }
 
 async function exchangeOAuth(context: AuthRouteContext): Promise<Response> {

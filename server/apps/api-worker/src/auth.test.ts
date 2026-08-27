@@ -597,6 +597,49 @@ describe("product authentication API", () => {
     expect(Array.isArray(boot.quotas)).toBe(true);
   });
 
+  it("rewrites local OAuth authorize URLs through a 302 onto the native callback", async () => {
+    const { app } = createAuthApp();
+    const pkce = await pkcePair();
+    const authorize = await app.fetch(
+      jsonPost("/v1/auth/oauth/authorize", {
+        provider: "google",
+        redirectUri: "audioreader://auth/callback",
+        codeChallenge: pkce.challenge,
+        state: "oauth-local-complete",
+      }),
+    );
+    expect(authorize.status).toBe(200);
+    const started = await readJson(authorize);
+    expect(isRecord(started)).toBe(true);
+    if (!isRecord(started)) {
+      return;
+    }
+    const authorizationUrl = new URL(String(started.authorizationUrl));
+    expect(authorizationUrl.pathname).toBe("/v1/auth/oauth/local-complete");
+    expect(authorizationUrl.searchParams.get("code")).toEqual(expect.any(String));
+    const complete = await app.fetch(new Request(authorizationUrl, { redirect: "manual" }));
+    expect(complete.status).toBe(302);
+    const location = complete.headers.get("location");
+    expect(location).toMatch(/^audioreader:\/\/auth\/callback/);
+    const callback = new URL(String(location));
+    expect(callback.searchParams.get("code")).toBe(authorizationUrl.searchParams.get("code"));
+    expect(callback.searchParams.get("state")).toBe("oauth-local-complete");
+  });
+
+  it("does not expose local OAuth completion outside issuance environments", async () => {
+    const app = createApiAppFromEnv({
+      ENVIRONMENT: "production",
+      SUPABASE_URL: "https://example.supabase.co",
+      SUPABASE_JWT_SECRET: "super-secret",
+    });
+    const complete = await app.fetch(
+      new Request(
+        "http://localhost/v1/auth/oauth/local-complete?code=abc&state=oauth-prod&redirect_uri=audioreader://auth/callback",
+      ),
+    );
+    expect(complete.status).toBe(404);
+  });
+
   it("accepts the native audioreader OAuth callback scheme", async () => {
     const { app } = createAuthApp();
     const pkce = await pkcePair();

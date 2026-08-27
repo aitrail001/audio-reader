@@ -15,7 +15,7 @@ sync learning data to Postgres.
 |---|---|
 | macOS app | Full local reading, transcription, study, optional LLM providers |
 | iPadOS app | Same product contract as macOS (ChatGPT-plan Codex login remains macOS-only) |
-| Product API (Cloudflare Worker) | Health, CORS, problem+json, email OTP, Google/Microsoft PKCE *stubs in local*, JWT refresh/logout, bootstrap, `GET /v1/me`, device list/revoke |
+| Product API (Cloudflare Worker) | Health, CORS, problem+json, email OTP, Google/Microsoft PKCE (local completes via `GET /v1/auth/oauth/local-complete` 302 onto `audioreader://auth/callback`), JWT refresh/logout, bootstrap, `GET /v1/me`, device list/revoke |
 | Postgres schema + RLS | Versioned migrations in `server/supabase/migrations/` |
 | Local Docker API | Worker on `http://127.0.0.1:8787` with in-memory adapters + Postgres schema sandbox |
 | Hosted Qwen, R2 media, sync push/pull, Resend email, admin console | Not wired yet. Staging/production health reports those dependencies `unavailable` until later PRs attach real clients |
@@ -248,9 +248,10 @@ imports also in Documents). Signing out never deletes local books.
 In **Settings → Account**:
 
 1. **Sign in with Google / Microsoft** — starts `ASWebAuthenticationSession`
-   with callback `audioreader://auth/callback`. Local Docker uses a stub
-   authorization URL (`auth.example.invalid`); hosted OAuth needs provider
-   clients configured on Supabase Auth, not in the app.
+   with callback `audioreader://auth/callback`. Local `ENVIRONMENT=local|test`
+   authorizes against `GET /v1/auth/oauth/local-complete`, which 302s onto that
+   callback with a one-time code (no real Google/Microsoft account). Hosted
+   OAuth needs provider clients on Supabase Auth, not in the app.
 2. **Email code** — request a 6-digit OTP, then verify. The API returns the
    same `202` whether or not the address already has an account.
 3. After tokens arrive, the app **bootstraps** this device (`POST /v1/auth/bootstrap`
@@ -451,6 +452,7 @@ docker compose up --build -d api
 | App account calls fail immediately | `curl http://127.0.0.1:8787/healthz`; start `pnpm dev:docker` |
 | OTP `401` | Local code is `123456` only when `ENVIRONMENT=local` and `LOCAL_DEV_OTP` is set. Production never accepts it |
 | OTP `429` | Isolate rate limits; wait or recreate the `api` container |
+| Google/Microsoft sign-in hangs | The API must be local (`ENVIRONMENT=local`) so authorize returns `/v1/auth/oauth/local-complete`, not `auth.example.invalid`. Restart `pnpm dev:api` or `pnpm dev:docker`. Hosted OAuth needs real IdP clients. |
 | iPad device cannot reach API | Not `localhost`; use Mac LAN IP; ATS allows local HTTP only |
 | `docker info` fails | Start Docker Desktop; `pnpm dev:docker` prints a clear error |
 | Postgres port busy | Host maps **54329**, not 5432, to avoid Homebrew Postgres |
