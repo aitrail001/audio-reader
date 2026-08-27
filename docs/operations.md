@@ -247,10 +247,10 @@ imports also in Documents). Signing out never deletes local books.
 
 In **Settings → Account**:
 
-1. **Sign in with Google / Microsoft** — starts `ASWebAuthenticationSession`
+1. **Sign in with Google / Microsoft** — production uses `ASWebAuthenticationSession`
    with callback `audioreader://auth/callback`. Local `ENVIRONMENT=local|test`
-   authorizes against `GET /v1/auth/oauth/local-complete`, which 302s onto that
-   callback with a one-time code (no real Google/Microsoft account). Hosted
+   authorizes against `GET /v1/auth/oauth/local-complete`; the app follows that
+   302 in-process (no Safari sheet) onto `audioreader://auth/callback`. Hosted
    OAuth needs provider clients on Supabase Auth, not in the app.
 2. **Email code** — request a 6-digit OTP, then verify. The API returns the
    same `202` whether or not the address already has an account.

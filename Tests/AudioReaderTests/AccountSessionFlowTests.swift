@@ -159,7 +159,11 @@ struct AccountSessionFlowTests {
         #expect(appState.contains("init(composition: AppComposition"))
         #expect(live.contains("ASWebAuthenticationSession"))
         #expect(live.contains("callbackURLScheme"))
-        #expect(live.contains("DispatchQueue.main.async"))
+        #expect(live.contains("nonisolated static func makeSession"))
+        #expect(live.contains("nonisolated static func finish"))
+        #expect(live.contains("enum WebAuthCallbacks"))
+        #expect(live.contains("/v1/auth/oauth/local-complete"))
+        #expect(live.contains("@concurrent"))
         #expect(live.contains("OnceResume"))
         #expect(view.contains("Sign in with Google"))
         #expect(view.contains("Sign in with Microsoft"))
@@ -179,6 +183,52 @@ struct AccountSessionFlowTests {
         #expect(live.contains("ProductAuthClient"))
         #expect(!live.contains("OpenAIAPIKeyStore"))
         #expect(!live.contains("codex login"))
+    }
+
+    @Test("Local OAuth complete URLs are recognized without Safari")
+    func localOAuthCompleteURLsAreRecognizedWithoutSafari() throws {
+        let local = URL(string: "http://127.0.0.1:8787/v1/auth/oauth/local-complete?code=abc&state=xyz")!
+        let hosted = URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
+        #expect(LocalOAuthRedirect.isLocalComplete(local))
+        #expect(!LocalOAuthRedirect.isLocalComplete(hosted))
+    }
+
+    @Test("Local OAuth complete follows the native callback redirect when the API is running")
+    func localOAuthCompleteFollowsNativeCallbackWhenAPIRunning() async throws {
+        guard let healthURL = URL(string: "http://127.0.0.1:8787/healthz") else {
+            return
+        }
+        var healthRequest = URLRequest(url: healthURL)
+        healthRequest.timeoutInterval = 1
+        do {
+            let (_, response) = try await URLSession.shared.data(for: healthRequest)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+        } catch {
+            return
+        }
+
+        var authorize = URLRequest(url: URL(string: "http://127.0.0.1:8787/v1/auth/oauth/authorize")!)
+        authorize.httpMethod = "POST"
+        authorize.setValue("application/json", forHTTPHeaderField: "content-type")
+        let pkce = PKCEPair.generate()
+        authorize.httpBody = try JSONSerialization.data(withJSONObject: [
+            "provider": "google",
+            "redirectUri": ProductAPI.callbackURL.absoluteString,
+            "codeChallenge": pkce.challenge,
+            "codeChallengeMethod": "S256",
+            "state": "oauth-live-follow",
+        ])
+        let (body, response) = try await URLSession.shared.data(for: authorize)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let payload = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        let authorization = try #require(payload?["authorizationUrl"] as? String)
+        let authorizationURL = try #require(URL(string: authorization))
+        #expect(LocalOAuthRedirect.isLocalComplete(authorizationURL))
+        let callback = try await LocalOAuthRedirect.follow(authorizationURL)
+        #expect(callback.scheme == "audioreader")
+        #expect(callback.path == "/callback" || callback.host == "auth")
+        #expect(callback.query?.contains("code=") == true)
+        #expect(callback.query?.contains("state=oauth-live-follow") == true)
     }
 
     @Test("OAuth callback scheme is registered for packaged macOS and iPad apps")
