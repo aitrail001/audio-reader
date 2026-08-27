@@ -33,6 +33,7 @@ extension AccountDeviceEnvironment {
         )
     }
 
+    @MainActor
     private static var currentPlatform: ProductDevicePlatform {
 #if os(macOS)
         .macos
@@ -43,6 +44,7 @@ extension AccountDeviceEnvironment {
 #endif
     }
 
+    @MainActor
     private static var currentDeviceName: String {
 #if os(macOS)
         Host.current().localizedName ?? "Mac"
@@ -57,17 +59,22 @@ final class ASWebOAuthBrowserSession: NSObject, OAuthBrowserSession, ASWebAuthen
 
     func start(authorizationURL: URL, callbackScheme: String) async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
+            let resume = OnceResume(continuation)
             let session = ASWebAuthenticationSession(
                 url: authorizationURL,
                 callbackURLScheme: callbackScheme
             ) { [weak self] url, error in
-                self?.session = nil
-                if let url {
-                    continuation.resume(returning: url)
-                } else if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(throwing: AuthClientError.cancelled)
+                // SafariLaunchAgent replies on an XPC queue. Resume on the main
+                // actor so Swift 6 isolation does not trap.
+                DispatchQueue.main.async {
+                    self?.session = nil
+                    if let url {
+                        resume.returning(url)
+                    } else if let error {
+                        resume.throwing(error)
+                    } else {
+                        resume.throwing(AuthClientError.cancelled)
+                    }
                 }
             }
             session.presentationContextProvider = self
@@ -75,7 +82,7 @@ final class ASWebOAuthBrowserSession: NSObject, OAuthBrowserSession, ASWebAuthen
             self.session = session
             if !session.start() {
                 self.session = nil
-                continuation.resume(throwing: AuthClientError.cancelled)
+                resume.throwing(AuthClientError.cancelled)
             }
         }
     }
@@ -89,5 +96,32 @@ final class ASWebOAuthBrowserSession: NSObject, OAuthBrowserSession, ASWebAuthen
             .flatMap(\.windows)
         return windows.first(where: \.isKeyWindow) ?? windows.first ?? ASPresentationAnchor()
 #endif
+    }
+}
+
+private final class OnceResume<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Error>?
+
+    init(_ continuation: CheckedContinuation<Value, Error>) {
+        self.continuation = continuation
+    }
+
+    func returning(_ value: Value) {
+        let pending = take()
+        pending?.resume(returning: value)
+    }
+
+    func throwing(_ error: Error) {
+        let pending = take()
+        pending?.resume(throwing: error)
+    }
+
+    private func take() -> CheckedContinuation<Value, Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        let pending = continuation
+        continuation = nil
+        return pending
     }
 }

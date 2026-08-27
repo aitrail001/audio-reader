@@ -159,6 +159,8 @@ struct AccountSessionFlowTests {
         #expect(appState.contains("init(composition: AppComposition"))
         #expect(live.contains("ASWebAuthenticationSession"))
         #expect(live.contains("callbackURLScheme"))
+        #expect(live.contains("DispatchQueue.main.async"))
+        #expect(live.contains("OnceResume"))
         #expect(view.contains("Sign in with Google"))
         #expect(view.contains("Sign in with Microsoft"))
         #expect(!view.contains("#if os(macOS)"))

@@ -1173,12 +1173,12 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.60")
-        #expect(plist["CFBundleVersion"] as? String == "61")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.60")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "61")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.60;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 61;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.61")
+        #expect(plist["CFBundleVersion"] as? String == "62")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.61")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "62")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.61;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 62;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
         let macATS = try #require(plist["NSAppTransportSecurity"] as? [String: Any])
