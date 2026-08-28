@@ -417,4 +417,84 @@ describe("hosted GoTrue auth service", () => {
       expect.arrayContaining([expect.objectContaining({ id: DEVICE_ID, revoked: false })]),
     );
   });
+
+  it("refuses suspended accounts even with a valid access token", async () => {
+    const userId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const identity = createMemoryIdentityStore();
+    await identity.ensureProfile({ userId, email: EMAIL });
+    await identity.setAccountStatus(userId, "suspended");
+    const token = await signAccessToken({ sub: userId, email: EMAIL }, JWT);
+    const { fetch } = createFetch(() => jsonResponse(500, { message: "unused" }));
+    const auth = createHostedAuthService({
+      jwt: JWT,
+      supabaseUrl: "https://example.supabase.co",
+      supabaseAnonKey: "anon-key",
+      fetch,
+      identity,
+    });
+    await expect(
+      auth.authenticate(
+        new Request("https://audio-reader.local/session", {
+          headers: { authorization: `Bearer ${token}` },
+        }),
+      ),
+    ).resolves.toBeNull();
+  });
+
+  it("grants bootstrap admin only when no operator exists yet", async () => {
+    const bootstrapId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const otherId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const { fetch } = createFetch(() => jsonResponse(500, { message: "unused" }));
+    const empty = createMemoryIdentityStore();
+    const firstAuth = createHostedAuthService({
+      jwt: JWT,
+      supabaseUrl: "https://example.supabase.co",
+      supabaseAnonKey: "anon-key",
+      fetch,
+      identity: empty,
+      adminBootstrapEmail: EMAIL,
+    });
+    const token = await signAccessToken({ sub: bootstrapId, email: EMAIL }, JWT);
+    const headers = { authorization: `Bearer ${token}` };
+    const first = await firstAuth.authenticate(
+      new Request("https://audio-reader.local/session", { headers }),
+    );
+    expect(first?.role).toBe("admin");
+    expect(await empty.hasAdminRole(bootstrapId)).toBe(true);
+    const again = await firstAuth.authenticate(
+      new Request("https://audio-reader.local/session", { headers }),
+    );
+    expect(again?.role).toBe("admin");
+
+    const occupied = createMemoryIdentityStore();
+    await occupied.ensureProfile({ userId: otherId, email: "ops@example.com" });
+    await occupied.grantAdminRole(otherId);
+    const blocked = createHostedAuthService({
+      jwt: JWT,
+      supabaseUrl: "https://example.supabase.co",
+      supabaseAnonKey: "anon-key",
+      fetch,
+      identity: occupied,
+      adminBootstrapEmail: EMAIL,
+    });
+    const second = await blocked.authenticate(
+      new Request("https://audio-reader.local/session", { headers }),
+    );
+    expect(second?.role).toBe("user");
+    expect(await occupied.hasAdminRole(bootstrapId)).toBe(false);
+  });
+
+  it("maps GoTrue refresh outages to not_ready instead of invalid_refresh", async () => {
+    const { fetch } = createFetch(() => jsonResponse(503, { message: "down" }));
+    const auth = createHostedAuthService({
+      jwt: JWT,
+      supabaseUrl: "https://example.supabase.co",
+      supabaseAnonKey: "anon-key",
+      fetch,
+    });
+    await expect(auth.refresh("refresh-token-hosted")).resolves.toEqual({
+      ok: false,
+      code: "not_ready",
+    });
+  });
 });

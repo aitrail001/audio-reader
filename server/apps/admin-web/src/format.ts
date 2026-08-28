@@ -87,29 +87,64 @@ export function reasonReady(reason: string): boolean {
   return reason.trim().length >= 5;
 }
 
-/** Accept a raw JWT, a magic-link URL, or a hash fragment that contains access_token. */
-export function extractAccessToken(raw: string): string {
+export type ExtractedSession = {
+  accessToken: string;
+  refreshToken?: string;
+};
+
+const JWT_PATTERN = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+
+function looksLikeJwt(value: string): boolean {
+  return JWT_PATTERN.test(value);
+}
+
+/** Hash wins so fragment magic links are not mixed with query leftovers. */
+function queryFrom(raw: string): URLSearchParams {
+  const hashStart = raw.indexOf("#");
+  if (hashStart >= 0) {
+    return new URLSearchParams(raw.slice(hashStart + 1));
+  }
+  const searchStart = raw.indexOf("?");
+  if (searchStart >= 0) {
+    return new URLSearchParams(raw.slice(searchStart + 1));
+  }
+  const tokenStart = raw.search(/access_token=|refresh_token=/);
+  if (tokenStart >= 0) {
+    return new URLSearchParams(raw.slice(tokenStart));
+  }
+  return new URLSearchParams();
+}
+
+/** True when the location may leak tokens in history or Referer. */
+export function hrefCarriesSessionTokens(href: string): boolean {
+  return href.includes("access_token=") || href.includes("refresh_token=");
+}
+
+/** Accept a raw JWT, a magic-link URL, or a hash fragment. Portal URLs are not tokens. */
+export function extractSession(raw: string): ExtractedSession | null {
   const trimmed = raw.trim();
   if (trimmed === "") {
-    return "";
+    return null;
   }
-  let candidate = trimmed;
-  if (trimmed.includes("access_token=")) {
-    const hashStart = trimmed.indexOf("#");
-    const queryStart = trimmed.indexOf("access_token=");
-    const encoded =
-      hashStart >= 0 && (queryStart < 0 || hashStart < queryStart)
-        ? trimmed.slice(hashStart + 1)
-        : trimmed.slice(queryStart);
-    try {
-      const token = new URLSearchParams(encoded).get("access_token");
-      if (typeof token === "string" && token.trim() !== "") {
-        candidate = token.trim();
-      }
-    } catch {
-      candidate = trimmed;
+  const bearer = /^(?:Bearer)\s+(\S+)/i.exec(trimmed);
+  if (bearer?.[1] !== undefined && looksLikeJwt(bearer[1])) {
+    return { accessToken: bearer[1] };
+  }
+  if (trimmed.includes("access_token=") || trimmed.includes("refresh_token=")) {
+    const params = queryFrom(trimmed);
+    const access = params.get("access_token")?.trim() ?? "";
+    const refresh = params.get("refresh_token")?.trim() ?? "";
+    if (!looksLikeJwt(access)) {
+      return null;
     }
+    return refresh === ""
+      ? { accessToken: access }
+      : { accessToken: access, refreshToken: refresh };
   }
-  const jwt = candidate.split(/\s+/)[0] ?? "";
-  return jwt;
+  const jwt = trimmed.split(/\s+/)[0] ?? "";
+  return looksLikeJwt(jwt) ? { accessToken: jwt } : null;
+}
+
+export function extractAccessToken(raw: string): string {
+  return extractSession(raw)?.accessToken ?? "";
 }

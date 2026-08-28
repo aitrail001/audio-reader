@@ -81,7 +81,12 @@ export {
   isAssistantTask,
 } from "./assistant-prompts";
 export type { AssistantTask } from "./assistant-prompts";
-export { createMemoryOpsStore, createSupabaseOpsStore, createUnavailableOpsStore } from "./ops";
+export {
+  RestPersistenceError,
+  createMemoryOpsStore,
+  createSupabaseOpsStore,
+  createUnavailableOpsStore,
+} from "./ops";
 export type {
   AdminUserRecord,
   CacheState,

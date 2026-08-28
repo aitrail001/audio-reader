@@ -1,5 +1,5 @@
-import { createFakePrincipal } from "@audio-reader/auth";
-import { createFakeDatabaseClient } from "@audio-reader/database";
+import { LOCAL_PASSWORDLESS_HMAC_SECRET, createFakePrincipal } from "@audio-reader/auth";
+import { RestPersistenceError, createFakeDatabaseClient } from "@audio-reader/database";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
 import { createRuntimeConfigService } from "./runtime-config";
@@ -110,6 +110,173 @@ describe("admin and privacy API", () => {
     expect(user.status).toBe(200);
     const userBody = await readJson(user);
     expect(isRecord(userBody) && Array.isArray(userBody.quotas)).toBe(true);
+  });
+
+  it("does not report a policy save when Postgres rejected the write", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
+    await database.identity.grantAdminRole(USER_ID);
+    database.ops.patchPolicy = () => Promise.reject(new RestPersistenceError(502, "JWT expired"));
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+    const patched = await app.fetch(
+      new Request("http://localhost/v1/admin/llm/policies/00000000-0000-4000-8000-0000000000aa", {
+        method: "PATCH",
+        headers: {
+          authorization: "Bearer admin",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-key-policy-prompt-02",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          reason: "switch translation model",
+          model: "qwen3.6-flash",
+        }),
+      }),
+    );
+    expect(patched.status).toBe(502);
+    const listed = await database.ops.listPolicies();
+    expect(listed.find((policy) => policy.id.endsWith("aa"))?.model).not.toBe("qwen3.6-flash");
+  });
+
+  it("does not report a feature flag save when Postgres rejected the write", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
+    await database.identity.grantAdminRole(USER_ID);
+    database.ops.patchFlag = () => Promise.reject(new RestPersistenceError(502, "JWT expired"));
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+    const patched = await app.fetch(
+      new Request("http://localhost/v1/admin/feature-flags/managed_qwen", {
+        method: "PATCH",
+        headers: {
+          authorization: "Bearer admin",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-key-flag-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          reason: "disable managed qwen",
+          enabled: false,
+        }),
+      }),
+    );
+    expect(patched.status).toBe(502);
+    expect(
+      (await database.ops.listFlags()).find((flag) => flag.key === "managed_qwen")?.enabled,
+    ).toBe(true);
+  });
+
+  it("does not report a quota save when Postgres rejected the write", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
+    await database.identity.grantAdminRole(USER_ID);
+    database.ops.patchQuota = () => Promise.reject(new RestPersistenceError(502, "JWT expired"));
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+    const patched = await app.fetch(
+      new Request("http://localhost/v1/admin/quotas/qwen_tasks_day", {
+        method: "PATCH",
+        headers: {
+          authorization: "Bearer admin",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-key-quota-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          reason: "raise daily qwen cap",
+          limit: 9,
+        }),
+      }),
+    );
+    expect(patched.status).toBe(502);
+    expect(
+      (await database.ops.quotasFor(USER_ID)).find((item) => item.key === "qwen_tasks_day")?.limit,
+    ).toBe(50);
+  });
+
+  it("does not report a runtime config save when Postgres rejected the write", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
+    await database.identity.grantAdminRole(USER_ID);
+    const runtime = createRuntimeConfigService({
+      env: { ENVIRONMENT: "test" },
+      ops: database.ops,
+      wrappingSecret: "test-operator-secret-key",
+    });
+    runtime.put = () => Promise.reject(new RestPersistenceError(502, "JWT expired"));
+    const app = createTestApp({
+      database,
+      runtime,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+    const saved = await app.fetch(
+      new Request("http://localhost/v1/admin/runtime-config", {
+        method: "PUT",
+        headers: {
+          authorization: "Bearer admin",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-key-runtime-fail-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          reason: "set qwen overlay",
+          qwen: {
+            apiKey: "sk-live-secret",
+            baseUrl: "https://example.invalid/v1",
+            model: "qwen3.6-flash",
+          },
+        }),
+      }),
+    );
+    expect(saved.status).toBe(502);
+    expect(JSON.stringify(await readJson(saved))).not.toContain("sk-live-secret");
+  });
+
+  it("returns 503 when operator wrapping is not configured instead of 500", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
+    await database.identity.grantAdminRole(USER_ID);
+    const runtime = createRuntimeConfigService({
+      env: { ENVIRONMENT: "production" },
+      ops: database.ops,
+      wrappingSecret: LOCAL_PASSWORDLESS_HMAC_SECRET,
+      wrappingSource: "none",
+    });
+    const app = createTestApp({
+      database,
+      runtime,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+    const saved = await app.fetch(
+      new Request("http://localhost/v1/admin/runtime-config", {
+        method: "PUT",
+        headers: {
+          authorization: "Bearer admin",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-key-runtime-wrap-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          reason: "set qwen overlay",
+          qwen: {
+            apiKey: "sk-should-not-wrap",
+            model: "qwen3.7-flash",
+          },
+        }),
+      }),
+    );
+    expect(saved.status).toBe(503);
+    const body = await readJson(saved);
+    expect(isRecord(body) && body.code).toBe("dependency_failed");
+    expect(JSON.stringify(body)).toContain("OPERATOR_CONFIG_KEY");
+    expect(JSON.stringify(body)).not.toContain("sk-should-not-wrap");
   });
 
   it("lets admins read and write runtime config without returning secrets", async () => {

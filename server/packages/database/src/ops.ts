@@ -9,7 +9,18 @@ import {
   utcDay,
   type QuotaKey,
 } from "./product-limits";
-import { restRow, restRows, type RestClient } from "./rest";
+import { isErrorBody, restOk, restRow, restRows, type RestClient } from "./rest";
+
+/** Operator-visible Postgres write failure. Admin routes map this to 502; never treat it as an in-memory success. */
+export class RestPersistenceError extends Error {
+  readonly status: number;
+
+  constructor(status: number, detail: string) {
+    super(detail);
+    this.name = "RestPersistenceError";
+    this.status = status;
+  }
+}
 
 export type AssetKind = "audio" | "ebook" | "cover" | "transcript_export" | "account_export";
 export type AssetStatus = "pending" | "ready" | "failed" | "deleting";
@@ -779,6 +790,13 @@ export function createUnavailableOpsStore(): OpsStore {
   };
 }
 
+/**
+ * Postgres (PostgREST) is the source of truth whenever this store is constructed.
+ * The in-memory map is only for methods not yet wired to REST, and for local tests.
+ * Policy, flag, quota, operator-settings, and audit writes must not fall back to memory
+ * after REST has already responded — that is what made admin saves look successful
+ * and then revert on reload.
+ */
 export function createSupabaseOpsStore(
   rest: RestClient,
   options: { identity?: IdentityStore; catalog?: CatalogStore } = {},
@@ -934,13 +952,13 @@ export function createSupabaseOpsStore(
         path: "/model_policies",
         query: { select: "*", order: "updated_at.desc" },
       });
-      if (response.status >= 400 || response.status === 0) {
-        return memory.listPolicies();
+      if (!restOk(response) || isErrorBody(response.body)) {
+        logPersistence("model_policies_list_unavailable", { status: response.status });
+        return [];
       }
-      const rows = restRows(response.body)
+      return restRows(response.body)
         .map(mapPolicyRow)
         .filter((row): row is OpsPolicy => row !== undefined);
-      return rows.length === 0 ? memory.listPolicies() : rows;
     },
     async getPolicy(id) {
       const response = await rest.request({
@@ -948,58 +966,14 @@ export function createSupabaseOpsStore(
         path: "/model_policies",
         query: { select: "*", id: `eq.${id}`, limit: "1" },
       });
-      const mapped = mapPolicyRow(restRow(response.body));
-      return mapped ?? memory.getPolicy(id);
+      if (!restOk(response) || isErrorBody(response.body)) {
+        logPersistence("model_policy_get_unavailable", { id, status: response.status });
+        return undefined;
+      }
+      return mapPolicyRow(restRow(response.body));
     },
     async patchPolicy(id, patch) {
-      const body: Record<string, unknown> = {
-        updated_at: new Date().toISOString(),
-      };
-      if (patch.model !== undefined) {
-        body.model = patch.model;
-      }
-      if (patch.enabled !== undefined) {
-        body.enabled = patch.enabled;
-      }
-      if (patch.promptVersion !== undefined) {
-        body.prompt_version = patch.promptVersion;
-      }
-      if (patch.systemPrompt !== undefined) {
-        body.system_prompt = patch.systemPrompt;
-      }
-      if (patch.schemaVersion !== undefined) {
-        body.schema_version = patch.schemaVersion;
-      }
-      if (patch.policyVersion !== undefined) {
-        body.policy_version = patch.policyVersion;
-      }
-      if (patch.canaryPercent !== undefined) {
-        body.canary_percent = patch.canaryPercent;
-      }
-      if (patch.maxInputTokens !== undefined) {
-        body.max_input_tokens = patch.maxInputTokens;
-      }
-      if (patch.maxOutputTokens !== undefined) {
-        body.max_output_tokens = patch.maxOutputTokens;
-      }
-      if (patch.timeoutMs !== undefined) {
-        body.timeout_ms = patch.timeoutMs;
-      }
-      if (patch.region !== undefined) {
-        body.region = patch.region;
-      }
-      if (patch.task !== undefined) {
-        body.task = patch.task;
-      }
-      const response = await rest.request({
-        method: "PATCH",
-        path: "/model_policies",
-        query: { id: `eq.${id}` },
-        prefer: "return=representation",
-        body,
-      });
-      const mapped = mapPolicyRow(restRow(response.body));
-      return mapped ?? memory.patchPolicy(id, patch);
+      return patchModelPolicy(rest, id, patch);
     },
     async listFlags() {
       const response = await rest.request({
@@ -1007,40 +981,16 @@ export function createSupabaseOpsStore(
         path: "/feature_flags",
         query: { select: "*", order: "key.asc" },
       });
-      if (response.status >= 400 || response.status === 0) {
-        return memory.listFlags();
+      if (!restOk(response) || isErrorBody(response.body)) {
+        logPersistence("feature_flags_list_unavailable", { status: response.status });
+        return [];
       }
-      const rows = restRows(response.body)
+      return restRows(response.body)
         .map(mapFlagRow)
         .filter((row): row is OpsFeatureFlag => row !== undefined);
-      return rows.length === 0 ? memory.listFlags() : rows;
     },
     async patchFlag(key, patch) {
-      const body: Record<string, unknown> = { updated_at: new Date().toISOString() };
-      if (patch.enabled !== undefined) {
-        body.enabled = patch.enabled;
-      }
-      if (patch.variant !== undefined) {
-        body.variant = patch.variant;
-      }
-      if (patch.rolloutPercent !== undefined) {
-        body.rollout_percent = patch.rolloutPercent;
-      }
-      if (patch.minAppVersion !== undefined) {
-        body.min_app_version = patch.minAppVersion;
-      }
-      if (patch.platforms !== undefined) {
-        body.platforms = patch.platforms;
-      }
-      const response = await rest.request({
-        method: "PATCH",
-        path: "/feature_flags",
-        query: { key: `eq.${key}` },
-        prefer: "return=representation",
-        body,
-      });
-      const mapped = mapFlagRow(restRow(response.body));
-      return mapped ?? memory.patchFlag(key, patch);
+      return patchFeatureFlag(rest, key, patch);
     },
     async quotasFor(userId) {
       const response = await rest.request({
@@ -1057,9 +1007,8 @@ export function createSupabaseOpsStore(
       }
       for (const row of rows) {
         if (typeof row.key === "string" && isQuotaKey(row.key)) {
-          const limit =
-            typeof row.limit_value === "number" ? row.limit_value : Number(row.limit_value);
-          if (Number.isFinite(limit)) {
+          const limit = finiteNumber(row.limit_value);
+          if (limit !== undefined) {
             await memory.patchQuota(row.key, limit);
           }
         }
@@ -1070,17 +1019,7 @@ export function createSupabaseOpsStore(
       if (!isQuotaKey(key) || limit < 0) {
         return undefined;
       }
-      const response = await rest.request({
-        method: "POST",
-        path: "/quota_limits",
-        query: { on_conflict: "key" },
-        prefer: "resolution=merge-duplicates,return=representation",
-        body: { key, limit_value: limit, updated_at: new Date().toISOString() },
-      });
-      if (response.status >= 400 || response.status === 0) {
-        return memory.patchQuota(key, limit);
-      }
-      return memory.patchQuota(key, limit);
+      return persistQuotaLimit(rest, memory, key, limit);
     },
     async createPrivacyRequest(input) {
       const created = await memory.createPrivacyRequest(input);
@@ -1161,42 +1100,13 @@ export function createSupabaseOpsStore(
         path: "/operator_settings",
         query: { select: "*", id: "eq.default", limit: "1" },
       });
-      const mapped = mapOperatorSettingsRow(restRow(response.body));
-      return mapped ?? memory.getOperatorSettings();
+      if (!restOk(response) || isErrorBody(response.body)) {
+        return memory.getOperatorSettings();
+      }
+      return mapOperatorSettingsRow(restRow(response.body)) ?? memory.getOperatorSettings();
     },
     async putOperatorSettings(input) {
-      const response = await rest.request({
-        method: "POST",
-        path: "/operator_settings",
-        query: { on_conflict: "id" },
-        prefer: "resolution=merge-duplicates,return=representation",
-        body: {
-          id: input.id,
-          payload: input.payload,
-          ciphertext: input.ciphertext,
-          nonce: input.nonce,
-          updated_at: new Date().toISOString(),
-          updated_by: input.updatedBy,
-        },
-      });
-      const mapped = mapOperatorSettingsRow(restRow(response.body));
-      if (mapped !== undefined) {
-        return mapped;
-      }
-      const patched = await rest.request({
-        method: "PATCH",
-        path: "/operator_settings",
-        query: { id: `eq.${input.id}` },
-        prefer: "return=representation",
-        body: {
-          payload: input.payload,
-          ciphertext: input.ciphertext,
-          nonce: input.nonce,
-          updated_at: new Date().toISOString(),
-          updated_by: input.updatedBy,
-        },
-      });
-      return mapOperatorSettingsRow(restRow(patched.body)) ?? memory.putOperatorSettings(input);
+      return persistOperatorSettings(rest, input);
     },
     async listAudit(filter) {
       const query: Record<string, string> = {
@@ -1230,36 +1140,7 @@ export function createSupabaseOpsStore(
       return rows;
     },
     async appendAudit(event) {
-      const response = await rest.request({
-        method: "POST",
-        path: "/audit_events",
-        prefer: "return=representation",
-        body: {
-          actor_id: event.actorId,
-          actor_type: "admin",
-          action: event.action,
-          resource_type: event.resourceType,
-          resource_id: event.resourceId,
-          reason: event.reason,
-          request_id: event.traceId,
-          metadata: event.metadata,
-        },
-      });
-      const row = restRow(response.body);
-      if (row === undefined) {
-        return memory.appendAudit(event);
-      }
-      return {
-        id: typeof row.id === "string" ? row.id : crypto.randomUUID(),
-        actorId: event.actorId,
-        action: event.action,
-        resourceType: event.resourceType,
-        resourceId: event.resourceId,
-        reason: event.reason,
-        traceId: event.traceId,
-        metadata: event.metadata,
-        createdAt: typeof row.created_at === "string" ? row.created_at : new Date().toISOString(),
-      };
+      return persistAuditEvent(rest, event);
     },
   };
 }
@@ -1392,7 +1273,7 @@ function mapPrivacyRow(row: Record<string, unknown> | undefined): OpsPrivacyRequ
 }
 
 function mapFlagRow(row: Record<string, unknown> | undefined): OpsFeatureFlag | undefined {
-  if (row === undefined || typeof row.key !== "string") {
+  if (row === undefined || isErrorBody(row) || typeof row.key !== "string" || row.key === "") {
     return undefined;
   }
   const platforms = Array.isArray(row.platforms)
@@ -1402,7 +1283,7 @@ function mapFlagRow(row: Record<string, unknown> | undefined): OpsFeatureFlag | 
     key: row.key,
     enabled: row.enabled !== false,
     variant: typeof row.variant === "string" ? row.variant : null,
-    rolloutPercent: typeof row.rollout_percent === "number" ? row.rollout_percent : 100,
+    rolloutPercent: finiteNumber(row.rollout_percent) ?? 100,
     minAppVersion: typeof row.min_app_version === "string" ? row.min_app_version : null,
     platforms,
   };
@@ -1438,7 +1319,14 @@ function seedDefaultPolicies(policies: Map<string, OpsPolicy>, timestamp: string
 }
 
 function mapAuditRow(row: Record<string, unknown> | undefined): OpsAuditEvent | undefined {
-  if (row === undefined) {
+  if (
+    row === undefined ||
+    isErrorBody(row) ||
+    typeof row.id !== "string" ||
+    row.id === "" ||
+    typeof row.action !== "string" ||
+    row.action === ""
+  ) {
     return undefined;
   }
   const metadata =
@@ -1446,10 +1334,10 @@ function mapAuditRow(row: Record<string, unknown> | undefined): OpsAuditEvent | 
       ? (row.metadata as Record<string, unknown>)
       : {};
   return {
-    id: typeof row.id === "string" ? row.id : crypto.randomUUID(),
+    id: row.id,
     actorId:
       typeof row.actor_id === "string" ? row.actor_id : "00000000-0000-4000-8000-0000000000ae",
-    action: typeof row.action === "string" ? row.action : "",
+    action: row.action,
     resourceType: typeof row.resource_type === "string" ? row.resource_type : "",
     resourceId: typeof row.resource_id === "string" ? row.resource_id : "",
     reason: typeof row.reason === "string" ? row.reason : "",
@@ -1459,27 +1347,524 @@ function mapAuditRow(row: Record<string, unknown> | undefined): OpsAuditEvent | 
   };
 }
 
+function logPersistence(message: string, fields: Record<string, unknown>): void {
+  console.warn(JSON.stringify({ level: "warn", message, ...fields }));
+}
+
+function pendingHasSubstantiveWrite(pending: Record<string, unknown>): boolean {
+  return Object.keys(pending).some((key) => key !== "updated_at");
+}
+
+function mappedWriteRow<T>(
+  response: { status: number; body: unknown },
+  map: (row: Record<string, unknown> | undefined) => T | undefined,
+): T | undefined {
+  if (!restOk(response) || isErrorBody(response.body)) {
+    return undefined;
+  }
+  return map(restRow(response.body));
+}
+
+/**
+ * PATCH with Prefer: return=representation, drop unknown columns, never treat a
+ * 2xx of the previous row as success. If the only remaining field is updated_at,
+ * the operator's change was not stored.
+ */
+async function patchRestRow<T>(input: {
+  rest: RestClient;
+  path: string;
+  query: Record<string, string>;
+  refetchQuery: Record<string, string>;
+  pending: Record<string, unknown>;
+  resource: string;
+  id: string;
+  map: (row: Record<string, unknown> | undefined) => T | undefined;
+  applied: (value: T, pending: Record<string, unknown>) => boolean;
+  notKeptDetail: string;
+}): Promise<T | undefined> {
+  const pending = input.pending;
+  logPersistence(`${input.resource}_patch_start`, {
+    id: input.id,
+    columns: Object.keys(pending).filter((key) => key !== "updated_at"),
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const response = await input.rest.request({
+      method: "PATCH",
+      path: input.path,
+      query: input.query,
+      prefer: "return=representation",
+      body: pending,
+    });
+    const mapped = mappedWriteRow(response, input.map);
+    if (restOk(response) && !isErrorBody(response.body)) {
+      if (mapped !== undefined && input.applied(mapped, pending)) {
+        logPersistence(`${input.resource}_patch_ok`, { id: input.id, outcome: "representation" });
+        return mapped;
+      }
+      const refetch = await input.rest.request({
+        method: "GET",
+        path: input.path,
+        query: input.refetchQuery,
+      });
+      const current = mappedWriteRow(refetch, input.map);
+      if (current !== undefined && input.applied(current, pending)) {
+        logPersistence(`${input.resource}_patch_ok`, { id: input.id, outcome: "refetch" });
+        return current;
+      }
+      if (current === undefined && mapped === undefined) {
+        logPersistence(`${input.resource}_patch_missing`, {
+          id: input.id,
+          status: response.status,
+        });
+        return undefined;
+      }
+      logPersistence(`${input.resource}_patch_not_kept`, { id: input.id, status: response.status });
+      throw new RestPersistenceError(502, input.notKeptDetail);
+    }
+    if (response.status === 0) {
+      logPersistence(`${input.resource}_patch_unreachable`, { id: input.id });
+      throw new RestPersistenceError(502, "Could not reach Postgres to save the change.");
+    }
+    const unknown = unknownRestColumn(response.body);
+    if (unknown !== undefined && Object.prototype.hasOwnProperty.call(pending, unknown)) {
+      logPersistence(`${input.resource}_patch_unknown_column`, {
+        column: unknown,
+        id: input.id,
+      });
+      delete pending[unknown];
+      if (!pendingHasSubstantiveWrite(pending)) {
+        logPersistence(`${input.resource}_patch_empty_after_unknown_columns`, { id: input.id });
+        throw new RestPersistenceError(
+          502,
+          `Postgres rejected the ${input.resource} update because it did not recognize the patched columns.`,
+        );
+      }
+      continue;
+    }
+    logPersistence(`${input.resource}_patch_rejected`, {
+      id: input.id,
+      status: response.status,
+    });
+    throw new RestPersistenceError(
+      502,
+      restErrorDetail(response.body) ??
+        `Postgres rejected the ${input.resource} update (${String(response.status)}).`,
+    );
+  }
+  throw new RestPersistenceError(502, `Postgres rejected the ${input.resource} update.`);
+}
+
+async function patchModelPolicy(
+  rest: RestClient,
+  id: string,
+  patch: Partial<Omit<OpsPolicy, "id" | "createdAt">>,
+): Promise<OpsPolicy | undefined> {
+  const pending: Record<string, unknown> = {
+    updated_at: new Date().toISOString(),
+  };
+  if (patch.model !== undefined) {
+    pending.model = patch.model;
+  }
+  if (patch.enabled !== undefined) {
+    pending.enabled = patch.enabled;
+  }
+  if (patch.promptVersion !== undefined) {
+    pending.prompt_version = patch.promptVersion;
+  }
+  if (patch.systemPrompt !== undefined) {
+    pending.system_prompt = patch.systemPrompt;
+  }
+  if (patch.schemaVersion !== undefined) {
+    pending.schema_version = patch.schemaVersion;
+  }
+  if (patch.policyVersion !== undefined) {
+    pending.policy_version = patch.policyVersion;
+  }
+  if (patch.canaryPercent !== undefined) {
+    pending.canary_percent = patch.canaryPercent;
+  }
+  if (patch.maxInputTokens !== undefined) {
+    pending.max_input_tokens = patch.maxInputTokens;
+  }
+  if (patch.maxOutputTokens !== undefined) {
+    pending.max_output_tokens = patch.maxOutputTokens;
+  }
+  if (patch.timeoutMs !== undefined) {
+    pending.timeout_ms = patch.timeoutMs;
+  }
+  if (patch.region !== undefined) {
+    pending.region = patch.region;
+  }
+  if (patch.task !== undefined) {
+    pending.task = patch.task;
+  }
+  return patchRestRow({
+    rest,
+    path: "/model_policies",
+    query: { id: `eq.${id}`, select: "*" },
+    refetchQuery: { select: "*", id: `eq.${id}`, limit: "1" },
+    pending,
+    resource: "model_policy",
+    id,
+    map: mapPolicyRow,
+    applied: policyWriteApplied,
+    notKeptDetail:
+      "Postgres did not keep the Qwen policy change. The previous model is still stored.",
+  });
+}
+
+async function patchFeatureFlag(
+  rest: RestClient,
+  key: string,
+  patch: Partial<Omit<OpsFeatureFlag, "key">>,
+): Promise<OpsFeatureFlag | undefined> {
+  const pending: Record<string, unknown> = {
+    updated_at: new Date().toISOString(),
+  };
+  if (patch.enabled !== undefined) {
+    pending.enabled = patch.enabled;
+  }
+  if (patch.variant !== undefined) {
+    pending.variant = patch.variant;
+  }
+  if (patch.rolloutPercent !== undefined) {
+    pending.rollout_percent = patch.rolloutPercent;
+  }
+  if (patch.minAppVersion !== undefined) {
+    pending.min_app_version = patch.minAppVersion;
+  }
+  if (patch.platforms !== undefined) {
+    pending.platforms = patch.platforms;
+  }
+  return patchRestRow({
+    rest,
+    path: "/feature_flags",
+    query: { key: `eq.${key}`, select: "*" },
+    refetchQuery: { select: "*", key: `eq.${key}`, limit: "1" },
+    pending,
+    resource: "feature_flag",
+    id: key,
+    map: mapFlagRow,
+    applied: flagWriteApplied,
+    notKeptDetail: "Postgres did not keep the feature flag change.",
+  });
+}
+
+async function persistQuotaLimit(
+  rest: RestClient,
+  memory: OpsStore,
+  key: QuotaKey,
+  limit: number,
+): Promise<OpsQuota | undefined> {
+  logPersistence("quota_patch_start", { key, limit });
+  const body = { key, limit_value: limit, updated_at: new Date().toISOString() };
+  const response = await rest.request({
+    method: "POST",
+    path: "/quota_limits",
+    query: { on_conflict: "key" },
+    prefer: "resolution=merge-duplicates,return=representation",
+    body,
+  });
+  let row = mappedWriteRow(response, (item) => item);
+  if (quotaLimitMatches(row, key, limit)) {
+    await memory.patchQuota(key, limit);
+    logPersistence("quota_patch_ok", { key, outcome: "representation" });
+    return quotaFromMemory(memory, key);
+  }
+  if (response.status === 0) {
+    logPersistence("quota_patch_unreachable", { key });
+    throw new RestPersistenceError(502, "Could not reach Postgres to save the quota.");
+  }
+  if (!restOk(response) || isErrorBody(response.body)) {
+    logPersistence("quota_patch_rejected", { key, status: response.status });
+    throw new RestPersistenceError(
+      502,
+      restErrorDetail(response.body) ??
+        `Postgres rejected the quota update (${String(response.status)}).`,
+    );
+  }
+  const refetch = await rest.request({
+    method: "GET",
+    path: "/quota_limits",
+    query: { select: "*", key: `eq.${key}`, limit: "1" },
+  });
+  row = mappedWriteRow(refetch, (item) => item);
+  if (quotaLimitMatches(row, key, limit)) {
+    await memory.patchQuota(key, limit);
+    logPersistence("quota_patch_ok", { key, outcome: "refetch" });
+    return quotaFromMemory(memory, key);
+  }
+  logPersistence("quota_patch_not_kept", { key, status: refetch.status });
+  throw new RestPersistenceError(502, "Postgres did not keep the quota limit.");
+}
+
+function quotaLimitMatches(
+  row: Record<string, unknown> | undefined,
+  key: string,
+  limit: number,
+): boolean {
+  return row !== undefined && row.key === key && finiteNumber(row.limit_value) === limit;
+}
+
+async function quotaFromMemory(memory: OpsStore, key: string): Promise<OpsQuota | undefined> {
+  const [updated] = (await memory.quotasFor("")).filter((item) => item.key === key);
+  return updated;
+}
+
+async function persistOperatorSettings(
+  rest: RestClient,
+  input: Omit<OperatorSettingsRecord, "updatedAt">,
+): Promise<OperatorSettingsRecord> {
+  logPersistence("operator_settings_put_start", {
+    id: input.id,
+    payloadKeys: Object.keys(input.payload),
+    ciphertextPresent: input.ciphertext !== null && input.ciphertext !== "",
+  });
+  const writeBody = {
+    id: input.id,
+    payload: input.payload,
+    ciphertext: input.ciphertext,
+    nonce: input.nonce,
+    updated_at: new Date().toISOString(),
+    updated_by: input.updatedBy,
+  };
+  const posted = await rest.request({
+    method: "POST",
+    path: "/operator_settings",
+    query: { on_conflict: "id" },
+    prefer: "resolution=merge-duplicates,return=representation",
+    body: writeBody,
+  });
+  let mapped = mappedWriteRow(posted, mapOperatorSettingsRow);
+  if (mapped !== undefined && operatorSettingsWriteApplied(mapped, input)) {
+    logPersistence("operator_settings_put_ok", { id: input.id, outcome: "insert" });
+    return mapped;
+  }
+  if (posted.status === 0) {
+    logPersistence("operator_settings_put_unreachable", { id: input.id });
+    throw new RestPersistenceError(502, "Could not reach Postgres to save operator settings.");
+  }
+  if (!restOk(posted) || isErrorBody(posted.body)) {
+    logPersistence("operator_settings_put_rejected", { id: input.id, status: posted.status });
+    throw new RestPersistenceError(
+      502,
+      restErrorDetail(posted.body) ??
+        `Postgres rejected the operator settings update (${String(posted.status)}).`,
+    );
+  }
+  const patched = await rest.request({
+    method: "PATCH",
+    path: "/operator_settings",
+    query: { id: `eq.${input.id}`, select: "*" },
+    prefer: "return=representation",
+    body: {
+      payload: input.payload,
+      ciphertext: input.ciphertext,
+      nonce: input.nonce,
+      updated_at: writeBody.updated_at,
+      updated_by: input.updatedBy,
+    },
+  });
+  mapped = mappedWriteRow(patched, mapOperatorSettingsRow);
+  if (mapped !== undefined && operatorSettingsWriteApplied(mapped, input)) {
+    logPersistence("operator_settings_put_ok", { id: input.id, outcome: "patch" });
+    return mapped;
+  }
+  if (patched.status === 0) {
+    logPersistence("operator_settings_put_unreachable", { id: input.id });
+    throw new RestPersistenceError(502, "Could not reach Postgres to save operator settings.");
+  }
+  if (!restOk(patched) || isErrorBody(patched.body)) {
+    logPersistence("operator_settings_put_rejected", { id: input.id, status: patched.status });
+    throw new RestPersistenceError(
+      502,
+      restErrorDetail(patched.body) ??
+        `Postgres rejected the operator settings update (${String(patched.status)}).`,
+    );
+  }
+  const refetch = await rest.request({
+    method: "GET",
+    path: "/operator_settings",
+    query: { select: "*", id: `eq.${input.id}`, limit: "1" },
+  });
+  mapped = mappedWriteRow(refetch, mapOperatorSettingsRow);
+  if (mapped !== undefined && operatorSettingsWriteApplied(mapped, input)) {
+    logPersistence("operator_settings_put_ok", { id: input.id, outcome: "refetch" });
+    return mapped;
+  }
+  logPersistence("operator_settings_put_not_kept", { id: input.id, status: refetch.status });
+  throw new RestPersistenceError(502, "Postgres did not keep the operator settings.");
+}
+
+function operatorSettingsWriteApplied(
+  row: OperatorSettingsRecord,
+  input: Omit<OperatorSettingsRecord, "updatedAt">,
+): boolean {
+  return (
+    row.id === input.id &&
+    JSON.stringify(row.payload) === JSON.stringify(input.payload) &&
+    row.ciphertext === input.ciphertext &&
+    row.nonce === input.nonce
+  );
+}
+
+async function persistAuditEvent(
+  rest: RestClient,
+  event: Omit<OpsAuditEvent, "id" | "createdAt">,
+): Promise<OpsAuditEvent> {
+  logPersistence("audit_append_start", {
+    action: event.action,
+    resourceType: event.resourceType,
+    resourceId: event.resourceId,
+  });
+  const response = await rest.request({
+    method: "POST",
+    path: "/audit_events",
+    prefer: "return=representation",
+    body: {
+      actor_id: event.actorId,
+      actor_type: "admin",
+      action: event.action,
+      resource_type: event.resourceType,
+      resource_id: event.resourceId,
+      reason: event.reason,
+      request_id: event.traceId,
+      metadata: event.metadata,
+    },
+  });
+  const mapped = mappedWriteRow(response, mapAuditRow);
+  if (mapped !== undefined) {
+    logPersistence("audit_append_ok", { id: mapped.id, action: event.action });
+    return mapped;
+  }
+  logPersistence("audit_append_failed", { action: event.action, status: response.status });
+  if (response.status === 0) {
+    throw new RestPersistenceError(502, "Could not reach Postgres to record the audit event.");
+  }
+  throw new RestPersistenceError(
+    502,
+    restErrorDetail(response.body) ?? "Postgres did not store the audit event.",
+  );
+}
+
+function policyWriteApplied(policy: OpsPolicy, written: Record<string, unknown>): boolean {
+  if (typeof written.model === "string" && policy.model !== written.model) {
+    return false;
+  }
+  if (typeof written.enabled === "boolean" && policy.enabled !== written.enabled) {
+    return false;
+  }
+  if (
+    typeof written.prompt_version === "string" &&
+    policy.promptVersion !== written.prompt_version
+  ) {
+    return false;
+  }
+  if (typeof written.system_prompt === "string" && policy.systemPrompt !== written.system_prompt) {
+    return false;
+  }
+  const canary = finiteNumber(written.canary_percent);
+  if (canary !== undefined && policy.canaryPercent !== canary) {
+    return false;
+  }
+  return true;
+}
+
+function flagWriteApplied(flag: OpsFeatureFlag, written: Record<string, unknown>): boolean {
+  if (typeof written.enabled === "boolean" && flag.enabled !== written.enabled) {
+    return false;
+  }
+  if (Object.prototype.hasOwnProperty.call(written, "variant")) {
+    const expected = typeof written.variant === "string" ? written.variant : null;
+    if (flag.variant !== expected) {
+      return false;
+    }
+  }
+  const rollout = finiteNumber(written.rollout_percent);
+  if (rollout !== undefined && flag.rolloutPercent !== rollout) {
+    return false;
+  }
+  if (Object.prototype.hasOwnProperty.call(written, "min_app_version")) {
+    const expected = typeof written.min_app_version === "string" ? written.min_app_version : null;
+    if (flag.minAppVersion !== expected) {
+      return false;
+    }
+  }
+  if (Array.isArray(written.platforms)) {
+    const expected = written.platforms.filter((item): item is string => typeof item === "string");
+    if (
+      flag.platforms.length !== expected.length ||
+      flag.platforms.some((item, index) => item !== expected[index])
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function restErrorDetail(body: unknown): string | undefined {
+  if (typeof body === "string" && body.trim() !== "") {
+    return body.trim().slice(0, 280);
+  }
+  if (isRecord(body) && typeof body.message === "string" && body.message.trim() !== "") {
+    return body.message.trim().slice(0, 280);
+  }
+  return undefined;
+}
+
+function unknownRestColumn(body: unknown): string | undefined {
+  const message = restErrorDetail(body);
+  if (message === undefined) {
+    return undefined;
+  }
+  const match = /Could not find the '([^']+)' column/i.exec(message);
+  return match?.[1];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
 function mapPolicyRow(row: Record<string, unknown> | undefined): OpsPolicy | undefined {
-  if (row === undefined) {
+  if (
+    row === undefined ||
+    isErrorBody(row) ||
+    typeof row.id !== "string" ||
+    typeof row.task !== "string" ||
+    typeof row.model !== "string"
+  ) {
     return undefined;
   }
   return {
-    id: typeof row.id === "string" ? row.id : crypto.randomUUID(),
-    task: typeof row.task === "string" ? row.task : "",
+    id: row.id,
+    task: row.task,
     region: typeof row.region === "string" ? row.region : "",
-    model: typeof row.model === "string" ? row.model : "",
+    model: row.model,
     promptVersion: typeof row.prompt_version === "string" ? row.prompt_version : "",
     systemPrompt:
       typeof row.system_prompt === "string" && row.system_prompt.trim() !== ""
         ? row.system_prompt
-        : defaultAssistantPrompt(typeof row.task === "string" ? row.task : ""),
+        : defaultAssistantPrompt(row.task),
     schemaVersion: typeof row.schema_version === "string" ? row.schema_version : "",
     policyVersion: typeof row.policy_version === "string" ? row.policy_version : "",
     enabled: row.enabled !== false,
-    canaryPercent: typeof row.canary_percent === "number" ? row.canary_percent : 0,
-    maxInputTokens: typeof row.max_input_tokens === "number" ? row.max_input_tokens : null,
-    maxOutputTokens: typeof row.max_output_tokens === "number" ? row.max_output_tokens : null,
-    timeoutMs: typeof row.timeout_ms === "number" ? row.timeout_ms : null,
+    canaryPercent: finiteNumber(row.canary_percent) ?? 0,
+    maxInputTokens: finiteNumber(row.max_input_tokens) ?? null,
+    maxOutputTokens: finiteNumber(row.max_output_tokens) ?? null,
+    timeoutMs: finiteNumber(row.timeout_ms) ?? null,
     createdAt: typeof row.created_at === "string" ? row.created_at : new Date().toISOString(),
     updatedAt: typeof row.updated_at === "string" ? row.updated_at : new Date().toISOString(),
   };
@@ -1488,7 +1873,7 @@ function mapPolicyRow(row: Record<string, unknown> | undefined): OpsPolicy | und
 function mapOperatorSettingsRow(
   row: Record<string, unknown> | undefined,
 ): OperatorSettingsRecord | undefined {
-  if (row === undefined) {
+  if (row === undefined || isErrorBody(row) || typeof row.id !== "string" || row.id === "") {
     return undefined;
   }
   const payload =
@@ -1496,7 +1881,7 @@ function mapOperatorSettingsRow(
       ? (row.payload as Record<string, unknown>)
       : {};
   return {
-    id: typeof row.id === "string" ? row.id : "default",
+    id: row.id,
     payload,
     ciphertext: typeof row.ciphertext === "string" ? row.ciphertext : null,
     nonce: typeof row.nonce === "string" ? row.nonce : null,

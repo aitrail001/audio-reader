@@ -35,6 +35,12 @@ const GOTRUE_PROVIDERS: Record<OAuthProvider, string> = {
   microsoft: "azure",
 };
 
+const BLOCKED_ACCOUNT_STATUSES = new Set(["suspended", "deletion_pending", "deleted"]);
+
+type IdentityAdminProbe = AuthIdentityStore & {
+  hasAnyAdminRole?: () => Promise<boolean>;
+};
+
 export function createHostedAuthService(options: HostedAuthServiceOptions): AuthService {
   const now = options.now ?? (() => new Date());
   const fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
@@ -48,15 +54,22 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
       allowLocalIssuance: false,
     });
 
-  async function principalFromProfile(profile: ProductProfile, subject: string) {
+  // Admin comes from admin_roles, not the JWT. Bootstrap email may insert the
+  // first operator row once; it must not re-grant after an operator revoke.
+  async function principalFromProfile(
+    profile: ProductProfile,
+    subject: string,
+    requestId: string,
+  ): Promise<Principal> {
     let admin =
       identity === undefined
         ? false
         : ((await identity.hasAdminRole?.(profile.accountId)) ?? false);
     const bootstrap = options.adminBootstrapEmail?.trim().toLowerCase() ?? "";
-    if (!admin && bootstrap !== "" && profile.email.trim().toLowerCase() === bootstrap) {
-      await identity?.grantAdminRole?.(profile.accountId);
-      admin = true;
+    const bootstrapMatch =
+      !admin && bootstrap !== "" && profile.email.trim().toLowerCase() === bootstrap;
+    if (bootstrapMatch && identity !== undefined) {
+      admin = await grantBootstrapAdmin(identity, profile.accountId, requestId);
     }
     return {
       subject,
@@ -65,6 +78,52 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
       role: admin ? ("admin" as const) : ("user" as const),
       email: profile.email,
     };
+  }
+
+  async function grantBootstrapAdmin(
+    store: AuthIdentityStore,
+    accountId: string,
+    requestId: string,
+  ): Promise<boolean> {
+    const probe: IdentityAdminProbe = store;
+    let anyAdmin = true;
+    try {
+      anyAdmin = probe.hasAnyAdminRole === undefined ? true : await probe.hasAnyAdminRole();
+    } catch {
+      anyAdmin = true;
+    }
+    if (anyAdmin) {
+      logAuthEvent({
+        message: "admin_bootstrap_grant",
+        requestId,
+        accountId,
+        outcome: "skipped",
+        reason: "admins_exist",
+      });
+      return false;
+    }
+    if (store.grantAdminRole === undefined) {
+      return false;
+    }
+    try {
+      await store.grantAdminRole(accountId);
+      logAuthEvent({
+        message: "admin_bootstrap_grant",
+        requestId,
+        accountId,
+        outcome: "granted",
+      });
+      return true;
+    } catch {
+      logAuthEvent({
+        message: "admin_bootstrap_grant",
+        requestId,
+        accountId,
+        outcome: "failed",
+        reason: "persist_failed",
+      });
+      return false;
+    }
   }
 
   function headers(accessToken?: string, apiKey?: string): Record<string, string> {
@@ -88,6 +147,12 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
       });
       return { status: response.status, body: await readBody(response) };
     } catch {
+      logAuthEvent({
+        message: "hosted_gotrue_error",
+        requestId: "auth",
+        outcome: "network_error",
+        reason: pathAndQuery.split("?")[0],
+      });
       return { status: 0, body: null };
     }
   }
@@ -116,7 +181,10 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
     return { ok: true, value: { tokens, principal, profile } };
   }
 
-  async function authenticateWithHeaders(headers: Headers) {
+  // JWT proves the GoTrue subject. Device revoke and account status live in
+  // identity storage; a valid signature is not enough to use the product API.
+  async function authenticateWithHeaders(headers: Headers): Promise<Principal | null> {
+    const requestId = headers.get("X-Request-Id")?.trim() || "auth";
     const request = new Request("https://audio-reader.local/session", { headers });
     if (identity === undefined) {
       return inner.authenticate(request);
@@ -131,11 +199,28 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
     }
     const email = result.claims.email ?? `${result.claims.sub}@users.invalid`;
     const profile = await identity.ensureProfile({ userId: result.claims.sub, email });
-    const deviceId = headers.get("X-Device-Id")?.trim() ?? "";
-    if (deviceId !== "" && (await identity.isDeviceRevoked(profile.accountId, deviceId))) {
+    const status = profileAccountStatus(profile);
+    if (BLOCKED_ACCOUNT_STATUSES.has(status)) {
+      logAuthEvent({
+        message: "hosted_authenticate",
+        requestId,
+        accountId: profile.accountId,
+        outcome: "blocked_status",
+        reason: status,
+      });
       return null;
     }
-    return await principalFromProfile(profile, result.claims.sub);
+    const deviceId = headers.get("X-Device-Id")?.trim() ?? "";
+    if (deviceId !== "" && (await identity.isDeviceRevoked(profile.accountId, deviceId))) {
+      logAuthEvent({
+        message: "hosted_authenticate",
+        requestId,
+        accountId: profile.accountId,
+        outcome: "device_revoked",
+      });
+      return null;
+    }
+    return await principalFromProfile(profile, result.claims.sub, requestId);
   }
 
   async function getStoredProfile(principal: Principal): Promise<ProductProfile | undefined> {
@@ -275,16 +360,39 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
         method: "POST",
         body: { refresh_token: refreshToken },
       });
-      if (result.status === 0 || result.status >= 500) {
+      // Network / 5xx / 429 are provider outages. Only 4xx means the token is bad.
+      if (result.status === 0 || result.status >= 500 || result.status === 429) {
+        logAuthEvent({
+          message: "hosted_refresh",
+          requestId: "auth",
+          outcome: "not_ready",
+          reason: `gotrue_${String(result.status)}`,
+        });
         return { ok: false, code: "not_ready" };
       }
       if (result.status >= 400) {
+        logAuthEvent({
+          message: "hosted_refresh",
+          requestId: "auth",
+          outcome: "invalid_refresh",
+        });
         return { ok: false, code: "invalid_refresh" };
       }
       const session = await sessionFromGoTrue(result.body, undefined, "invalid_refresh");
       if (!session.ok) {
+        logAuthEvent({
+          message: "hosted_refresh",
+          requestId: "auth",
+          outcome: session.code,
+        });
         return session;
       }
+      logAuthEvent({
+        message: "hosted_refresh",
+        requestId: "auth",
+        accountId: session.value.principal.accountId,
+        outcome: "ok",
+      });
       return {
         ok: true,
         value: { tokens: session.value.tokens, principal: session.value.principal },
@@ -439,6 +547,30 @@ async function readBody(response: Response): Promise<unknown> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function profileAccountStatus(profile: ProductProfile): string {
+  if (!("status" in profile)) {
+    return "active";
+  }
+  const status = (profile as { status?: unknown }).status;
+  return typeof status === "string" && status.trim() !== "" ? status : "active";
+}
+
+function logAuthEvent(event: {
+  message: string;
+  requestId: string;
+  outcome: string;
+  accountId?: string;
+  reason?: string;
+}): void {
+  console.warn(
+    JSON.stringify({
+      level: "warn",
+      component: "hosted-auth",
+      ...event,
+    }),
+  );
 }
 
 export function extractEmailOtp(body: unknown): string | undefined {

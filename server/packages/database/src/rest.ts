@@ -75,6 +75,22 @@ export function restRow(body: unknown): Record<string, unknown> | undefined {
   return restRows(body)[0];
 }
 
+/** True for 2xx. Status 0 is a network failure swallowed by request(); it is not success. */
+export function restOk(response: RestResponse): boolean {
+  return response.status >= 200 && response.status < 300;
+}
+
+/**
+ * PostgREST error payloads are `{code, message, ...}` objects. They must not be
+ * mapped as table rows — doing so makes a failed write look stored.
+ */
+export function isErrorBody(body: unknown): boolean {
+  if (!isRecord(body)) {
+    return false;
+  }
+  return typeof body.code === "string" && typeof body.message === "string";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

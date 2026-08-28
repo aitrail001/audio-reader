@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   extractAccessToken,
+  extractSession,
   formatBytes,
+  hrefCarriesSessionTokens,
   nextCursorOf,
   pageItems,
   reasonReady,
@@ -47,6 +49,29 @@ describe("operator format helpers", () => {
       ),
     ).toBe(jwt);
     expect(extractAccessToken(jwt)).toBe(jwt);
+    expect(extractAccessToken(`Bearer ${jwt}`)).toBe(jwt);
     expect(extractAccessToken("")).toBe("");
+    expect(
+      extractSession(
+        `https://audio-reader-admin.pages.dev/#access_token=${jwt}&refresh_token=rt-admin-1&type=magiclink`,
+      ),
+    ).toEqual({ accessToken: jwt, refreshToken: "rt-admin-1" });
+    expect(
+      extractSession(
+        `https://audio-reader-admin.pages.dev/?access_token=${jwt}&refresh_token=rt-query-1&type=magiclink`,
+      ),
+    ).toEqual({ accessToken: jwt, refreshToken: "rt-query-1" });
+    expect(extractSession(`#refresh_token=rt-only`)).toBeNull();
+    expect(hrefCarriesSessionTokens(`https://admin.example/#refresh_token=rt-admin-1`)).toBe(true);
+    expect(hrefCarriesSessionTokens("https://audio-reader-admin.pages.dev/")).toBe(false);
+  });
+
+  it("does not treat the operator portal URL as a signed-in session", () => {
+    expect(extractAccessToken("https://audio-reader-admin.pages.dev/")).toBe("");
+    expect(extractAccessToken("https://audio-reader-admin.pages.dev/index.html")).toBe("");
+    expect(extractAccessToken("http://localhost:5173/")).toBe("");
+    expect(
+      extractAccessToken("https://feature-cross-device-multi-u.audio-reader-admin.pages.dev"),
+    ).toBe("");
   });
 });

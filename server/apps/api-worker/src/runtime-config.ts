@@ -1,3 +1,4 @@
+import { LOCAL_PASSWORDLESS_HMAC_SECRET } from "@audio-reader/auth";
 import {
   decryptOperatorSecrets,
   encryptOperatorSecrets,
@@ -6,7 +7,7 @@ import {
 import type { OpsStore } from "@audio-reader/database";
 import type { QwenClient } from "@audio-reader/qwen";
 import { createFakeQwenClient, createQwenClient } from "@audio-reader/qwen";
-import type { OperatorWrappingSource, WorkerEnv } from "./env";
+import { parseEnvironment, type OperatorWrappingSource, type WorkerEnv } from "./env";
 import { parseServiceAccountJson } from "./gcs";
 import { recordOperatorEvent } from "./operator-events";
 import {
@@ -56,6 +57,13 @@ export type RuntimeConfigView = {
   };
   updatedAt?: string;
 };
+
+export class OperatorWrappingNotConfiguredError extends Error {
+  constructor() {
+    super("Operator wrapping key is not configured; refusing to encrypt secrets.");
+    this.name = "OperatorWrappingNotConfiguredError";
+  }
+}
 
 export type RuntimeConfigPut = {
   qwen?: {
@@ -156,9 +164,13 @@ export function createRuntimeConfigService(input: {
         console.warn(
           JSON.stringify({
             level: "warn",
+            component: "runtime-config",
             message: "operator_secrets_decrypt_failed",
-            detail:
-              "Saved operator secrets could not be decrypted. Check OPERATOR_CONFIG_KEY / CACHE_HMAC_SECRET.",
+            requestId: "runtime",
+            outcome: "failed",
+            wrappingSource,
+            ciphertextPresent: true,
+            secretsDecryptable: false,
           }),
         );
       }
@@ -193,13 +205,17 @@ export function createRuntimeConfigService(input: {
 
   async function resolved() {
     const state = await load();
-    const qwenApiKey = state.secrets.qwenApiKey?.trim() || envQwenKey();
+    // Ciphertext that will not decrypt must not mix Desk model/URL with env keys.
+    const denyEnvSecrets = state.ciphertextPresent && !state.secretsDecryptable;
+    const qwenApiKey = state.secrets.qwenApiKey?.trim() || (denyEnvSecrets ? "" : envQwenKey());
     const qwenBaseUrl =
       state.publicPayload.qwenBaseUrl?.trim() || input.env.QWEN_BASE_URL?.trim() || "";
     const qwenModel = state.publicPayload.qwenModel?.trim() || input.env.QWEN_MODEL?.trim() || "";
-    const gcsJson = state.secrets.gcsServiceAccountJson?.trim() || envGcsJson();
+    const gcsJson =
+      state.secrets.gcsServiceAccountJson?.trim() || (denyEnvSecrets ? "" : envGcsJson());
     const gcsBucket = state.publicPayload.gcsBucket?.trim() || envGcsBucket();
-    const turnstileSecret = state.secrets.turnstileSecret?.trim() || envTurnstile();
+    const turnstileSecret =
+      state.secrets.turnstileSecret?.trim() || (denyEnvSecrets ? "" : envTurnstile());
     return {
       state,
       qwenApiKey,
@@ -213,22 +229,23 @@ export function createRuntimeConfigService(input: {
 
   async function view(): Promise<RuntimeConfigView> {
     const snapshot = await resolved();
+    const denyEnvSecrets = snapshot.state.ciphertextPresent && !snapshot.state.secretsDecryptable;
     const qwenSource =
       (snapshot.state.secrets.qwenApiKey?.trim() ?? "") !== ""
         ? "admin"
-        : envQwenKey() !== ""
+        : !denyEnvSecrets && envQwenKey() !== ""
           ? "env"
           : "none";
     const storageSource =
       (snapshot.state.secrets.gcsServiceAccountJson?.trim() ?? "") !== ""
         ? "admin"
-        : envGcsJson() !== ""
+        : !denyEnvSecrets && envGcsJson() !== ""
           ? "env"
           : "none";
     const turnstileSource =
       (snapshot.state.secrets.turnstileSecret?.trim() ?? "") !== ""
         ? "admin"
-        : envTurnstile() !== ""
+        : !denyEnvSecrets && envTurnstile() !== ""
           ? "env"
           : "none";
     let clientEmail = snapshot.state.publicPayload.gcsClientEmail;
@@ -350,10 +367,27 @@ export function createRuntimeConfigService(input: {
         nextSecrets.turnstileSecret = patch.turnstile.secretKey.trim();
       }
 
-      const cipher =
-        Object.keys(nextSecrets).length === 0
-          ? { ciphertext: null, nonce: null }
-          : await encryptOperatorSecrets(input.wrappingSecret, nextSecrets);
+      const encrypting = Object.keys(nextSecrets).length > 0;
+      if (
+        encrypting &&
+        !canEncryptOperatorSecrets(input.env.ENVIRONMENT, wrappingSource, input.wrappingSecret)
+      ) {
+        console.warn(
+          JSON.stringify({
+            level: "warn",
+            component: "runtime-config",
+            message: "operator_runtime_put_refused",
+            requestId: actorId,
+            outcome: "wrapping_not_configured",
+            wrappingSource,
+          }),
+        );
+        throw new OperatorWrappingNotConfiguredError();
+      }
+
+      const cipher = encrypting
+        ? await encryptOperatorSecrets(input.wrappingSecret, nextSecrets)
+        : { ciphertext: null, nonce: null };
       const saved = await input.ops?.putOperatorSettings({
         id: "default",
         payload: nextPublic,
@@ -494,6 +528,21 @@ export function hostOf(value: string): string {
   } catch {
     return "(invalid)";
   }
+}
+
+function canEncryptOperatorSecrets(
+  environment: string | undefined,
+  wrappingSource: OperatorWrappingSource,
+  wrappingSecret: string,
+): boolean {
+  if (wrappingSecret.trim() === LOCAL_PASSWORDLESS_HMAC_SECRET) {
+    return false;
+  }
+  if (wrappingSource === "none") {
+    const parsed = parseEnvironment(environment);
+    return parsed === "local" || parsed === "test";
+  }
+  return true;
 }
 
 function asPublicPayload(value: Record<string, unknown>): OperatorPublicPayload {

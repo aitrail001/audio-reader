@@ -14,6 +14,8 @@ describe("operator console coverage", () => {
       "/v1/health",
       "/v1/auth/config",
       "/v1/auth/email-otp/request",
+      "/v1/auth/token/refresh",
+      "/v1/auth/logout",
       "/v1/admin/runtime-config",
       "/v1/admin/users",
       "/suspend",

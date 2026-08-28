@@ -1,6 +1,7 @@
 import {
   LOCAL_JWT_CONFIG,
   createFakePrincipal,
+  createHostedAuthService,
   createMemoryAuthService,
   createMemoryPasswordlessLimiter,
   hashIdentifier,
@@ -8,6 +9,7 @@ import {
   signAccessToken,
   type MemoryPasswordlessLimiterOptions,
 } from "@audio-reader/auth";
+import { createFakeDatabaseClient } from "@audio-reader/database";
 import { REQUEST_ID_HEADER } from "@audio-reader/observability";
 import { describe, expect, it, vi } from "vitest";
 import { createApiAppFromEnv, createTestApp } from "./app";
@@ -1026,6 +1028,51 @@ describe("product authentication API", () => {
     const { app } = createAuthApp();
     const response = await app.fetch(new Request("http://localhost/v1/me"));
     expect(response.status).toBe(401);
+  });
+
+  it("rejects /v1/me after the account is suspended", async () => {
+    const database = createFakeDatabaseClient();
+    const userId = "00000000-0000-4000-8000-000000000002";
+    await database.identity.ensureProfile({ userId, email: EMAIL });
+    await database.identity.setAccountStatus(userId, "suspended");
+    const token = await signAccessToken({ sub: userId, email: EMAIL }, LOCAL_JWT_CONFIG);
+    const auth = createHostedAuthService({
+      jwt: LOCAL_JWT_CONFIG,
+      supabaseUrl: "https://example.supabase.co",
+      supabaseAnonKey: "anon-key",
+      identity: database.identity,
+      fetch: () => Promise.resolve(new Response(null, { status: 500 })),
+    });
+    const app = createTestApp({
+      database,
+      auth,
+      authenticate: (request) => auth.authenticate(request),
+    });
+    const me = await app.fetch(new Request("http://localhost/v1/me", { headers: bearer(token) }));
+    expect(me.status).toBe(401);
+  });
+
+  it("returns 503 when hosted refresh cannot reach GoTrue", async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(new Response("down", { status: 503 })));
+    vi.stubGlobal("fetch", fetchMock);
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const app = createApiAppFromEnv({
+        ENVIRONMENT: "production",
+        SUPABASE_URL: "https://example.supabase.co",
+        SUPABASE_JWT_SECRET: "super-secret",
+        SUPABASE_ANON_KEY: "anon-key",
+      });
+      const response = await app.fetch(
+        jsonPost("/v1/auth/token/refresh", { refreshToken: "refresh-hosted" }),
+      );
+      expect(response.status).toBe(503);
+      const body = await readJson(response);
+      expect(isRecord(body) && body.code).toBe("not_ready");
+    } finally {
+      spy.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 
   it("fails closed in production without a JWT secret", async () => {

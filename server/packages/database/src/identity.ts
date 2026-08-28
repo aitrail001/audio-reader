@@ -92,6 +92,9 @@ export type IdentityStore = {
     status: IdentityAccountStatus,
   ): Promise<IdentityProfile | undefined>;
   hasAdminRole(userId: string): Promise<boolean>;
+  // True when any unrevoked admin_roles row exists. Used so bootstrap email
+  // grants at most the first operator and never re-grants after a revoke.
+  hasAnyAdminRole(): Promise<boolean>;
   grantAdminRole(userId: string): Promise<void>;
   revokeAllDevices(userId: string): Promise<void>;
 };
@@ -290,6 +293,10 @@ export function createMemoryIdentityStore(options: { now?: () => Date } = {}): I
 
     hasAdminRole(userId) {
       return Promise.resolve(admins.has(userId));
+    },
+
+    hasAnyAdminRole() {
+      return Promise.resolve(admins.size > 0);
     },
 
     grantAdminRole(userId) {
@@ -571,7 +578,14 @@ export function createSupabaseIdentityStore(rest: RestClient): IdentityStore {
           limit: "1",
         },
       });
+      // Store errors must not look like "not revoked" — product auth fails closed.
+      if (!isRestOk(response.status)) {
+        return true;
+      }
       const row = restRow(response.body);
+      if (row !== undefined && !isDeviceRevocationRow(row)) {
+        return true;
+      }
       return row?.revoked === true;
     },
 
@@ -615,16 +629,40 @@ export function createSupabaseIdentityStore(rest: RestClient): IdentityStore {
           limit: "1",
         },
       });
-      return restRow(response.body) !== undefined;
+      // 4xx/5xx bodies are JSON objects; never treat them as a role row.
+      if (!isRestOk(response.status)) {
+        return false;
+      }
+      return isAdminRoleRow(restRow(response.body));
+    },
+
+    async hasAnyAdminRole() {
+      const response = await rest.request({
+        method: "GET",
+        path: "/admin_roles",
+        query: {
+          revoked_at: "is.null",
+          select: "id",
+          limit: "1",
+        },
+      });
+      if (!isRestOk(response.status)) {
+        return true;
+      }
+      return isAdminRoleRow(restRow(response.body));
     },
 
     async grantAdminRole(userId) {
-      await rest.request({
+      const response = await rest.request({
         method: "POST",
         path: "/admin_roles",
         prefer: "return=minimal",
         body: { user_id: userId, role: "operator" },
       });
+      if (isRestOk(response.status) || response.status === 409) {
+        return;
+      }
+      throw new Error("failed to persist admin role");
     },
 
     async revokeAllDevices(userId) {
@@ -670,7 +708,7 @@ export function createUnavailableIdentityStore(): IdentityStore {
       return Promise.resolve({ ok: false, code: "not_found" });
     },
     isDeviceRevoked() {
-      return Promise.resolve(false);
+      return Promise.resolve(true);
     },
     listProfiles() {
       return Promise.resolve([]);
@@ -681,8 +719,11 @@ export function createUnavailableIdentityStore(): IdentityStore {
     hasAdminRole() {
       return Promise.resolve(false);
     },
+    hasAnyAdminRole() {
+      return Promise.resolve(true);
+    },
     grantAdminRole() {
-      return Promise.resolve();
+      return Promise.reject(new Error("database unavailable"));
     },
     revokeAllDevices() {
       return Promise.resolve();
@@ -769,6 +810,24 @@ function optionalString(value: unknown): string | undefined {
 
 function nullableString(value: unknown): string | null {
   return optionalString(value) ?? null;
+}
+
+function isRestOk(status: number): boolean {
+  return status >= 200 && status < 300;
+}
+
+function isAdminRoleRow(row: Record<string, unknown> | undefined): boolean {
+  if (row === undefined) {
+    return false;
+  }
+  return (
+    (typeof row.id === "string" && row.id.trim() !== "") ||
+    (typeof row.user_id === "string" && row.user_id.trim() !== "")
+  );
+}
+
+function isDeviceRevocationRow(row: Record<string, unknown>): boolean {
+  return typeof row.revoked === "boolean";
 }
 
 function numericValue(value: unknown, fallback: number): number {

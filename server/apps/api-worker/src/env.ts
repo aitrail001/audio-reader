@@ -165,6 +165,8 @@ export function resolveSupabaseRestConfig(
 
 export type OperatorWrappingSource = "operator_config_key" | "cache_hmac" | "none";
 
+// OPERATOR_CONFIG_KEY is the wrapping secret for Desk ciphertext. Falling back
+// to the committed local-dev pepper (source "none") must not encrypt live keys.
 export function resolveOperatorWrappingSecret(env: WorkerEnv): {
   secret: string;
   fromEnv: boolean;

@@ -167,4 +167,28 @@ describe("supabase identity store", () => {
     expect(calls.some((call) => call.url.includes("/rest/v1/profiles"))).toBe(true);
     expect(calls.some((call) => call.url.includes("/rest/v1/user_settings"))).toBe(true);
   });
+
+  it("does not treat a PostgREST error body as an admin role", async () => {
+    const fetchImpl: RestFetch = () =>
+      Promise.resolve(jsonResponse(401, { message: "JWT expired", code: "PGRST301" }));
+    const rest = createSupabaseRestClient({
+      url: "https://example.supabase.co",
+      serviceRoleKey: "service-role-key",
+      fetch: fetchImpl,
+    });
+    const store = createSupabaseIdentityStore(rest);
+    await expect(store.hasAdminRole(USER_A)).resolves.toBe(false);
+  });
+
+  it("treats device lookup failures as revoked", async () => {
+    const fetchImpl: RestFetch = () =>
+      Promise.resolve(jsonResponse(500, { message: "upstream unavailable" }));
+    const rest = createSupabaseRestClient({
+      url: "https://example.supabase.co",
+      serviceRoleKey: "service-role-key",
+      fetch: fetchImpl,
+    });
+    const store = createSupabaseIdentityStore(rest);
+    await expect(store.isDeviceRevoked(USER_A, DEVICE_A)).resolves.toBe(true);
+  });
 });

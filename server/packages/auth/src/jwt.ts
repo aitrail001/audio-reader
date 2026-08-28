@@ -110,6 +110,9 @@ export async function signAccessToken(
   return `${signingInput}.${signature}`;
 }
 
+// HS256 is verified with config.secret (the GoTrue JWT secret), never JWKS.
+// ES256 is verified only against the issuer JWKS. Other algs, including none,
+// are rejected so an HMAC secret cannot be swapped for an EC public key.
 export async function validateAccessToken(
   token: string,
   config: JwtSigningConfig,

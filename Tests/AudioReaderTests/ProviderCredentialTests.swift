@@ -74,6 +74,66 @@ struct ProviderCredentialTests {
         )
     }
 
+    @Test("Existing vault sealed by a Keychain-shaped wrapping key unlocks after file migration")
+    func migratesKeychainWrappingKeyOntoFileAndUnlocksVault() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioReader-Wrapping-Key-Migrate-\(UUID().uuidString)", isDirectory: true)
+        let keyURL = root.appendingPathComponent("credential-vault.key")
+        let vaultURL = root.appendingPathComponent("credentials.vault")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let wrappingData = Data(repeating: 0x3C, count: 32)
+        let sealer = EncryptedFileCredentialVault(
+            fileURL: vaultURL,
+            keyProvider: FixedCredentialVaultKeyProvider(SymmetricKey(data: wrappingData))
+        )
+        #expect(sealer.save("sk-legacy-secret", account: LLMProvider.openAI.rawValue))
+        #expect(!FileManager.default.fileExists(atPath: keyURL.path))
+
+        let legacy = InMemoryWrappingKeySource(wrappingData)
+        let provider = FileCredentialVaultKeyProvider(fileURL: keyURL, legacyWrappingKey: legacy)
+        let vault = EncryptedFileCredentialVault(fileURL: vaultURL, keyProvider: provider)
+
+        #expect(vault.read(account: LLMProvider.openAI.rawValue) == "sk-legacy-secret")
+        let migrated = try Data(contentsOf: keyURL)
+        #expect(migrated.count == 32)
+        #expect(migrated == wrappingData)
+        #expect(try legacy.read() == nil)
+#if os(macOS)
+        let attributes = try FileManager.default.attributesOfItem(atPath: keyURL.path)
+        #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+#elseif os(iOS)
+        let attributes = try FileManager.default.attributesOfItem(atPath: keyURL.path)
+        #expect(attributes[.protectionKey] as? FileProtectionType == .completeUntilFirstUserAuthentication)
+#endif
+
+        let fileOnly = FileCredentialVaultKeyProvider(fileURL: keyURL)
+        let reopened = EncryptedFileCredentialVault(fileURL: vaultURL, keyProvider: fileOnly)
+        #expect(reopened.read(account: LLMProvider.openAI.rawValue) == "sk-legacy-secret")
+    }
+
+    @Test("Missing wrapping key for an existing vault is not replaced")
+    func doesNotMintWrappingKeyWhenExistingVaultCannotUnlock() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioReader-Wrapping-Key-Missing-\(UUID().uuidString)", isDirectory: true)
+        let keyURL = root.appendingPathComponent("credential-vault.key")
+        let vaultURL = root.appendingPathComponent("credentials.vault")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try Data("sealed-placeholder".utf8).write(to: vaultURL)
+        let provider = FileCredentialVaultKeyProvider(
+            fileURL: keyURL,
+            legacyWrappingKey: InMemoryWrappingKeySource(Data(repeating: 0x11, count: 16))
+        )
+
+        #expect(throws: CredentialVaultKeyError.missingForExistingVault) {
+            try provider.key(vaultExists: true)
+        }
+        #expect(!FileManager.default.fileExists(atPath: keyURL.path))
+    }
+
     @Test("Wrapping key is a 256-bit file and never Keychain for new vaults")
     func wrappingKeyLivesInAProtectedFile() throws {
         let root = FileManager.default.temporaryDirectory
@@ -274,6 +334,28 @@ private final class TestCredentialVault: CredentialVault {
 
     func delete(account: String) -> Bool {
         values.removeValue(forKey: account)
+        return true
+    }
+}
+
+private final class InMemoryWrappingKeySource: CredentialVaultWrappingKeySource, @unchecked Sendable {
+    private let lock = NSLock()
+    private var data: Data?
+
+    init(_ data: Data?) {
+        self.data = data
+    }
+
+    func read() throws -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        return data
+    }
+
+    func delete() -> Bool {
+        lock.lock()
+        data = nil
+        lock.unlock()
         return true
     }
 }

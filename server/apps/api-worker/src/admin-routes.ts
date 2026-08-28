@@ -1,8 +1,8 @@
 import type { Principal } from "@audio-reader/auth";
 import type { components } from "@audio-reader/contract";
-import type { IdentityStore, OpsStore } from "@audio-reader/database";
+import { RestPersistenceError, type IdentityStore, type OpsStore } from "@audio-reader/database";
 import { readJsonObject } from "./body";
-import { asHead, jsonResponse } from "./http";
+import { asHead, jsonResponse, problemResponse } from "./http";
 import { withIdempotency, type IdempotencyStore } from "./idempotency";
 import {
   UUID_PATTERN,
@@ -16,7 +16,11 @@ import {
 } from "./route-helpers";
 import { buildOperatorDiagnostics } from "./diagnostics";
 import { listOperatorEvents, operatorEventFromAudit, recordOperatorEvent } from "./operator-events";
-import type { RuntimeConfigPut, RuntimeConfigService } from "./runtime-config";
+import {
+  OperatorWrappingNotConfiguredError,
+  type RuntimeConfigPut,
+  type RuntimeConfigService,
+} from "./runtime-config";
 
 type AdminUser = components["schemas"]["AdminUser"];
 type LlmPolicy = components["schemas"]["LlmPolicy"];
@@ -587,7 +591,32 @@ async function putRuntimeConfig(
         const message = error instanceof Error ? error.message : "runtime config is invalid.";
         return fieldError(context.requestId, "runtimeConfig", message);
       }
-      const view = await runtime.put(patch, principal.accountId);
+      let view: Awaited<ReturnType<RuntimeConfigService["put"]>>;
+      try {
+        view = await runtime.put(patch, principal.accountId);
+      } catch (error: unknown) {
+        if (error instanceof RestPersistenceError) {
+          return persistenceFailed(context.requestId, "Runtime config update failed", error);
+        }
+        if (error instanceof OperatorWrappingNotConfiguredError) {
+          console.warn(
+            JSON.stringify({
+              level: "warn",
+              message: "operator_wrapping_not_configured",
+              requestId: context.requestId,
+            }),
+          );
+          return problemResponse({
+            status: 503,
+            code: "dependency_failed",
+            title: "Runtime config update failed",
+            detail:
+              "Operator wrapping key is not configured. Set OPERATOR_CONFIG_KEY before saving secrets.",
+            traceId: context.requestId,
+          });
+        }
+        throw error;
+      }
       await context.ops?.appendAudit({
         actorId: principal.accountId,
         action: "put_runtime_config",
@@ -676,6 +705,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function persistenceFailed(
+  requestId: string,
+  title: string,
+  error: RestPersistenceError,
+): Response {
+  console.warn(
+    JSON.stringify({
+      level: "warn",
+      message: "admin_persistence_failed",
+      requestId,
+      title,
+      status: error.status,
+      detail: error.message,
+    }),
+  );
+  return problemResponse({
+    status: 502,
+    code: "dependency_failed",
+    title,
+    detail: error.message,
+    traceId: requestId,
+  });
+}
+
 async function patchPolicy(
   context: AdminRouteContext,
   principal: Principal,
@@ -698,19 +751,27 @@ async function patchPolicy(
         return fieldError(context.requestId, "reason", "reason must be at least 5 characters.");
       }
       const before = await ops.getPolicy(policyId);
-      const patched = await ops.patchPolicy(policyId, {
-        ...(typeof body.value.enabled === "boolean" ? { enabled: body.value.enabled } : {}),
-        ...(typeof body.value.model === "string" ? { model: body.value.model } : {}),
-        ...(typeof body.value.promptVersion === "string"
-          ? { promptVersion: body.value.promptVersion }
-          : {}),
-        ...(typeof body.value.systemPrompt === "string"
-          ? { systemPrompt: body.value.systemPrompt }
-          : {}),
-        ...(typeof body.value.canaryPercent === "number"
-          ? { canaryPercent: body.value.canaryPercent }
-          : {}),
-      });
+      let patched: Awaited<ReturnType<OpsStore["patchPolicy"]>>;
+      try {
+        patched = await ops.patchPolicy(policyId, {
+          ...(typeof body.value.enabled === "boolean" ? { enabled: body.value.enabled } : {}),
+          ...(typeof body.value.model === "string" ? { model: body.value.model } : {}),
+          ...(typeof body.value.promptVersion === "string"
+            ? { promptVersion: body.value.promptVersion }
+            : {}),
+          ...(typeof body.value.systemPrompt === "string"
+            ? { systemPrompt: body.value.systemPrompt }
+            : {}),
+          ...(typeof body.value.canaryPercent === "number"
+            ? { canaryPercent: body.value.canaryPercent }
+            : {}),
+        });
+      } catch (error: unknown) {
+        if (error instanceof RestPersistenceError) {
+          return persistenceFailed(context.requestId, "Policy update failed", error);
+        }
+        throw error;
+      }
       if (patched === undefined) {
         return notFound(context.requestId);
       }
@@ -901,7 +962,15 @@ async function patchFlag(
           (item): item is string => typeof item === "string",
         );
       }
-      const updated = await ops.patchFlag(key, patch);
+      let updated: Awaited<ReturnType<OpsStore["patchFlag"]>>;
+      try {
+        updated = await ops.patchFlag(key, patch);
+      } catch (error: unknown) {
+        if (error instanceof RestPersistenceError) {
+          return persistenceFailed(context.requestId, "Feature flag update failed", error);
+        }
+        throw error;
+      }
       if (updated === undefined) {
         return notFound(context.requestId);
       }
@@ -952,7 +1021,15 @@ async function patchQuota(
       if (typeof body.value.limit !== "number" || body.value.limit < 0) {
         return fieldError(context.requestId, "limit", "limit must be a non-negative number.");
       }
-      const updated = await ops.patchQuota(key, body.value.limit);
+      let updated: Awaited<ReturnType<OpsStore["patchQuota"]>>;
+      try {
+        updated = await ops.patchQuota(key, body.value.limit);
+      } catch (error: unknown) {
+        if (error instanceof RestPersistenceError) {
+          return persistenceFailed(context.requestId, "Quota update failed", error);
+        }
+        throw error;
+      }
       if (updated === undefined) {
         return notFound(context.requestId);
       }

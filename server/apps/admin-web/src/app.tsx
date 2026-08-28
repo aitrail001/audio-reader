@@ -1,18 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   API_BASE,
-  TOKEN_STORAGE_KEY,
+  AdminSessionError,
   fetchAuthConfig,
   getJson,
   getJsonOrNull,
+  loadStoredSession,
+  logoutSession,
   requestOtp,
   sendJson,
+  storeSession,
+  subscribeSession,
   verifyOtp,
+  type StoredSession,
 } from "./api";
 import {
   extractAccessToken,
+  extractSession,
   formatBytes,
   formatWhen,
+  hrefCarriesSessionTokens,
   nextCursorOf,
   pageItems,
   pipClass,
@@ -119,7 +126,7 @@ export function App() {
   const [health, setHealth] = useState<HealthPayload | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [token, setToken] = useState(() =>
-    preview ? "preview" : (sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? ""),
+    preview ? "preview" : (loadStoredSession()?.accessToken ?? ""),
   );
   const [email, setEmail] = useState("audio.reader.service@gmail.com");
   const [code, setCode] = useState("");
@@ -220,14 +227,30 @@ export function App() {
     };
   }, []);
 
-  const rememberToken = (value: string) => {
-    setToken(value);
-    if (value === "" || preview) {
-      sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-    } else {
-      sessionStorage.setItem(TOKEN_STORAGE_KEY, value);
+  const rememberSession = (session: StoredSession | string | null) => {
+    if (preview) {
+      setToken(session === null || session === "" ? "" : "preview");
+      return;
     }
+    if (session === null || session === "") {
+      storeSession(null);
+      setToken("");
+      return;
+    }
+    const next = typeof session === "string" ? { accessToken: session } : session;
+    storeSession(next);
+    setToken(next.accessToken);
   };
+
+  useEffect(() => {
+    if (preview) {
+      return;
+    }
+    // Storage is source of truth after silent refresh or a wipe; React token must follow.
+    return subscribeSession((session) => {
+      setToken(session?.accessToken ?? "");
+    });
+  }, [preview]);
 
   const applyRuntime = (config: RuntimeConfig) => {
     setRuntime(config);
@@ -369,7 +392,15 @@ export function App() {
         setAdminError(null);
         setStatus("Operator data loaded.");
       } catch (cause: unknown) {
-        setAdminError(cause instanceof Error ? cause.message : "admin request failed");
+        const message = cause instanceof Error ? cause.message : "admin request failed";
+        if (cause instanceof AdminSessionError) {
+          if (cause.outcome === "invalid") {
+            rememberSession(null);
+          }
+        } else if (loadStoredSession() === null) {
+          rememberSession(null);
+        }
+        setAdminError(message);
       } finally {
         setBusy(false);
       }
@@ -393,12 +424,15 @@ export function App() {
   );
 
   useEffect(() => {
-    const fromLink = extractAccessToken(window.location.href);
-    if (fromLink !== "") {
-      const next = `${window.location.pathname}${window.location.search}`;
-      window.history.replaceState({}, document.title, next);
-      rememberToken(fromLink);
-      void loadAdmin(fromLink);
+    const href = window.location.href;
+    const fromLink = extractSession(href);
+    // Strip query and hash even when parse fails so tokens cannot linger in history.
+    if (hrefCarriesSessionTokens(href)) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+    if (fromLink !== null) {
+      rememberSession(fromLink);
+      void loadAdmin(fromLink.accessToken);
       return;
     }
     if (token.trim() !== "") {
@@ -429,13 +463,13 @@ export function App() {
   async function onVerifyCode(): Promise<void> {
     setBusy(true);
     try {
-      const access = await verifyOtp(
+      const session = await verifyOtp(
         email.trim(),
         code.trim(),
         turnstileToken === "" ? undefined : turnstileToken,
       );
-      rememberToken(access);
-      await loadAdmin(access);
+      rememberSession(session);
+      await loadAdmin(session.accessToken);
     } catch (cause: unknown) {
       const message = cause instanceof Error ? cause.message : "sign-in failed";
       if (
@@ -728,9 +762,12 @@ export function App() {
               className="ghost"
               disabled={busy || extractAccessToken(tokenDraft) === ""}
               onClick={() => {
-                const access = extractAccessToken(tokenDraft);
-                rememberToken(access);
-                void loadAdmin(access);
+                const session = extractSession(tokenDraft);
+                if (session === null) {
+                  return;
+                }
+                rememberSession(session);
+                void loadAdmin(session.accessToken);
               }}
             >
               Use token
@@ -753,7 +790,7 @@ export function App() {
           void loadAdmin();
         }}
         onSignOut={() => {
-          rememberToken("");
+          void logoutSession();
           setStatus(null);
         }}
       />
@@ -1764,9 +1801,10 @@ function PoliciesPanel(props: {
     <>
       <h2>Policies</h2>
       <p className="lede">
-        Each Managed Qwen task has its own model and system prompt. Translation and chapter summary
-        must still return the JSON shape the app parses. Prompt version is a cache label; editing
-        the system prompt also busts shared cache.
+        Each Managed Qwen task has its own model and system prompt. Saving writes them to Postgres;
+        an enabled policy model is what Managed Qwen uses and overrides the Desk model. Translation
+        and chapter summary must still return the JSON shape the app parses. Prompt version is a
+        cache label; editing the system prompt also busts shared cache.
       </p>
       {props.policies.length === 0 ? (
         <p className="empty">No Qwen policies loaded.</p>

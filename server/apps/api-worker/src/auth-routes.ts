@@ -415,8 +415,44 @@ async function refreshSession(context: AuthRouteContext): Promise<Response> {
   }
   const result = await auth.refresh(refreshToken);
   if (!result.ok) {
+    if (result.code === "not_ready") {
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          component: "auth-routes",
+          message: "token_refresh",
+          requestId: context.requestId,
+          outcome: "not_ready",
+        }),
+      );
+      return problemResponse({
+        status: 503,
+        code: "not_ready",
+        title: "Service unavailable",
+        detail: "Token refresh is temporarily unavailable.",
+        traceId: context.requestId,
+      });
+    }
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        component: "auth-routes",
+        message: "token_refresh",
+        requestId: context.requestId,
+        outcome: "invalid_refresh",
+      }),
+    );
     return unauthorized(context.requestId, "The refresh token is invalid.");
   }
+  console.warn(
+    JSON.stringify({
+      level: "warn",
+      component: "auth-routes",
+      message: "token_refresh",
+      requestId: context.requestId,
+      outcome: "ok",
+    }),
+  );
   return jsonResponse(toTokenPair(result.value.tokens));
 }
 
