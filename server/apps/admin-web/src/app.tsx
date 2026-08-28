@@ -1801,10 +1801,10 @@ function PoliciesPanel(props: {
     <>
       <h2>Policies</h2>
       <p className="lede">
-        Each Managed Qwen task has its own model and system prompt. Saving writes them to Postgres;
-        an enabled policy model is what Managed Qwen uses and overrides the Desk model. Translation
-        and chapter summary must still return the JSON shape the app parses. Prompt version is a
-        cache label; editing the system prompt also busts shared cache.
+        Each Managed Qwen task has its own model, canary, and system prompt. Saving writes them to
+        Postgres. Canary 0 uses the Desk model when Desk is set; canary 100 uses this policy model
+        for every account. Translation and chapter summary must still return the JSON shape the app
+        parses. Prompt version is a cache label; editing the system prompt also busts shared cache.
       </p>
       {props.policies.length === 0 ? (
         <p className="empty">No Qwen policies loaded.</p>

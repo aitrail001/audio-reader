@@ -151,7 +151,7 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
         message: "hosted_gotrue_error",
         requestId: "auth",
         outcome: "network_error",
-        reason: pathAndQuery.split("?")[0],
+        reason: pathAndQuery.split("?")[0] ?? "gotrue",
       });
       return { status: 0, body: null };
     }

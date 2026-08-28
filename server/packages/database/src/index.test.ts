@@ -7,7 +7,9 @@ describe("@audio-reader/database", () => {
   });
 
   it("exports the core multi-user table contract", () => {
-    expect(CORE_TABLES).toHaveLength(28);
+    expect(CORE_TABLES).toHaveLength(32);
+    expect(CORE_TABLES).toContain("chat_messages");
+    expect(CORE_TABLES).toContain("passwordless_hits");
     expect(CORE_TABLES).toContain("profiles");
     expect(CORE_TABLES).toContain("assistant_cache_entries");
     expect(CORE_TABLES).toContain("operator_settings");

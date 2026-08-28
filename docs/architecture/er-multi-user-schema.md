@@ -10,8 +10,8 @@ transaction functions. Tables, policies, and RPCs come from versioned SQL in
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Private, synchronized | `profiles`, `devices`, `user_settings`, `books`, `book_assets`, `chapters`, `reading_progress`, `transcript_revisions`, `transcript_segments`, `vocabulary_occurrences`, `known_lemmas`, `review_cards`, `review_events`, `user_assistant_results` |
 | Private, user-filed   | `privacy_requests` (authenticated JWT may CRUD own rows)                                                                                                                                                                                           |
-| Private, server-owned | `assistant_jobs`, `usage_ledger`, `sync_changes`, `idempotency_records`, `admin_roles`                                                                                                                                                             |
-| Global / operational  | `canonical_works`, `canonical_editions`, `assistant_cache_entries`, `feature_flags`, `quota_limits`, `model_policies`, `audit_events`, `operator_settings`                                                                                          |
+| Private, server-owned | `assistant_jobs`, `usage_ledger`, `sync_changes`, `idempotency_records`, `admin_roles`, `chat_messages`                                                                                                                                              |
+| Global / operational  | `canonical_works`, `canonical_editions`, `assistant_cache_entries`, `feature_flags`, `quota_limits`, `model_policies`, `audit_events`, `operator_settings`, `passwordless_hits`, `passwordless_cooldowns`, `passwordless_blocked_attempts`               |
 
 Synchronized private rows carry `id`, `user_id`, `created_at`, `updated_at`,
 `server_version`, `deleted_at`, and `last_mutation_id`. Authorization fields are
@@ -34,6 +34,7 @@ erDiagram
   profiles ||--o{ idempotency_records : claims
   profiles ||--o{ admin_roles : assigned
   profiles ||--o{ privacy_requests : files
+  profiles ||--o{ chat_messages : chats
   canonical_works ||--o{ canonical_editions : groups
   canonical_works ||--o{ books : optional
   canonical_editions ||--o{ books : optional
@@ -51,7 +52,10 @@ erDiagram
 ```
 
 Operational tables with no user FK: `feature_flags`, `quota_limits`, `model_policies`,
-`audit_events`, `operator_settings`.
+`audit_events`, `operator_settings`, `passwordless_hits`, `passwordless_cooldowns`,
+`passwordless_blocked_attempts`. `chat_messages` are Worker-owned (`user_id` set,
+no JWT policies). `idempotency_records.user_id` is a UUID without a profiles FK so
+anonymous OTP writes can share claims.
 
 ## Row Level Security
 
@@ -63,8 +67,9 @@ Authenticated JWTs are scoped with `auth.uid()` and `public.current_user_is_acti
 - `assistant_jobs`, `usage_ledger`, and `sync_changes`: select own rows only
 - `assistant_cache_entries`, `model_policies`, `admin_roles`, `audit_events`,
   `operator_settings`, `idempotency_records`, `feature_flags`, `quota_limits`,
-  `canonical_works`, and `canonical_editions`: no JWT policies (normal clients cannot
-  query them)
+  `canonical_works`, `canonical_editions`, `chat_messages`, `passwordless_hits`,
+  `passwordless_cooldowns`, and `passwordless_blocked_attempts`: no JWT policies
+  (normal clients cannot query them)
 
 Suspended profiles (`account_status` other than `active`, or `deleted_at` set)
 cannot read or write rows. Users cannot insert `admin_roles` or write

@@ -175,7 +175,30 @@ public final class AccountSession {
             try await refreshAccessTokenKeepingSession()
             guard mode.isSignedIn else { return }
             try await loadDevices()
+            try await refreshProductBootstrap()
         }
+    }
+
+    /// Reloads flags and quotas from bootstrap. Empty flags must not default
+    /// account_sync to on after a cold start.
+    private func refreshProductBootstrap() async throws {
+        guard let accessToken else { return }
+        let deviceID = try store.deviceID()
+        let bootstrap = try await client.bootstrap(
+            accessToken: accessToken,
+            request: AuthBootstrapRequest(
+                deviceId: deviceID,
+                platform: environment.platform,
+                deviceName: environment.deviceName,
+                appVersion: environment.appVersion,
+                buildNumber: environment.buildNumber,
+                locale: environment.locale,
+                timeZone: environment.timeZone
+            )
+        )
+        profile = bootstrap.profile
+        featureFlags = bootstrap.featureFlags
+        quotas = bootstrap.quotas
     }
 
     public func signOut() async {
@@ -220,7 +243,7 @@ public final class AccountSession {
 
     public func setSyncEnabled(_ enabled: Bool) {
         guard mode.isSignedIn else { return }
-        guard !enabled || flagEnabled("account_sync") else {
+        guard !enabled || flagEnabled("account_sync", default: false) else {
             errorMessage = "Account sync is turned off for this product right now."
             return
         }

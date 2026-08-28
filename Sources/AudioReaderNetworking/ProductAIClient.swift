@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public struct ProductTranslationRequest: Codable, Equatable, Sendable {
@@ -198,9 +199,21 @@ extension ProductAIClient {
 
 private func productAIUUIDOrUnscoped(_ value: String) -> String {
     let pattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
-    return value.wholeMatch(of: pattern) != nil
-        ? value.lowercased()
-        : ManagedAccountCredentials.unscopedChapterID
+    if value.wholeMatch(of: pattern) != nil {
+        return value.lowercased()
+    }
+    let digest = SHA256.hash(data: Data("chapter:\(value)".utf8))
+    var bytes = Array(digest.prefix(16))
+    bytes[6] = (bytes[6] & 0x0f) | 0x50
+    bytes[8] = (bytes[8] & 0x3f) | 0x80
+    let hex = bytes.map { String(format: "%02x", $0) }.joined()
+    let start = hex.startIndex
+    func slice(_ offset: Int, _ count: Int) -> String {
+        let from = hex.index(start, offsetBy: offset)
+        let to = hex.index(from, offsetBy: count)
+        return String(hex[from..<to])
+    }
+    return "\(slice(0, 8))-\(slice(8, 4))-\(slice(12, 4))-\(slice(16, 4))-\(slice(20, 12))"
 }
 
 public enum ManagedAccountCredentials: Sendable {

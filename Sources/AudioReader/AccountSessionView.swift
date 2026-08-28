@@ -217,7 +217,7 @@ struct AccountSessionView: View {
                     .font(.body)
             }
             .accessibilityLabel("Sync learning data across devices")
-            .disabled(!session.flagEnabled("account_sync"))
+            .disabled(!session.flagEnabled("account_sync", default: false))
 
             Text("Sync is optional. Turning it on pushes pending learning-data changes and pulls updates from your other devices. Books and media stay on this device unless you enable cloud media later.")
                 .font(.body)

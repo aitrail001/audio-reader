@@ -5,6 +5,7 @@ import {
   createFakePrincipal,
   createHostedAuthService,
   createMemoryAuthService,
+  createDurablePasswordlessLimiter,
   createMemoryPasswordlessLimiter,
   type AuthService,
   type HostedOtpMailer,
@@ -16,6 +17,7 @@ import {
 import {
   createFakeDatabaseClient,
   createSupabaseDatabaseClient,
+  createSupabaseRestClient,
   createUnavailableDatabaseClient,
   type DatabaseClient,
 } from "@audio-reader/database";
@@ -40,7 +42,12 @@ import {
 } from "./env";
 import { buildHealth, isServiceReady } from "./health";
 import { asHead, jsonResponse, problemResponse, withRequestId } from "./http";
-import { createMemoryIdempotencyStore, type IdempotencyStore } from "./idempotency";
+import { createPostgresPasswordlessStore } from "./durable-stores";
+import {
+  createMemoryIdempotencyStore,
+  createPostgresIdempotencyStore,
+  type IdempotencyStore,
+} from "./idempotency";
 import { createResendOtpMailer } from "./otp-mail";
 import {
   createFakeObjectStore,
@@ -281,6 +288,28 @@ export function createApiAppFromEnv(env: WorkerEnv): ApiApp {
     cacheHmacSecret: cacheHmac.secret,
     verifyTurnstile,
     ...(env.TURNSTILE_SITE_KEY?.trim() ? { turnstileSiteKey: env.TURNSTILE_SITE_KEY.trim() } : {}),
+    ...(rest === undefined || useFakes
+      ? {}
+      : {
+          idempotencyStore: createPostgresIdempotencyStore(createSupabaseRestClient(rest)),
+          passwordlessLimiter: createDurablePasswordlessLimiter({
+            store: createPostgresPasswordlessStore(createSupabaseRestClient(rest)),
+            verifyTurnstile,
+            hmacSecret: hmac.secret,
+            enableChallenge: true,
+            onSecurityEvent: (event) => {
+              logSecurityEvent({
+                message: event.type,
+                requestId: event.requestId ?? "unspecified",
+                action: event.action,
+                emailHash: event.emailHash,
+                ipHash: event.ipHash,
+                reason: event.reason,
+                ...(event.deviceId === null ? {} : { deviceId: event.deviceId }),
+              });
+            },
+          }),
+        }),
   });
 }
 
@@ -342,8 +371,7 @@ function createDefaultPasswordlessLimiter(input: {
   verifyTurnstile?: TurnstileVerifier;
   hmacSecret: string;
 }): PasswordlessLimiter {
-  // Isolate-local Maps. Durable Objects, KV, or the Rate Limiting API should replace this
-  // before treating the buckets as production protection.
+  // Local/test only. Staging and production pass a Postgres limiter from createApiAppFromEnv.
   const local = input.environment === "local" || input.environment === "test";
   const enableChallenge = local || input.verifyTurnstile !== undefined;
   const verifier: TurnstileVerifier =

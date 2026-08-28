@@ -160,7 +160,7 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
       if (!allowed) {
         return quotaExceeded(context.requestId);
       }
-      const policy = await resolveAssistantPolicy(context, "translation");
+      const policy = await resolveAssistantPolicy(context, "translation", principal.accountId);
       const cacheKey = await cacheKeyFor(context, {
         taskType: "translation",
         sourceLanguage,
@@ -184,7 +184,7 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
         if (replay !== undefined) {
           return replay;
         }
-        const completed = await completeWithPolicy(context, "translation", {
+        const completed = await completeWithPolicy(context, "translation", principal.accountId, {
           jsonObject: true,
           messages: [
             {
@@ -278,7 +278,7 @@ async function createSummary(context: AssistantRouteContext): Promise<Response> 
       if (!allowed) {
         return quotaExceeded(context.requestId);
       }
-      const policy = await resolveAssistantPolicy(context, "chapter_summary");
+      const policy = await resolveAssistantPolicy(context, "chapter_summary", principal.accountId);
       const segments = Array.isArray(body.value.segments)
         ? body.value.segments.filter((item): item is string => typeof item === "string")
         : [];
@@ -308,24 +308,29 @@ async function createSummary(context: AssistantRouteContext): Promise<Response> 
         if (replay !== undefined) {
           return replay;
         }
-        const completed = await completeWithPolicy(context, "chapter_summary", {
-          jsonObject: true,
-          messages: [
-            {
-              role: "system",
-              content: policy.systemPrompt,
-            },
-            {
-              role: "user",
-              content: JSON.stringify({
-                chapterId,
-                sourceLanguage: body.value.sourceLanguage,
-                targetLanguage: body.value.targetLanguage,
-                segments,
-              }),
-            },
-          ],
-        });
+        const completed = await completeWithPolicy(
+          context,
+          "chapter_summary",
+          principal.accountId,
+          {
+            jsonObject: true,
+            messages: [
+              {
+                role: "system",
+                content: policy.systemPrompt,
+              },
+              {
+                role: "user",
+                content: JSON.stringify({
+                  chapterId,
+                  sourceLanguage: body.value.sourceLanguage,
+                  targetLanguage: body.value.targetLanguage,
+                  segments,
+                }),
+              },
+            ],
+          },
+        );
         if (completed === "disabled" || !completed.ok) {
           return qwenFailure(context, "chapter_summary", completed);
         }
@@ -413,7 +418,7 @@ async function createChat(context: AssistantRouteContext): Promise<Response> {
       const contextSegments = Array.isArray(body.value.contextSegments)
         ? body.value.contextSegments.filter((item): item is string => typeof item === "string")
         : [];
-      const completed = await completeWithPolicy(context, "chat", {
+      const completed = await completeWithPolicy(context, "chat", principal.accountId, {
         messages: [
           {
             role: "system",
@@ -536,10 +541,23 @@ function requiredString(value: unknown, field: string, requestId: string): strin
 async function resolveAssistantPolicy(
   context: AssistantRouteContext,
   task: string,
+  accountId?: string,
 ): Promise<TaskModelResolution> {
   const policies = (await context.ops?.listPolicies()) ?? [];
   const view = await context.runtime?.view();
-  return resolveTaskModel(policies, task, view?.qwen.model ?? "");
+  return resolveTaskModel(
+    policies.map((policy) => ({
+      task: policy.task,
+      enabled: policy.enabled,
+      model: policy.model,
+      promptVersion: policy.promptVersion,
+      systemPrompt: policy.systemPrompt,
+      canaryPercent: policy.canaryPercent,
+    })),
+    task,
+    view?.qwen.model ?? "",
+    accountId === undefined ? {} : { accountId },
+  );
 }
 
 function withPolicySystemPrompt(
@@ -570,9 +588,10 @@ function withPolicySystemPrompt(
 async function completeWithPolicy(
   context: AssistantRouteContext,
   task: string,
+  accountId: string,
   request: QwenCompletionRequest,
 ): Promise<QwenCompletionResult | "disabled"> {
-  const resolved = await resolveAssistantPolicy(context, task);
+  const resolved = await resolveAssistantPolicy(context, task, accountId);
   const view = await context.runtime?.view();
   console.warn(
     JSON.stringify({

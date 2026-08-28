@@ -27,6 +27,10 @@ export const CORE_TABLES = [
   "privacy_requests",
   "operator_settings",
   "quota_limits",
+  "chat_messages",
+  "passwordless_hits",
+  "passwordless_cooldowns",
+  "passwordless_blocked_attempts",
 ] as const;
 
 export type CoreTable = (typeof CORE_TABLES)[number];
@@ -94,6 +98,10 @@ export const JWT_DENIED_TABLES = [
   "admin_roles",
   "audit_events",
   "operator_settings",
+  "chat_messages",
+  "passwordless_hits",
+  "passwordless_cooldowns",
+  "passwordless_blocked_attempts",
 ] as const;
 
 /** RLS enabled, no authenticated policies. Includes JWT-denied tables. */

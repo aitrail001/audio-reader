@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import { normalizeEmail } from "./service";
 import {
   createCloudflareTurnstileVerifier,
+  createDurablePasswordlessLimiter,
   createMemoryPasswordlessLimiter,
   hashIdentifier,
   type PasswordlessAttempt,
+  type PasswordlessDurableStore,
   type PasswordlessLimiter,
   type PasswordlessSecurityEvent,
 } from "./passwordless-limit";
@@ -69,8 +71,8 @@ describe("passwordless rate limits", () => {
     });
     await limiter.checkRequest(attempt({ email: EMAIL }));
     await limiter.checkRequest(attempt({ email: EMAIL }));
-    expect(limiter.listBlockedAttempts()[0]?.emailHash).toBe(hmac);
-    expect(JSON.stringify(limiter.listBlockedAttempts())).not.toContain(EMAIL);
+    expect((await limiter.listBlockedAttempts())[0]?.emailHash).toBe(hmac);
+    expect(JSON.stringify(await limiter.listBlockedAttempts())).not.toContain(EMAIL);
   });
 
   it("enforces a resend cooldown per email hash", async () => {
@@ -265,7 +267,7 @@ describe("passwordless rate limits", () => {
     await limiter.checkRequest(
       attempt({ email: EMAIL, ip: IP, deviceId: DEVICE, requestId: "req-blocked-1" }),
     );
-    const blocked = limiter.listBlockedAttempts();
+    const blocked = await limiter.listBlockedAttempts();
     expect(blocked).toEqual([
       expect.objectContaining({
         action: "email_otp_request",
@@ -310,6 +312,25 @@ describe("passwordless rate limits", () => {
     await limiter.recordVerifyFailure(attempt({ email: EMAIL }));
     await limiter.recordVerifySuccess({ email: EMAIL });
     expect(await limiter.checkVerify(attempt({ email: EMAIL }))).toEqual({ ok: true });
+  });
+
+  it("fails closed when the durable store cannot count hits", async () => {
+    const store: PasswordlessDurableStore = {
+      countHits: async () => null,
+      addHit: async () => true,
+      clearHits: async () => undefined,
+      getCooldownUntilMs: async () => 0,
+      setCooldown: async () => true,
+      clearCooldown: async () => undefined,
+      appendBlocked: async () => undefined,
+      listBlocked: async () => [],
+    };
+    const limiter = createDurablePasswordlessLimiter({ store });
+    const denied = await limiter.checkRequest(attempt({ email: EMAIL }));
+    expect(denied.ok).toBe(false);
+    if (!denied.ok) {
+      expect(denied.code).toBe("rate_limited");
+    }
   });
 });
 

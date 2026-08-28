@@ -1147,6 +1147,82 @@ export function createSupabaseOpsStore(
     async appendAudit(event) {
       return persistAuditEvent(rest, event);
     },
+    async putChatMessage(message) {
+      const response = await rest.request({
+        method: "POST",
+        path: "/chat_messages",
+        prefer: "return=representation,resolution=merge-duplicates",
+        query: { on_conflict: "thread_id,message_id" },
+        body: {
+          thread_id: message.threadId,
+          message_id: message.messageId,
+          user_id: message.accountId,
+          role: message.role,
+          text: message.text,
+          created_at: message.createdAt,
+        },
+      });
+      if (
+        !restOk(response) ||
+        isErrorBody(response.body) ||
+        mapChatRow(restRow(response.body)) === undefined
+      ) {
+        throw new RestPersistenceError(
+          response.status === 0 ? 502 : response.status,
+          "Postgres did not store the chat message.",
+        );
+      }
+    },
+    async getChatMessage(threadId, messageId) {
+      const response = await rest.request({
+        method: "GET",
+        path: "/chat_messages",
+        query: {
+          select: "*",
+          thread_id: `eq.${threadId}`,
+          message_id: `eq.${messageId}`,
+          limit: "1",
+        },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        return undefined;
+      }
+      return mapChatRow(restRow(response.body));
+    },
+  };
+}
+
+function mapChatRow(row: Record<string, unknown> | undefined):
+  | {
+      accountId: string;
+      threadId: string;
+      messageId: string;
+      role: "user" | "assistant";
+      text: string;
+      createdAt: string;
+    }
+  | undefined {
+  if (
+    row === undefined ||
+    isErrorBody(row) ||
+    typeof row.user_id !== "string" ||
+    typeof row.thread_id !== "string" ||
+    typeof row.message_id !== "string" ||
+    typeof row.text !== "string"
+  ) {
+    return undefined;
+  }
+  const role = row.role === "user" || row.role === "assistant" ? row.role : undefined;
+  if (role === undefined) {
+    return undefined;
+  }
+  return {
+    accountId: row.user_id,
+    threadId: row.thread_id,
+    messageId: row.message_id,
+    role,
+    text: row.text,
+    createdAt: typeof row.created_at === "string" ? row.created_at : new Date().toISOString(),
   };
 }
 

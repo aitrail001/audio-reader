@@ -736,7 +736,7 @@ async function listBlockedAttempts(context: AuthRouteContext): Promise<Response>
   if (principal.role !== "admin") {
     return forbidden(context.requestId, "Administrator role required.");
   }
-  const items = context.passwordlessLimiter?.listBlockedAttempts() ?? [];
+  const items = (await context.passwordlessLimiter?.listBlockedAttempts()) ?? [];
   return asHead(context.request, jsonResponse({ items }));
 }
 

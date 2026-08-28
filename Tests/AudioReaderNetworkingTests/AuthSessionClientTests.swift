@@ -352,6 +352,8 @@ struct AuthSessionClientTests {
         await restored.restore()
         #expect(restored.mode == .signedInSyncOn)
         #expect(restored.profile?.email == email)
+        #expect(restored.flagEnabled("managed_qwen"))
+        #expect(client.bootstrapCount == 2)
     }
 
     @MainActor

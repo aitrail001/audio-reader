@@ -38,10 +38,26 @@ function runtime(overrides: Partial<RuntimeConfigView["qwen"]> = {}): RuntimeCon
 }
 
 describe("operator diagnostics helpers", () => {
-  it("lets an enabled policy model override the Desk model", () => {
+  it("uses Desk when canary is 0 and a Desk model is set", () => {
     expect(
       resolveTaskModel(
-        [{ task: "translation", enabled: true, model: "qwen3.7-plus" }],
+        [{ task: "translation", enabled: true, model: "qwen3.7-plus", canaryPercent: 0 }],
+        "translation",
+        "qwen3.7-flash",
+      ),
+    ).toEqual({
+      disabled: false,
+      model: "qwen3.7-flash",
+      source: "desk",
+      promptVersion: "qwen-managed-v1",
+      systemPrompt: DEFAULT_ASSISTANT_PROMPTS.translation,
+    });
+  });
+
+  it("uses the policy model for a full canary", () => {
+    expect(
+      resolveTaskModel(
+        [{ task: "translation", enabled: true, model: "qwen3.7-plus", canaryPercent: 100 }],
         "translation",
         "qwen3.7-flash",
       ),
@@ -101,7 +117,7 @@ describe("operator diagnostics helpers", () => {
     });
     expect(notes.some((note) => note.includes("could not be decrypted"))).toBe(true);
     expect(notes.some((note) => note.includes("No Qwen API key"))).toBe(true);
-    expect(notes.some((note) => note.includes("overrides Desk model"))).toBe(true);
+    expect(notes.some((note) => note.includes("Desk model qwen3.7-flash is live"))).toBe(true);
     expect(notes.some((note) => note.includes("No quotas loaded"))).toBe(true);
   });
 });

@@ -16,6 +16,7 @@ export type TaskPolicyInput = {
   model: string;
   promptVersion?: string;
   systemPrompt?: string;
+  canaryPercent?: number;
 };
 
 export type TaskModelResolution = {
@@ -26,10 +27,21 @@ export type TaskModelResolution = {
   systemPrompt: string;
 };
 
+export function canaryBucket(accountId: string, task: string): number {
+  const material = `${accountId}:${task}`;
+  let hash = 2166136261;
+  for (let index = 0; index < material.length; index += 1) {
+    hash ^= material.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) % 100;
+}
+
 export function resolveTaskModel(
   policies: readonly TaskPolicyInput[],
   task: string,
   deskModel: string,
+  options: { accountId?: string } = {},
 ): TaskModelResolution {
   const matching = policies.filter((policy) => policy.task === task);
   const enabled = matching.find((policy) => policy.enabled);
@@ -45,22 +57,40 @@ export function resolveTaskModel(
     };
   }
   const policyModel = enabled?.model.trim() ?? "";
-  if (policyModel !== "") {
-    return {
-      disabled: false,
-      model: policyModel,
-      source: "policy",
-      promptVersion,
-      systemPrompt,
-    };
-  }
+  const desk = deskModel.trim();
+  const canary = enabled?.canaryPercent ?? 0;
+  const usePolicy = shouldUsePolicyModel(policyModel, desk, canary, options.accountId, task);
+  const model = usePolicy ? policyModel : desk || policyModel;
   return {
     disabled: false,
-    model: deskModel,
-    source: "desk",
+    model,
+    source: usePolicy && policyModel !== "" ? "policy" : "desk",
     promptVersion,
     systemPrompt,
   };
+}
+
+function shouldUsePolicyModel(
+  policyModel: string,
+  desk: string,
+  canaryPercent: number,
+  accountId: string | undefined,
+  task: string,
+): boolean {
+  if (policyModel === "") {
+    return false;
+  }
+  if (canaryPercent <= 0) {
+    return desk === "";
+  }
+  if (canaryPercent >= 100) {
+    return true;
+  }
+  const id = accountId?.trim() ?? "";
+  if (id === "") {
+    return true;
+  }
+  return canaryBucket(id, task) < canaryPercent;
 }
 
 export function formatQwenProbe(detail: QwenPingDetail): string {
@@ -141,13 +171,17 @@ export function diagnosticNotes(input: {
         `All ${task} policies are disabled. The app cannot call managed Qwen for ${task}.`,
       );
     } else if (
-      resolved.source === "policy" &&
-      resolved.model !== "" &&
+      resolved.source === "desk" &&
       runtime.qwen.model !== "" &&
-      resolved.model !== runtime.qwen.model
+      (input.policies.find((policy) => policy.task === task && policy.enabled)?.model ?? "") !==
+        "" &&
+      input.policies.find((policy) => policy.task === task && policy.enabled)?.model !==
+        runtime.qwen.model
     ) {
       notes.push(
-        `Enabled ${task} policy uses ${resolved.model}, which overrides Desk model ${runtime.qwen.model}.`,
+        `Desk model ${runtime.qwen.model} is live for ${task}. Policy model ${
+          input.policies.find((policy) => policy.task === task && policy.enabled)?.model ?? ""
+        } applies when canary is 100 or the account is in the canary bucket.`,
       );
     }
   }

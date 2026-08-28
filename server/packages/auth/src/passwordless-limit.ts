@@ -82,7 +82,19 @@ export type PasswordlessLimiter = {
     attempt: Pick<PasswordlessAttempt, "email" | "ip" | "deviceId" | "requestId">,
   ): Promise<void>;
   recordVerifySuccess(attempt: Pick<PasswordlessAttempt, "email">): Promise<void>;
-  listBlockedAttempts(): BlockedAttempt[];
+  listBlockedAttempts(): Promise<BlockedAttempt[]>;
+};
+
+/** Shared hit/cooldown/blocked rows. null counts mean the store is down (fail closed). */
+export type PasswordlessDurableStore = {
+  countHits(key: string, sinceIso: string): Promise<number | null>;
+  addHit(key: string, atIso: string): Promise<boolean>;
+  clearHits(key: string): Promise<void>;
+  getCooldownUntilMs(emailHash: string): Promise<number | null>;
+  setCooldown(emailHash: string, untilIso: string): Promise<boolean>;
+  clearCooldown(emailHash: string): Promise<void>;
+  appendBlocked(attempt: BlockedAttempt): Promise<void>;
+  listBlocked(): Promise<BlockedAttempt[]>;
 };
 
 export type MemoryPasswordlessLimiterOptions = {
@@ -379,7 +391,201 @@ export function createMemoryPasswordlessLimiter(
     },
 
     listBlockedAttempts() {
-      return blockedAttempts.map((item) => ({ ...item }));
+      return Promise.resolve(blockedAttempts.map((item) => ({ ...item })));
+    },
+  };
+}
+
+/**
+ * Postgres-backed limiter. Isolate-local Maps cannot protect production OTP.
+ * Store errors fail closed (rate_limited).
+ */
+export function createDurablePasswordlessLimiter(
+  options: MemoryPasswordlessLimiterOptions & { store: PasswordlessDurableStore },
+): PasswordlessLimiter {
+  const memory = createMemoryPasswordlessLimiter(options);
+  const store = options.store;
+  const now = options.now ?? (() => new Date());
+  const limits = { ...DEFAULT_PASSWORDLESS_LIMITS, ...options.limits };
+  const verifyTurnstile = options.verifyTurnstile ?? (() => Promise.resolve(false));
+  const onSecurityEvent = options.onSecurityEvent;
+  const hmacSecret = options.hmacSecret ?? LOCAL_PASSWORDLESS_HMAC_SECRET;
+  const enableChallenge = options.enableChallenge ?? true;
+
+  async function identities(attempt: Pick<PasswordlessAttempt, "email" | "ip" | "deviceId">) {
+    const emailHash = await hashIdentifier(normalizeEmail(attempt.email), hmacSecret);
+    const ipHash = await hashIdentifier(attempt.ip, hmacSecret);
+    return {
+      emailHash,
+      ipHash,
+      deviceId: attempt.deviceId ?? null,
+    };
+  }
+
+  function requestBuckets(ids: {
+    emailHash: string;
+    ipHash: string;
+    deviceId: string | null;
+  }): Array<{ key: string; limit: BucketLimit }> {
+    const buckets = [
+      { key: `req:email:${ids.emailHash}`, limit: limits.requestEmail },
+      { key: `req:ip:${ids.ipHash}`, limit: limits.requestIp },
+    ];
+    if (ids.deviceId !== null) {
+      buckets.push({ key: `req:device:${ids.deviceId}`, limit: limits.requestDevice });
+    }
+    return buckets;
+  }
+
+  function verifyBuckets(ids: {
+    emailHash: string;
+    ipHash: string;
+    deviceId: string | null;
+  }): Array<{ key: string; limit: BucketLimit }> {
+    const buckets = [
+      { key: `ver:email:${ids.emailHash}`, limit: limits.verifyEmail },
+      { key: `ver:ip:${ids.ipHash}`, limit: limits.verifyIp },
+    ];
+    if (ids.deviceId !== null) {
+      buckets.push({ key: `ver:device:${ids.deviceId}`, limit: limits.verifyDevice });
+    }
+    return buckets;
+  }
+
+  async function deny(
+    action: PasswordlessAction,
+    reason: "rate_limited" | "challenge_required",
+    ids: {
+      emailHash: string;
+      ipHash: string;
+      deviceId: string | null;
+      requestId?: string;
+    },
+    retryAfterSeconds?: number,
+  ): Promise<PasswordlessDecision> {
+    const at = now().toISOString();
+    const blocked: BlockedAttempt = {
+      id: crypto.randomUUID(),
+      action,
+      reason,
+      emailHash: ids.emailHash,
+      ipHash: ids.ipHash,
+      deviceId: ids.deviceId,
+      at,
+      ...(ids.requestId === undefined ? {} : { requestId: ids.requestId }),
+    };
+    await store.appendBlocked(blocked);
+    onSecurityEvent?.({
+      type:
+        reason === "rate_limited" ? "passwordless_rate_limited" : "passwordless_challenge_required",
+      action,
+      reason,
+      emailHash: ids.emailHash,
+      ipHash: ids.ipHash,
+      deviceId: ids.deviceId,
+      at,
+      ...(ids.requestId === undefined ? {} : { requestId: ids.requestId }),
+      ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+    });
+    if (reason === "rate_limited") {
+      return { ok: false, code: "rate_limited", retryAfterSeconds: retryAfterSeconds ?? 30 };
+    }
+    return { ok: false, code: "challenge_required" };
+  }
+
+  async function decide(
+    action: PasswordlessAction,
+    attempt: PasswordlessAttempt,
+  ): Promise<PasswordlessDecision> {
+    const ids = await identities(attempt);
+    const buckets = action === "email_otp_request" ? requestBuckets(ids) : verifyBuckets(ids);
+    const windowSeconds =
+      action === "email_otp_request" ? limits.requestWindowSeconds : limits.verifyWindowSeconds;
+    const nowMs = now().getTime();
+    const sinceIso = new Date(nowMs - windowSeconds * 1000).toISOString();
+    const tracked = {
+      emailHash: ids.emailHash,
+      ipHash: ids.ipHash,
+      deviceId: ids.deviceId,
+      ...(attempt.requestId === undefined ? {} : { requestId: attempt.requestId }),
+    };
+
+    if (action === "email_otp_request") {
+      const cooldownUntil = await store.getCooldownUntilMs(ids.emailHash);
+      if (cooldownUntil === null) {
+        return deny(action, "rate_limited", tracked, 30);
+      }
+      if (nowMs < cooldownUntil) {
+        return deny(
+          action,
+          "rate_limited",
+          tracked,
+          Math.max(1, Math.ceil((cooldownUntil - nowMs) / 1000)),
+        );
+      }
+    }
+
+    const counts: number[] = [];
+    for (const bucket of buckets) {
+      const count = await store.countHits(bucket.key, sinceIso);
+      if (count === null) {
+        return deny(action, "rate_limited", tracked, 30);
+      }
+      counts.push(count);
+    }
+    const overMax = buckets.filter((bucket, index) => (counts[index] ?? 0) >= bucket.limit.max);
+    if (overMax.length > 0) {
+      return deny(action, "rate_limited", tracked, windowSeconds);
+    }
+    if (enableChallenge) {
+      const needsChallenge = buckets.some(
+        (bucket, index) => (counts[index] ?? 0) >= bucket.limit.challengeAfter,
+      );
+      if (needsChallenge) {
+        const token = attempt.turnstileToken?.trim() ?? "";
+        const accepted = token !== "" && (await verifyTurnstile(token, attempt.ip));
+        if (!accepted) {
+          return deny(action, "challenge_required", tracked);
+        }
+      }
+    }
+    const atIso = now().toISOString();
+    for (const bucket of buckets) {
+      const wrote = await store.addHit(bucket.key, atIso);
+      if (!wrote) {
+        return deny(action, "rate_limited", tracked, 30);
+      }
+    }
+    if (action === "email_otp_request") {
+      const until = new Date(nowMs + limits.requestCooldownSeconds * 1000).toISOString();
+      const cooled = await store.setCooldown(ids.emailHash, until);
+      if (!cooled) {
+        return deny(action, "rate_limited", tracked, 30);
+      }
+    }
+    return { ok: true as const };
+  }
+
+  return {
+    hashEmail(email) {
+      return hashIdentifier(normalizeEmail(email), hmacSecret);
+    },
+    checkRequest(attempt) {
+      return decide("email_otp_request", attempt);
+    },
+    checkVerify(attempt) {
+      return decide("email_otp_verify", attempt);
+    },
+    async recordVerifyFailure(attempt) {
+      await memory.recordVerifyFailure(attempt);
+    },
+    async recordVerifySuccess(attempt) {
+      const emailHash = await hashIdentifier(normalizeEmail(attempt.email), hmacSecret);
+      await store.clearHits(`ver:email:${emailHash}`);
+      await store.clearCooldown(emailHash);
+    },
+    listBlockedAttempts() {
+      return store.listBlocked();
     },
   };
 }

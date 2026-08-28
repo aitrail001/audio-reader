@@ -349,7 +349,9 @@ Objects, KV, or the Cloudflare Rate Limiting API before public issuance.
 - Apple apps use `x.y.z` (`CFBundleShortVersionString`) plus integer
   `CFBundleVersion`. Shared native behavior bumps the patch once.
 - Server packages stay `0.0.0` private workspace versions. Worker
-  `APP_VERSION` is independent (`1.0.0-draft.1` until the public API ships).
+  `APP_VERSION` is independent (`1.0.3-draft.1` until the public API ships).
+- Production OTP From is `AudioReader <audio.reader.service@gmail.com>`. Verify
+  that address in Resend; `onboarding@resend.dev` only delivers to the Resend account.
 
 ---
 
