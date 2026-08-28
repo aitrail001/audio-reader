@@ -532,3 +532,27 @@ public struct OutboxMutation: Codable, Equatable, Sendable, Identifiable {
         self.status = status
     }
 }
+
+/// Last applied server revision and payload for an entity. Source of truth for
+/// `baseRevision` and for skipping unchanged snapshot rows.
+public struct SyncEntityVersion: Equatable, Sendable {
+    public var entityType: String
+    public var entityID: String
+    public var serverVersion: Int64
+    public var payload: Data
+    public var lastMutationID: String?
+
+    public init(
+        entityType: String,
+        entityID: String,
+        serverVersion: Int64,
+        payload: Data,
+        lastMutationID: String? = nil
+    ) {
+        self.entityType = entityType
+        self.entityID = entityID
+        self.serverVersion = serverVersion
+        self.payload = payload
+        self.lastMutationID = lastMutationID
+    }
+}

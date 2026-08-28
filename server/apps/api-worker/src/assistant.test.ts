@@ -366,4 +366,32 @@ describe("managed Qwen assistant API", () => {
     expect(isRecord(body) && body.policyVersion).toBe("operator-v2");
     expect(seen[0]).toBe("Return JSON with keys translation and notes. Operator prompt v2.");
   });
+
+  it("rejects assistant calls from an unregistered device", async () => {
+    const app = createTestApp({
+      qwen: createFakeQwenClient({ text: '{"translation":"你好","notes":[]}' }),
+    });
+    const response = await app.fetch(
+      new Request("http://localhost/v1/ai/translations", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test",
+          "content-type": "application/json",
+          "X-Device-Id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "Idempotency-Key": "idempotency-key-qwen-unregistered",
+        },
+        body: JSON.stringify({
+          task: "sentence",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          source: "Hello",
+          editionFingerprint: "ed-1",
+          chapterFingerprint: "ch-1",
+          promptVersion: "v1",
+        }),
+      }),
+    );
+    expect(response.status).toBe(401);
+  });
 });

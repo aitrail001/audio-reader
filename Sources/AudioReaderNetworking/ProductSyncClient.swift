@@ -102,6 +102,9 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
     public var pullChanges: [SyncPulledChange] = []
     public var pullCursor: String = "0"
     public var pullHasMore = false
+    public var pullPages: [SyncPullResponse] = []
+    public var pushStatus: String = "applied"
+    public var conflictRevision: Int?
     private let lock = NSLock()
 
     public init() {}
@@ -112,10 +115,16 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
         return withLock {
             pushed.append(request)
             let results = request.mutations.map { mutation in
-                SyncMutationResult(
+                let revision: Int
+                if pushStatus == "conflict" {
+                    revision = conflictRevision ?? max(mutation.baseRevision, 1)
+                } else {
+                    revision = mutation.baseRevision + 1
+                }
+                return SyncMutationResult(
                     mutationId: mutation.mutationId,
-                    status: "applied",
-                    entityRevision: mutation.baseRevision + 1
+                    status: pushStatus,
+                    entityRevision: revision
                 )
             }
             let cursor = String((Int(pullCursor) ?? 0) + results.count)
@@ -130,6 +139,9 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
         _ = limit
         return withLock {
             pulledCursors.append(cursor)
+            if !pullPages.isEmpty {
+                return pullPages.removeFirst()
+            }
             return SyncPullResponse(changes: pullChanges, cursor: pullCursor, hasMore: pullHasMore)
         }
     }

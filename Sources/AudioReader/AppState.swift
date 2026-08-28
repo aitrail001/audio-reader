@@ -717,6 +717,9 @@ final class AppState {
             textSource = raw
         }
         player.rate = Float(settings.playbackRate)
+        self.account.onLearningDataApplied = { [weak self] in
+            self?.reloadSyncedLearningData()
+        }
         guard usesLivePersistence else { return }
         importGlossesIntoVocab()
         if vocab.contains(where: { DictionaryLookup.looksLikeMarkup($0.definition ?? "") }) {
@@ -1393,6 +1396,26 @@ final class AppState {
         settings.textSource = textSource.rawValue
         guard usesLivePersistence else { return }
         Persistence.saveSettings(settings)
+    }
+
+    func reloadSyncedLearningData() {
+        guard usesLivePersistence else { return }
+        var loaded = Persistence.loadSettings()
+#if os(iOS)
+        loaded.libraryPath = Persistence.importedBooksURL.path
+        loaded.openAIAuthentication = OpenAIAuthentication.apiKey.rawValue
+        loaded.grokAuthentication = GrokAuthentication.apiKey.rawValue
+#endif
+        settings = loaded
+        vocab = ((try? vocabularyRepository.loadVocabulary()) ?? []).map { stored in
+            var copy = VocabEntry(stored)
+            copy.sanitizeDictionaryFields()
+            return copy
+        }
+        knownLemmas = ((try? knownLemmaRepository.loadKnownLemmas()) ?? []).map(KnownLemmaRecord.init)
+        selectedDictionaryName = settings.preferredDictionary
+        player.rate = Float(settings.playbackRate)
+        refreshStudyIndex()
     }
 
     private func persistKnownLemmas() {

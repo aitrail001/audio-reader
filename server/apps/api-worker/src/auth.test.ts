@@ -71,6 +71,10 @@ function bearer(token: string): Record<string, string> {
   return { authorization: `Bearer ${token}` };
 }
 
+function sessionHeaders(token: string, deviceId = DEVICE_ID): Record<string, string> {
+  return { ...bearer(token), "X-Device-Id": deviceId };
+}
+
 function accessToken(tokens: unknown): string {
   if (!isRecord(tokens) || typeof tokens.accessToken !== "string") {
     throw new Error("expected token pair");
@@ -229,8 +233,20 @@ describe("product authentication API", () => {
       expect(verified.status).toBe(200);
       const tokens = await readJson(verified);
       expect(isRecord(tokens) && tokens.refreshToken).toBe("refresh-hosted");
+      const bootstrapped = await app.fetch(
+        jsonPost(
+          "/v1/auth/bootstrap",
+          { deviceId: DEVICE_ID, platform: "macos", appVersion: "1.0.0" },
+          {
+            ...bearer(accessToken),
+            "X-Device-Id": DEVICE_ID,
+            "Idempotency-Key": "hosted-otp-boot-01",
+          },
+        ),
+      );
+      expect(bootstrapped.status).toBe(200);
       const me = await app.fetch(
-        new Request("http://localhost/v1/me", { headers: bearer(accessToken) }),
+        new Request("http://localhost/v1/me", { headers: sessionHeaders(accessToken) }),
       );
       expect(me.status).toBe(200);
     } finally {
@@ -686,12 +702,10 @@ describe("product authentication API", () => {
     expect(typeof tokens.refreshToken).toBe("string");
     expect(tokens.tokenType).toBe("Bearer");
 
-    const me = await app.fetch(
+    const unbound = await app.fetch(
       new Request("http://localhost/v1/me", { headers: bearer(String(tokens.accessToken)) }),
     );
-    expect(me.status).toBe(200);
-    const profile = await readJson(me);
-    expect(isRecord(profile) && profile.email).toBe(EMAIL);
+    expect(unbound.status).toBe(401);
 
     const bootstrap = await app.fetch(
       jsonPost(
@@ -710,6 +724,14 @@ describe("product authentication API", () => {
       ),
     );
     expect(bootstrap.status).toBe(200);
+    const me = await app.fetch(
+      new Request("http://localhost/v1/me", {
+        headers: sessionHeaders(String(tokens.accessToken)),
+      }),
+    );
+    expect(me.status).toBe(200);
+    const profile = await readJson(me);
+    expect(isRecord(profile) && profile.email).toBe(EMAIL);
     const boot = await readJson(bootstrap);
     expect(isRecord(boot)).toBe(true);
     if (!isRecord(boot)) {
@@ -1104,10 +1126,10 @@ describe("product authentication API", () => {
     });
     spy.mockRestore();
     const token = await signAccessToken({ sub: "user-prod", email: EMAIL }, jwt);
-    const me = await app.fetch(new Request("http://localhost/v1/me", { headers: bearer(token) }));
-    expect(me.status).toBe(200);
-    const profile = await readJson(me);
-    expect(isRecord(profile) && profile.email).toBe(EMAIL);
+    const request = new Request("http://localhost/v1/me", { headers: bearer(token) });
+    await expect(app.authenticate(request)).resolves.toMatchObject({ email: EMAIL });
+    const me = await app.fetch(request);
+    expect(me.status).toBe(401);
 
     const pkce = await pkcePair();
     const authorize = await app.fetch(
@@ -1156,7 +1178,9 @@ describe("product authentication API", () => {
     ).toBe(200);
 
     const aliceList = await app.fetch(
-      new Request("http://localhost/v1/me/devices", { headers: bearer(alice.accessToken) }),
+      new Request("http://localhost/v1/me/devices", {
+        headers: sessionHeaders(alice.accessToken),
+      }),
     );
     expect(aliceList.status).toBe(200);
     const aliceDevices = await readJson(aliceList);
@@ -1179,7 +1203,9 @@ describe("product authentication API", () => {
     expect(isRecord(stealBody) && stealBody.code).toBe("not_found");
 
     const bobList = await app.fetch(
-      new Request("http://localhost/v1/me/devices", { headers: bearer(bob.accessToken) }),
+      new Request("http://localhost/v1/me/devices", {
+        headers: sessionHeaders(bob.accessToken, DEVICE_B),
+      }),
     );
     const bobDevices = await readJson(bobList);
     expect(bobDevices).toEqual([expect.objectContaining({ id: DEVICE_B, revoked: false })]);
@@ -1210,10 +1236,11 @@ describe("product authentication API", () => {
     expect(revoked.status).toBe(204);
 
     const listed = await app.fetch(
-      new Request("http://localhost/v1/me/devices", { headers: bearer(session.accessToken) }),
+      new Request("http://localhost/v1/me/devices", {
+        headers: sessionHeaders(session.accessToken),
+      }),
     );
-    const devices = await readJson(listed);
-    expect(devices).toEqual([expect.objectContaining({ id: DEVICE_ID, revoked: true })]);
+    expect(listed.status).toBe(401);
 
     const refresh = await app.fetch(
       jsonPost("/v1/auth/token/refresh", { refreshToken: session.refreshToken }),
@@ -1374,7 +1401,9 @@ describe("product authentication API", () => {
     ).toBe(200);
 
     const listed = await app.fetch(
-      new Request("http://localhost/v1/me/devices", { headers: bearer(session.accessToken) }),
+      new Request("http://localhost/v1/me/devices", {
+        headers: sessionHeaders(session.accessToken, DEVICE_B),
+      }),
     );
     expect(listed.status).toBe(200);
     expect(await readJson(listed)).toEqual([

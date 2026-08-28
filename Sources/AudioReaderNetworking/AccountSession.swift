@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 #if canImport(AudioReaderDomain)
 import AudioReaderDomain
 #endif
@@ -30,6 +31,12 @@ public final class AccountSession {
     private let oauth: any OAuthBrowserSession
     private let environment: AccountDeviceEnvironment
     private let syncRuntime: AccountSyncRuntime?
+    /// Reloads in-memory learning state after a pull so a later local save cannot clobber it.
+    public var onLearningDataApplied: (@MainActor () -> Void)?
+    private static let syncLog = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "account-sync")
+    private static let syncPushBatchSize = 500
+    private static let syncPullPageLimit = 100
+    private static let syncPullPageCap = 64
 
     public static let revokedDeviceRecoveryMessage =
         "This device is no longer signed in. Books on this device were kept. Sign in again to reconnect."
@@ -367,42 +374,158 @@ public final class AccountSession {
         return accessToken
     }
 
+    /// Snapshot enumerates local learning data; only rows whose payload differs
+    /// from the last applied version are enqueued. Conflicts stay pending as a
+    /// new mutation at the server revision so the original mutationId is not
+    /// retried as a duplicate.
     private func drainSync(runtime: AccountSyncRuntime) async throws {
+        let jobID = ProductHTTP.makeRequestID()
         let deviceID = try store.deviceID()
-        for mutation in try runtime.snapshot() {
-            try runtime.outbox.enqueue(mutation)
-        }
+        try enqueueDirtySnapshot(runtime: runtime)
         let pending = try runtime.outbox.pendingMutations()
-        let cursor = try runtime.cursor.loadCursor()
+        Self.syncLog.info(
+            "sync_push_start message=sync_push_start requestId=\(jobID, privacy: .public) pending=\(pending.count, privacy: .public)"
+        )
         if !pending.isEmpty {
-            let request = SyncPushRequest(
-                deviceId: deviceID,
-                batchId: UUID().uuidString.lowercased(),
-                baseCursor: cursor,
-                mutations: try pending.map { try $0.productMutation() }
-            )
-            let pushed = try await withAccessToken { access in
-                try await runtime.client.push(accessToken: access, deviceID: deviceID, request: request)
+            var lookup = Dictionary(uniqueKeysWithValues: pending.map { ($0.id.rawValue, $0) })
+            var index = 0
+            while index < pending.count {
+                let end = min(index + Self.syncPushBatchSize, pending.count)
+                let batch = Array(pending[index..<end])
+                index = end
+                let request = SyncPushRequest(
+                    deviceId: deviceID,
+                    batchId: UUID().uuidString.lowercased(),
+                    baseCursor: try runtime.cursor.loadCursor(),
+                    mutations: try batch.map { try $0.productMutation() }
+                )
+                let pushed = try await withAccessToken { access in
+                    try await runtime.client.push(accessToken: access, deviceID: deviceID, request: request)
+                }
+                try runtime.cursor.saveCursor(pushed.cursor)
+                for result in pushed.results {
+                    try applyPushResult(result, lookup: &lookup, runtime: runtime, jobID: jobID)
+                }
             }
-            try runtime.cursor.saveCursor(pushed.cursor)
-            for result in pushed.results
-                where result.status == "applied" || result.status == "duplicate" || result.status == "conflict"
-            {
-                try runtime.outbox.markAcknowledged(id: MutationID(rawValue: result.mutationId))
-            }
         }
-        let pulled = try await withAccessToken { access in
-            try await runtime.client.pull(
-                accessToken: access,
-                deviceID: deviceID,
-                cursor: try runtime.cursor.loadCursor(),
-                limit: 100
+
+        var hasMore = true
+        var pages = 0
+        var applied = 0
+        while hasMore {
+            guard pages < Self.syncPullPageCap else { break }
+            pages += 1
+            let pulled = try await withAccessToken { access in
+                try await runtime.client.pull(
+                    accessToken: access,
+                    deviceID: deviceID,
+                    cursor: try runtime.cursor.loadCursor(),
+                    limit: Self.syncPullPageLimit
+                )
+            }
+            for change in SyncPulledChange.applying(pulled.changes) {
+                try runtime.applyChange(change)
+                applied += 1
+                try runtime.versions?.saveVersion(
+                    SyncEntityVersion(
+                        entityType: change.entityType,
+                        entityID: change.entityId,
+                        serverVersion: Int64(change.revision),
+                        payload: SyncJSONCoding.data(from: change.payload)
+                    )
+                )
+            }
+            try runtime.cursor.saveCursor(pulled.cursor)
+            hasMore = pulled.hasMore
+            Self.syncLog.info(
+                "sync_pull_page message=sync_pull_page requestId=\(jobID, privacy: .public) cursor=\(pulled.cursor, privacy: .public) hasMore=\(pulled.hasMore, privacy: .public) changes=\(pulled.changes.count, privacy: .public)"
+            )
+            if !hasMore { break }
+        }
+        Self.syncLog.info(
+            "sync_finish message=sync_finish requestId=\(jobID, privacy: .public) applied=\(applied, privacy: .public)"
+        )
+        if applied > 0 {
+            onLearningDataApplied?()
+        }
+    }
+
+    private func applyPushResult(
+        _ result: SyncMutationResult,
+        lookup: inout [String: OutboxMutation],
+        runtime: AccountSyncRuntime,
+        jobID: String
+    ) throws {
+        let mutationID = MutationID(rawValue: result.mutationId)
+        switch result.status {
+        case "applied", "duplicate":
+            try runtime.outbox.markAcknowledged(id: mutationID)
+            if let mutation = lookup[result.mutationId] {
+                try runtime.versions?.saveVersion(
+                    SyncEntityVersion(
+                        entityType: mutation.entityType.rawValue,
+                        entityID: mutation.entityID,
+                        serverVersion: Int64(result.entityRevision ?? Int(mutation.baseRevision.rawValue) + 1),
+                        payload: mutation.payload,
+                        lastMutationID: result.mutationId
+                    )
+                )
+            }
+        case "conflict":
+            guard let mutation = lookup[result.mutationId] else { return }
+            var retry = mutation
+            retry.id = MutationID.generate()
+            retry.baseRevision = ServerVersion(Int64(result.entityRevision ?? Int(mutation.baseRevision.rawValue)))
+            try runtime.outbox.enqueue(retry)
+            try runtime.outbox.markAcknowledged(id: mutationID)
+            Self.syncLog.info(
+                "sync_conflict_requeued message=sync_conflict_requeued requestId=\(jobID, privacy: .public) entityType=\(mutation.entityType.rawValue, privacy: .public)"
+            )
+        default:
+            Self.syncLog.info(
+                "sync_push_rejected message=sync_push_rejected requestId=\(jobID, privacy: .public) status=\(result.status, privacy: .public)"
             )
         }
-        for change in pulled.changes {
-            try runtime.applyChange(change)
+    }
+
+    private func enqueueDirtySnapshot(runtime: AccountSyncRuntime) throws {
+        let candidates = try runtime.snapshot()
+        let pending = try runtime.outbox.pendingMutations()
+        var pendingByEntity: [String: OutboxMutation] = [:]
+        for item in pending {
+            pendingByEntity[Self.entityKey(item)] = item
         }
-        try runtime.cursor.saveCursor(pulled.cursor)
+        for var candidate in candidates {
+            let key = Self.entityKey(candidate)
+            if let version = try runtime.versions?.loadVersion(
+                entityType: candidate.entityType.rawValue,
+                entityID: candidate.entityID
+            ) {
+                candidate.baseRevision = ServerVersion(version.serverVersion)
+                if SyncJSONCoding.payloadsMatch(version.payload, candidate.payload) {
+                    continue
+                }
+            } else {
+                candidate.baseRevision = candidate.baseRevision.rawValue == 0 ? .zero : candidate.baseRevision
+            }
+            if let existing = pendingByEntity[key] {
+                if SyncJSONCoding.payloadsMatch(existing.payload, candidate.payload),
+                   existing.baseRevision == candidate.baseRevision {
+                    continue
+                }
+                var updated = existing
+                updated.payload = candidate.payload
+                updated.baseRevision = candidate.baseRevision
+                updated.occurredAt = candidate.occurredAt
+                try runtime.outbox.updatePending(updated)
+            } else {
+                try runtime.outbox.enqueue(candidate)
+            }
+        }
+    }
+
+    private static func entityKey(_ mutation: OutboxMutation) -> String {
+        "\(mutation.entityType.rawValue)|\(mutation.entityID)|\(mutation.operation.rawValue)"
     }
 
     private func refreshAccessTokenKeepingSession() async throws {

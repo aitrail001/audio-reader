@@ -170,6 +170,7 @@ public struct AccountSyncRuntime: Sendable {
     public var client: any SyncClient
     public var outbox: any SyncOutboxRepository
     public var cursor: any SyncCursorStoring
+    public var versions: (any SyncEntityVersionStoring)?
     public var snapshot: @Sendable () throws -> [OutboxMutation]
     public var applyChange: @Sendable (SyncPulledChange) throws -> Void
 
@@ -177,14 +178,61 @@ public struct AccountSyncRuntime: Sendable {
         client: any SyncClient,
         outbox: any SyncOutboxRepository,
         cursor: any SyncCursorStoring,
+        versions: (any SyncEntityVersionStoring)? = nil,
         snapshot: @escaping @Sendable () throws -> [OutboxMutation] = { [] },
         applyChange: @escaping @Sendable (SyncPulledChange) throws -> Void = { _ in }
     ) {
         self.client = client
         self.outbox = outbox
         self.cursor = cursor
+        self.versions = versions
         self.snapshot = snapshot
         self.applyChange = applyChange
+    }
+}
+
+enum SyncJSONCoding {
+    static var encoder: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }
+
+    static var decoder: JSONDecoder { JSONDecoder() }
+
+    static func payloadsMatch(_ lhs: Data, _ rhs: Data) -> Bool {
+        let left = try? decoder.decode([String: SyncJSONValue].self, from: lhs)
+        let right = try? decoder.decode([String: SyncJSONValue].self, from: rhs)
+        if let left, let right {
+            return left == right
+        }
+        return lhs == rhs
+    }
+
+    static func data(from payload: [String: SyncJSONValue]) -> Data {
+        (try? encoder.encode(payload)) ?? Data("{}".utf8)
+    }
+}
+
+extension SyncPulledChange {
+    /// Books and vocabulary first so progress/reviews can attach to rows that exist.
+    static func applying(_ changes: [SyncPulledChange]) -> [SyncPulledChange] {
+        let rank: [String: Int] = [
+            OutboxEntityType.book.rawValue: 0,
+            OutboxEntityType.chapter.rawValue: 1,
+            OutboxEntityType.vocabulary.rawValue: 2,
+            OutboxEntityType.settings.rawValue: 3,
+            OutboxEntityType.transcript.rawValue: 4,
+            OutboxEntityType.lexemeState.rawValue: 5,
+            OutboxEntityType.progress.rawValue: 6,
+            OutboxEntityType.reviewEvent.rawValue: 7
+        ]
+        return changes.sorted { lhs, rhs in
+            let left = rank[lhs.entityType] ?? 50
+            let right = rank[rhs.entityType] ?? 50
+            if left != right { return left < right }
+            return lhs.sequence < rhs.sequence
+        }
     }
 }
 

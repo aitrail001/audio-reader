@@ -235,6 +235,36 @@ public final class InMemorySyncOutboxRepository: SyncOutboxRepository, @unchecke
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         items[index].status = .acknowledged
     }
+
+    public func updatePending(_ mutation: OutboxMutation) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let index = items.firstIndex(where: { $0.id == mutation.id && $0.status == .pending }) else {
+            return
+        }
+        var updated = mutation
+        updated.status = .pending
+        items[index] = updated
+    }
+}
+
+public final class InMemorySyncEntityVersionStore: SyncEntityVersionStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [String: SyncEntityVersion] = [:]
+
+    public init() {}
+
+    public func loadVersion(entityType: String, entityID: String) throws -> SyncEntityVersion? {
+        lock.lock()
+        defer { lock.unlock() }
+        return items["\(entityType)|\(entityID)"]
+    }
+
+    public func saveVersion(_ version: SyncEntityVersion) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        items["\(version.entityType)|\(version.entityID)"] = version
+    }
 }
 
 public final class InMemorySyncCursorStore: SyncCursorStoring, @unchecked Sendable {

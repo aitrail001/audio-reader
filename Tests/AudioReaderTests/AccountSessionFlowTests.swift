@@ -374,6 +374,90 @@ struct AccountSessionFlowTests {
         #expect(mutations.contains(where: { $0.entityType == .progress && $0.entityID == vocabID }))
     }
 
+    @Test("Sync snapshot hashes non-UUID book and chapter IDs instead of the settings sentinel")
+    func syncSnapshotHashesBookAndChapterIDs() throws {
+        let vocabID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let mutations = try AccountSyncApplicator.snapshot(
+            settings: .default,
+            vocabulary: [
+                VocabEntry(
+                    id: vocabID,
+                    word: "loom",
+                    context: "Call me Ishmael",
+                    bookID: "moby-folder",
+                    bookTitle: "Moby-Dick",
+                    chapterID: "loomings",
+                    chapterTitle: "Loomings",
+                    timestamp: 4,
+                    addedAt: Date(timeIntervalSince1970: 1_777_000_000),
+                    isInLearnList: true
+                )
+            ],
+            lemmas: [],
+            books: [
+                StoredBook(
+                    id: BookID(rawValue: "moby-folder"),
+                    title: "Moby-Dick",
+                    author: nil,
+                    source: "local_folder",
+                    chapters: [
+                        StoredChapter(id: ChapterID(rawValue: "loomings"), index: 0, title: "Loomings")
+                    ]
+                )
+            ]
+        )
+        let vocab = try #require(mutations.first { $0.entityType == .vocabulary })
+        let payload = try JSONDecoder().decode([String: SyncJSONValue].self, from: vocab.payload)
+        let bookID = AccountSyncApplicator.syncEntityID("moby-folder", kind: "book")
+        let chapterID = AccountSyncApplicator.syncEntityID("loomings", kind: "chapter")
+        #expect(payload["bookId"]?.stringValue == bookID)
+        #expect(payload["chapterId"]?.stringValue == chapterID)
+        #expect(payload["localBookId"]?.stringValue == "moby-folder")
+        #expect(payload["localChapterId"]?.stringValue == "loomings")
+        #expect(payload["bookId"]?.stringValue != AccountSyncApplicator.settingsEntityID)
+        #expect(mutations.contains(where: { $0.entityType == .book && $0.entityID == bookID }))
+    }
+
+    @Test("Vocabulary apply keeps existing SRS fields when the pull omits them")
+    func applyVocabularyPreservesReviewState() {
+        let existing = VocabEntry(
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            word: "loom",
+            context: "Call me Ishmael",
+            bookID: "book-1",
+            bookTitle: "Moby-Dick",
+            chapterID: "ch-1",
+            chapterTitle: "Loomings",
+            timestamp: 4,
+            addedAt: Date(timeIntervalSince1970: 1_777_000_000),
+            reviewCount: 4,
+            nextReview: Date(timeIntervalSince1970: 1_777_100_000),
+            lastReviewedAt: Date(timeIntervalSince1970: 1_777_000_100),
+            lastReviewQuality: .remember,
+            reviewIntervalDays: 6,
+            reviewEaseFactor: 2.8,
+            isInLearnList: true
+        )
+        let incoming = VocabEntry(
+            id: existing.id,
+            word: "loom",
+            context: "Call me Ishmael",
+            bookID: "book-1",
+            bookTitle: "Moby-Dick",
+            chapterID: "ch-1",
+            chapterTitle: "Loomings",
+            timestamp: 4,
+            addedAt: Date(timeIntervalSince1970: 1_777_000_000),
+            isInLearnList: true
+        )
+        let merged = AccountSyncApplicator.mergingVocabulary(existing: existing, incoming: incoming)
+        #expect(merged.reviewCount == 4)
+        #expect(merged.lastReviewQuality == .remember)
+        #expect(merged.reviewIntervalDays == 6)
+        #expect(merged.reviewEaseFactor == 2.8)
+        #expect(merged.nextReview == existing.nextReview)
+    }
+
     @Test("Managed Qwen is a shared account provider with no local API key")
     func managedQwenIsSharedAccountProvider() {
         #expect(LLMProvider.managedQwen.menuLabel == "Managed Qwen (account)")

@@ -64,6 +64,9 @@ describe("memory identity store", () => {
     expect(await store.revokeDevice(USER_A, DEVICE_A)).toEqual({ ok: true });
     expect(await store.isDeviceRevoked(USER_A, DEVICE_A)).toBe(true);
     expect(await store.isDeviceRevoked(USER_B, DEVICE_B)).toBe(false);
+    expect(await store.hasActiveDevice(USER_A, DEVICE_A)).toBe(false);
+    expect(await store.hasActiveDevice(USER_B, DEVICE_B)).toBe(true);
+    expect(await store.hasActiveDevice(USER_A, DEVICE_B)).toBe(false);
     expect(
       await store.bootstrapDevice(USER_A, {
         deviceId: DEVICE_A,

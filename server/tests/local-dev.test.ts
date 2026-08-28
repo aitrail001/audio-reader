@@ -44,10 +44,13 @@ describe("local development workspace", () => {
     expect(wrangler).toContain("[env.production.vars]");
     expect(wrangler).toMatch(/\[env\.production\.vars\][\s\S]*ENVIRONMENT = "production"/);
     expect(wrangler).toMatch(
-      /\[env\.production\.vars\][\s\S]*CORS_ALLOWED_ORIGINS = "https:\/\/audio-reader-admin\.pages\.dev/,
+      /\[env\.production\.vars\][\s\S]*CORS_ALLOWED_ORIGINS = "https:\/\/audio-reader-admin\.pages\.dev"/,
     );
     expect(wrangler).not.toMatch(
       /\[env\.production\.vars\][\s\S]*CORS_ALLOWED_ORIGINS = "http:\/\/localhost/,
+    );
+    expect(wrangler).not.toMatch(
+      /\[env\.production\.vars\][\s\S]*CORS_ALLOWED_ORIGINS = "[^"]*feature-cross-device/,
     );
     expect(wrangler).toMatch(/^LOCAL_DEV_OTP = "123456"$/m);
     expect(wrangler).toMatch(/\[env\.production\.vars\][\s\S]*LOCAL_DEV_OTP = ""/);

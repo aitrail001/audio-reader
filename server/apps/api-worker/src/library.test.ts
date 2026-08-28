@@ -23,6 +23,13 @@ function authHeaders(key = "idempotency-key-library-01"): Record<string, string>
   };
 }
 
+function readHeaders(): Record<string, string> {
+  return {
+    authorization: "Bearer test",
+    "X-Device-Id": DEVICE_ID,
+  };
+}
+
 async function createBook(app = createTestApp()) {
   const response = await app.fetch(
     new Request("http://localhost/v1/books", {
@@ -69,7 +76,7 @@ describe("library API", () => {
     expect(created.chapterCount).toBe(1);
 
     const listed = await app.fetch(
-      new Request("http://localhost/v1/books", { headers: { authorization: "Bearer test" } }),
+      new Request("http://localhost/v1/books", { headers: readHeaders() }),
     );
     expect(listed.status).toBe(200);
     const page = await readJson(listed);
@@ -80,7 +87,7 @@ describe("library API", () => {
 
     const chapters = await app.fetch(
       new Request(`http://localhost/v1/books/${BOOK_ID}/chapters`, {
-        headers: { authorization: "Bearer test" },
+        headers: readHeaders(),
       }),
     );
     expect(chapters.status).toBe(200);
@@ -148,7 +155,7 @@ describe("library API", () => {
     );
     expect(vocab.status).toBe(201);
     const listed = await app.fetch(
-      new Request("http://localhost/v1/vocabulary", { headers: { authorization: "Bearer test" } }),
+      new Request("http://localhost/v1/vocabulary", { headers: readHeaders() }),
     );
     const page = await readJson(listed);
     expect(isRecord(page) && Array.isArray(page.items)).toBe(true);
@@ -185,7 +192,7 @@ describe("library API", () => {
     expect(transcript.status).toBe(201);
     const active = await app.fetch(
       new Request(`http://localhost/v1/chapters/${CHAPTER_ID}/transcript`, {
-        headers: { authorization: "Bearer test" },
+        headers: readHeaders(),
       }),
     );
     expect(active.status).toBe(200);

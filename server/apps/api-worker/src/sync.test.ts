@@ -46,6 +46,27 @@ describe("sync API", () => {
     expect(pulled.status).toBe(401);
   });
 
+  it("rejects sync from an unregistered device", async () => {
+    const app = createTestApp();
+    const pushed = await app.fetch(
+      new Request("http://localhost/v1/sync/push", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test",
+          "content-type": "application/json",
+          "X-Device-Id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "Idempotency-Key": "idempotency-key-sync-unregistered",
+        },
+        body: JSON.stringify({
+          deviceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          batchId: BATCH_ID,
+          mutations: [],
+        }),
+      }),
+    );
+    expect(pushed.status).toBe(401);
+  });
+
   it("pushes a mutation once and pulls it for the same account", async () => {
     const app = createTestApp();
     const requestBody = {

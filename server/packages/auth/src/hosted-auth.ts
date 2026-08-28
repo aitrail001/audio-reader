@@ -355,7 +355,7 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
       return sessionFromGoTrue(result.body, input.deviceId, "invalid_oauth");
     },
 
-    async refresh(refreshToken) {
+    async refresh(refreshToken, deviceId) {
       const result = await gotrue("/token?grant_type=refresh_token", {
         method: "POST",
         body: { refresh_token: refreshToken },
@@ -378,7 +378,8 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
         });
         return { ok: false, code: "invalid_refresh" };
       }
-      const session = await sessionFromGoTrue(result.body, undefined, "invalid_refresh");
+      // Pass the caller device so a revoked X-Device-Id cannot mint a new pair.
+      const session = await sessionFromGoTrue(result.body, deviceId, "invalid_refresh");
       if (!session.ok) {
         logAuthEvent({
           message: "hosted_refresh",

@@ -54,6 +54,40 @@ struct SyncClientTests {
         #expect(pulled.changes.first?.payload["targetLanguage"]?.stringValue == "zh")
         #expect(http.requests.last?.path.contains("/v1/sync/pull") == true)
     }
+
+    @Test("pulled changes apply vocabulary before progress and reviews")
+    func pulledChangesApplyVocabularyBeforeProgress() {
+        let progress = SyncPulledChange(
+            sequence: 1,
+            entityType: "progress",
+            entityId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            operation: "upsert",
+            revision: 1,
+            changedAt: "2026-08-26T09:12:04Z",
+            payload: [:]
+        )
+        let vocab = SyncPulledChange(
+            sequence: 2,
+            entityType: "vocabulary",
+            entityId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            operation: "upsert",
+            revision: 1,
+            changedAt: "2026-08-26T09:12:04Z",
+            payload: [:]
+        )
+        let review = SyncPulledChange(
+            sequence: 3,
+            entityType: "review_event",
+            entityId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            operation: "append",
+            revision: 1,
+            changedAt: "2026-08-26T09:12:04Z",
+            payload: [:]
+        )
+        #expect(SyncPulledChange.applying([progress, review, vocab]).map(\.entityType) == [
+            "vocabulary", "progress", "review_event"
+        ])
+    }
 }
 
 @Suite("Account session sync")
@@ -113,6 +147,155 @@ struct AccountSessionSyncTests {
         #expect(try outbox.pendingMutations().isEmpty)
         #expect(applied.value.first?.payload["targetLanguage"]?.stringValue == "ja")
         #expect(try cursor.loadCursor() == sync.pullCursor)
+    }
+
+    @MainActor
+    @Test("conflict leaves a pending retry at the server revision instead of acking success")
+    func synchronizeDoesNotAckConflictAsSuccess() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        sync.pushStatus = "conflict"
+        sync.conflictRevision = 4
+        let outbox = InMemorySyncOutboxRepository()
+        let originalID = MutationID(rawValue: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d")
+        try outbox.enqueue(
+            OutboxMutation(
+                id: originalID,
+                entityType: .settings,
+                entityID: "00000000-0000-4000-8000-00000000000a",
+                operation: .upsert,
+                baseRevision: .zero,
+                occurredAt: Date(timeIntervalSince1970: 1_777_000_000),
+                payload: Data("{\"targetLanguage\":\"zh\"}".utf8)
+            )
+        )
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(client: sync, outbox: outbox, cursor: InMemorySyncCursorStore())
+        )
+        await session.requestEmailCode("conflict@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+        await session.synchronize()
+
+        let pending = try outbox.pendingMutations()
+        #expect(pending.count == 1)
+        #expect(pending[0].id != originalID)
+        #expect(pending[0].baseRevision.rawValue == 4)
+        #expect(String(data: pending[0].payload, encoding: .utf8) == "{\"targetLanguage\":\"zh\"}")
+    }
+
+    @MainActor
+    @Test("pull continues while hasMore instead of treating the first page as complete")
+    func synchronizeLoopsPullWhileHasMore() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        let applied = LockingBox<[SyncPulledChange]>([])
+        sync.pullPages = [
+            SyncPullResponse(
+                changes: [
+                    SyncPulledChange(
+                        sequence: 1,
+                        entityType: "settings",
+                        entityId: "00000000-0000-4000-8000-00000000000a",
+                        operation: "upsert",
+                        revision: 1,
+                        changedAt: "2026-08-26T09:12:04Z",
+                        payload: ["targetLanguage": .string("ja")]
+                    )
+                ],
+                cursor: "1",
+                hasMore: true
+            ),
+            SyncPullResponse(
+                changes: [
+                    SyncPulledChange(
+                        sequence: 2,
+                        entityType: "vocabulary",
+                        entityId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        operation: "upsert",
+                        revision: 1,
+                        changedAt: "2026-08-26T09:12:05Z",
+                        payload: ["surface": .string("ice")]
+                    )
+                ],
+                cursor: "2",
+                hasMore: false
+            )
+        ]
+        let cursor = InMemorySyncCursorStore()
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: InMemorySyncOutboxRepository(),
+                cursor: cursor,
+                applyChange: { change in
+                    applied.value.append(change)
+                }
+            )
+        )
+        await session.requestEmailCode("pages@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+        await session.synchronize()
+
+        #expect(sync.pulledCursors == ["0", "1"])
+        #expect(applied.value.map(\.sequence) == [1, 2])
+        #expect(try cursor.loadCursor() == "2")
+    }
+
+    @MainActor
+    @Test("unchanged snapshot payloads are not pushed again")
+    func synchronizeSkipsUnchangedSnapshotRows() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        let outbox = InMemorySyncOutboxRepository()
+        let versions = InMemorySyncEntityVersionStore()
+        let payload = Data("{\"targetLanguage\":\"zh\"}".utf8)
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: outbox,
+                cursor: InMemorySyncCursorStore(),
+                versions: versions,
+                snapshot: {
+                    [
+                        OutboxMutation(
+                            id: MutationID.generate(),
+                            entityType: .settings,
+                            entityID: "00000000-0000-4000-8000-00000000000a",
+                            operation: .upsert,
+                            baseRevision: .zero,
+                            occurredAt: Date(),
+                            payload: payload
+                        )
+                    ]
+                }
+            )
+        )
+        await session.requestEmailCode("dirty@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+        await session.synchronize()
+        await session.synchronize()
+
+        #expect(sync.pushed.count == 1)
+        #expect(try outbox.pendingMutations().isEmpty)
+        #expect(try versions.loadVersion(entityType: "settings", entityID: "00000000-0000-4000-8000-00000000000a")?.serverVersion == 1)
     }
 }
 

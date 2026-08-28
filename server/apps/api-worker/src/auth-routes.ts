@@ -12,6 +12,7 @@ import type { OpsStore } from "@audio-reader/database";
 import { readJsonObject } from "./body";
 import { asHead, jsonResponse, problemResponse } from "./http";
 import { withIdempotency, type IdempotencyStore } from "./idempotency";
+import { requireBoundDevice } from "./route-helpers";
 
 type Profile = components["schemas"]["Profile"];
 type TokenPair = components["schemas"]["TokenPair"];
@@ -413,7 +414,9 @@ async function refreshSession(context: AuthRouteContext): Promise<Response> {
   if (refreshToken instanceof Response) {
     return refreshToken;
   }
-  const result = await auth.refresh(refreshToken);
+  const deviceHeader = context.request.headers.get("X-Device-Id")?.trim() ?? "";
+  const deviceId = UUID_PATTERN.test(deviceHeader) ? deviceHeader : undefined;
+  const result = await auth.refresh(refreshToken, deviceId);
   if (!result.ok) {
     if (result.code === "not_ready") {
       console.warn(
@@ -575,7 +578,7 @@ async function bootstrapSession(context: AuthRouteContext): Promise<Response> {
 }
 
 async function getProfile(context: AuthRouteContext): Promise<Response> {
-  const principal = await requirePrincipal(context);
+  const principal = await requireBoundProductPrincipal(context);
   if (principal instanceof Response) {
     return principal;
   }
@@ -585,7 +588,7 @@ async function getProfile(context: AuthRouteContext): Promise<Response> {
 }
 
 async function patchProfile(context: AuthRouteContext): Promise<Response> {
-  const principal = await requirePrincipal(context);
+  const principal = await requireBoundProductPrincipal(context);
   if (principal instanceof Response) {
     return principal;
   }
@@ -622,7 +625,7 @@ async function patchProfile(context: AuthRouteContext): Promise<Response> {
 }
 
 async function getUserSettings(context: AuthRouteContext): Promise<Response> {
-  const principal = await requirePrincipal(context);
+  const principal = await requireBoundProductPrincipal(context);
   if (principal instanceof Response) {
     return principal;
   }
@@ -638,7 +641,7 @@ async function getUserSettings(context: AuthRouteContext): Promise<Response> {
 }
 
 async function putUserSettings(context: AuthRouteContext): Promise<Response> {
-  const principal = await requirePrincipal(context);
+  const principal = await requireBoundProductPrincipal(context);
   if (principal instanceof Response) {
     return principal;
   }
@@ -683,7 +686,7 @@ async function putUserSettings(context: AuthRouteContext): Promise<Response> {
 }
 
 async function listDevices(context: AuthRouteContext): Promise<Response> {
-  const principal = await requirePrincipal(context);
+  const principal = await requireBoundProductPrincipal(context);
   if (principal instanceof Response) {
     return principal;
   }
@@ -695,7 +698,7 @@ async function listDevices(context: AuthRouteContext): Promise<Response> {
 }
 
 async function revokeDevice(context: AuthRouteContext, deviceId: string): Promise<Response> {
-  const principal = await requirePrincipal(context);
+  const principal = await requireBoundProductPrincipal(context);
   if (principal instanceof Response) {
     return principal;
   }
@@ -823,6 +826,32 @@ async function requirePrincipal(context: AuthRouteContext): Promise<Principal | 
   const principal = await context.authenticate(context.request);
   if (principal === null) {
     return unauthorized(context.requestId, "Authentication required.");
+  }
+  return principal;
+}
+
+async function requireBoundProductPrincipal(
+  context: AuthRouteContext,
+): Promise<Principal | Response> {
+  const principal = await requirePrincipal(context);
+  if (principal instanceof Response) {
+    return principal;
+  }
+  const auth = context.auth;
+  const bound = await requireBoundDevice({
+    request: context.request,
+    requestId: context.requestId,
+    accountId: principal.accountId,
+    hasActiveDevice: async (_accountId, deviceId) => {
+      if (auth === undefined) {
+        return false;
+      }
+      const devices = await auth.listDevices(principal);
+      return devices.some((device) => device.id === deviceId && !device.revoked);
+    },
+  });
+  if (bound instanceof Response) {
+    return bound;
   }
   return principal;
 }

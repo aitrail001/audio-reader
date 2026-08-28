@@ -39,4 +39,16 @@ struct ProductAPIBaseURLTests {
         let missing = ProductAPI.resolveBaseURL(environment: [:], infoDictionary: nil)
         #expect(missing == ProductAPI.defaultBaseURL)
     }
+
+    @Test("product HTTP adds a UUID X-Request-Id without replacing a caller value")
+    func productHTTPAddsRequestID() {
+        let generated = ProductHTTP.headersByAddingRequestID([:])
+        #expect(generated.headers[ProductHTTP.requestIDHeader] == generated.requestID)
+        #expect(UUID(uuidString: generated.requestID) != nil)
+
+        let preserved = ProductHTTP.headersByAddingRequestID([
+            ProductHTTP.requestIDHeader: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        ])
+        #expect(preserved.requestID == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    }
 }

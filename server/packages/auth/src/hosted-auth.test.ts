@@ -326,6 +326,8 @@ describe("hosted GoTrue auth service", () => {
       return;
     }
     expect(refreshed.value.tokens.refreshToken).toBe("refresh-token-next");
+    const withDevice = await auth.refresh("refresh-token-hosted", DEVICE_ID);
+    expect(withDevice.ok).toBe(true);
     await auth.logout("refresh-token-next");
     expect(calls.some((call) => call.url.includes("/logout"))).toBe(true);
     const logout = calls.find((call) => call.url.includes("/logout"));
@@ -495,6 +497,40 @@ describe("hosted GoTrue auth service", () => {
     await expect(auth.refresh("refresh-token-hosted")).resolves.toEqual({
       ok: false,
       code: "not_ready",
+    });
+  });
+
+  it("refuses refresh when the presented device has been revoked", async () => {
+    const userId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const identity = createMemoryIdentityStore();
+    await identity.ensureProfile({ userId, email: EMAIL });
+    await identity.bootstrapDevice(userId, {
+      deviceId: DEVICE_ID,
+      platform: "macos",
+      appVersion: "1.0.0",
+    });
+    await identity.revokeDevice(userId, DEVICE_ID);
+    const accessToken = await signAccessToken({ sub: userId, email: EMAIL }, JWT);
+    const { fetch } = createFetch((call) => {
+      if (call.url.includes("grant_type=refresh_token")) {
+        return jsonResponse(200, {
+          access_token: accessToken,
+          refresh_token: "refresh-token-next",
+          expires_in: 3600,
+        });
+      }
+      return jsonResponse(500, { message: "unexpected" });
+    });
+    const auth = createHostedAuthService({
+      jwt: JWT,
+      supabaseUrl: "https://example.supabase.co",
+      supabaseAnonKey: "anon-key",
+      fetch,
+      identity,
+    });
+    await expect(auth.refresh("refresh-token-hosted", DEVICE_ID)).resolves.toEqual({
+      ok: false,
+      code: "invalid_token",
     });
   });
 });

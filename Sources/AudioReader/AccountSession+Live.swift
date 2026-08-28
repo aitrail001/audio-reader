@@ -26,6 +26,7 @@ extension AccountSession {
                 client: ProductSyncClient(http: http, baseURL: ProductAPI.resolvedBaseURL),
                 outbox: sqlite,
                 cursor: sqlite,
+                versions: sqlite,
                 snapshot: AccountSyncApplicator.snapshot,
                 applyChange: AccountSyncApplicator.apply
             )
@@ -36,6 +37,9 @@ extension AccountSession {
 enum AccountSyncApplicator {
     static let settingsEntityID = "00000000-0000-4000-8000-00000000000a"
 
+    /// Full local snapshot. `drainSync` enqueues only rows whose payload differs
+    /// from the last applied `entity_versions` row; mutation IDs are new solely
+    /// for those dirty rows.
     static func snapshot() throws -> [OutboxMutation] {
         let sqlite = LocalSQLiteStore(fileURL: Persistence.root.appendingPathComponent("library.sqlite"))
         return try snapshot(
@@ -64,7 +68,7 @@ enum AccountSyncApplicator {
                 operation: .upsert,
                 baseRevision: .zero,
                 occurredAt: Date(),
-                payload: try JSONEncoder().encode(
+                payload: try encodePayload(
                     PortableLearningSettings(
                         sourceLanguage: settings.transcriptionLanguage,
                         targetLanguage: settings.targetLanguage,
@@ -77,7 +81,7 @@ enum AccountSyncApplicator {
             )
         ]
         for book in books {
-            let entityID = isUUID(book.id.rawValue) ? book.id.rawValue.lowercased() : uuidForStableKey("book:\(book.id.rawValue)")
+            let entityID = syncEntityID(book.id.rawValue, kind: "book")
             mutations.append(
                 OutboxMutation(
                     id: MutationID.generate(),
@@ -86,7 +90,7 @@ enum AccountSyncApplicator {
                     operation: .upsert,
                     baseRevision: .zero,
                     occurredAt: Date(),
-                    payload: try JSONEncoder().encode(
+                    payload: try encodePayload(
                         PortableBook(
                             localId: book.id.rawValue,
                             title: book.title,
@@ -110,7 +114,7 @@ enum AccountSyncApplicator {
         for transcript in transcripts {
             let localID = transcript.chapterID.rawValue
             seenChapters.insert(localID)
-            let chapterID = isUUID(localID) ? localID.lowercased() : uuidForStableKey("chapter:\(localID)")
+            let chapterID = syncEntityID(localID, kind: "chapter")
             let json = String(data: try JSONEncoder.iso.encode(transcript), encoding: .utf8) ?? "{}"
             mutations.append(
                 OutboxMutation(
@@ -120,7 +124,7 @@ enum AccountSyncApplicator {
                     operation: .upsert,
                     baseRevision: .zero,
                     occurredAt: transcript.createdAt,
-                    payload: try JSONEncoder().encode(
+                    payload: try encodePayload(
                         PortableTranscript(
                             chapterId: chapterID,
                             localChapterId: localID,
@@ -135,9 +139,7 @@ enum AccountSyncApplicator {
             )
         }
         for transcript in Persistence.loadAllTranscripts() where seenChapters.insert(transcript.chapterID).inserted {
-            let chapterID = isUUID(transcript.chapterID)
-                ? transcript.chapterID.lowercased()
-                : uuidForStableKey("chapter:\(transcript.chapterID)")
+            let chapterID = syncEntityID(transcript.chapterID, kind: "chapter")
             let json = String(data: try JSONEncoder.iso.encode(transcript), encoding: .utf8) ?? "{}"
             mutations.append(
                 OutboxMutation(
@@ -147,7 +149,7 @@ enum AccountSyncApplicator {
                     operation: .upsert,
                     baseRevision: .zero,
                     occurredAt: transcript.createdAt,
-                    payload: try JSONEncoder().encode(
+                    payload: try encodePayload(
                         PortableTranscript(
                             chapterId: chapterID,
                             localChapterId: transcript.chapterID,
@@ -162,12 +164,8 @@ enum AccountSyncApplicator {
             )
         }
         for review in reviews {
-            let entityID = isUUID(review.id.rawValue)
-                ? review.id.rawValue.lowercased()
-                : uuidForStableKey("review:\(review.id.rawValue)")
-            let vocabularyID = isUUID(review.vocabularyID.rawValue)
-                ? review.vocabularyID.rawValue.lowercased()
-                : settingsEntityID
+            let entityID = syncEntityID(review.id.rawValue, kind: "review")
+            let vocabularyID = syncEntityID(review.vocabularyID.rawValue, kind: "vocab")
             mutations.append(
                 OutboxMutation(
                     id: MutationID.generate(),
@@ -176,55 +174,60 @@ enum AccountSyncApplicator {
                     operation: .append,
                     baseRevision: .zero,
                     occurredAt: review.reviewedAt,
-                    payload: try JSONEncoder().encode(
+                    payload: try encodePayload(
                         PortableReview(
                             vocabularyId: vocabularyID,
                             face: review.face,
                             rating: review.rating,
-                            reviewedAt: ISO8601DateFormatter().string(from: review.reviewedAt)
+                            reviewedAt: isoString(review.reviewedAt)
                         )
                     )
                 )
             )
         }
-        for entry in vocabulary where entry.reviewCount > 0 && isUUID(entry.id) {
+        for entry in vocabulary where entry.reviewCount > 0 {
+            let vocabID = syncEntityID(entry.id, kind: "vocab")
             mutations.append(
                 OutboxMutation(
                     id: MutationID.generate(),
                     entityType: .progress,
-                    entityID: entry.id.lowercased(),
+                    entityID: vocabID,
                     operation: .upsert,
                     baseRevision: .zero,
                     occurredAt: entry.lastReviewedAt ?? entry.addedAt,
-                    payload: try JSONEncoder().encode(
+                    payload: try encodePayload(
                         PortableProgress(
-                            vocabularyId: entry.id.lowercased(),
+                            vocabularyId: vocabID,
                             reviewCount: entry.reviewCount,
-                            nextReview: entry.nextReview.map { ISO8601DateFormatter().string(from: $0) },
-                            lastReviewedAt: entry.lastReviewedAt.map { ISO8601DateFormatter().string(from: $0) },
+                            nextReview: entry.nextReview.map(isoString),
+                            lastReviewedAt: entry.lastReviewedAt.map(isoString),
                             lastReviewQuality: entry.lastReviewQuality?.rawValue
                         )
                     )
                 )
             )
         }
-        for entry in vocabulary where isUUID(entry.id) {
-            let category = entry.category.rawValue
+        for entry in vocabulary {
+            let vocabID = syncEntityID(entry.id, kind: "vocab")
             mutations.append(
                 OutboxMutation(
                     id: MutationID.generate(),
                     entityType: .vocabulary,
-                    entityID: entry.id.lowercased(),
+                    entityID: vocabID,
                     operation: .upsert,
                     baseRevision: .zero,
                     occurredAt: entry.addedAt,
-                    payload: try JSONEncoder().encode(
+                    payload: try encodePayload(
                         PortableVocabulary(
-                            bookId: isUUID(entry.bookID) ? entry.bookID.lowercased() : settingsEntityID,
-                            chapterId: isUUID(entry.chapterID) ? entry.chapterID.lowercased() : settingsEntityID,
+                            bookId: syncEntityID(entry.bookID, kind: "book"),
+                            chapterId: syncEntityID(entry.chapterID, kind: "chapter"),
+                            localBookId: entry.bookID,
+                            localChapterId: entry.chapterID,
+                            bookTitle: entry.bookTitle,
+                            chapterTitle: entry.chapterTitle,
                             surface: entry.word,
                             lemma: entry.word,
-                            category: category,
+                            category: entry.category.rawValue,
                             context: entry.context,
                             timestampSeconds: entry.timestamp,
                             state: entry.isInLearnList ? "learning" : "unknown",
@@ -244,7 +247,7 @@ enum AccountSyncApplicator {
                     operation: .upsert,
                     baseRevision: .zero,
                     occurredAt: lemma.updatedAt,
-                    payload: try JSONEncoder().encode(
+                    payload: try encodePayload(
                         PortableLemma(language: lemma.language, lemma: lemma.form, state: "known")
                     )
                 )
@@ -253,6 +256,8 @@ enum AccountSyncApplicator {
         return mutations
     }
 
+    /// Apply one pulled change. Caller must feed books/vocabulary before
+    /// progress/reviews (`SyncPulledChange.applying`).
     static func apply(_ change: SyncPulledChange) throws {
         switch change.entityType {
         case OutboxEntityType.settings.rawValue:
@@ -268,6 +273,8 @@ enum AccountSyncApplicator {
         case OutboxEntityType.reviewEvent.rawValue:
             applyReview(change)
         case OutboxEntityType.book.rawValue:
+            // Media stays on-device. Hashed book IDs plus localId/title travel
+            // on vocabulary rows so learning data does not use the settings UUID.
             break
         default:
             break
@@ -304,27 +311,46 @@ enum AccountSyncApplicator {
             Persistence.saveVocab(items)
             return
         }
-        let entry = VocabEntry(
+        let localBook = change.payload["localBookId"]?.stringValue
+        let localChapter = change.payload["localChapterId"]?.stringValue
+        let incoming = VocabEntry(
             id: change.entityId,
             word: change.payload["surface"]?.stringValue ?? change.payload["lemma"]?.stringValue ?? "",
             category: VocabCategory(rawValue: change.payload["category"]?.stringValue ?? "word") ?? .word,
             definition: change.payload["definition"]?.stringValue,
             translation: change.payload["note"]?.stringValue,
             context: change.payload["context"]?.stringValue ?? "",
-            bookID: change.payload["bookId"]?.stringValue ?? "",
+            bookID: nonempty(localBook) ?? change.payload["bookId"]?.stringValue ?? "",
             bookTitle: change.payload["bookTitle"]?.stringValue ?? "",
-            chapterID: change.payload["chapterId"]?.stringValue ?? "",
+            chapterID: nonempty(localChapter) ?? change.payload["chapterId"]?.stringValue ?? "",
             chapterTitle: change.payload["chapterTitle"]?.stringValue ?? "",
             timestamp: change.payload["timestampSeconds"]?.numberValue ?? 0,
-            addedAt: ISO8601DateFormatter().date(from: change.changedAt) ?? Date(),
+            addedAt: isoDate(change.changedAt) ?? Date(),
             isInLearnList: change.payload["state"]?.stringValue == "learning"
         )
-        if let index = items.firstIndex(where: { $0.id.caseInsensitiveCompare(change.entityId) == .orderedSame }) {
-            items[index] = entry
+        if let index = items.firstIndex(where: {
+            $0.id.caseInsensitiveCompare(change.entityId) == .orderedSame
+        }) {
+            items[index] = mergingVocabulary(existing: items[index], incoming: incoming)
         } else {
-            items.append(entry)
+            items.append(incoming)
         }
         Persistence.saveVocab(items)
+    }
+
+    static func mergingVocabulary(existing: VocabEntry, incoming: VocabEntry) -> VocabEntry {
+        var merged = incoming
+        if merged.reviewCount == 0 { merged.reviewCount = existing.reviewCount }
+        if merged.nextReview == nil { merged.nextReview = existing.nextReview }
+        if merged.lastReviewedAt == nil { merged.lastReviewedAt = existing.lastReviewedAt }
+        if merged.lastReviewQuality == nil { merged.lastReviewQuality = existing.lastReviewQuality }
+        if merged.reviewIntervalDays == 0 { merged.reviewIntervalDays = existing.reviewIntervalDays }
+        if merged.reviewEaseFactor == 2.5 { merged.reviewEaseFactor = existing.reviewEaseFactor }
+        if merged.bookTitle.isEmpty { merged.bookTitle = existing.bookTitle }
+        if merged.chapterTitle.isEmpty { merged.chapterTitle = existing.chapterTitle }
+        if merged.bookID.isEmpty { merged.bookID = existing.bookID }
+        if merged.chapterID.isEmpty { merged.chapterID = existing.chapterID }
+        return merged
     }
 
     private static func applyLemma(_ change: SyncPulledChange) {
@@ -369,6 +395,12 @@ enum AccountSyncApplicator {
         if let quality = change.payload["lastReviewQuality"]?.stringValue {
             items[index].lastReviewQuality = VocabReviewQuality(rawValue: quality)
         }
+        if let next = change.payload["nextReview"]?.stringValue {
+            items[index].nextReview = isoDate(next)
+        }
+        if let last = change.payload["lastReviewedAt"]?.stringValue {
+            items[index].lastReviewedAt = isoDate(last)
+        }
         Persistence.saveVocab(items)
     }
 
@@ -378,8 +410,9 @@ enum AccountSyncApplicator {
         guard let index = items.firstIndex(where: { $0.id.caseInsensitiveCompare(vocabularyId) == .orderedSame }) else {
             return
         }
-        items[index].reviewCount += 1
-        items[index].lastReviewedAt = ISO8601DateFormatter().date(from: change.changedAt) ?? Date()
+        if let reviewed = isoDate(change.payload["reviewedAt"]?.stringValue ?? change.changedAt) {
+            items[index].lastReviewedAt = reviewed
+        }
         if let rating = change.payload["rating"]?.stringValue {
             items[index].lastReviewQuality = VocabReviewQuality(rawValue: rating)
         }
@@ -388,6 +421,35 @@ enum AccountSyncApplicator {
 
     static func uuidForLemma(language: String, form: String) -> String {
         uuidForStableKey("lemma:\(language):\(form)")
+    }
+
+    static func syncEntityID(_ localID: String, kind: String) -> String {
+        isUUID(localID) ? localID.lowercased() : uuidForStableKey("\(kind):\(localID)")
+    }
+
+    private static func encodePayload<Value: Encodable>(_ value: Value) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(value)
+    }
+
+    private static func isoString(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+
+    private static func isoDate(_ raw: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        if let date = formatter.date(from: raw) { return date }
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: raw)
+    }
+
+    private static func nonempty(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        return value
     }
 
     static func uuidForStableKey(_ key: String) -> String {
@@ -418,6 +480,10 @@ private struct PortableLearningSettings: Encodable {
 private struct PortableVocabulary: Encodable {
     var bookId: String
     var chapterId: String
+    var localBookId: String
+    var localChapterId: String
+    var bookTitle: String
+    var chapterTitle: String
     var surface: String
     var lemma: String
     var category: String

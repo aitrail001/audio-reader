@@ -49,9 +49,15 @@ public protocol SyncOutboxRepository: Sendable {
     func enqueue(_ mutation: OutboxMutation) throws
     func pendingMutations() throws -> [OutboxMutation]
     func markAcknowledged(id: MutationID) throws
+    func updatePending(_ mutation: OutboxMutation) throws
 }
 
 public protocol SyncCursorStoring: Sendable {
     func loadCursor() throws -> String
     func saveCursor(_ cursor: String) throws
+}
+
+public protocol SyncEntityVersionStoring: Sendable {
+    func loadVersion(entityType: String, entityID: String) throws -> SyncEntityVersion?
+    func saveVersion(_ version: SyncEntityVersion) throws
 }

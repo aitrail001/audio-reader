@@ -1,4 +1,22 @@
 import Foundation
+import os
+
+enum ProductHTTP {
+    static let requestIDHeader = "X-Request-Id"
+    static let log = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "product-http")
+
+    static func makeRequestID() -> String {
+        UUID().uuidString.lowercased()
+    }
+
+    static func headersByAddingRequestID(_ headers: [String: String]) -> (headers: [String: String], requestID: String) {
+        var merged = headers
+        let requestID = merged[requestIDHeader]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolved = (requestID?.isEmpty == false) ? requestID! : makeRequestID()
+        merged[requestIDHeader] = resolved
+        return (merged, resolved)
+    }
+}
 
 public struct HTTPRequest: Sendable {
     public var method: String
@@ -43,10 +61,11 @@ public struct LiveHTTPClient: HTTPPerforming, Sendable {
         guard let url = URL(string: request.path, relativeTo: baseURL)?.absoluteURL else {
             throw AuthClientError.invalidResponse
         }
+        let prepared = ProductHTTP.headersByAddingRequestID(request.headers)
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = request.method
         urlRequest.httpBody = request.body
-        for (key, value) in request.headers {
+        for (key, value) in prepared.headers {
             urlRequest.setValue(value, forHTTPHeaderField: key)
         }
         let (data, response) = try await session.data(for: urlRequest)
@@ -59,6 +78,10 @@ public struct LiveHTTPClient: HTTPPerforming, Sendable {
                 headers[key] = value
             }
         }
+        let path = url.path
+        ProductHTTP.log.info(
+            "http_complete message=product_http_complete method=\(request.method, privacy: .public) path=\(path, privacy: .public) status=\(http.statusCode, privacy: .public) requestId=\(prepared.requestID, privacy: .public)"
+        )
         return HTTPResponse(statusCode: http.statusCode, headers: headers, body: data)
     }
 }

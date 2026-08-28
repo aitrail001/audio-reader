@@ -269,6 +269,7 @@ export type OpsStore = {
     input: { task: string; cacheEntryId: string | null; outputText: string },
   ): Promise<void>;
   putChatMessage(message: {
+    accountId: string;
     threadId: string;
     messageId: string;
     role: "user" | "assistant";
@@ -280,6 +281,7 @@ export type OpsStore = {
     messageId: string,
   ): Promise<
     | {
+        accountId: string;
         threadId: string;
         messageId: string;
         role: "user" | "assistant";
@@ -313,6 +315,7 @@ export function createMemoryOpsStore(
   const chatMessages = new Map<
     string,
     {
+      accountId: string;
       threadId: string;
       messageId: string;
       role: "user" | "assistant";
@@ -712,6 +715,8 @@ export function createMemoryOpsStore(
       return Promise.resolve();
     },
 
+    // Isolate-local until a chat table exists. Always store accountId so GET
+    // cannot return another user's message from this Worker isolate.
     putChatMessage(message) {
       chatMessages.set(`${message.threadId}:${message.messageId}`, { ...message });
       return Promise.resolve();

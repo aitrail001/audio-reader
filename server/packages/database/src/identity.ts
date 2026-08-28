@@ -86,6 +86,8 @@ export type IdentityStore = {
     deviceId: string,
   ): Promise<{ ok: true } | { ok: false; code: "not_found" }>;
   isDeviceRevoked(userId: string, deviceId: string): Promise<boolean>;
+  // True only for a device this account registered and has not revoked.
+  hasActiveDevice(userId: string, deviceId: string): Promise<boolean>;
   listProfiles(): Promise<IdentityProfile[]>;
   setAccountStatus(
     userId: string,
@@ -97,6 +99,7 @@ export type IdentityStore = {
   hasAnyAdminRole(): Promise<boolean>;
   grantAdminRole(userId: string): Promise<void>;
   revokeAllDevices(userId: string): Promise<void>;
+  seedActiveDevice?(userId: string, deviceId: string): void;
 };
 
 export function defaultIdentitySettings(nowIso: string): IdentitySettings {
@@ -272,6 +275,43 @@ export function createMemoryIdentityStore(options: { now?: () => Date } = {}): I
     isDeviceRevoked(userId, deviceId) {
       const existing = devices.get(userId)?.find((device) => device.id === deviceId);
       return Promise.resolve(existing?.revoked === true);
+    },
+
+    hasActiveDevice(userId, deviceId) {
+      const existing = devices.get(userId)?.find((device) => device.id === deviceId);
+      return Promise.resolve(existing !== undefined && !existing.revoked);
+    },
+
+    seedActiveDevice(userId, deviceId) {
+      const timestamp = currentIso();
+      if (!profiles.has(userId)) {
+        profiles.set(userId, {
+          id: crypto.randomUUID(),
+          accountId: userId,
+          email: `${userId}@users.invalid`,
+          displayName: null,
+          avatarUrl: null,
+          status: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          deletionPendingAt: null,
+        });
+      }
+      const listed = devices.get(userId) ?? [];
+      if (listed.some((device) => device.id === deviceId)) {
+        return;
+      }
+      listed.push({
+        id: deviceId,
+        platform: "macos",
+        name: null,
+        appVersion: "test",
+        createdAt: timestamp,
+        lastSeenAt: timestamp,
+        revoked: false,
+        revokedAt: null,
+      });
+      devices.set(userId, listed);
     },
 
     listProfiles() {
@@ -589,6 +629,24 @@ export function createSupabaseIdentityStore(rest: RestClient): IdentityStore {
       return row?.revoked === true;
     },
 
+    async hasActiveDevice(userId, deviceId) {
+      const response = await rest.request({
+        method: "GET",
+        path: "/devices",
+        query: {
+          user_id: `eq.${userId}`,
+          id: `eq.${deviceId}`,
+          select: "revoked",
+          limit: "1",
+        },
+      });
+      if (!isRestOk(response.status)) {
+        return false;
+      }
+      const row = restRow(response.body);
+      return isDeviceRevocationRow(row ?? {}) && row?.revoked === false;
+    },
+
     async listProfiles() {
       const response = await rest.request({
         method: "GET",
@@ -709,6 +767,9 @@ export function createUnavailableIdentityStore(): IdentityStore {
     },
     isDeviceRevoked() {
       return Promise.resolve(true);
+    },
+    hasActiveDevice() {
+      return Promise.resolve(false);
     },
     listProfiles() {
       return Promise.resolve([]);

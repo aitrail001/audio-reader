@@ -202,6 +202,7 @@ export type AuthService = {
   exchangeOAuth(input: OAuthExchangeInput): Promise<AuthResult<AuthenticatedSession>>;
   refresh(
     refreshToken: string,
+    deviceId?: string,
   ): Promise<AuthResult<{ tokens: SessionTokens; principal: Principal }>>;
   logout(refreshToken: string): Promise<void>;
   getProfile(principal: Principal): Promise<ProductProfile | undefined>;
@@ -605,7 +606,7 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
       };
     },
 
-    async refresh(refreshToken) {
+    async refresh(refreshToken, deviceId) {
       const record = refreshTokens.get(refreshToken);
       if (record === undefined || record.expiresAtMs <= now().getTime()) {
         return { ok: false, code: "invalid_refresh" };
@@ -617,8 +618,12 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
         refreshTokens.delete(refreshToken);
         return { ok: false, code: "invalid_refresh" };
       }
-      if (record.deviceId !== undefined) {
-        const device = devices.get(deviceKey(account.id, record.deviceId));
+      const boundDevice = deviceId ?? record.deviceId;
+      if (record.deviceId !== undefined && deviceId !== undefined && deviceId !== record.deviceId) {
+        return { ok: false, code: "invalid_refresh" };
+      }
+      if (boundDevice !== undefined) {
+        const device = devices.get(deviceKey(account.id, boundDevice));
         if (device?.revoked) {
           refreshTokens.delete(refreshToken);
           return { ok: false, code: "invalid_refresh" };

@@ -146,6 +146,9 @@ export function createTestApp(overrides: Partial<AppOptions> = {}): ApiApp {
       ops: database.ops,
       wrappingSecret: "test-operator-secret-key",
     });
+  const principal = createFakePrincipal();
+  const testDeviceId = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+  database.identity.seedActiveDevice?.(principal.accountId, testDeviceId);
   return createApiApp({
     environment: "test",
     version: "1.0.0-draft.1",
@@ -153,7 +156,7 @@ export function createTestApp(overrides: Partial<AppOptions> = {}): ApiApp {
     storage: createFakeObjectStore(),
     qwen: createFakeQwenClient(),
     auth: createMemoryAuthService({ jwt: LOCAL_JWT_CONFIG }),
-    authenticate: () => createFakePrincipal(),
+    authenticate: () => principal,
     ...rest,
     database,
     runtime,
@@ -457,6 +460,7 @@ async function handleRequest(
       authenticate,
       idempotencyStore,
       sync: options.database.sync,
+      identity: options.database.identity,
     });
     if (routed !== undefined) {
       return routed;
@@ -471,6 +475,7 @@ async function handleRequest(
       idempotencyStore,
       qwen: options.qwen,
       ops: options.database.ops,
+      identity: options.database.identity,
       cacheHmacSecret:
         options.cacheHmacSecret ?? options.hmacSecret ?? LOCAL_PASSWORDLESS_HMAC_SECRET,
       ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
@@ -487,6 +492,7 @@ async function handleRequest(
       authenticate,
       idempotencyStore,
       catalog: options.database.catalog,
+      identity: options.database.identity,
     });
     if (routed !== undefined) {
       return routed;

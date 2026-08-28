@@ -1,6 +1,6 @@
 import type { Principal } from "@audio-reader/auth";
 import type { components } from "@audio-reader/contract";
-import type { CatalogStore } from "@audio-reader/database";
+import type { CatalogStore, IdentityStore } from "@audio-reader/database";
 import { readJsonObject } from "./body";
 import { asHead, emptyResponse, jsonResponse } from "./http";
 import { withIdempotency, type IdempotencyStore } from "./idempotency";
@@ -13,6 +13,7 @@ import {
   notFound,
   pageCursor,
   parseLimit,
+  requireBoundDevice,
   requireDeviceId,
   requirePrincipal,
   requiredString,
@@ -86,6 +87,7 @@ export type LibraryRouteContext = {
   authenticate: (request: Request) => Promise<Principal | null>;
   idempotencyStore: IdempotencyStore;
   catalog?: CatalogStore;
+  identity?: IdentityStore;
 };
 
 export function isLibraryPath(path: string): boolean {
@@ -124,6 +126,18 @@ export async function handleLibraryRoute(
   const principal = await requirePrincipal(context);
   if (principal instanceof Response) {
     return principal;
+  }
+  const bound = await requireBoundDevice({
+    request: context.request,
+    requestId: context.requestId,
+    accountId: principal.accountId,
+    hasActiveDevice: (accountId, deviceId) =>
+      context.identity === undefined
+        ? Promise.resolve(false)
+        : context.identity.hasActiveDevice(accountId, deviceId),
+  });
+  if (bound instanceof Response) {
+    return bound;
   }
   const catalog = context.catalog;
   if (catalog === undefined) {

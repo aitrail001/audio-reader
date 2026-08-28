@@ -3,7 +3,7 @@ import Foundation
 import AudioReaderDomain
 #endif
 
-public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, @unchecked Sendable {
+public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, SyncEntityVersionStoring, @unchecked Sendable {
     public let url: URL
     #if DEBUG
     var interruptAfterTable: String?
@@ -135,6 +135,76 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, @u
         try connection.run("UPDATE sync_outbox SET status = ? WHERE id = ?") { [connection] stmt in
             connection.bind(stmt, 1, OutboxMutationStatus.acknowledged.rawValue)
             connection.bind(stmt, 2, id.rawValue)
+        }
+    }
+
+    public func updatePending(_ mutation: OutboxMutation) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try connection.run(
+            """
+            UPDATE sync_outbox
+            SET entity_type = ?, entity_id = ?, operation = ?, base_revision = ?, occurred_at = ?, payload = ?
+            WHERE id = ? AND status = ?
+            """
+        ) { [connection] stmt in
+            connection.bind(stmt, 1, mutation.entityType.rawValue)
+            connection.bind(stmt, 2, mutation.entityID)
+            connection.bind(stmt, 3, mutation.operation.rawValue)
+            connection.bind(stmt, 4, Int(mutation.baseRevision.rawValue))
+            connection.bindDate(stmt, 5, mutation.occurredAt)
+            connection.bind(stmt, 6, mutation.payload)
+            connection.bind(stmt, 7, mutation.id.rawValue)
+            connection.bind(stmt, 8, OutboxMutationStatus.pending.rawValue)
+        }
+    }
+
+    public func loadVersion(entityType: String, entityID: String) throws -> SyncEntityVersion? {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let rows = try connection.query(
+            """
+            SELECT server_version, payload_json, last_mutation_id
+            FROM entity_versions WHERE entity_type = ? AND entity_id = ? LIMIT 1
+            """
+        ) { [connection] stmt in
+            connection.bind(stmt, 1, entityType)
+            connection.bind(stmt, 2, entityID)
+        }
+        guard let row = rows.first else { return nil }
+        return SyncEntityVersion(
+            entityType: entityType,
+            entityID: entityID,
+            serverVersion: Int64(row.int("server_version")),
+            payload: Data((row.string("payload_json") ?? "{}").utf8),
+            lastMutationID: row.string("last_mutation_id")
+        )
+    }
+
+    public func saveVersion(_ version: SyncEntityVersion) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let json = String(data: version.payload, encoding: .utf8) ?? "{}"
+        try connection.run(
+            """
+            INSERT INTO entity_versions(
+              entity_type, entity_id, server_version, updated_at, last_mutation_id, payload_json
+            ) VALUES (?,?,?,?,?,?)
+            ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+              server_version = excluded.server_version,
+              updated_at = excluded.updated_at,
+              last_mutation_id = excluded.last_mutation_id,
+              payload_json = excluded.payload_json
+            """
+        ) { [connection] stmt in
+            connection.bind(stmt, 1, version.entityType)
+            connection.bind(stmt, 2, version.entityID)
+            connection.bind(stmt, 3, Int(version.serverVersion))
+            connection.bindDate(stmt, 4, Date())
+            connection.bind(stmt, 5, version.lastMutationID)
+            connection.bind(stmt, 6, json)
         }
     }
 

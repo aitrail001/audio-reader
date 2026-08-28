@@ -56,6 +56,60 @@ export function requireDeviceId(request: Request, requestId: string): string | R
   return deviceId;
 }
 
+// Product APIs bind the session to a bootstrapped device. A stolen access
+// token with no header or a random UUID must not work.
+export async function requireBoundDevice(input: {
+  request: Request;
+  requestId: string;
+  accountId: string;
+  hasActiveDevice: (accountId: string, deviceId: string) => Promise<boolean>;
+}): Promise<string | Response> {
+  const deviceId = input.request.headers.get("X-Device-Id")?.trim() ?? "";
+  if (!UUID_PATTERN.test(deviceId)) {
+    logDeviceBinding({
+      requestId: input.requestId,
+      accountId: input.accountId,
+      outcome: "missing_header",
+    });
+    return problemResponse({
+      status: 401,
+      code: "unauthorized",
+      title: "Unauthorized",
+      detail: "X-Device-Id must name a signed-in device.",
+      traceId: input.requestId,
+    });
+  }
+  const active = await input.hasActiveDevice(input.accountId, deviceId);
+  if (!active) {
+    logDeviceBinding({
+      requestId: input.requestId,
+      accountId: input.accountId,
+      outcome: "unregistered_or_revoked",
+    });
+    return problemResponse({
+      status: 401,
+      code: "unauthorized",
+      title: "Unauthorized",
+      detail: "This device is not signed in for the account.",
+      traceId: input.requestId,
+    });
+  }
+  return deviceId;
+}
+
+function logDeviceBinding(event: { requestId: string; accountId: string; outcome: string }): void {
+  console.warn(
+    JSON.stringify({
+      level: "warn",
+      component: "device-binding",
+      message: "require_bound_device",
+      requestId: event.requestId,
+      accountId: event.accountId,
+      outcome: event.outcome,
+    }),
+  );
+}
+
 export function fieldError(requestId: string, field: string, message: string): Response {
   return problemResponse({
     status: 400,

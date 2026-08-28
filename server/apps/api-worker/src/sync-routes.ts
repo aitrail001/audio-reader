@@ -1,9 +1,15 @@
 import type { Principal } from "@audio-reader/auth";
 import type { components } from "@audio-reader/contract";
-import { isSyncEntityType, type SyncMutation, type SyncStore } from "@audio-reader/database";
+import {
+  isSyncEntityType,
+  type IdentityStore,
+  type SyncMutation,
+  type SyncStore,
+} from "@audio-reader/database";
 import { readJsonObject } from "./body";
 import { asHead, jsonResponse, problemResponse } from "./http";
 import { withIdempotency, type IdempotencyStore } from "./idempotency";
+import { requireBoundDevice } from "./route-helpers";
 
 type SyncPushResponse = components["schemas"]["SyncPushResponse"];
 type SyncPullResponse = components["schemas"]["SyncPullResponse"];
@@ -20,6 +26,7 @@ export type SyncRouteContext = {
   authenticate: (request: Request) => Promise<Principal | null>;
   idempotencyStore: IdempotencyStore;
   sync?: SyncStore;
+  identity?: IdentityStore;
 };
 
 export function isSyncPath(path: string): boolean {
@@ -71,7 +78,7 @@ async function pushSync(context: SyncRouteContext): Promise<Response> {
   if (sync instanceof Response) {
     return sync;
   }
-  const deviceId = requireDeviceId(context.request, context.requestId);
+  const deviceId = await requireBoundSyncDevice(context, principal);
   if (deviceId instanceof Response) {
     return deviceId;
   }
@@ -142,7 +149,7 @@ async function pullSync(context: SyncRouteContext, url: URL): Promise<Response> 
   if (sync instanceof Response) {
     return sync;
   }
-  const deviceId = requireDeviceId(context.request, context.requestId);
+  const deviceId = await requireBoundSyncDevice(context, principal);
   if (deviceId instanceof Response) {
     return deviceId;
   }
@@ -193,18 +200,19 @@ function requireSync(context: SyncRouteContext): SyncStore | Response {
   return context.sync;
 }
 
-function requireDeviceId(request: Request, requestId: string): string | Response {
-  const deviceId = request.headers.get("X-Device-Id")?.trim() ?? "";
-  if (!UUID_PATTERN.test(deviceId)) {
-    return problemResponse({
-      status: 400,
-      code: "bad_request",
-      title: "Bad request",
-      detail: "X-Device-Id must be a UUID.",
-      traceId: requestId,
-    });
-  }
-  return deviceId;
+async function requireBoundSyncDevice(
+  context: SyncRouteContext,
+  principal: Principal,
+): Promise<string | Response> {
+  return requireBoundDevice({
+    request: context.request,
+    requestId: context.requestId,
+    accountId: principal.accountId,
+    hasActiveDevice: (accountId, deviceId) =>
+      context.identity === undefined
+        ? Promise.resolve(false)
+        : context.identity.hasActiveDevice(accountId, deviceId),
+  });
 }
 
 function parseMutations(value: unknown, requestId: string): SyncMutation[] | Response {

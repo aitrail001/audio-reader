@@ -1181,12 +1181,12 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.75")
-        #expect(plist["CFBundleVersion"] as? String == "76")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.75")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "76")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.75;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 76;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.76")
+        #expect(plist["CFBundleVersion"] as? String == "77")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.76")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "77")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.76;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 77;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
         #expect(plist["ProductAPIBaseURL"] as? String == ProductAPI.hostedProductionBaseURL.absoluteString)

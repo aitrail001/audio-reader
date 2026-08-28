@@ -1,6 +1,10 @@
 import { LOCAL_PASSWORDLESS_HMAC_SECRET, type Principal } from "@audio-reader/auth";
 import type { components } from "@audio-reader/contract";
-import { composeAssistantSystemPrompt, type OpsStore } from "@audio-reader/database";
+import {
+  composeAssistantSystemPrompt,
+  type IdentityStore,
+  type OpsStore,
+} from "@audio-reader/database";
 import {
   hmacCacheKey,
   sha256Hex,
@@ -14,6 +18,7 @@ import { readJsonObject } from "./body";
 import { resolveTaskModel, type TaskModelResolution } from "./diagnostics";
 import { jsonResponse, problemResponse } from "./http";
 import { withIdempotency, type IdempotencyStore } from "./idempotency";
+import { requireBoundDevice } from "./route-helpers";
 import { recordOperatorEvent, SYSTEM_ACTOR_ID } from "./operator-events";
 import { hostOf, type RuntimeConfigService } from "./runtime-config";
 
@@ -38,6 +43,7 @@ export type AssistantRouteContext = {
   idempotencyStore: IdempotencyStore;
   qwen: QwenClient;
   ops?: OpsStore;
+  identity?: IdentityStore;
   cacheHmacSecret?: string;
   runtime?: RuntimeConfigService;
 };
@@ -118,11 +124,10 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
   if (gated !== undefined) {
     return gated;
   }
-  const deviceId = requireDeviceId(context.request, context.requestId);
-  if (deviceId instanceof Response) {
-    return deviceId;
+  const bound = await requireBoundProductDevice(context, principal);
+  if (bound instanceof Response) {
+    return bound;
   }
-  void deviceId;
   return withIdempotency(
     context.idempotencyStore,
     context.request,
@@ -253,11 +258,10 @@ async function createSummary(context: AssistantRouteContext): Promise<Response> 
   if (gated !== undefined) {
     return gated;
   }
-  const deviceId = requireDeviceId(context.request, context.requestId);
-  if (deviceId instanceof Response) {
-    return deviceId;
+  const bound = await requireBoundProductDevice(context, principal);
+  if (bound instanceof Response) {
+    return bound;
   }
-  void deviceId;
   return withIdempotency(
     context.idempotencyStore,
     context.request,
@@ -377,11 +381,10 @@ async function createChat(context: AssistantRouteContext): Promise<Response> {
   if (gated !== undefined) {
     return gated;
   }
-  const deviceId = requireDeviceId(context.request, context.requestId);
-  if (deviceId instanceof Response) {
-    return deviceId;
+  const bound = await requireBoundProductDevice(context, principal);
+  if (bound instanceof Response) {
+    return bound;
   }
-  void deviceId;
   return withIdempotency(
     context.idempotencyStore,
     context.request,
@@ -435,6 +438,7 @@ async function createChat(context: AssistantRouteContext): Promise<Response> {
       const messageId = crypto.randomUUID();
       const createdAt = new Date().toISOString();
       await context.ops?.putChatMessage({
+        accountId: principal.accountId,
         threadId,
         messageId,
         role: "assistant",
@@ -463,9 +467,12 @@ async function getChatMessage(
   if (principal instanceof Response) {
     return principal;
   }
-  void principal;
+  const bound = await requireBoundProductDevice(context, principal);
+  if (bound instanceof Response) {
+    return bound;
+  }
   const stored = await context.ops?.getChatMessage(threadId, messageId);
-  if (stored === undefined) {
+  if (stored === undefined || stored.accountId !== principal.accountId) {
     return problemResponse({
       status: 404,
       code: "not_found",
@@ -497,18 +504,19 @@ async function requirePrincipal(context: AssistantRouteContext): Promise<Princip
   return principal;
 }
 
-function requireDeviceId(request: Request, requestId: string): string | Response {
-  const deviceId = request.headers.get("X-Device-Id")?.trim() ?? "";
-  if (!UUID_PATTERN.test(deviceId)) {
-    return problemResponse({
-      status: 400,
-      code: "bad_request",
-      title: "Bad request",
-      detail: "X-Device-Id must be a UUID.",
-      traceId: requestId,
-    });
-  }
-  return deviceId;
+async function requireBoundProductDevice(
+  context: AssistantRouteContext,
+  principal: Principal,
+): Promise<string | Response> {
+  return requireBoundDevice({
+    request: context.request,
+    requestId: context.requestId,
+    accountId: principal.accountId,
+    hasActiveDevice: (accountId, deviceId) =>
+      context.identity === undefined
+        ? Promise.resolve(false)
+        : context.identity.hasActiveDevice(accountId, deviceId),
+  });
 }
 
 function requiredString(value: unknown, field: string, requestId: string): string | Response {
