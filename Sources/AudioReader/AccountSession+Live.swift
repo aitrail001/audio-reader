@@ -1,4 +1,5 @@
 import AuthenticationServices
+import CryptoKit
 import Foundation
 #if os(macOS)
 import AppKit
@@ -8,16 +9,470 @@ import UIKit
 #if canImport(AudioReaderNetworking)
 import AudioReaderNetworking
 #endif
+#if canImport(AudioReaderLocalStore)
+import AudioReaderLocalStore
+#endif
 
 extension AccountSession {
     static func live() -> AccountSession {
-        AccountSession(
-            client: ProductAuthClient(baseURL: ProductAPI.resolvedBaseURL),
-            store: KeychainAuthSessionStore(),
+        let sqlite = LocalSQLiteStore(fileURL: Persistence.root.appendingPathComponent("library.sqlite"))
+        let http = LiveHTTPClient(baseURL: ProductAPI.resolvedBaseURL)
+        return AccountSession(
+            client: ProductAuthClient(http: http, baseURL: ProductAPI.resolvedBaseURL),
+            store: EncryptedFileAuthSessionStore(directory: Persistence.root, legacy: nil),
             oauth: ASWebOAuthBrowserSession(),
-            environment: .current()
+            environment: .current(),
+            syncRuntime: AccountSyncRuntime(
+                client: ProductSyncClient(http: http, baseURL: ProductAPI.resolvedBaseURL),
+                outbox: sqlite,
+                cursor: sqlite,
+                snapshot: AccountSyncApplicator.snapshot,
+                applyChange: AccountSyncApplicator.apply
+            )
         )
     }
+}
+
+enum AccountSyncApplicator {
+    static let settingsEntityID = "00000000-0000-4000-8000-00000000000a"
+
+    static func snapshot() throws -> [OutboxMutation] {
+        let sqlite = LocalSQLiteStore(fileURL: Persistence.root.appendingPathComponent("library.sqlite"))
+        return try snapshot(
+            settings: Persistence.loadSettings(),
+            vocabulary: Persistence.loadVocab(),
+            lemmas: Persistence.loadKnownLemmas(),
+            books: (try? sqlite.loadBooks()) ?? [],
+            transcripts: (try? sqlite.loadTranscripts()) ?? [],
+            reviews: (try? sqlite.loadReviewEvents()) ?? []
+        )
+    }
+
+    static func snapshot(
+        settings: AppSettings,
+        vocabulary: [VocabEntry],
+        lemmas: [KnownLemmaRecord],
+        books: [StoredBook] = [],
+        transcripts: [StoredTranscript] = [],
+        reviews: [StoredReviewEvent] = []
+    ) throws -> [OutboxMutation] {
+        var mutations: [OutboxMutation] = [
+            OutboxMutation(
+                id: MutationID.generate(),
+                entityType: .settings,
+                entityID: settingsEntityID,
+                operation: .upsert,
+                baseRevision: .zero,
+                occurredAt: Date(),
+                payload: try JSONEncoder().encode(
+                    PortableLearningSettings(
+                        sourceLanguage: settings.transcriptionLanguage,
+                        targetLanguage: settings.targetLanguage,
+                        readerLevel: settings.readerLanguageLevel,
+                        playbackRate: settings.playbackRate,
+                        skipSeconds: settings.skipSeconds,
+                        appearance: settings.appearance
+                    )
+                )
+            )
+        ]
+        for book in books {
+            let entityID = isUUID(book.id.rawValue) ? book.id.rawValue.lowercased() : uuidForStableKey("book:\(book.id.rawValue)")
+            mutations.append(
+                OutboxMutation(
+                    id: MutationID.generate(),
+                    entityType: .book,
+                    entityID: entityID,
+                    operation: .upsert,
+                    baseRevision: .zero,
+                    occurredAt: Date(),
+                    payload: try JSONEncoder().encode(
+                        PortableBook(
+                            localId: book.id.rawValue,
+                            title: book.title,
+                            author: book.author,
+                            source: book.source,
+                            chapters: book.chapters.map {
+                                PortableChapter(
+                                    localId: $0.id.rawValue,
+                                    index: $0.index,
+                                    title: $0.title,
+                                    duration: $0.duration,
+                                    startTime: $0.startTime
+                                )
+                            }
+                        )
+                    )
+                )
+            )
+        }
+        var seenChapters = Set<String>()
+        for transcript in transcripts {
+            let localID = transcript.chapterID.rawValue
+            seenChapters.insert(localID)
+            let chapterID = isUUID(localID) ? localID.lowercased() : uuidForStableKey("chapter:\(localID)")
+            let json = String(data: try JSONEncoder.iso.encode(transcript), encoding: .utf8) ?? "{}"
+            mutations.append(
+                OutboxMutation(
+                    id: MutationID.generate(),
+                    entityType: .transcript,
+                    entityID: chapterID,
+                    operation: .upsert,
+                    baseRevision: .zero,
+                    occurredAt: transcript.createdAt,
+                    payload: try JSONEncoder().encode(
+                        PortableTranscript(
+                            chapterId: chapterID,
+                            localChapterId: localID,
+                            locale: transcript.locale,
+                            source: transcript.source,
+                            ebookAligned: transcript.ebookAligned,
+                            segmentCount: transcript.segments.count,
+                            transcriptJSON: json
+                        )
+                    )
+                )
+            )
+        }
+        for transcript in Persistence.loadAllTranscripts() where seenChapters.insert(transcript.chapterID).inserted {
+            let chapterID = isUUID(transcript.chapterID)
+                ? transcript.chapterID.lowercased()
+                : uuidForStableKey("chapter:\(transcript.chapterID)")
+            let json = String(data: try JSONEncoder.iso.encode(transcript), encoding: .utf8) ?? "{}"
+            mutations.append(
+                OutboxMutation(
+                    id: MutationID.generate(),
+                    entityType: .transcript,
+                    entityID: chapterID,
+                    operation: .upsert,
+                    baseRevision: .zero,
+                    occurredAt: transcript.createdAt,
+                    payload: try JSONEncoder().encode(
+                        PortableTranscript(
+                            chapterId: chapterID,
+                            localChapterId: transcript.chapterID,
+                            locale: transcript.locale,
+                            source: transcript.source,
+                            ebookAligned: transcript.ebookAligned,
+                            segmentCount: transcript.segments.count,
+                            transcriptJSON: json
+                        )
+                    )
+                )
+            )
+        }
+        for review in reviews {
+            let entityID = isUUID(review.id.rawValue)
+                ? review.id.rawValue.lowercased()
+                : uuidForStableKey("review:\(review.id.rawValue)")
+            let vocabularyID = isUUID(review.vocabularyID.rawValue)
+                ? review.vocabularyID.rawValue.lowercased()
+                : settingsEntityID
+            mutations.append(
+                OutboxMutation(
+                    id: MutationID.generate(),
+                    entityType: .reviewEvent,
+                    entityID: entityID,
+                    operation: .append,
+                    baseRevision: .zero,
+                    occurredAt: review.reviewedAt,
+                    payload: try JSONEncoder().encode(
+                        PortableReview(
+                            vocabularyId: vocabularyID,
+                            face: review.face,
+                            rating: review.rating,
+                            reviewedAt: ISO8601DateFormatter().string(from: review.reviewedAt)
+                        )
+                    )
+                )
+            )
+        }
+        for entry in vocabulary where entry.reviewCount > 0 && isUUID(entry.id) {
+            mutations.append(
+                OutboxMutation(
+                    id: MutationID.generate(),
+                    entityType: .progress,
+                    entityID: entry.id.lowercased(),
+                    operation: .upsert,
+                    baseRevision: .zero,
+                    occurredAt: entry.lastReviewedAt ?? entry.addedAt,
+                    payload: try JSONEncoder().encode(
+                        PortableProgress(
+                            vocabularyId: entry.id.lowercased(),
+                            reviewCount: entry.reviewCount,
+                            nextReview: entry.nextReview.map { ISO8601DateFormatter().string(from: $0) },
+                            lastReviewedAt: entry.lastReviewedAt.map { ISO8601DateFormatter().string(from: $0) },
+                            lastReviewQuality: entry.lastReviewQuality?.rawValue
+                        )
+                    )
+                )
+            )
+        }
+        for entry in vocabulary where isUUID(entry.id) {
+            let category = entry.category.rawValue
+            mutations.append(
+                OutboxMutation(
+                    id: MutationID.generate(),
+                    entityType: .vocabulary,
+                    entityID: entry.id.lowercased(),
+                    operation: .upsert,
+                    baseRevision: .zero,
+                    occurredAt: entry.addedAt,
+                    payload: try JSONEncoder().encode(
+                        PortableVocabulary(
+                            bookId: isUUID(entry.bookID) ? entry.bookID.lowercased() : settingsEntityID,
+                            chapterId: isUUID(entry.chapterID) ? entry.chapterID.lowercased() : settingsEntityID,
+                            surface: entry.word,
+                            lemma: entry.word,
+                            category: category,
+                            context: entry.context,
+                            timestampSeconds: entry.timestamp,
+                            state: entry.isInLearnList ? "learning" : "unknown",
+                            definition: entry.definition,
+                            note: entry.translation
+                        )
+                    )
+                )
+            )
+        }
+        for lemma in lemmas {
+            mutations.append(
+                OutboxMutation(
+                    id: MutationID.generate(),
+                    entityType: .lexemeState,
+                    entityID: uuidForLemma(language: lemma.language, form: lemma.form),
+                    operation: .upsert,
+                    baseRevision: .zero,
+                    occurredAt: lemma.updatedAt,
+                    payload: try JSONEncoder().encode(
+                        PortableLemma(language: lemma.language, lemma: lemma.form, state: "known")
+                    )
+                )
+            )
+        }
+        return mutations
+    }
+
+    static func apply(_ change: SyncPulledChange) throws {
+        switch change.entityType {
+        case OutboxEntityType.settings.rawValue:
+            applySettings(change)
+        case OutboxEntityType.vocabulary.rawValue:
+            applyVocabulary(change)
+        case OutboxEntityType.lexemeState.rawValue:
+            applyLemma(change)
+        case OutboxEntityType.transcript.rawValue:
+            applyTranscript(change)
+        case OutboxEntityType.progress.rawValue:
+            applyProgress(change)
+        case OutboxEntityType.reviewEvent.rawValue:
+            applyReview(change)
+        case OutboxEntityType.book.rawValue:
+            break
+        default:
+            break
+        }
+    }
+
+    private static func applySettings(_ change: SyncPulledChange) {
+        var settings = Persistence.loadSettings()
+        if let target = change.payload["targetLanguage"]?.stringValue, !target.isEmpty {
+            settings.targetLanguage = target
+        }
+        if let source = change.payload["sourceLanguage"]?.stringValue, !source.isEmpty {
+            settings.transcriptionLanguage = source
+        }
+        if let level = change.payload["readerLevel"]?.stringValue, !level.isEmpty {
+            settings.readerLanguageLevel = level
+        }
+        if let rate = change.payload["playbackRate"]?.numberValue {
+            settings.playbackRate = rate
+        }
+        if let skip = change.payload["skipSeconds"]?.numberValue {
+            settings.skipSeconds = skip
+        }
+        if let appearance = change.payload["appearance"]?.stringValue, !appearance.isEmpty {
+            settings.appearance = appearance
+        }
+        Persistence.saveSettings(settings)
+    }
+
+    private static func applyVocabulary(_ change: SyncPulledChange) {
+        var items = Persistence.loadVocab()
+        if change.operation == OutboxOperation.delete.rawValue {
+            items.removeAll { $0.id.caseInsensitiveCompare(change.entityId) == .orderedSame }
+            Persistence.saveVocab(items)
+            return
+        }
+        let entry = VocabEntry(
+            id: change.entityId,
+            word: change.payload["surface"]?.stringValue ?? change.payload["lemma"]?.stringValue ?? "",
+            category: VocabCategory(rawValue: change.payload["category"]?.stringValue ?? "word") ?? .word,
+            definition: change.payload["definition"]?.stringValue,
+            translation: change.payload["note"]?.stringValue,
+            context: change.payload["context"]?.stringValue ?? "",
+            bookID: change.payload["bookId"]?.stringValue ?? "",
+            bookTitle: change.payload["bookTitle"]?.stringValue ?? "",
+            chapterID: change.payload["chapterId"]?.stringValue ?? "",
+            chapterTitle: change.payload["chapterTitle"]?.stringValue ?? "",
+            timestamp: change.payload["timestampSeconds"]?.numberValue ?? 0,
+            addedAt: ISO8601DateFormatter().date(from: change.changedAt) ?? Date(),
+            isInLearnList: change.payload["state"]?.stringValue == "learning"
+        )
+        if let index = items.firstIndex(where: { $0.id.caseInsensitiveCompare(change.entityId) == .orderedSame }) {
+            items[index] = entry
+        } else {
+            items.append(entry)
+        }
+        Persistence.saveVocab(items)
+    }
+
+    private static func applyLemma(_ change: SyncPulledChange) {
+        guard let language = change.payload["language"]?.stringValue,
+              let form = change.payload["lemma"]?.stringValue ?? change.payload["form"]?.stringValue
+        else { return }
+        var lemmas = Persistence.loadKnownLemmas()
+        let record = KnownLemmaRecord(language: language, form: form, updatedAt: Date())
+        if let index = lemmas.firstIndex(where: { $0.language == language && $0.form == form }) {
+            lemmas[index] = record
+        } else {
+            lemmas.append(record)
+        }
+        Persistence.saveKnownLemmas(lemmas)
+    }
+
+    static func isUUID(_ value: String) -> Bool {
+        let pattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+        return value.wholeMatch(of: pattern) != nil
+    }
+
+    private static func applyTranscript(_ change: SyncPulledChange) {
+        guard let json = change.payload["transcriptJSON"]?.stringValue,
+              let data = json.data(using: .utf8),
+              var transcript = try? JSONDecoder.iso.decode(Transcript.self, from: data)
+        else { return }
+        if let localID = change.payload["localChapterId"]?.stringValue, !localID.isEmpty {
+            transcript.chapterID = localID
+        }
+        try? Persistence.saveTranscript(transcript)
+    }
+
+    private static func applyProgress(_ change: SyncPulledChange) {
+        guard let vocabularyId = change.payload["vocabularyId"]?.stringValue else { return }
+        var items = Persistence.loadVocab()
+        guard let index = items.firstIndex(where: { $0.id.caseInsensitiveCompare(vocabularyId) == .orderedSame }) else {
+            return
+        }
+        if let count = change.payload["reviewCount"]?.numberValue {
+            items[index].reviewCount = Int(count)
+        }
+        if let quality = change.payload["lastReviewQuality"]?.stringValue {
+            items[index].lastReviewQuality = VocabReviewQuality(rawValue: quality)
+        }
+        Persistence.saveVocab(items)
+    }
+
+    private static func applyReview(_ change: SyncPulledChange) {
+        guard let vocabularyId = change.payload["vocabularyId"]?.stringValue else { return }
+        var items = Persistence.loadVocab()
+        guard let index = items.firstIndex(where: { $0.id.caseInsensitiveCompare(vocabularyId) == .orderedSame }) else {
+            return
+        }
+        items[index].reviewCount += 1
+        items[index].lastReviewedAt = ISO8601DateFormatter().date(from: change.changedAt) ?? Date()
+        if let rating = change.payload["rating"]?.stringValue {
+            items[index].lastReviewQuality = VocabReviewQuality(rawValue: rating)
+        }
+        Persistence.saveVocab(items)
+    }
+
+    static func uuidForLemma(language: String, form: String) -> String {
+        uuidForStableKey("lemma:\(language):\(form)")
+    }
+
+    static func uuidForStableKey(_ key: String) -> String {
+        let digest = SHA256.hash(data: Data(key.utf8))
+        var bytes = Array(digest.prefix(16))
+        bytes[6] = (bytes[6] & 0x0f) | 0x50
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+        let start = hex.startIndex
+        func slice(_ offset: Int, _ count: Int) -> String {
+            let from = hex.index(start, offsetBy: offset)
+            let to = hex.index(from, offsetBy: count)
+            return String(hex[from..<to])
+        }
+        return "\(slice(0, 8))-\(slice(8, 4))-\(slice(12, 4))-\(slice(16, 4))-\(slice(20, 12))"
+    }
+}
+
+private struct PortableLearningSettings: Encodable {
+    var sourceLanguage: String
+    var targetLanguage: String
+    var readerLevel: String
+    var playbackRate: Double
+    var skipSeconds: Double
+    var appearance: String
+}
+
+private struct PortableVocabulary: Encodable {
+    var bookId: String
+    var chapterId: String
+    var surface: String
+    var lemma: String
+    var category: String
+    var context: String
+    var timestampSeconds: Double
+    var state: String
+    var definition: String?
+    var note: String?
+}
+
+private struct PortableLemma: Encodable {
+    var language: String
+    var lemma: String
+    var state: String
+}
+
+private struct PortableBook: Encodable {
+    var localId: String
+    var title: String
+    var author: String?
+    var source: String
+    var chapters: [PortableChapter]
+}
+
+private struct PortableChapter: Encodable {
+    var localId: String
+    var index: Int
+    var title: String
+    var duration: Double?
+    var startTime: Double?
+}
+
+private struct PortableTranscript: Encodable {
+    var chapterId: String
+    var localChapterId: String
+    var locale: String
+    var source: String
+    var ebookAligned: Bool
+    var segmentCount: Int
+    var transcriptJSON: String
+}
+
+private struct PortableReview: Encodable {
+    var vocabularyId: String
+    var face: String
+    var rating: String
+    var reviewedAt: String
+}
+
+private struct PortableProgress: Encodable {
+    var vocabularyId: String
+    var reviewCount: Int
+    var nextReview: String?
+    var lastReviewedAt: String?
+    var lastReviewQuality: String?
 }
 
 extension AccountDeviceEnvironment {

@@ -102,14 +102,19 @@ enum CredentialVaultKeyError: Error {
     case invalidStoredKey
 }
 
-final class KeychainCredentialVaultKeyProvider: CredentialVaultKeyProvider, @unchecked Sendable {
-    static let shared = KeychainCredentialVaultKeyProvider()
+final class FileCredentialVaultKeyProvider: CredentialVaultKeyProvider, @unchecked Sendable {
+    static let shared = FileCredentialVaultKeyProvider(
+        fileURL: Persistence.root.appendingPathComponent("credential-vault.key")
+    )
 
-    private let service = "com.johnsonzhang.AudioReader.credential-vault-key"
-    private let account = "credential-vault-wrapping-key"
+    private let fileURL: URL
     private let lock = NSLock()
     private var cachedKey: SymmetricKey?
     private var cachedError: CredentialVaultKeyError?
+
+    init(fileURL: URL) {
+        self.fileURL = fileURL
+    }
 
     func key(vaultExists: Bool) throws -> SymmetricKey {
         lock.lock()
@@ -132,52 +137,48 @@ final class KeychainCredentialVaultKeyProvider: CredentialVaultKeyProvider, @unc
     }
 
     private func loadOrCreateKey(vaultExists: Bool) throws -> SymmetricKey {
-        if let stored = try readStoredKey() {
+        if let stored = try readFileKey() {
             guard stored.count == 32 else { throw CredentialVaultKeyError.invalidStoredKey }
             return SymmetricKey(data: stored)
         }
         guard !vaultExists else { throw CredentialVaultKeyError.missingForExistingVault }
         let key = SymmetricKey(size: .bits256)
         let data = key.withUnsafeBytes { Data($0) }
-        try saveStoredKey(data)
+        try saveFileKey(data)
         return key
     }
 
-    private func readStoredKey() throws -> Data? {
-        var query = baseQuery()
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = result as? Data else {
-            throw CredentialVaultKeyError.unavailable
-        }
-        return data
+    private func readFileKey() throws -> Data? {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+        let data = try Data(contentsOf: fileURL)
+        return data.isEmpty ? nil : data
     }
 
-    private func saveStoredKey(_ data: Data) throws {
-        var item = baseQuery()
-        item[kSecValueData as String] = data
-        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else {
-            throw CredentialVaultKeyError.unavailable
-        }
+    private func saveFileKey(_ data: Data) throws {
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data.write(to: fileURL, options: .atomic)
+#if os(iOS)
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: fileURL.path
+        )
+#elseif os(macOS)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: fileURL.path
+        )
+#endif
     }
 
-    private func baseQuery() -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-    }
 }
 
 final class EncryptedFileCredentialVault: CredentialVault, @unchecked Sendable {
     static let shared = EncryptedFileCredentialVault(
         fileURL: Persistence.root.appendingPathComponent("llm-credentials.vault"),
-        keyProvider: KeychainCredentialVaultKeyProvider.shared
+        keyProvider: FileCredentialVaultKeyProvider.shared
     )
 
     private struct EncryptedDocument: Codable {
@@ -413,9 +414,6 @@ enum ProviderAPIKeyStore {
         fileURL: URL,
         for provider: LLMProvider
     ) -> [LegacyCredentialMigrationResult] {
-        [
-            migrateLegacyKeychain(provider),
-            migrateLegacyFile(fileURL, for: provider)
-        ]
+        [migrateLegacyFile(fileURL, for: provider)]
     }
 }

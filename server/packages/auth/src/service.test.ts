@@ -170,21 +170,21 @@ describe("memory auth service", () => {
       microsoftSession.value.principal.accountId,
     );
 
-    const stolen = auth.linkIdentity(emailSession.value.principal, {
+    const stolen = await auth.linkIdentity(emailSession.value.principal, {
       provider: "google",
       providerSubject: "google-user-1",
       email: EMAIL,
     });
     expect(stolen).toEqual({ ok: false, code: "already_linked" });
 
-    const rebound = auth.linkIdentity(googleSession.value.principal, {
+    const rebound = await auth.linkIdentity(googleSession.value.principal, {
       provider: "google",
       providerSubject: "google-user-1",
       email: EMAIL,
     });
     expect(rebound.ok).toBe(true);
 
-    const firstBind = auth.linkIdentity(emailSession.value.principal, {
+    const firstBind = await auth.linkIdentity(emailSession.value.principal, {
       provider: "google",
       providerSubject: "google-user-unbound",
       email: EMAIL,
@@ -318,8 +318,11 @@ describe("memory auth service", () => {
       return;
     }
 
-    const aliceBoot = auth.bootstrap(alice.value.principal, macosDevice(DEVICE_A, "Alice Mac"));
-    const bobBoot = auth.bootstrap(bob.value.principal, macosDevice(DEVICE_B, "Bob Mac"));
+    const aliceBoot = await auth.bootstrap(
+      alice.value.principal,
+      macosDevice(DEVICE_A, "Alice Mac"),
+    );
+    const bobBoot = await auth.bootstrap(bob.value.principal, macosDevice(DEVICE_B, "Bob Mac"));
     expect(aliceBoot.ok).toBe(true);
     expect(bobBoot.ok).toBe(true);
     if (!aliceBoot.ok || !bobBoot.ok) {
@@ -328,8 +331,8 @@ describe("memory auth service", () => {
     expect(aliceBoot.value.device.id).toBe(DEVICE_A);
     expect(aliceBoot.value.device.revoked).toBe(false);
 
-    const aliceDevices = auth.listDevices(alice.value.principal);
-    const bobDevices = auth.listDevices(bob.value.principal);
+    const aliceDevices = await auth.listDevices(alice.value.principal);
+    const bobDevices = await auth.listDevices(bob.value.principal);
     expect(aliceDevices.map((device) => device.id)).toEqual([DEVICE_A]);
     expect(bobDevices.map((device) => device.id)).toEqual([DEVICE_B]);
     expect(aliceDevices[0]?.name).toBe("Alice Mac");
@@ -348,17 +351,17 @@ describe("memory auth service", () => {
     if (!alice.ok || !bob.ok) {
       return;
     }
-    expect(auth.bootstrap(alice.value.principal, macosDevice(DEVICE_A)).ok).toBe(true);
-    expect(auth.bootstrap(bob.value.principal, macosDevice(DEVICE_B)).ok).toBe(true);
+    expect((await auth.bootstrap(alice.value.principal, macosDevice(DEVICE_A))).ok).toBe(true);
+    expect((await auth.bootstrap(bob.value.principal, macosDevice(DEVICE_B))).ok).toBe(true);
 
-    expect(auth.listDevices(alice.value.principal).some((device) => device.id === DEVICE_B)).toBe(
-      false,
-    );
-    expect(auth.revokeDevice(alice.value.principal, DEVICE_B)).toEqual({
+    expect(
+      (await auth.listDevices(alice.value.principal)).some((device) => device.id === DEVICE_B),
+    ).toBe(false);
+    expect(await auth.revokeDevice(alice.value.principal, DEVICE_B)).toEqual({
       ok: false,
       code: "not_found",
     });
-    expect(auth.listDevices(bob.value.principal)).toEqual(
+    expect(await auth.listDevices(bob.value.principal)).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: DEVICE_B, revoked: false })]),
     );
     const bobRefresh = await auth.refresh(bob.value.tokens.refreshToken);
@@ -376,23 +379,23 @@ describe("memory auth service", () => {
     if (!first.ok) {
       return;
     }
-    expect(auth.bootstrap(first.value.principal, macosDevice(DEVICE_A)).ok).toBe(true);
+    expect((await auth.bootstrap(first.value.principal, macosDevice(DEVICE_A))).ok).toBe(true);
     await auth.requestEmailOtp(EMAIL);
     const second = await auth.verifyEmailOtp(EMAIL, "666666", DEVICE_C);
     expect(second.ok).toBe(true);
     if (!second.ok) {
       return;
     }
-    expect(auth.bootstrap(second.value.principal, macosDevice(DEVICE_C)).ok).toBe(true);
+    expect((await auth.bootstrap(second.value.principal, macosDevice(DEVICE_C))).ok).toBe(true);
 
-    expect(auth.revokeDevice(first.value.principal, DEVICE_A)).toEqual({ ok: true });
+    expect(await auth.revokeDevice(first.value.principal, DEVICE_A)).toEqual({ ok: true });
     const revokedRefresh = await auth.refresh(first.value.tokens.refreshToken);
     expect(revokedRefresh).toEqual({ ok: false, code: "invalid_refresh" });
 
     const otherRefresh = await auth.refresh(second.value.tokens.refreshToken);
     expect(otherRefresh.ok).toBe(true);
 
-    const listed = auth.listDevices(first.value.principal);
+    const listed = await auth.listDevices(first.value.principal);
     expect(listed).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: DEVICE_A, revoked: true }),
@@ -400,7 +403,7 @@ describe("memory auth service", () => {
       ]),
     );
 
-    const rebootstrap = auth.bootstrap(first.value.principal, macosDevice(DEVICE_A));
+    const rebootstrap = await auth.bootstrap(first.value.principal, macosDevice(DEVICE_A));
     expect(rebootstrap).toEqual({ ok: false, code: "device_revoked" });
   });
 
@@ -429,8 +432,8 @@ describe("memory auth service", () => {
     if (!exchanged.ok) {
       return;
     }
-    expect(auth.bootstrap(exchanged.value.principal, macosDevice(DEVICE_A)).ok).toBe(true);
-    expect(auth.revokeDevice(exchanged.value.principal, DEVICE_A)).toEqual({ ok: true });
+    expect((await auth.bootstrap(exchanged.value.principal, macosDevice(DEVICE_A))).ok).toBe(true);
+    expect(await auth.revokeDevice(exchanged.value.principal, DEVICE_A)).toEqual({ ok: true });
     expect(await auth.refresh(exchanged.value.tokens.refreshToken)).toEqual({
       ok: false,
       code: "invalid_refresh",
@@ -461,8 +464,8 @@ describe("memory auth service", () => {
     if (!exchanged.ok) {
       return;
     }
-    expect(auth.bootstrap(exchanged.value.principal, macosDevice(DEVICE_A)).ok).toBe(true);
-    expect(auth.revokeDevice(exchanged.value.principal, DEVICE_A)).toEqual({ ok: true });
+    expect((await auth.bootstrap(exchanged.value.principal, macosDevice(DEVICE_A))).ok).toBe(true);
+    expect(await auth.revokeDevice(exchanged.value.principal, DEVICE_A)).toEqual({ ok: true });
     expect(await auth.refresh(exchanged.value.tokens.refreshToken)).toEqual({
       ok: false,
       code: "invalid_refresh",
@@ -480,8 +483,8 @@ describe("memory auth service", () => {
     if (!first.ok) {
       return;
     }
-    expect(auth.bootstrap(first.value.principal, macosDevice(DEVICE_A)).ok).toBe(true);
-    expect(auth.revokeDevice(first.value.principal, DEVICE_A)).toEqual({ ok: true });
+    expect((await auth.bootstrap(first.value.principal, macosDevice(DEVICE_A))).ok).toBe(true);
+    expect(await auth.revokeDevice(first.value.principal, DEVICE_A)).toEqual({ ok: true });
 
     const revokedRequest = new Request("http://localhost/v1/me", {
       headers: {
@@ -504,7 +507,7 @@ describe("memory auth service", () => {
     if (!relogin.ok) {
       return;
     }
-    expect(auth.bootstrap(relogin.value.principal, macosDevice(DEVICE_A)).ok).toBe(true);
+    expect((await auth.bootstrap(relogin.value.principal, macosDevice(DEVICE_A))).ok).toBe(true);
     expect(await auth.refresh(relogin.value.tokens.refreshToken)).toMatchObject({ ok: true });
     expect(await auth.refresh(first.value.tokens.refreshToken)).toEqual({
       ok: false,
@@ -538,12 +541,12 @@ describe("memory auth service", () => {
       return;
     }
 
-    expect(auth.bootstrap(exchanged.value.principal, macosDevice(DEVICE_B)).ok).toBe(true);
-    expect(auth.listDevices(exchanged.value.principal).map((device) => device.id)).toEqual([
+    expect((await auth.bootstrap(exchanged.value.principal, macosDevice(DEVICE_B))).ok).toBe(true);
+    expect((await auth.listDevices(exchanged.value.principal)).map((device) => device.id)).toEqual([
       DEVICE_B,
     ]);
 
-    expect(auth.revokeDevice(exchanged.value.principal, DEVICE_B)).toEqual({ ok: true });
+    expect(await auth.revokeDevice(exchanged.value.principal, DEVICE_B)).toEqual({ ok: true });
     expect(await auth.refresh(exchanged.value.tokens.refreshToken)).toEqual({
       ok: false,
       code: "invalid_refresh",

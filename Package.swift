@@ -38,7 +38,8 @@ let package = Package(
             ],
             path: "Sources/AudioReaderNetworking",
             linkerSettings: [
-                .linkedFramework("Security")
+                .linkedFramework("Security"),
+                .linkedFramework("CryptoKit")
             ]
         ),
         .executableTarget(
@@ -86,7 +87,8 @@ let package = Package(
         .testTarget(
             name: "AudioReaderNetworkingTests",
             dependencies: [
-                "AudioReaderNetworking"
+                "AudioReaderNetworking",
+                "AudioReaderLocalStore"
             ]
         ),
         .testTarget(

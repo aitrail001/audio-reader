@@ -61,7 +61,6 @@ final class AppState {
     var isTranslating = false
     var translationError: String?
     var vocabularyNotice: String?
-    var showSettings = false
     var account: AccountSession
     var credentialMigrationWarning: String?
     var codexLoginStatus = "Codex login status not checked"
@@ -224,6 +223,7 @@ final class AppState {
 
     var selectedLLMModel: String {
         switch llmProvider {
+        case .managedQwen: "qwen3.7-plus"
         case .grok: settings.grokModel
         case .qwenCloud: settings.qwenModel
         case .openAI: settings.openAIModel
@@ -246,6 +246,7 @@ final class AppState {
 
     var selectedLLMEffort: String {
         switch llmProvider {
+        case .managedQwen: ""
         case .grok: settings.grokEffort
         case .qwenCloud: settings.qwenEffort
         case .openAI: settings.openAIEffort
@@ -356,6 +357,8 @@ final class AppState {
 
     func llmConfigurationError(for provider: LLMProvider) -> LLMError? {
         switch provider {
+        case .managedQwen:
+            account.mode.isSignedIn ? nil : .managedAccountRequired
         case .grok:
             grokAuthentication == .grokBuild
                 ? (GrokBuildCredentialProvider.load() == nil ? .grokBuildNotLoggedIn : nil)
@@ -720,6 +723,9 @@ final class AppState {
             persistVocabulary()
         }
         migrateLegacyProviderCredentials()
+        if ProcessInfo.processInfo.environment["AUDIOREADER_OPEN_SETTINGS"] == "1" {
+            tab = .settings
+        }
     }
 
     func boot() async {
@@ -1378,6 +1384,10 @@ final class AppState {
         dictionaryHits.first { $0.name == selectedDictionaryName } ?? dictionaryHits.first
     }
 
+    func presentSettings() {
+        tab = .settings
+    }
+
     func persistSettings() {
         settings.playbackRate = Double(player.rate)
         settings.textSource = textSource.rawValue
@@ -1751,7 +1761,7 @@ final class AppState {
         let provider = llmProvider
         if let configurationError = llmConfigurationError(for: provider) {
             translationError = configurationError.localizedDescription
-            showSettings = true
+            presentSettings()
             return
         }
         if !force,
@@ -1909,7 +1919,7 @@ final class AppState {
         let provider = llmProvider
         if let configurationError = llmConfigurationError(for: provider) {
             chapterAssistantError = configurationError.localizedDescription
-            showSettings = true
+            presentSettings()
             return
         }
         let blocks = ChapterTranslationBatch.blocks(
@@ -2434,7 +2444,7 @@ final class AppState {
         let provider = llmProvider
         if let configurationError = llmConfigurationError(for: provider) {
             chapterAssistantError = configurationError.localizedDescription
-            showSettings = true
+            presentSettings()
             return
         }
         let baseURL = settings.endpoint(for: provider)

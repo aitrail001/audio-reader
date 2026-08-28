@@ -13,10 +13,18 @@ export {
   type SignAccessTokenClaims,
 } from "./jwt";
 export {
+  createHostedAuthService,
+  extractEmailOtp,
+  type HostedAuthFetch,
+  type HostedAuthServiceOptions,
+  type HostedOtpMailer,
+} from "./hosted-auth";
+export {
   AUTH_PROVIDERS,
   createMemoryAuthService,
   normalizeEmail,
   type AuthFailureCode,
+  type AuthIdentityStore,
   type AuthProviderId,
   type AuthResult,
   type AuthService,
@@ -34,6 +42,7 @@ export {
   type ProductProfile,
   type ProductSettings,
   type SessionTokens,
+  type SettingsPutResult,
 } from "./service";
 export {
   DEFAULT_PASSWORDLESS_LIMITS,

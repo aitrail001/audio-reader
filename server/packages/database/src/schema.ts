@@ -25,6 +25,8 @@ export const CORE_TABLES = [
   "admin_roles",
   "audit_events",
   "privacy_requests",
+  "operator_settings",
+  "quota_limits",
 ] as const;
 
 export type CoreTable = (typeof CORE_TABLES)[number];
@@ -73,8 +75,10 @@ export const GLOBAL_TABLES = [
   "canonical_editions",
   "assistant_cache_entries",
   "feature_flags",
+  "quota_limits",
   "model_policies",
   "audit_events",
+  "operator_settings",
 ] as const;
 
 /** Synchronized private rows plus user-filed privacy requests. */
@@ -89,6 +93,7 @@ export const JWT_DENIED_TABLES = [
   "model_policies",
   "admin_roles",
   "audit_events",
+  "operator_settings",
 ] as const;
 
 /** RLS enabled, no authenticated policies. Includes JWT-denied tables. */
@@ -97,6 +102,7 @@ export const SERVER_ONLY_TABLES = [
   "canonical_works",
   "canonical_editions",
   "feature_flags",
+  "quota_limits",
   ...JWT_DENIED_TABLES,
 ] as const;
 

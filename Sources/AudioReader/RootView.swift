@@ -23,6 +23,8 @@ struct RootView: View {
                 PlayerView(state: state)
             case .vocab:
                 VocabularyView(state: state)
+            case .settings:
+                SettingsView(state: state)
             }
         }
         .background(Palette.bg)
@@ -34,8 +36,9 @@ struct RootView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 280)
+                .frame(width: 360)
             }
+            if state.tab != .settings {
             ToolbarItem(placement: .automatic) {
                 Button {
                     state.chooseLibrary()
@@ -71,24 +74,15 @@ struct RootView: View {
                 }
                 .onChange(of: state.settings.appearance) { _, _ in state.persistSettings() }
             }
+            }
             if !state.backgroundJobs.isEmpty {
                 ToolbarItem(placement: .automatic) {
                     BackgroundJobsButton(state: state)
                 }
             }
-            ToolbarItem(placement: .automatic) {
-                Button {
-                    state.showSettings = true
-                } label: {
-                    Label("Settings", systemImage: "gear")
-                }
-            }
         }
         .sheet(item: $state.chapterStudyPresentation) { _ in
             ChapterStudyListView(state: state)
-        }
-        .sheet(isPresented: $state.showSettings) {
-            SettingsView(state: state)
         }
         .alert("Could Not Open Background Job", isPresented: Binding(
             get: { state.backgroundJobNavigationError != nil },

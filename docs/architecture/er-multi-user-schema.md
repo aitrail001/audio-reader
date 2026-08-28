@@ -11,7 +11,7 @@ transaction functions. Tables, policies, and RPCs come from versioned SQL in
 | Private, synchronized | `profiles`, `devices`, `user_settings`, `books`, `book_assets`, `chapters`, `reading_progress`, `transcript_revisions`, `transcript_segments`, `vocabulary_occurrences`, `known_lemmas`, `review_cards`, `review_events`, `user_assistant_results` |
 | Private, user-filed   | `privacy_requests` (authenticated JWT may CRUD own rows)                                                                                                                                                                                           |
 | Private, server-owned | `assistant_jobs`, `usage_ledger`, `sync_changes`, `idempotency_records`, `admin_roles`                                                                                                                                                             |
-| Global / operational  | `canonical_works`, `canonical_editions`, `assistant_cache_entries`, `feature_flags`, `model_policies`, `audit_events`                                                                                                                              |
+| Global / operational  | `canonical_works`, `canonical_editions`, `assistant_cache_entries`, `feature_flags`, `quota_limits`, `model_policies`, `audit_events`, `operator_settings`                                                                                          |
 
 Synchronized private rows carry `id`, `user_id`, `created_at`, `updated_at`,
 `server_version`, `deleted_at`, and `last_mutation_id`. Authorization fields are
@@ -50,7 +50,8 @@ erDiagram
   assistant_jobs ||--o{ user_assistant_results : completes
 ```
 
-Operational tables with no user FK: `feature_flags`, `model_policies`, `audit_events`.
+Operational tables with no user FK: `feature_flags`, `quota_limits`, `model_policies`,
+`audit_events`, `operator_settings`.
 
 ## Row Level Security
 
@@ -61,8 +62,9 @@ Authenticated JWTs are scoped with `auth.uid()` and `public.current_user_is_acti
 - Synchronized private tables and `privacy_requests`: select/insert/update/delete own rows
 - `assistant_jobs`, `usage_ledger`, and `sync_changes`: select own rows only
 - `assistant_cache_entries`, `model_policies`, `admin_roles`, `audit_events`,
-  `idempotency_records`, `feature_flags`, `canonical_works`, and
-  `canonical_editions`: no JWT policies (normal clients cannot query them)
+  `operator_settings`, `idempotency_records`, `feature_flags`, `quota_limits`,
+  `canonical_works`, and `canonical_editions`: no JWT policies (normal clients cannot
+  query them)
 
 Suspended profiles (`account_status` other than `active`, or `deleted_at` set)
 cannot read or write rows. Users cannot insert `admin_roles` or write

@@ -4,6 +4,8 @@ export type JwtSigningConfig = {
   secret: string;
   accessTokenTtlSeconds?: number;
   clockSkewSeconds?: number;
+  jwksUrl?: string;
+  fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 };
 
 export type JwtClaims = {
@@ -123,7 +125,7 @@ export async function validateAccessToken(
     return { ok: false, code: "invalid_token" };
   }
   const header = decodeJson(parts[0]);
-  if (!isRecord(header) || header.alg !== "HS256") {
+  if (!isRecord(header) || (header.alg !== "HS256" && header.alg !== "ES256")) {
     return { ok: false, code: "invalid_token" };
   }
   const signingInput = `${parts[0]}.${parts[1]}`;
@@ -131,7 +133,7 @@ export async function validateAccessToken(
   if (signature === undefined) {
     return { ok: false, code: "invalid_signature" };
   }
-  const valid = await hmacVerify(config.secret, signingInput, signature);
+  const valid = await verifyJwtSignature(header, signingInput, signature, config);
   if (!valid) {
     return { ok: false, code: "invalid_signature" };
   }
@@ -245,4 +247,108 @@ async function hmacVerify(
 ): Promise<boolean> {
   const key = await hmacKey(secret, "verify");
   return crypto.subtle.verify("HMAC", key, signature, encoder.encode(signingInput));
+}
+
+async function verifyJwtSignature(
+  header: Record<string, unknown>,
+  signingInput: string,
+  signature: Uint8Array,
+  config: JwtSigningConfig,
+): Promise<boolean> {
+  if (header.alg === "HS256") {
+    return hmacVerify(config.secret, signingInput, signature);
+  }
+  if (header.alg === "ES256" && config.jwksUrl !== undefined && config.jwksUrl !== "") {
+    return verifyEs256(
+      signingInput,
+      signature,
+      config,
+      typeof header.kid === "string" ? header.kid : undefined,
+    );
+  }
+  return false;
+}
+
+type JwtJwk = JsonWebKey & {
+  kid?: string;
+  use?: string;
+  alg?: string;
+};
+
+const jwksCache = new Map<string, { fetchedAt: number; keys: readonly JwtJwk[] }>();
+const JWKS_TTL_MS = 60 * 60 * 1000;
+
+async function verifyEs256(
+  signingInput: string,
+  signature: Uint8Array,
+  config: JwtSigningConfig,
+  kid: string | undefined,
+): Promise<boolean> {
+  const jwksUrl = config.jwksUrl;
+  if (jwksUrl === undefined || jwksUrl === "") {
+    return false;
+  }
+  const keys = await loadJwks(jwksUrl, config.fetch ?? globalThis.fetch);
+  const candidates = keys.filter((key) => {
+    if (key.kty !== "EC" || key.crv !== "P-256") {
+      return false;
+    }
+    if (kid !== undefined && typeof key.kid === "string" && key.kid !== kid) {
+      return false;
+    }
+    return true;
+  });
+  const data = encoder.encode(signingInput);
+  for (const jwk of candidates) {
+    try {
+      const cryptoKey = await crypto.subtle.importKey(
+        "jwk",
+        jwk,
+        { name: "ECDSA", namedCurve: "P-256" },
+        false,
+        ["verify"],
+      );
+      const ok = await crypto.subtle.verify(
+        { name: "ECDSA", hash: "SHA-256" },
+        cryptoKey,
+        signature,
+        data,
+      );
+      if (ok) {
+        return true;
+      }
+    } catch {
+      // Try the next JWK.
+    }
+  }
+  return false;
+}
+
+async function loadJwks(
+  url: string,
+  fetchImpl: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): Promise<readonly JwtJwk[]> {
+  const cached = jwksCache.get(url);
+  const now = Date.now();
+  if (cached !== undefined && now - cached.fetchedAt < JWKS_TTL_MS) {
+    return cached.keys;
+  }
+  const response = await fetchImpl(url);
+  if (!response.ok) {
+    if (cached !== undefined) {
+      return cached.keys;
+    }
+    return [];
+  }
+  const body: unknown = await response.json();
+  const keys = parseJwks(body);
+  jwksCache.set(url, { fetchedAt: now, keys });
+  return keys;
+}
+
+function parseJwks(body: unknown): JwtJwk[] {
+  if (!isRecord(body) || !Array.isArray(body.keys)) {
+    return [];
+  }
+  return body.keys.filter((key): key is JwtJwk => isRecord(key) && typeof key.kty === "string");
 }

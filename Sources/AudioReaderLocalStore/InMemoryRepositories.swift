@@ -236,3 +236,24 @@ public final class InMemorySyncOutboxRepository: SyncOutboxRepository, @unchecke
         items[index].status = .acknowledged
     }
 }
+
+public final class InMemorySyncCursorStore: SyncCursorStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var cursor: String
+
+    public init(cursor: String = "0") {
+        self.cursor = cursor
+    }
+
+    public func loadCursor() throws -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return cursor
+    }
+
+    public func saveCursor(_ cursor: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        self.cursor = cursor
+    }
+}

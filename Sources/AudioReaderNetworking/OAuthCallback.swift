@@ -10,7 +10,10 @@ public enum OAuthCallbackValidator: Sendable {
         if let error = value("error", in: items), !error.isEmpty {
             throw OAuthCallbackError.provider(error)
         }
-        guard let state = value("state", in: items), state == pending.state else {
+        // Hosted GoTrue PKCE returns `?code=` only. Extra `state` on redirect_to
+        // is not allow-listed and falls back to Site URL. Require a match only
+        // when the callback includes state (local-complete still sends it).
+        if let state = value("state", in: items), state != pending.state {
             throw OAuthCallbackError.stateMismatch
         }
         guard let code = value("code", in: items), !code.isEmpty else {

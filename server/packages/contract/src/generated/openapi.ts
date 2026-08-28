@@ -699,6 +699,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/users/{userId}/grant-admin": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Grant the operator role so the user's JWT is treated as admin */
+        post: operations["adminGrantUserAdmin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/llm/policies": {
         parameters: {
             query?: never;
@@ -869,6 +886,160 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/runtime-config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get operator-managed runtime configuration */
+        get: operations["adminGetRuntimeConfig"];
+        /** Update Qwen, GCS, and Turnstile configuration without a Worker redeploy */
+        put: operations["adminPutRuntimeConfig"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Operator diagnostics for Qwen, flags, quotas, and policies */
+        get: operations["adminGetDiagnostics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recent operator-visible events for Qwen, config, and probes */
+        get: operations["adminListOperatorEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/feature-flags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List product feature flags and kill switches */
+        get: operations["adminListFeatureFlags"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/feature-flags/{flagKey}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Enable, disable, or retarget a feature flag */
+        patch: operations["adminPatchFeatureFlag"];
+        trace?: never;
+    };
+    "/v1/admin/quotas": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List starter product quotas */
+        get: operations["adminListQuotas"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/quotas/{quotaKey}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Change a product quota limit */
+        patch: operations["adminPatchQuota"];
+        trace?: never;
+    };
+    "/v1/admin/privacy-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List account export and deletion requests */
+        get: operations["adminListPrivacyRequests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/privacy-requests/{requestId}/actions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Complete or cancel a privacy request */
+        post: operations["adminActOnPrivacyRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -932,6 +1103,7 @@ export interface components {
         };
         AuthConfig: {
             providers: components["schemas"]["AuthProvider"][];
+            turnstileSiteKey?: string;
         };
         AuthProvider: {
             /** @enum {string} */
@@ -998,6 +1170,7 @@ export interface components {
             createdAt: string;
             /** Format: date-time */
             lastSeenAt: string;
+            quotas?: components["schemas"]["Quota"][];
             revoked: boolean;
             revokedAt?: string | null;
         };
@@ -1005,6 +1178,17 @@ export interface components {
             key: string;
             enabled: boolean;
             variant?: string | null;
+            rolloutPercent?: number;
+            minAppVersion?: string | null;
+            platforms?: ("macos" | "ios" | "ipados")[];
+        };
+        FeatureFlagPatch: {
+            reason: string;
+            enabled?: boolean;
+            variant?: string | null;
+            rolloutPercent?: number;
+            minAppVersion?: string | null;
+            platforms?: string[];
         };
         Quota: {
             key: string;
@@ -1012,6 +1196,32 @@ export interface components {
             limit: number;
             /** Format: date-time */
             periodEndsAt: string;
+        };
+        QuotaPatch: {
+            reason: string;
+            limit: number;
+        };
+        PrivacyRequest: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            accountId: string;
+            /** @enum {string} */
+            kind: "export" | "deletion";
+            /** @enum {string} */
+            status: "queued" | "running" | "ready" | "failed" | "expired" | "cancelled";
+            format?: string | null;
+            assetId?: string | null;
+            error?: string | null;
+            reason?: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            completedAt?: string | null;
+        };
+        PrivacyRequestAction: {
+            /** @enum {string} */
+            action: "complete" | "cancel";
+            reason: string;
         };
         BootstrapResponse: {
             profile: components["schemas"]["Profile"];
@@ -1548,6 +1758,7 @@ export interface components {
             /** Format: date-time */
             createdAt: string;
             lastSeenAt: string | null;
+            quotas?: components["schemas"]["Quota"][];
         };
         AdminAction: {
             reason: string;
@@ -1560,6 +1771,7 @@ export interface components {
             region: string;
             model: string;
             promptVersion: string;
+            systemPrompt: string;
             schemaVersion: string;
             policyVersion: string;
             enabled: boolean;
@@ -1578,10 +1790,99 @@ export interface components {
             canaryPercent?: number;
             model?: string;
             promptVersion?: string;
+            systemPrompt?: string;
             schemaVersion?: string;
             maxInputTokens?: number;
             maxOutputTokens?: number;
             timeoutMs?: number;
+        };
+        RuntimeConfig: {
+            qwen: {
+                apiKeyConfigured: boolean;
+                apiKeyLast4?: string;
+                baseUrl: string;
+                model: string;
+                /** @enum {string} */
+                source: "env" | "admin" | "none";
+                ciphertextPresent?: boolean;
+                secretsDecryptable?: boolean;
+                wrappingSecretConfigured?: boolean;
+                /** @enum {string} */
+                wrappingSecretSource?: "operator_config_key" | "cache_hmac" | "none";
+            };
+            storage: {
+                /** @enum {string} */
+                provider: "gcs" | "supabase" | "none";
+                bucket?: string;
+                serviceAccountConfigured: boolean;
+                clientEmail?: string;
+                /** @enum {string} */
+                source: "env" | "admin" | "none";
+            };
+            turnstile: {
+                configured: boolean;
+                /** @enum {string} */
+                source: "env" | "admin" | "none";
+            };
+            bootstrap: {
+                supabaseUrlConfigured: boolean;
+                supabaseAnonKeyConfigured: boolean;
+                supabaseServiceRoleConfigured: boolean;
+                cacheHmacConfigured: boolean;
+                operatorConfigKeyConfigured: boolean;
+                adminBootstrapEmailConfigured: boolean;
+                resendConfigured?: boolean;
+                otpFromConfigured?: boolean;
+                qwenEnvKeyConfigured?: boolean;
+            };
+            /** Format: date-time */
+            updatedAt?: string;
+        };
+        OperatorEvent: {
+            id: string;
+            /** Format: date-time */
+            at: string;
+            kind: string;
+            requestId: string;
+            task?: string;
+            status?: string;
+            summary: string;
+            detail?: string;
+            metadata?: {
+                [key: string]: unknown;
+            };
+        };
+        OperatorDiagnostics: {
+            recentEvents?: components["schemas"]["OperatorEvent"][];
+            runtime: components["schemas"]["RuntimeConfig"];
+            flags: components["schemas"]["FeatureFlag"][];
+            quotas: components["schemas"]["Quota"][];
+            policies: components["schemas"]["LlmPolicy"][];
+            qwenProbe: string;
+            notes: string[];
+            qwenComplete?: components["schemas"]["QwenCompleteProbe"];
+        };
+        QwenCompleteProbe: {
+            /** @enum {string} */
+            status: "ok" | "rejected" | "unavailable" | "skipped" | "no_key" | "policy_disabled";
+            httpStatus?: number;
+            model?: string;
+            detail?: string;
+        };
+        RuntimeConfigPut: {
+            reason: string;
+            qwen?: {
+                apiKey?: string | null;
+                baseUrl?: string;
+                model?: string;
+            };
+            storage?: {
+                bucket?: string;
+                serviceAccountJson?: string | null;
+            };
+            turnstile?: {
+                secretKey?: string | null;
+            };
         };
         CacheEntry: {
             /** Format: uuid */
@@ -1667,6 +1968,10 @@ export interface components {
         };
         CursorPageAudit: {
             items: components["schemas"]["AuditEvent"][];
+            nextCursor: string | null;
+        };
+        CursorPagePrivacyRequests: {
+            items: components["schemas"]["PrivacyRequest"][];
             nextCursor: string | null;
         };
     };
@@ -3431,6 +3736,45 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    adminGrantUserAdmin: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminAction"];
+            };
+        };
+        responses: {
+            /** @description User with operator role */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUser"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     adminListLlmPolicies: {
         parameters: {
             query?: never;
@@ -3748,6 +4092,9 @@ export interface operations {
                 cursor?: string;
                 limit?: number;
                 actorId?: string;
+                action?: string;
+                requestId?: string;
+                resourceType?: string;
             };
             header?: never;
             path?: never;
@@ -3762,6 +4109,339 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CursorPageAudit"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminGetRuntimeConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Runtime configuration with secrets masked */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeConfig"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminPutRuntimeConfig: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RuntimeConfigPut"];
+            };
+        };
+        responses: {
+            /** @description Updated runtime configuration with secrets masked */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeConfig"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminGetDiagnostics: {
+        parameters: {
+            query?: {
+                /** @description models pings /models; complete also runs a tiny chat completion */
+                probe?: "models" | "complete";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Diagnostic snapshot without secrets */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperatorDiagnostics"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminListOperatorEvents: {
+        parameters: {
+            query?: {
+                requestId?: string;
+                kind?: string;
+                task?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Recent events without secrets */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperatorEvent"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminListFeatureFlags: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Feature flags */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeatureFlag"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminPatchFeatureFlag: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                flagKey: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FeatureFlagPatch"];
+            };
+        };
+        responses: {
+            /** @description Updated feature flag */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeatureFlag"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminListQuotas: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Quotas */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Quota"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminPatchQuota: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                quotaKey: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["QuotaPatch"];
+            };
+        };
+        responses: {
+            /** @description Updated quota */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Quota"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminListPrivacyRequests: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+                status?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Privacy request page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CursorPagePrivacyRequests"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminActOnPrivacyRequest: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                requestId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PrivacyRequestAction"];
+            };
+        };
+        responses: {
+            /** @description Updated privacy request */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrivacyRequest"];
                 };
             };
             400: components["responses"]["BadRequest"];

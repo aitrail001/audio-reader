@@ -50,5 +50,7 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>ProductAPIBaseURL</key>
+	<string>https://audio-reader-api-worker-production.audio-reader-service.workers.dev</string>
 </dict>
 </plist>

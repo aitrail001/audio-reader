@@ -5,8 +5,10 @@ import {
   type PasswordlessLimiter,
   type Principal,
   type ProductProfile,
+  type ProductSettings,
 } from "@audio-reader/auth";
 import type { components } from "@audio-reader/contract";
+import type { OpsStore } from "@audio-reader/database";
 import { readJsonObject } from "./body";
 import { asHead, jsonResponse, problemResponse } from "./http";
 import { withIdempotency, type IdempotencyStore } from "./idempotency";
@@ -17,11 +19,11 @@ type BootstrapResponse = components["schemas"]["BootstrapResponse"];
 type AuthConfig = components["schemas"]["AuthConfig"];
 type AuthOAuthAuthorizeResponse = components["schemas"]["AuthOAuthAuthorizeResponse"];
 
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const OTP_PATTERN = /^[0-9]{6}$/;
+const OTP_PATTERN = /^[0-9]{6,12}$/;
 const PKCE_PATTERN = /^[A-Za-z0-9\-._~]{43,128}$/;
-const STATE_PATTERN = /^[\w.:-]{8,256}$/;
+const STATE_PATTERN = /^[A-Za-z0-9\-._~:.]{8,256}$/;
 
 const AUTH_METHODS: Record<string, readonly string[]> = {
   "/v1/auth/config": ["GET", "HEAD"],
@@ -33,7 +35,8 @@ const AUTH_METHODS: Record<string, readonly string[]> = {
   "/v1/auth/token/refresh": ["POST"],
   "/v1/auth/logout": ["POST"],
   "/v1/auth/bootstrap": ["POST"],
-  "/v1/me": ["GET", "HEAD"],
+  "/v1/me": ["GET", "HEAD", "PATCH"],
+  "/v1/me/settings": ["GET", "HEAD", "PUT"],
   "/v1/me/devices": ["GET", "HEAD"],
   "/v1/me/devices/{deviceId}": ["DELETE"],
   "/v1/admin/auth/blocked-attempts": ["GET", "HEAD"],
@@ -65,6 +68,9 @@ export type AuthRouteContext = {
   authenticate: (request: Request) => Promise<Principal | null>;
   idempotencyStore: IdempotencyStore;
   passwordlessLimiter?: PasswordlessLimiter;
+  localOAuthComplete: boolean;
+  turnstileSiteKey?: string;
+  ops?: OpsStore;
 };
 
 export function isAuthPath(path: string): boolean {
@@ -104,7 +110,7 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<Respon
 
   switch (resolved.route) {
     case "/v1/auth/config":
-      return asHead(context.request, jsonResponse(authConfig()));
+      return asHead(context.request, jsonResponse(authConfig(context.turnstileSiteKey)));
     case "/v1/auth/email-otp/request":
       return requestEmailOtp(context);
     case "/v1/auth/email-otp/verify":
@@ -122,7 +128,9 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<Respon
     case "/v1/auth/bootstrap":
       return bootstrapSession(context);
     case "/v1/me":
-      return getProfile(context);
+      return method === "PATCH" ? patchProfile(context) : getProfile(context);
+    case "/v1/me/settings":
+      return method === "PUT" ? putUserSettings(context) : getUserSettings(context);
     case "/v1/me/devices":
       return listDevices(context);
     case "/v1/me/devices/{deviceId}":
@@ -134,8 +142,12 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<Respon
   }
 }
 
-function authConfig(): AuthConfig {
-  return { providers: [...AUTH_PROVIDERS] };
+function authConfig(turnstileSiteKey?: string): AuthConfig {
+  const key = turnstileSiteKey?.trim() ?? "";
+  return {
+    providers: [...AUTH_PROVIDERS],
+    ...(key === "" ? {} : { turnstileSiteKey: key }),
+  };
 }
 
 async function requestEmailOtp(context: AuthRouteContext): Promise<Response> {
@@ -190,7 +202,7 @@ async function verifyEmailOtp(context: AuthRouteContext): Promise<Response> {
     return fieldError(context.requestId, "email", "email must be a valid email address.");
   }
   if (!OTP_PATTERN.test(code)) {
-    return fieldError(context.requestId, "code", "code must be a 6-digit one-time password.");
+    return fieldError(context.requestId, "code", "code must be a 6 to 12 digit one-time password.");
   }
   if (!UUID_PATTERN.test(deviceId)) {
     return fieldError(context.requestId, "deviceId", "deviceId must be a UUID.");
@@ -251,7 +263,8 @@ async function authorizeOAuth(context: AuthRouteContext): Promise<Response> {
   if (state instanceof Response) {
     return state;
   }
-  if (!PKCE_PATTERN.test(codeChallenge)) {
+  const normalizedChallenge = normalizePkce(codeChallenge);
+  if (!PKCE_PATTERN.test(normalizedChallenge)) {
     return fieldError(
       context.requestId,
       "codeChallenge",
@@ -271,7 +284,7 @@ async function authorizeOAuth(context: AuthRouteContext): Promise<Response> {
   const result = await auth.authorizeOAuth({
     provider,
     redirectUri,
-    codeChallenge,
+    codeChallenge: normalizedChallenge,
     state,
   });
   if (!result.ok) {
@@ -281,7 +294,9 @@ async function authorizeOAuth(context: AuthRouteContext): Promise<Response> {
     return unauthorized(context.requestId, "The OAuth request is invalid.");
   }
   const payload: AuthOAuthAuthorizeResponse = {
-    authorizationUrl: localCompleteAuthorizationUrl(context.request, result.value.authorizationUrl),
+    authorizationUrl: context.localOAuthComplete
+      ? localCompleteAuthorizationUrl(context.request, result.value.authorizationUrl)
+      : result.value.authorizationUrl,
     state: result.value.state,
   };
   return jsonResponse(payload);
@@ -300,7 +315,7 @@ function localCompleteAuthorizationUrl(request: Request, issued: string): string
 }
 
 function completeLocalOAuth(context: AuthRouteContext): Response {
-  if (context.auth === undefined || !context.auth.canIssueSessions()) {
+  if (!context.localOAuthComplete) {
     return new Response(null, { status: 404 });
   }
   const url = new URL(context.request.url);
@@ -363,7 +378,8 @@ async function exchangeOAuth(context: AuthRouteContext): Promise<Response> {
   if (redirectUri instanceof Response) {
     return redirectUri;
   }
-  if (!PKCE_PATTERN.test(codeVerifier)) {
+  const normalizedVerifier = normalizePkce(codeVerifier);
+  if (!PKCE_PATTERN.test(normalizedVerifier)) {
     return fieldError(context.requestId, "codeVerifier", "codeVerifier must be a PKCE verifier.");
   }
   const state = optionalString(body.value.state);
@@ -374,7 +390,7 @@ async function exchangeOAuth(context: AuthRouteContext): Promise<Response> {
   const result = await auth.exchangeOAuth({
     provider,
     code,
-    codeVerifier,
+    codeVerifier: normalizedVerifier,
     redirectUri,
     deviceId,
     ...(state === undefined ? {} : { state }),
@@ -457,7 +473,24 @@ async function bootstrapSession(context: AuthRouteContext): Promise<Response> {
       const buildNumber = optionalString(body.value.buildNumber);
       const locale = optionalString(body.value.locale);
       const timeZone = optionalString(body.value.timeZone);
-      const bootstrapped = auth.bootstrap(principal, {
+      const listed = await auth.listDevices(principal);
+      const active = listed.filter((device) => !device.revoked);
+      const alreadyRegistered = active.some((device) => device.id === deviceId);
+      if (!alreadyRegistered && context.ops !== undefined) {
+        const quotas = await context.ops.quotasFor(principal.accountId);
+        const devicesQuota = quotas.find((item) => item.key === "devices");
+        const limit = devicesQuota?.limit ?? 2;
+        if (active.length >= limit) {
+          return problemResponse({
+            status: 409,
+            code: "device_limit",
+            title: "Conflict",
+            detail: `This account can have at most ${String(limit)} signed-in devices. Revoke another device and try again.`,
+            traceId: context.requestId,
+          });
+        }
+      }
+      const bootstrapped = await auth.bootstrap(principal, {
         deviceId,
         platform,
         appVersion,
@@ -472,12 +505,30 @@ async function bootstrapSession(context: AuthRouteContext): Promise<Response> {
         }
         return unauthorized(context.requestId, "Authentication required.");
       }
+      const flags =
+        context.ops === undefined
+          ? [...bootstrapped.value.featureFlags]
+          : (await context.ops.listFlags()).map((flag) => ({
+              key: flag.key,
+              enabled: flag.enabled,
+              variant: flag.variant,
+              rolloutPercent: flag.rolloutPercent,
+              minAppVersion: flag.minAppVersion,
+              platforms: flag.platforms.filter(
+                (item): item is "macos" | "ios" | "ipados" =>
+                  item === "macos" || item === "ios" || item === "ipados",
+              ),
+            }));
+      const quotas =
+        context.ops === undefined
+          ? [...bootstrapped.value.quotas]
+          : await context.ops.quotasFor(principal.accountId);
       const payload: BootstrapResponse = {
         profile: toProfile(bootstrapped.value.profile),
         device: bootstrapped.value.device,
         settings: bootstrapped.value.settings,
-        featureFlags: [...bootstrapped.value.featureFlags],
-        quotas: [...bootstrapped.value.quotas],
+        featureFlags: flags,
+        quotas,
         syncCursor: bootstrapped.value.syncCursor,
       };
       return jsonResponse(payload);
@@ -492,9 +543,107 @@ async function getProfile(context: AuthRouteContext): Promise<Response> {
   if (principal instanceof Response) {
     return principal;
   }
-  const stored = context.auth?.getProfile(principal);
+  const stored = await context.auth?.getProfile(principal);
   const profile = stored ?? profileFromPrincipal(principal);
   return asHead(context.request, jsonResponse(toProfile(profile)));
+}
+
+async function patchProfile(context: AuthRouteContext): Promise<Response> {
+  const principal = await requirePrincipal(context);
+  if (principal instanceof Response) {
+    return principal;
+  }
+  const auth = requireAuthService(context);
+  if (auth instanceof Response) {
+    return auth;
+  }
+  const deviceIdHeader = requireDeviceIdHeader(context.request, context.requestId);
+  if (deviceIdHeader instanceof Response) {
+    return deviceIdHeader;
+  }
+  return withIdempotency(
+    context.idempotencyStore,
+    context.request,
+    async () => {
+      const body = await readJsonObject(context.request, context.requestId);
+      if (!body.ok) {
+        return body.response;
+      }
+      const displayName = optionalNullableString(body.value.displayName);
+      const avatarUrl = optionalNullableString(body.value.avatarUrl);
+      const patched = await auth.patchProfile(principal, {
+        ...(displayName === undefined ? {} : { displayName }),
+        ...(avatarUrl === undefined ? {} : { avatarUrl }),
+      });
+      if (patched === undefined) {
+        return notFound(context.requestId, "Profile not found.");
+      }
+      return jsonResponse(toProfile(patched));
+    },
+    context.requestId,
+    principal,
+  );
+}
+
+async function getUserSettings(context: AuthRouteContext): Promise<Response> {
+  const principal = await requirePrincipal(context);
+  if (principal instanceof Response) {
+    return principal;
+  }
+  const auth = requireAuthService(context);
+  if (auth instanceof Response) {
+    return auth;
+  }
+  const settings = await auth.getSettings(principal);
+  if (settings === undefined) {
+    return notFound(context.requestId, "Settings not found.");
+  }
+  return asHead(context.request, jsonResponse(toUserSettings(settings)));
+}
+
+async function putUserSettings(context: AuthRouteContext): Promise<Response> {
+  const principal = await requirePrincipal(context);
+  if (principal instanceof Response) {
+    return principal;
+  }
+  const auth = requireAuthService(context);
+  if (auth instanceof Response) {
+    return auth;
+  }
+  const deviceIdHeader = requireDeviceIdHeader(context.request, context.requestId);
+  if (deviceIdHeader instanceof Response) {
+    return deviceIdHeader;
+  }
+  return withIdempotency(
+    context.idempotencyStore,
+    context.request,
+    async () => {
+      const body = await readJsonObject(context.request, context.requestId);
+      if (!body.ok) {
+        return body.response;
+      }
+      const parsed = parseUserSettings(body.value, context.requestId);
+      if (parsed instanceof Response) {
+        return parsed;
+      }
+      const result = await auth.putSettings(principal, parsed);
+      if (!result.ok) {
+        if (result.code === "conflict") {
+          return problemResponse({
+            status: 409,
+            code: "conflict",
+            title: "Conflict",
+            detail: "Settings were updated on another device. Reload and retry.",
+            traceId: context.requestId,
+          });
+        }
+        return notFound(context.requestId, "Settings not found.");
+      }
+      return jsonResponse(toUserSettings(result.value));
+    },
+    context.requestId,
+    principal,
+  );
 }
 
 async function listDevices(context: AuthRouteContext): Promise<Response> {
@@ -506,7 +655,7 @@ async function listDevices(context: AuthRouteContext): Promise<Response> {
   if (auth instanceof Response) {
     return auth;
   }
-  return asHead(context.request, jsonResponse(auth.listDevices(principal)));
+  return asHead(context.request, jsonResponse(await auth.listDevices(principal)));
 }
 
 async function revokeDevice(context: AuthRouteContext, deviceId: string): Promise<Response> {
@@ -528,12 +677,12 @@ async function revokeDevice(context: AuthRouteContext, deviceId: string): Promis
   return withIdempotency(
     context.idempotencyStore,
     context.request,
-    () => {
-      const result = auth.revokeDevice(principal, deviceId);
+    async () => {
+      const result = await auth.revokeDevice(principal, deviceId);
       if (!result.ok) {
-        return Promise.resolve(notFound(context.requestId, "Device not found."));
+        return notFound(context.requestId, "Device not found.");
       }
-      return Promise.resolve(new Response(null, { status: 204 }));
+      return new Response(null, { status: 204 });
     },
     context.requestId,
     principal,
@@ -685,13 +834,6 @@ async function readRefreshToken(context: AuthRouteContext): Promise<string | Res
   if (refreshToken instanceof Response) {
     return refreshToken;
   }
-  if (refreshToken.length < 16) {
-    return fieldError(
-      context.requestId,
-      "refreshToken",
-      "refreshToken must be at least 16 characters.",
-    );
-  }
   return refreshToken;
 }
 
@@ -719,6 +861,66 @@ function toProfile(profile: ProductProfile): Profile {
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
     deletionPendingAt: profile.deletionPendingAt,
+  };
+}
+
+function toUserSettings(settings: ProductSettings) {
+  return {
+    revision: settings.revision,
+    sourceLanguage: settings.sourceLanguage,
+    targetLanguage: settings.targetLanguage,
+    readerLevel: settings.readerLevel,
+    playbackRate: settings.playbackRate,
+    skipSeconds: settings.skipSeconds,
+    appearance: settings.appearance,
+    updatedAt: settings.updatedAt,
+  };
+}
+
+function parseUserSettings(
+  body: Record<string, unknown>,
+  requestId: string,
+): ProductSettings | Response {
+  const sourceLanguage = requiredString(body.sourceLanguage, "sourceLanguage", requestId);
+  if (sourceLanguage instanceof Response) {
+    return sourceLanguage;
+  }
+  const targetLanguage = requiredString(body.targetLanguage, "targetLanguage", requestId);
+  if (targetLanguage instanceof Response) {
+    return targetLanguage;
+  }
+  const readerLevel = body.readerLevel;
+  if (
+    readerLevel !== "beginner" &&
+    readerLevel !== "elementary" &&
+    readerLevel !== "intermediate" &&
+    readerLevel !== "upper_intermediate" &&
+    readerLevel !== "advanced"
+  ) {
+    return fieldError(requestId, "readerLevel", "readerLevel is invalid.");
+  }
+  const appearance = body.appearance;
+  if (appearance !== "system" && appearance !== "light" && appearance !== "dark") {
+    return fieldError(requestId, "appearance", "appearance is invalid.");
+  }
+  if (typeof body.revision !== "number" || !Number.isInteger(body.revision) || body.revision < 0) {
+    return fieldError(requestId, "revision", "revision must be a non-negative integer.");
+  }
+  if (typeof body.playbackRate !== "number" || body.playbackRate < 0.5 || body.playbackRate > 3) {
+    return fieldError(requestId, "playbackRate", "playbackRate must be between 0.5 and 3.");
+  }
+  if (typeof body.skipSeconds !== "number" || body.skipSeconds < 1 || body.skipSeconds > 60) {
+    return fieldError(requestId, "skipSeconds", "skipSeconds must be between 1 and 60.");
+  }
+  return {
+    revision: body.revision,
+    sourceLanguage,
+    targetLanguage,
+    readerLevel,
+    playbackRate: body.playbackRate,
+    skipSeconds: body.skipSeconds,
+    appearance,
+    updatedAt: typeof body.updatedAt === "string" ? body.updatedAt : new Date().toISOString(),
   };
 }
 
@@ -754,8 +956,15 @@ function requiredUri(value: unknown, field: string, requestId: string): string |
       return text;
     }
     // Native ASWebAuthenticationSession cannot watch http(s).
-    if (parsed.protocol === "audioreader:" && parsed.host === "auth") {
-      return text;
+    if (parsed.protocol === "audioreader:") {
+      const href = parsed.href;
+      if (
+        parsed.host === "auth" ||
+        href.startsWith("audioreader://auth/callback") ||
+        href.startsWith("audioreader:auth/callback")
+      ) {
+        return text;
+      }
     }
   } catch {
     // Invalid URI text falls through to the field error.
@@ -803,12 +1012,16 @@ function optionalNullableString(value: unknown): string | null | undefined {
   return optionalString(value);
 }
 
+function normalizePkce(value: string): string {
+  return value.replace(/=+$/g, "");
+}
+
 function fieldError(requestId: string, field: string, message: string): Response {
   return problemResponse({
     status: 400,
     code: "bad_request",
     title: "Bad request",
-    detail: "The request body is invalid.",
+    detail: message,
     traceId: requestId,
     fieldErrors: [{ field, message }],
   });

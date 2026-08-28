@@ -1,0 +1,634 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-28T22:00:00Z",
+  "title": "Design System: AudioReader",
+  "extensions": {
+    "colorMeta": {
+      "terracotta": {
+        "role": "primary",
+        "displayName": "Fired Terracotta",
+        "canonical": "#B8521F",
+        "dark": "#C45C26",
+        "source": "Palette.terracotta light (0.72, 0.32, 0.12) / dark (0.769, 0.361, 0.149)",
+        "tonalRamp": [
+          "oklch(22% 0.09 45)",
+          "oklch(32% 0.11 45)",
+          "oklch(42% 0.13 45)",
+          "oklch(52% 0.14 45)",
+          "oklch(58% 0.15 45)",
+          "oklch(68% 0.13 45)",
+          "oklch(80% 0.08 45)",
+          "oklch(93% 0.03 45)"
+        ]
+      },
+      "terracotta-ink": {
+        "role": "primary",
+        "displayName": "Terracotta Ink",
+        "canonical": "#7A3413",
+        "dark": "#E8B86D",
+        "source": "admin-web --terracotta-ink; selected rail and links",
+        "tonalRamp": [
+          "oklch(18% 0.08 45)",
+          "oklch(28% 0.10 45)",
+          "oklch(36% 0.12 45)",
+          "oklch(42% 0.13 45)",
+          "oklch(52% 0.12 50)",
+          "oklch(64% 0.10 55)",
+          "oklch(78% 0.07 60)",
+          "oklch(92% 0.03 65)"
+        ]
+      },
+      "terracotta-wash": {
+        "role": "primary",
+        "displayName": "Terracotta Wash",
+        "canonical": "rgba(184, 82, 31, 0.16)",
+        "dark": "rgba(196, 92, 38, 0.22)",
+        "source": "iPad sidebar 16% terracotta; admin-web --terracotta-wash",
+        "tonalRamp": [
+          "oklch(22% 0.09 45 / 0.16)",
+          "oklch(32% 0.11 45 / 0.16)",
+          "oklch(42% 0.13 45 / 0.16)",
+          "oklch(52% 0.14 45 / 0.16)",
+          "oklch(58% 0.15 45 / 0.16)",
+          "oklch(68% 0.13 45 / 0.16)",
+          "oklch(80% 0.08 45 / 0.16)",
+          "oklch(93% 0.03 45 / 0.16)"
+        ]
+      },
+      "gold": {
+        "role": "secondary",
+        "displayName": "Lamp Gold",
+        "canonical": "#B7802E",
+        "dark": "#E8B86D",
+        "source": "Palette.gold light (0.72, 0.50, 0.18) / dark (0.910, 0.722, 0.427)",
+        "tonalRamp": [
+          "oklch(24% 0.08 75)",
+          "oklch(35% 0.10 75)",
+          "oklch(46% 0.12 75)",
+          "oklch(56% 0.13 75)",
+          "oklch(64% 0.13 75)",
+          "oklch(74% 0.11 75)",
+          "oklch(84% 0.07 75)",
+          "oklch(94% 0.03 75)"
+        ]
+      },
+      "gold-soft": {
+        "role": "secondary",
+        "displayName": "Lamp Gold Wash",
+        "canonical": "rgba(232, 184, 110, 0.22)",
+        "dark": "rgba(232, 184, 110, 0.18)",
+        "source": "Palette.goldSoft",
+        "tonalRamp": [
+          "oklch(24% 0.08 75 / 0.22)",
+          "oklch(35% 0.10 75 / 0.22)",
+          "oklch(46% 0.12 75 / 0.22)",
+          "oklch(56% 0.13 75 / 0.22)",
+          "oklch(64% 0.13 75 / 0.22)",
+          "oklch(74% 0.11 75 / 0.22)",
+          "oklch(84% 0.07 75 / 0.22)",
+          "oklch(94% 0.03 75 / 0.22)"
+        ]
+      },
+      "ink-on-gold": {
+        "role": "secondary",
+        "displayName": "Ink on Gold",
+        "canonical": "#241A0F",
+        "dark": "#14110E",
+        "source": "Palette.inkOnGold",
+        "tonalRamp": [
+          "oklch(15% 0.02 60)",
+          "oklch(22% 0.02 60)",
+          "oklch(32% 0.02 55)",
+          "oklch(42% 0.02 55)",
+          "oklch(55% 0.015 55)",
+          "oklch(70% 0.01 55)",
+          "oklch(84% 0.008 55)",
+          "oklch(95% 0.005 55)"
+        ]
+      },
+      "ok": {
+        "role": "tertiary",
+        "displayName": "Forest Ok",
+        "canonical": "#2F6B3A",
+        "dark": "#7DBA86",
+        "source": "admin-web --ok; status-line copy only",
+        "tonalRamp": [
+          "oklch(18% 0.08 145)",
+          "oklch(28% 0.09 145)",
+          "oklch(38% 0.10 145)",
+          "oklch(46% 0.10 145)",
+          "oklch(56% 0.09 145)",
+          "oklch(68% 0.08 145)",
+          "oklch(82% 0.05 145)",
+          "oklch(94% 0.02 145)"
+        ]
+      },
+      "warn": {
+        "role": "tertiary",
+        "displayName": "Amber Warn",
+        "canonical": "#8A5A12",
+        "dark": "#E8B86D",
+        "source": "admin-web --warn; degraded pips and warn pills",
+        "tonalRamp": [
+          "oklch(22% 0.08 70)",
+          "oklch(32% 0.10 70)",
+          "oklch(42% 0.11 70)",
+          "oklch(50% 0.12 70)",
+          "oklch(60% 0.11 70)",
+          "oklch(72% 0.09 70)",
+          "oklch(84% 0.06 70)",
+          "oklch(94% 0.03 70)"
+        ]
+      },
+      "bad": {
+        "role": "tertiary",
+        "displayName": "Ledger Red",
+        "canonical": "#9B2C1A",
+        "dark": "#E0705C",
+        "source": "admin-web --bad; alerts, danger, failed pills",
+        "tonalRamp": [
+          "oklch(20% 0.10 30)",
+          "oklch(30% 0.12 30)",
+          "oklch(40% 0.14 30)",
+          "oklch(48% 0.15 30)",
+          "oklch(58% 0.13 30)",
+          "oklch(70% 0.10 30)",
+          "oklch(82% 0.07 30)",
+          "oklch(94% 0.03 30)"
+        ]
+      },
+      "bg": {
+        "role": "neutral",
+        "displayName": "Laid Paper",
+        "canonical": "#F7F2E8",
+        "dark": "#14110E",
+        "source": "Palette.bg light (0.97, 0.95, 0.91) / dark (0.078, 0.067, 0.055)",
+        "tonalRamp": [
+          "oklch(18% 0.015 70)",
+          "oklch(28% 0.015 70)",
+          "oklch(40% 0.016 70)",
+          "oklch(55% 0.016 75)",
+          "oklch(72% 0.018 75)",
+          "oklch(86% 0.018 80)",
+          "oklch(94% 0.016 80)",
+          "oklch(97% 0.012 80)"
+        ]
+      },
+      "panel": {
+        "role": "neutral",
+        "displayName": "Hot-Pressed Sheet",
+        "canonical": "#FEFAF4",
+        "dark": "#1E1A16",
+        "source": "Palette.panel",
+        "tonalRamp": [
+          "oklch(20% 0.014 70)",
+          "oklch(30% 0.014 70)",
+          "oklch(42% 0.015 70)",
+          "oklch(58% 0.015 75)",
+          "oklch(74% 0.016 78)",
+          "oklch(88% 0.016 80)",
+          "oklch(96% 0.014 80)",
+          "oklch(99% 0.010 80)"
+        ]
+      },
+      "panel2": {
+        "role": "neutral",
+        "displayName": "Deckled Inset",
+        "canonical": "#EDE6D9",
+        "dark": "#28221C",
+        "source": "Palette.panel2",
+        "tonalRamp": [
+          "oklch(22% 0.016 70)",
+          "oklch(32% 0.018 70)",
+          "oklch(44% 0.020 70)",
+          "oklch(58% 0.022 72)",
+          "oklch(72% 0.022 75)",
+          "oklch(84% 0.020 78)",
+          "oklch(91% 0.018 80)",
+          "oklch(96% 0.012 80)"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Walnut Ink",
+        "canonical": "#291F17",
+        "dark": "#F4EDE3",
+        "source": "Palette.ink",
+        "tonalRamp": [
+          "oklch(18% 0.025 55)",
+          "oklch(26% 0.028 55)",
+          "oklch(36% 0.030 55)",
+          "oklch(48% 0.028 55)",
+          "oklch(62% 0.022 60)",
+          "oklch(76% 0.016 65)",
+          "oklch(88% 0.012 70)",
+          "oklch(96% 0.010 75)"
+        ]
+      },
+      "dim": {
+        "role": "neutral",
+        "displayName": "Walnut Dim",
+        "canonical": "#6B5E52",
+        "dark": "#8F8278",
+        "source": "Palette.dim",
+        "tonalRamp": [
+          "oklch(22% 0.02 60)",
+          "oklch(32% 0.022 60)",
+          "oklch(42% 0.024 60)",
+          "oklch(50% 0.024 60)",
+          "oklch(58% 0.022 60)",
+          "oklch(70% 0.018 60)",
+          "oklch(82% 0.012 65)",
+          "oklch(93% 0.008 70)"
+        ]
+      },
+      "mute": {
+        "role": "neutral",
+        "displayName": "Walnut Mute",
+        "canonical": "#8C8070",
+        "dark": "#5D5349",
+        "source": "Palette.mute",
+        "tonalRamp": [
+          "oklch(24% 0.018 65)",
+          "oklch(34% 0.020 65)",
+          "oklch(44% 0.022 65)",
+          "oklch(54% 0.022 65)",
+          "oklch(62% 0.020 65)",
+          "oklch(74% 0.016 65)",
+          "oklch(85% 0.012 70)",
+          "oklch(94% 0.008 75)"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "rgba(0, 0, 0, 0.08)",
+        "dark": "rgba(255, 255, 255, 0.06)",
+        "source": "Palette.line",
+        "tonalRamp": [
+          "oklch(15% 0 0 / 0.16)",
+          "oklch(20% 0 0 / 0.14)",
+          "oklch(25% 0 0 / 0.12)",
+          "oklch(30% 0 0 / 0.10)",
+          "oklch(40% 0 0 / 0.08)",
+          "oklch(70% 0 0 / 0.08)",
+          "oklch(90% 0 0 / 0.10)",
+          "oklch(98% 0 0 / 0.12)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "iPad book-detail largeTitle serif. Settings large title stays San Francisco."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Literary titles: macOS Vocabulary 22pt serif, library 14pt semibold serif, vocab headwords 20pt serif."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Settings settingRow labels as subheadline medium San Francisco."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Account session copy and native Form values; reader body is a separate 16–34pt New York ramp."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Footnote helpers in Palette.dim or Palette.mute, caption counts, 11pt monospaced metrics."
+      },
+      "operator-wordmark": {
+        "displayName": "Operator Wordmark",
+        "purpose": "New York 1.35rem AudioReader mark on the operator top bar only."
+      },
+      "operator-stage": {
+        "displayName": "Operator Stage Title",
+        "purpose": "San Francisco 1.5rem / 600 stage headings (Desk, Users, Policies)."
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "ease-standard",
+        "value": "cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "Operator button color transitions (180ms)."
+      },
+      {
+        "name": "pip-live",
+        "value": "2.4s cubic-bezier(0.22, 1, 0.36, 1) infinite; concentric gold ring, not card lift",
+        "purpose": "Live ok health-pip pulse. Disabled under prefers-reduced-motion."
+      },
+      {
+        "name": "shimmer",
+        "value": "1.2s linear infinite; panel2–panel gradient on 4px skeleton bars",
+        "purpose": "Operator loading skeleton. Disabled under prefers-reduced-motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "ipad-sidebar",
+        "value": "220px",
+        "purpose": "IPadSplitColumnPolicy.sidebarIdeal; min 180, max 300."
+      },
+      {
+        "name": "ipad-content",
+        "value": "260px",
+        "purpose": "IPadSplitColumnPolicy.contentIdeal; min 200, max 560."
+      },
+      {
+        "name": "mac-sidebar",
+        "value": "240px",
+        "purpose": "RootView sidebar ideal; min 200, max 300."
+      },
+      {
+        "name": "reader-lookup-min",
+        "value": "220px",
+        "purpose": "ReaderSplitLayout.minimumLookupWidth."
+      },
+      {
+        "name": "reader-text-preferred",
+        "value": "320px",
+        "purpose": "ReaderSplitLayout.preferredMinimumTextWidth; absolute floor 200."
+      },
+      {
+        "name": "operator-stack",
+        "value": "860px",
+        "purpose": "Operator rail stacks to a two-column destination grid; reason dock spans both columns."
+      },
+      {
+        "name": "operator-rail",
+        "value": "16rem",
+        "purpose": "Operator left rail width above 860px."
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Terracotta bordered-prominent action: Open player, Add EPUB, Send email sign-in code.",
+      "html": "<button class=\"ds-btn-primary\">Save Settings</button>",
+      "css": ".ds-btn-primary { background: #B8521F; color: #FEFAF4; padding: 10px 16px; min-height: 44px; border: none; border-radius: 10px; font: 500 15px/1.2 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; cursor: pointer; transition: filter 0.15s ease; } .ds-btn-primary:hover { filter: brightness(1.08); } .ds-btn-primary:focus-visible { outline: 2px solid #B8521F; outline-offset: 3px; } .ds-btn-primary:active { filter: brightness(0.94); }"
+    },
+    {
+      "name": "Study Button",
+      "kind": "button",
+      "refersTo": "button-study",
+      "description": "Gold prominent study action with ink-on-gold label, as in Choose review.",
+      "html": "<button class=\"ds-btn-study\"><svg viewBox=\"0 0 20 20\" width=\"14\" height=\"14\" aria-hidden=\"true\"><rect x=\"2\" y=\"3\" width=\"12\" height=\"14\" rx=\"1.5\" fill=\"currentColor\"/><rect x=\"6\" y=\"1\" width=\"12\" height=\"14\" rx=\"1.5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\"/></svg> Choose review</button>",
+      "css": ".ds-btn-study { display: inline-flex; align-items: center; gap: 8px; background: #B7802E; color: #241A0F; padding: 10px 16px; min-height: 44px; border: none; border-radius: 10px; font: 500 15px/1.2 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; cursor: pointer; transition: filter 0.15s ease; } .ds-btn-study:hover { filter: brightness(1.06); } .ds-btn-study:focus-visible { outline: 2px solid #B7802E; outline-offset: 3px; } .ds-btn-study:active { filter: brightness(0.94); }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Platform bordered ghost on paper for Revert, Keep current, and non-primary desk actions.",
+      "html": "<button class=\"ds-btn-secondary\">Revert</button>",
+      "css": ".ds-btn-secondary { background: #FEFAF4; color: #291F17; padding: 10px 16px; min-height: 44px; border: 1px solid rgba(0,0,0,0.08); border-radius: 10px; font: 500 15px/1.2 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; cursor: pointer; transition: background 0.15s ease; } .ds-btn-secondary:hover { background: #EDE6D9; } .ds-btn-secondary:focus-visible { outline: 2px solid #B8521F; outline-offset: 3px; } .ds-btn-secondary:active { background: #EDE6D9; }"
+    },
+    {
+      "name": "Sign Out",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Account Sign out: plain live Color.red text, role destructive, 44pt row on panel paper — not a Palette token.",
+      "html": "<button class=\"ds-btn-signout\" type=\"button\">Sign out</button>",
+      "css": ".ds-btn-signout { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 44px; padding: 10px 16px; border: none; background: transparent; color: #FF3B30; font: 500 17px/1.3 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; cursor: pointer; } .ds-btn-signout:hover { opacity: 0.82; } .ds-btn-signout:focus-visible { outline: 2px solid #FF3B30; outline-offset: 3px; } .ds-btn-signout:active { opacity: 0.7; }"
+    },
+    {
+      "name": "Rounded Field",
+      "kind": "input",
+      "refersTo": "input-field",
+      "description": "Native rounded-border SecureField and TextField used in Settings credentials and Account email.",
+      "html": "<label class=\"ds-field\"><span class=\"ds-field-label\">xAI API key</span><input class=\"ds-input\" type=\"password\" placeholder=\"Enter a new XAI_API_KEY\" /></label>",
+      "css": ".ds-field { display: flex; flex-direction: column; gap: 6px; width: 100%; } .ds-field-label { font: 500 15px/1.3 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; color: #291F17; } .ds-input { height: 44px; padding: 8px 10px; border: 1px solid rgba(0,0,0,0.18); border-radius: 8px; background: #FEFAF4; color: #291F17; font: 400 15px/1.3 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; } .ds-input:hover { border-color: rgba(0,0,0,0.28); } .ds-input:focus-visible { outline: 2px solid #B8521F; outline-offset: 1px; border-color: #B8521F; }"
+    },
+    {
+      "name": "Filter Chip",
+      "kind": "chip",
+      "refersTo": "chip-filter-on",
+      "description": "Capsule vocabulary category chip; gold-soft when on, panel2 when off.",
+      "html": "<div class=\"ds-chips\"><button class=\"ds-chip ds-chip-on\">All 12</button><button class=\"ds-chip\">Words 8</button></div>",
+      "css": ".ds-chips { display: flex; gap: 8px; } .ds-chip { background: #EDE6D9; color: #6B5E52; border: none; border-radius: 999px; padding: 6px 10px; font: 500 12px/1.2 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; cursor: pointer; } .ds-chip-on { background: rgba(232, 184, 110, 0.22); color: #B7802E; } .ds-chip:hover { filter: brightness(0.97); } .ds-chip:focus-visible { outline: 2px solid #B7802E; outline-offset: 2px; }"
+    },
+    {
+      "name": "Book Card",
+      "kind": "card",
+      "refersTo": "card-book",
+      "description": "Library cover card on panel paper with 2:3 well, serif title, hairline or gold selection stroke.",
+      "html": "<article class=\"ds-book\"><div class=\"ds-cover\"><svg viewBox=\"0 0 24 24\" width=\"28\" height=\"28\" aria-hidden=\"true\"><path d=\"M6 4.5h11a1.5 1.5 0 0 1 1.5 1.5v13L17 18H6a1.5 1.5 0 0 1-1.5-1.5v-11A1.5 1.5 0 0 1 6 4.5z\" fill=\"none\" stroke=\"#B7802E\" stroke-width=\"1.4\"/></svg></div><h3 class=\"ds-book-title\">The Bound Chapter</h3><p class=\"ds-book-meta\"><span>Unknown author</span><span>3/12 transcribed</span></p></article>",
+      "css": ".ds-book { background: #FEFAF4; color: #291F17; padding: 12px; border-radius: 12px; border: 2px solid #B7802E; max-width: 220px; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; } .ds-cover { aspect-ratio: 2 / 3; background: #EDE6D9; border-radius: 12px; display: grid; place-items: center; margin-bottom: 8px; } .ds-book-title { margin: 0; font: 600 14px/1.3 'New York', Palatino, Georgia, ui-serif; color: #291F17; min-height: 34px; } .ds-book-meta { display: flex; justify-content: space-between; gap: 8px; margin: 0; font-size: 11px; color: #6B5E52; } .ds-book-meta span:last-child { color: #8C8070; }"
+    },
+    {
+      "name": "Destination Nav",
+      "kind": "nav",
+      "refersTo": "nav-destination",
+      "description": "macOS segmented destinations and iPad sidebar Settings row with terracotta wash when selected.",
+      "html": "<nav class=\"ds-nav\"><button class=\"ds-nav-item\">Library</button><button class=\"ds-nav-item\">Player</button><button class=\"ds-nav-item\">Words</button><button class=\"ds-nav-item ds-nav-on\"><svg viewBox=\"0 0 20 20\" width=\"14\" height=\"14\" aria-hidden=\"true\"><circle cx=\"10\" cy=\"10\" r=\"3\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\"/><path d=\"M10 2.5v1.4M10 16.1v1.4M17.5 10h-1.4M3.9 10H2.5M15.3 4.7l-1 1M5.7 14.3l-1 1M15.3 15.3l-1-1M5.7 5.7l-1-1\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\"/></svg> Settings</button></nav>",
+      "css": ".ds-nav { display: flex; gap: 0; background: #EDE6D9; border-radius: 8px; padding: 2px; width: 360px; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; } .ds-nav-item { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; border: none; background: transparent; color: #291F17; font: 500 13px/1 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; border-radius: 6px; cursor: pointer; } .ds-nav-on { background: #FEFAF4; box-shadow: inset 0 0 0 1px rgba(184, 82, 31, 0.16); } .ds-nav-item:hover { background: rgba(184, 82, 31, 0.08); } .ds-nav-item:focus-visible { outline: 2px solid #B8521F; outline-offset: 2px; }"
+    },
+    {
+      "name": "Settings Grouped Form",
+      "kind": "custom",
+      "refersTo": "form-settings",
+      "description": "Paper grouped Settings: hidden OS fill, Palette.bg page, Palette.panel rows, Account first, Save in the toolbar, Version last.",
+      "html": "<section class=\"ds-settings\"><header class=\"ds-settings-bar\"><h1>Settings</h1><div class=\"ds-settings-actions\"><button class=\"ds-btn-secondary\" type=\"button\">Revert</button><button class=\"ds-btn-primary\" type=\"button\">Save Settings</button></div></header><div class=\"ds-group\"><h2>Account</h2><p class=\"ds-body\">Local mode — reading stays on this device.</p></div><div class=\"ds-group\"><h2>LLM provider</h2><div class=\"ds-status\"><svg viewBox=\"0 0 20 20\" width=\"16\" height=\"16\" aria-hidden=\"true\"><circle cx=\"10\" cy=\"10\" r=\"8\" fill=\"#B7802E\"/><path d=\"M6 10.5l2.4 2.4L14 7.5\" fill=\"none\" stroke=\"#241A0F\" stroke-width=\"1.8\" stroke-linecap=\"round\"/></svg> Ready — signed-in account</div></div><div class=\"ds-group\"><div class=\"ds-row\"><span>Version</span><span>1.0.0</span></div></div></section>",
+      "css": ".ds-settings { background: #F7F2E8; color: #291F17; padding: 24px; border-radius: 12px; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; } .ds-settings-bar { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; margin-bottom: 20px; } .ds-settings-bar h1 { margin: 0; font: 700 34px/1.1 -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif; } .ds-settings-actions { display: flex; gap: 8px; } .ds-settings .ds-btn-primary, .ds-settings .ds-btn-secondary { min-height: 36px; padding: 8px 14px; font-size: 14px; } .ds-group { background: #FEFAF4; border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; } .ds-group h2 { margin: 0 0 8px; font: 600 13px/1.2 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; color: #6B5E52; } .ds-body { margin: 0; font: 400 15px/1.4 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; } .ds-status { display: flex; align-items: center; gap: 8px; min-height: 44px; color: #B7802E; font: 500 15px/1.3 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; } .ds-row { display: flex; justify-content: space-between; min-height: 44px; align-items: center; font: 400 15px/1.3 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; }"
+    },
+    {
+      "name": "Warning Callout",
+      "kind": "custom",
+      "refersTo": "warning-callout",
+      "description": "Gold-soft 12pt rounded legal or migration warning with gold triangle, not a red error card.",
+      "html": "<aside class=\"ds-warn\"><svg viewBox=\"0 0 20 20\" width=\"16\" height=\"16\" aria-hidden=\"true\"><path d=\"M10 2.5l8 14.5H2L10 2.5z\" fill=\"#B7802E\"/><rect x=\"9.2\" y=\"8\" width=\"1.6\" height=\"5\" rx=\"0.6\" fill=\"#241A0F\"/><circle cx=\"10\" cy=\"15\" r=\"0.9\" fill=\"#241A0F\"/></svg><div><p>Using a Grok Build sign-in through AudioReader may violate xAI's terms. Review the current terms before continuing.</p><a href=\"#\">Review xAI terms</a></div></aside>",
+      "css": ".ds-warn { display: flex; align-items: flex-start; gap: 10px; padding: 10px; background: rgba(232, 184, 110, 0.22); color: #291F17; border-radius: 12px; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; } .ds-warn p { margin: 0 0 6px; font: 500 15px/1.35 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; } .ds-warn a { color: #B8521F; font: 500 13px/1.3 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; text-decoration: none; } .ds-warn a:hover { text-decoration: underline; } .ds-warn a:focus-visible { outline: 2px solid #B8521F; outline-offset: 2px; }"
+    },
+    {
+      "name": "Operator Primary Button",
+      "kind": "button",
+      "refersTo": "button-operator-primary",
+      "description": "Terracotta fill, 8px corners, 44px floor: Save runtime config, Sign in, Save policy.",
+      "html": "<button class=\"ds-op-primary\" type=\"button\">Save runtime config</button>",
+      "css": ".ds-op-primary { background: #B8521F; color: #FEFAF4; min-height: 44px; padding: 0 16px; border: 0; border-radius: 8px; font: 400 15px/1.45 'SF Pro Text', 'Segoe UI', system-ui, sans-serif; cursor: pointer; transition: background 180ms cubic-bezier(0.22, 1, 0.36, 1); } .ds-op-primary:hover { background: color-mix(in srgb, #B8521F 88%, black); } .ds-op-primary:active { background: #7A3413; } .ds-op-primary:focus-visible { outline: 2px solid #B8521F; outline-offset: 2px; } .ds-op-primary:disabled { opacity: 0.45; cursor: not-allowed; }"
+    },
+    {
+      "name": "Operator Sign Out",
+      "kind": "button",
+      "refersTo": "button-operator-ghost",
+      "description": "Operator session Sign out: plain #C62828, 8px corners, not terracotta or gold.",
+      "html": "<button class=\"ds-op-signout\" type=\"button\">Sign out</button>",
+      "css": ".ds-op-signout { background: transparent; border: 0; color: #C62828; min-height: 44px; padding: 0 0.85rem; border-radius: 8px; font: 400 15px/1.45 'SF Pro Text', 'Segoe UI', system-ui, sans-serif; cursor: pointer; } .ds-op-signout:hover { background: color-mix(in srgb, #C62828 8%, transparent); } .ds-op-signout:focus-visible { outline: 2px solid #B8521F; outline-offset: 2px; }"
+    },
+    {
+      "name": "Health Pips",
+      "kind": "chip",
+      "refersTo": "health-pip",
+      "description": "Top-bar live API dots: mute idle, gold ok with concentric pulse, warn for degraded.",
+      "html": "<div class=\"ds-pips\" aria-label=\"API health\"><span class=\"ds-pip ds-pip-ok\"><i></i>ok</span><span class=\"ds-pip ds-pip-ok\"><i></i>database ok</span><span class=\"ds-pip ds-pip-warn\"><i></i>storage degraded</span></div>",
+      "css": ".ds-pips { display: flex; flex-wrap: wrap; gap: 0.75rem; font-family: 'SF Pro Text', 'Segoe UI', system-ui, sans-serif; } .ds-pip { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.78rem; color: #6B5E52; } .ds-pip i { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: #8C8070; } .ds-pip-ok i { background: #B7802E; box-shadow: 0 0 0 0 color-mix(in srgb, #B7802E 55%, transparent); animation: ds-pip-live 2.4s cubic-bezier(0.22, 1, 0.36, 1) infinite; } .ds-pip-warn i { background: #8A5A12; } @keyframes ds-pip-live { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, #B7802E 45%, transparent); } 70% { box-shadow: 0 0 0 0.45rem transparent; } 100% { box-shadow: 0 0 0 0 transparent; } } @media (prefers-reduced-motion: reduce) { .ds-pip-ok i { animation: none; } }"
+    },
+    {
+      "name": "Operator Rail",
+      "kind": "nav",
+      "refersTo": "nav-operator-rail-current",
+      "description": "16rem destination rail with terracotta-wash current page and change-reason dock at the foot.",
+      "html": "<nav class=\"ds-rail\" aria-label=\"Operator sections\"><button class=\"ds-dest ds-dest-on\" type=\"button\">Desk</button><button class=\"ds-dest\" type=\"button\">Users</button><button class=\"ds-dest\" type=\"button\">Policies</button><button class=\"ds-dest\" type=\"button\">Jobs</button><label class=\"ds-reason\">Change reason<input value=\"operator update\" /></label></nav>",
+      "css": ".ds-rail { display: flex; flex-direction: column; gap: 0.15rem; width: 16rem; padding: 0.85rem 0.7rem 1.1rem; background: color-mix(in srgb, #EDE6D9 92%, transparent); border-right: 1px solid rgba(0,0,0,0.08); font-family: 'SF Pro Text', 'Segoe UI', system-ui, sans-serif; min-height: 22rem; } .ds-dest { appearance: none; background: transparent; border: 0; text-align: left; min-height: 44px; padding: 0 0.8rem; border-radius: 8px; color: #291F17; font: inherit; cursor: pointer; } .ds-dest-on { background: rgba(184, 82, 31, 0.16); color: #7A3413; font-weight: 600; } .ds-dest:hover:not(.ds-dest-on) { background: color-mix(in srgb, #FEFAF4 70%, transparent); } .ds-dest:focus-visible { outline: 2px solid #B8521F; outline-offset: 2px; } .ds-reason { display: flex; flex-direction: column; gap: 0.3rem; margin-top: auto; padding-top: 1rem; font-size: 0.84rem; font-weight: 500; color: #6B5E52; } .ds-reason input { min-height: 44px; padding: 0.55rem 0.7rem; border: 1px solid rgba(0,0,0,0.08); border-radius: 8px; background: #FEFAF4; color: #291F17; font: 400 15px/1.45 inherit; caret-color: #B8521F; } .ds-reason input:focus-visible { outline: 2px solid #B8521F; outline-offset: 2px; }"
+    },
+    {
+      "name": "Ledger Runtime Form",
+      "kind": "custom",
+      "refersTo": "form-runtime",
+      "description": "Desk runtime sheet: lined fields on panel, terracotta Save runtime config, gold set pills.",
+      "html": "<section class=\"ds-ledger\"><h3>Runtime configuration</h3><div class=\"ds-grid\"><label>Qwen base URL<input value=\"https://dashscope.aliyuncs.com/compatible-mode/v1\" /></label><label>Qwen model<input value=\"qwen-plus\" /></label></div><label>Qwen API key (leave blank to keep)<input type=\"password\" /></label><div class=\"ds-actions\"><button class=\"ds-op-primary\" type=\"button\">Save runtime config</button><button class=\"ds-op-ghost\" type=\"button\">Clear stored Qwen key</button></div><p class=\"ds-pill-row\"><span class=\"ds-pill-ok\">set</span> <span class=\"ds-pill-warn\">missing</span></p></section>",
+      "css": ".ds-ledger { background: #FEFAF4; border: 1px solid rgba(0,0,0,0.08); border-radius: 12px; padding: 1rem 1.15rem 1.15rem; color: #291F17; font-family: 'SF Pro Text', 'Segoe UI', system-ui, sans-serif; } .ds-ledger h3 { margin: 0 0 0.85rem; font: 600 0.95rem/1.3 'SF Pro Text', sans-serif; } .ds-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; } .ds-ledger label { display: flex; flex-direction: column; gap: 0.3rem; margin: 0.55rem 0; font-size: 0.84rem; font-weight: 500; color: #6B5E52; } .ds-ledger input { min-height: 44px; padding: 0.55rem 0.7rem; border: 1px solid rgba(0,0,0,0.08); border-radius: 8px; background: #FEFAF4; color: #291F17; font: 400 15px/1.45 inherit; caret-color: #B8521F; } .ds-ledger input:focus-visible { outline: 2px solid #B8521F; outline-offset: 2px; } .ds-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; } .ds-op-ghost { background: #FEFAF4; color: #291F17; min-height: 44px; padding: 0 16px; border: 1px solid rgba(0,0,0,0.08); border-radius: 8px; font: inherit; cursor: pointer; } .ds-op-ghost:hover { background: #EDE6D9; } .ds-op-ghost:focus-visible { outline: 2px solid #B8521F; outline-offset: 2px; } .ds-pill-row { margin: 0.85rem 0 0; display: flex; gap: 0.4rem; } .ds-pill-ok { background: #B7802E; color: #241A0F; border-radius: 999px; padding: 0.14rem 0.55rem; font-size: 0.75rem; font-weight: 500; } .ds-pill-warn { background: color-mix(in srgb, #8A5A12 16%, #FEFAF4); color: #8A5A12; border-radius: 999px; padding: 0.14rem 0.55rem; font-size: 0.75rem; font-weight: 500; }"
+    },
+    {
+      "name": "Status Pills",
+      "kind": "chip",
+      "refersTo": "pill-ok",
+      "description": "Operator status capsules: ok is gold + ink-on-gold, never forest green fill.",
+      "html": "<div class=\"ds-pills\"><span class=\"ds-pill ds-pill-ok\">active</span><span class=\"ds-pill ds-pill-warn\">disabled</span><span class=\"ds-pill ds-pill-bad\">failed</span><span class=\"ds-pill\">idle</span></div>",
+      "css": ".ds-pills { display: flex; flex-wrap: wrap; gap: 0.4rem; font-family: 'SF Pro Text', 'Segoe UI', system-ui, sans-serif; } .ds-pill { display: inline-block; padding: 0.14rem 0.55rem; border-radius: 999px; font-size: 0.75rem; font-weight: 500; background: #EDE6D9; color: #6B5E52; } .ds-pill-ok { background: #B7802E; color: #241A0F; } .ds-pill-warn { background: color-mix(in srgb, #8A5A12 16%, #FEFAF4); color: #8A5A12; } .ds-pill-bad { background: color-mix(in srgb, #9B2C1A 12%, #FEFAF4); color: #9B2C1A; }"
+    },
+    {
+      "name": "Operator Data Table",
+      "kind": "custom",
+      "refersTo": "table-operator",
+      "description": "Lined ledger table on panel: panel2 headers, gold-soft selected row, bg expand row.",
+      "html": "<div class=\"ds-scroll\"><table class=\"ds-data\"><caption>Support-safe account metadata</caption><thead><tr><th>Email</th><th>Status</th><th>Actions</th></tr></thead><tbody><tr class=\"ds-selected\"><td>operator@example.com<div class=\"ds-mono\">acct_01</div></td><td><span class=\"ds-pill ds-pill-ok\">active</span></td><td><button class=\"ds-op-danger\" type=\"button\">Confirm suspend</button></td></tr><tr class=\"ds-expand\"><td colspan=\"3\"><dl class=\"ds-detail\"><dt>User id</dt><dd class=\"ds-mono\">usr_01</dd></dl></td></tr></tbody></table></div>",
+      "css": ".ds-scroll { overflow-x: auto; border: 1px solid rgba(0,0,0,0.08); border-radius: 12px; background: #FEFAF4; font-family: 'SF Pro Text', 'Segoe UI', system-ui, sans-serif; color: #291F17; } .ds-data { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; } .ds-data caption { text-align: left; padding: 0.7rem 0.85rem 0.2rem; color: #6B5E52; font-size: 0.8rem; } .ds-data th { text-align: left; font-size: 0.75rem; font-weight: 600; color: #6B5E52; padding: 0.7rem 0.85rem; border-bottom: 1px solid rgba(0,0,0,0.08); background: #EDE6D9; } .ds-data td { padding: 0.7rem 0.85rem; border-bottom: 1px solid rgba(0,0,0,0.08); vertical-align: top; } .ds-selected td { background: rgba(232, 184, 110, 0.22); } .ds-expand td { background: #F7F2E8; } .ds-mono { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 0.78rem; color: #6B5E52; } .ds-op-danger { background: transparent; color: #9B2C1A; min-height: 36px; padding: 0 0.7rem; border: 1px solid color-mix(in srgb, #9B2C1A 38%, rgba(0,0,0,0.08)); border-radius: 8px; font: inherit; cursor: pointer; } .ds-op-danger:hover { background: color-mix(in srgb, #9B2C1A 8%, #FEFAF4); } .ds-op-danger:focus-visible { outline: 2px solid #B8521F; outline-offset: 2px; } .ds-detail { display: grid; grid-template-columns: 8rem 1fr; gap: 0.35rem 0.75rem; margin: 0; font-size: 0.88rem; } .ds-detail dt { color: #6B5E52; } .ds-pill { display: inline-block; padding: 0.14rem 0.55rem; border-radius: 999px; font-size: 0.75rem; font-weight: 500; } .ds-pill-ok { background: #B7802E; color: #241A0F; }"
+    },
+    {
+      "name": "Sign-in Gate",
+      "kind": "card",
+      "refersTo": "gate-sign-in",
+      "description": "Centered 28rem paper gate: SF heading, terracotta Send sign-in code / Sign in, ghost Use token.",
+      "html": "<main class=\"ds-gate\"><h1>Sign in to operate</h1><p class=\"ds-lede\">Use the product account that holds the operator role. Health is public; everything else needs an admin JWT.</p><label>Email<input type=\"email\" value=\"\" /></label><button class=\"ds-op-primary\" type=\"button\">Send sign-in code</button></main>",
+      "css": ".ds-gate { max-width: 28rem; margin: 2rem auto; background: #FEFAF4; border: 1px solid rgba(0,0,0,0.08); border-radius: 16px; padding: 1.7rem 1.55rem 1.8rem; font-family: 'SF Pro Text', 'Segoe UI', system-ui, sans-serif; color: #291F17; } .ds-gate h1 { font: 600 1.7rem/1.2 'SF Pro Text', 'Segoe UI', system-ui, sans-serif; letter-spacing: -0.02em; margin: 0 0 0.4rem; } .ds-lede { color: #6B5E52; margin: 0 0 1.35rem; max-width: 68ch; font-size: 15px; line-height: 1.45; } .ds-gate label { display: flex; flex-direction: column; gap: 0.3rem; margin: 0.55rem 0; font-size: 0.84rem; font-weight: 500; color: #6B5E52; } .ds-gate input { min-height: 44px; padding: 0.55rem 0.7rem; border: 1px solid rgba(0,0,0,0.08); border-radius: 8px; background: #FEFAF4; color: #291F17; font: 400 15px/1.45 inherit; caret-color: #B8521F; } .ds-gate input:focus-visible { outline: 2px solid #B8521F; outline-offset: 2px; } .ds-gate .ds-op-primary { margin-top: 0.5rem; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Paper Desk",
+    "overview": "AudioReader is a bound-book desk, not a media dashboard. Warm paper fills the window; terracotta is the only chrome accent; gold is the bookmark that marks what is ready, playing, or saved. The product is a dedicated reading tool: calm, book-focused, and thoughtful. Native Mac and iPad use SwiftUI controls; the operator console is the same desk, drawn as a paper ledger in the browser — not a second brand and not a SaaS metrics product.\n\nSettings is a first-class destination beside Library, Player, and Words. It is a grouped Form page with a large title, Account at the top, Save in the trailing toolbar, and version as the last row — not a modal that interrupts the book. The Form hides the OS grouped-list fill and sits on Laid Paper with Hot-Pressed Sheet rows, the same paper stack as Library and the reader. macOS and iPadOS are two presentations of one desk: shared Palette, shared type roles, shared destinations; only column chrome and toolbar placement change.\n\nThe operator console (`server/apps/admin-web`) is a third presentation of that desk. A signed-in operator sees live health in the paper top bar, a left rail of destinations with the change-reason field at the foot, and a stage that opens on Desk: a lined service ledger, then a grouped runtime form whose primary action is Save runtime config in terracotta. Users, policies, jobs, cache, access, metrics, and audit are ledger tables on the same paper — not charts, glass, or neon.\n\nThe world rejects cramped desktop chrome transplanted onto iPad, decorative AI-dashboard styling, and dense configuration competing with the reading surface. Native Settings stay native SwiftUI; the operator console may use HTML form chrome on paper, but it must not impersonate a metrics cloud.",
+    "keyCharacteristics": [
+      "Paper stack: `bg` page, `panel` card, `panel2` inset — never a white/gray OS default as the brand ground",
+      "Settings Form paints that stack (`scrollContentBackground(.hidden)`, `Palette.bg` page, `Palette.panel` rows)",
+      "Terracotta tint for app chrome and primary actions; gold for status, study, and playback-on",
+      "Native grouped Form for Settings; sidebar + split columns for destinations",
+      "System text styles for chrome and Settings; New York (or Georgia / Palatino) for books",
+      "SF Symbols for status and navigation on native; 44-point control floors on interactive rows",
+      "Tonal layering and hairline `line` strokes instead of offset drop shadows",
+      "Operator console tiles `paper-grain.svg` at 180px on laid paper; New York is the wordmark only",
+      "Operator Desk is health ledger first, then the runtime form; ready/ok is ink-on-gold, not a green chip"
+    ],
+    "rules": [
+      {
+        "name": "The Terracotta Tint Rule",
+        "body": ".tint(Palette.terracotta) on the split root and on Settings. Primary bordered-prominent buttons are terracotta. Gold is never the app tint. Operator committing actions (Save runtime config, Sign in, Save policy) are terracotta fills.",
+        "section": "colors"
+      },
+      {
+        "name": "The Bookmark Gold Rule",
+        "body": "Gold means ready, on, saved, or study — checkmarks, selected chips, review actions, playback-active glyphs, operator ok pills, live health pips. Do not paint large surfaces gold.",
+        "section": "colors"
+      },
+      {
+        "name": "The Ink-on-Gold Ready Rule",
+        "body": "Operator ready/ok/enabled/set pills are gold fill with `ink-on-gold` type. Never fill those pills with `ok` green.",
+        "section": "colors"
+      },
+      {
+        "name": "The Paper Stack Rule",
+        "body": "Screens sit on `bg`. Cards and chrome sit on `panel`. Insets, placeholders, and unselected chips sit on `panel2`. Do not introduce a fourth ground.",
+        "section": "colors"
+      },
+      {
+        "name": "The Paper Form Rule",
+        "body": "Settings Form is grouped, then the OS grouped-list fill is hidden. The page is `Palette.bg`; every section uses `listRowBackground(Palette.panel)`. Do not leave Settings on system grouped gray or grouped-dark fill.",
+        "section": "colors"
+      },
+      {
+        "name": "The Two Voices Rule",
+        "body": "Serif is for books, headwords, and literary titles. San Francisco system styles are for Settings, Account, toolbars, and chrome. Do not set Settings labels in New York.",
+        "section": "typography"
+      },
+      {
+        "name": "The Wordmark-Only Serif Rule",
+        "body": "On the operator console, New York is the AudioReader wordmark only. Stage titles, gate headings, rail destinations, and form labels stay San Francisco.",
+        "section": "typography"
+      },
+      {
+        "name": "The System Settings Type Rule",
+        "body": "Settings and Account use SwiftUI text styles (`.body`, `.subheadline.weight(.medium)`, `.footnote`) so Dynamic Type and the grouped Form stay native. Hard-coded point sizes belong to the reader and to compact chrome, not to the Settings page.",
+        "section": "typography"
+      },
+      {
+        "name": "The First-Class Settings Rule",
+        "body": "Settings is a sidebar/tab destination equal to Library and Words. Do not present it as a modal over the reader.",
+        "section": "layout"
+      },
+      {
+        "name": "The Account-to-Version Rule",
+        "body": "Settings scans Account → Appearance → Dictionary → Languages → LLM → Version. Save lives in the toolbar, not as a row inside the Form.",
+        "section": "layout"
+      },
+      {
+        "name": "The One Toolbar Owner Rule",
+        "body": "On iPad, stateful toolbar actions belong to exactly one visible column (content or detail), never both.",
+        "section": "layout"
+      },
+      {
+        "name": "The Desk-First Rule",
+        "body": "The operator stage opens on Desk: lined service ledger, then the grouped runtime form. Do not open on metrics.",
+        "section": "layout"
+      },
+      {
+        "name": "The Change-Reason Dock Rule",
+        "body": "The change-reason field lives at the foot of the operator rail and gates every mutation. Do not hide it inside a modal or a single panel.",
+        "section": "layout"
+      },
+      {
+        "name": "The Hairline Rule",
+        "body": "Separators are `Palette.line`. Do not add hard offset shadows. Selection is a gold stroke or a terracotta wash, not a drop shadow.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Live Pip Rule",
+        "body": "Operator ok pips may pulse a concentric gold ring. Do not reuse that ring as card elevation.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Native Control Shape Rule",
+        "body": "Settings fields, steppers, segmented pickers, and bordered buttons keep SwiftUI shapes. Custom radii apply to paper cards, chips, covers, and callouts — not to a restyled Form. Operator HTML controls use 8 px fields and 12 px ledgers; they do not restyle native Settings.",
+        "section": "shapes"
+      }
+    ],
+    "dos": [
+      "Do treat Settings as a first-class destination with grouped Form, large title, Account first, Version last, and Save in the trailing toolbar.",
+      "Do hide the Settings Form scroll background and stack paper as `bg` page → `panel` rows (`panel2` only for insets elsewhere).",
+      "Do tint the app and primary buttons terracotta; use gold only as the bookmark (ready, on, study, selected chip, operator ok pill, live pip).",
+      "Do use system text styles in Settings/Account and New York (or the reader’s chosen serif) for books and headwords.",
+      "Do keep 44 pt minimum interactive height on Settings rows, Account buttons, iPad sidebar rows, and operator destinations/fields/primary actions.",
+      "Do ship the same destinations and Palette on macOS and iPadOS; change only split columns and toolbar placement.",
+      "Do open the operator console on Desk: service ledger, then runtime form, Save runtime config in terracotta.",
+      "Do dock change reason at the rail foot and require five characters before mutations.",
+      "Do paint operator ok/enabled/set as gold + `ink-on-gold`; keep New York on the operator wordmark only.",
+      "Do tile `paper-grain.svg` at 180px on laid paper for the operator page."
+    ],
+    "donts": [
+      "Don't present Settings as a sheet, popover, or inspector over the reader.",
+      "Don't leave Settings on the OS grouped-list fill, or invent a fourth paper ground for native field chrome.",
+      "Don't restyle native Settings into a web form kit or AI-dashboard cards. The operator console is the Paper Desk ledger, not a substitute Settings page and not a SaaS metrics dashboard.",
+      "Don't make gold the app tint or flood a screen with terracotta.",
+      "Don't add offset drop shadows.",
+      "Don't set Settings labels in a display serif or invent a third type family beyond system UI, the reader serif choice, and monospaced metrics.",
+      "Don't set operator stage titles, gate headings, or rail labels in New York.",
+      "Don't fill ready/ok pills with `ok` green.",
+      "Don't duplicate stateful toolbar actions into two iPad columns.",
+      "Don't preload API keys into fields or style credential rows as a dashboard widget.",
+      "Don't restyle Sign out into a terracotta or gold fill; native stays plain `Color.red`, operator stays plain `#C62828`."
+    ]
+  }
+}

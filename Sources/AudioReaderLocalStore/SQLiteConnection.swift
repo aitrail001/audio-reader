@@ -151,6 +151,16 @@ final class SQLiteConnection: @unchecked Sendable {
         bind(stmt, index, value.map(\.timeIntervalSince1970))
     }
 
+    func bind(_ stmt: OpaquePointer, _ index: Int32, _ value: Data) {
+        if value.isEmpty {
+            sqlite3_bind_blob(stmt, index, nil, 0, sqliteStatic)
+            return
+        }
+        _ = value.withUnsafeBytes { raw in
+            sqlite3_bind_blob(stmt, index, raw.baseAddress, Int32(value.count), sqliteTransient)
+        }
+    }
+
     private func errmsg() -> String {
         db.flatMap { sqlite3_errmsg($0) }.map { String(cString: $0) } ?? "unknown"
     }

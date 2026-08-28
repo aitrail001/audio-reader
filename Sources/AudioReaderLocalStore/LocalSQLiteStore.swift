@@ -3,7 +3,7 @@ import Foundation
 import AudioReaderDomain
 #endif
 
-public final class LocalSQLiteStore: @unchecked Sendable {
+public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, @unchecked Sendable {
     public let url: URL
     #if DEBUG
     var interruptAfterTable: String?
@@ -78,6 +78,96 @@ public final class LocalSQLiteStore: @unchecked Sendable {
         try SQLiteConnection.validateIdentifier(table)
         let rows = try connection.query("SELECT COUNT(*) AS c FROM \(table)")
         return rows.first?.int("c") ?? 0
+    }
+
+    public func enqueue(_ mutation: OutboxMutation) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let existing = try connection.query(
+            "SELECT id FROM sync_outbox WHERE id = ? LIMIT 1"
+        ) { [connection] stmt in
+            connection.bind(stmt, 1, mutation.id.rawValue)
+        }
+        if !existing.isEmpty { return }
+        try connection.run(
+            """
+            INSERT INTO sync_outbox(
+              id, entity_type, entity_id, operation, base_revision, occurred_at, payload, status
+            ) VALUES (?,?,?,?,?,?,?,?)
+            """
+        ) { [connection] stmt in
+            connection.bind(stmt, 1, mutation.id.rawValue)
+            connection.bind(stmt, 2, mutation.entityType.rawValue)
+            connection.bind(stmt, 3, mutation.entityID)
+            connection.bind(stmt, 4, mutation.operation.rawValue)
+            connection.bind(stmt, 5, Int(mutation.baseRevision.rawValue))
+            connection.bindDate(stmt, 6, mutation.occurredAt)
+            connection.bind(stmt, 7, mutation.payload)
+            connection.bind(stmt, 8, OutboxMutationStatus.pending.rawValue)
+        }
+    }
+
+    public func pendingMutations() throws -> [OutboxMutation] {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let rows = try connection.query(
+            "SELECT * FROM sync_outbox WHERE status = 'pending' ORDER BY occurred_at, id"
+        )
+        return try rows.map { row in
+            OutboxMutation(
+                id: MutationID(rawValue: try row.required("id")),
+                entityType: OutboxEntityType(rawValue: try row.required("entity_type")) ?? .studyActivity,
+                entityID: try row.required("entity_id"),
+                operation: OutboxOperation(rawValue: try row.required("operation")) ?? .upsert,
+                baseRevision: ServerVersion(Int64(row.int("base_revision"))),
+                occurredAt: row.date("occurred_at"),
+                payload: Data((row.string("payload") ?? "{}").utf8),
+                status: .pending
+            )
+        }
+    }
+
+    public func markAcknowledged(id: MutationID) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try connection.run("UPDATE sync_outbox SET status = ? WHERE id = ?") { [connection] stmt in
+            connection.bind(stmt, 1, OutboxMutationStatus.acknowledged.rawValue)
+            connection.bind(stmt, 2, id.rawValue)
+        }
+    }
+
+    public func loadCursor() throws -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let rows = try connection.query("SELECT cursor FROM sync_state WHERE id = 'local' LIMIT 1")
+        let cursor = rows.first?.string("cursor")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return cursor.isEmpty ? "0" : cursor
+    }
+
+    public func saveCursor(_ cursor: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let existing = try connection.query("SELECT id FROM sync_state WHERE id = 'local' LIMIT 1")
+        if existing.isEmpty {
+            try connection.run(
+                "INSERT INTO sync_state(id, cursor, last_pull_at, last_push_at, payload_json) VALUES ('local', ?, ?, ?, '{}')"
+            ) { [connection] stmt in
+                connection.bind(stmt, 1, cursor)
+                connection.bindDate(stmt, 2, Date())
+                connection.bindDate(stmt, 3, Date())
+            }
+            return
+        }
+        try connection.run(
+            "UPDATE sync_state SET cursor = ?, last_pull_at = ? WHERE id = 'local'"
+        ) { [connection] stmt in
+            connection.bind(stmt, 1, cursor)
+            connection.bindDate(stmt, 2, Date())
+        }
     }
 
     public func loadBooks() throws -> [StoredBook] {

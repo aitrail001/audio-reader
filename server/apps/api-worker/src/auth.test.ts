@@ -170,6 +170,114 @@ describe("product authentication API", () => {
     expect(requested.status).toBe(503);
   });
 
+  it("issues production OTP through GoTrue when the anon key is configured", async () => {
+    const jwt = {
+      issuer: "https://example.supabase.co/auth/v1",
+      audience: "authenticated",
+      secret: "super-secret",
+      accessTokenTtlSeconds: 3600,
+      clockSkewSeconds: 0,
+    };
+    const accessToken = await signAccessToken({ sub: "user-hosted", email: EMAIL }, jwt);
+    const fetchMock = vi.fn(
+      (input: Request | URL | string, init?: RequestInit): Promise<Response> => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.endsWith("/otp")) {
+          return Promise.resolve(new Response(null, { status: 200 }));
+        }
+        if (url.endsWith("/verify")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                access_token: accessToken,
+                refresh_token: "refresh-hosted",
+                expires_in: 3600,
+                token_type: "bearer",
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ message: "unexpected", url, method: init?.method }), {
+            status: 500,
+          }),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const app = createApiAppFromEnv({
+        ENVIRONMENT: "production",
+        SUPABASE_URL: "https://example.supabase.co",
+        SUPABASE_JWT_SECRET: "super-secret",
+        SUPABASE_ANON_KEY: "anon-key",
+      });
+      const requested = await app.fetch(jsonPost("/v1/auth/email-otp/request", { email: EMAIL }));
+      expect(requested.status).toBe(202);
+      const verified = await app.fetch(
+        jsonPost("/v1/auth/email-otp/verify", {
+          email: EMAIL,
+          code: "424242",
+          deviceId: DEVICE_ID,
+        }),
+      );
+      expect(verified.status).toBe(200);
+      const tokens = await readJson(verified);
+      expect(isRecord(tokens) && tokens.refreshToken).toBe("refresh-hosted");
+      const me = await app.fetch(
+        new Request("http://localhost/v1/me", { headers: bearer(accessToken) }),
+      );
+      expect(me.status).toBe(200);
+    } finally {
+      spy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("returns hosted GoTrue authorize URLs instead of local-complete", async () => {
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const app = createApiAppFromEnv({
+        ENVIRONMENT: "production",
+        SUPABASE_URL: "https://example.supabase.co",
+        SUPABASE_JWT_SECRET: "super-secret",
+        SUPABASE_ANON_KEY: "anon-key",
+      });
+      const pkce = await pkcePair();
+      const authorize = await app.fetch(
+        jsonPost("/v1/auth/oauth/authorize", {
+          provider: "microsoft",
+          redirectUri: "audioreader://auth/callback",
+          codeChallenge: pkce.challenge,
+          state: "oauth-hosted-state",
+        }),
+      );
+      expect(authorize.status).toBe(200);
+      const started = await readJson(authorize);
+      expect(isRecord(started)).toBe(true);
+      if (!isRecord(started)) {
+        return;
+      }
+      const authorizationUrl = new URL(String(started.authorizationUrl));
+      expect(authorizationUrl.pathname).toBe("/auth/v1/authorize");
+      expect(authorizationUrl.searchParams.get("provider")).toBe("azure");
+      expect(authorizationUrl.searchParams.get("code_challenge")).toBe(pkce.challenge);
+      expect(String(started.authorizationUrl)).not.toContain("local-complete");
+
+      const complete = await app.fetch(
+        new Request(
+          "http://localhost/v1/auth/oauth/local-complete?code=abc&state=oauth-hosted-state&redirect_uri=audioreader://auth/callback",
+        ),
+      );
+      expect(complete.status).toBe(404);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("GET /v1/auth/config lists Google, Microsoft, and email OTP", async () => {
     const response = await createTestApp().fetch(new Request("http://localhost/v1/auth/config"));
     expect(response.status).toBe(200);
@@ -443,6 +551,21 @@ describe("product authentication API", () => {
     }
   });
 
+  it("warns when production can validate JWTs but cannot issue hosted sessions", () => {
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      createApiAppFromEnv({
+        ENVIRONMENT: "production",
+        SUPABASE_URL: "https://example.supabase.co",
+        SUPABASE_JWT_SECRET: "super-secret",
+      });
+      const logged = spy.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(logged).toContain("hosted_auth_unconfigured");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("logs passwordless security events without raw email", async () => {
     const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
@@ -595,6 +718,99 @@ describe("product authentication API", () => {
     expect(boot.syncCursor).toBe("0");
     expect(Array.isArray(boot.featureFlags)).toBe(true);
     expect(Array.isArray(boot.quotas)).toBe(true);
+    const flags = Array.isArray(boot.featureFlags) ? boot.featureFlags : [];
+    const quotas = Array.isArray(boot.quotas) ? boot.quotas : [];
+    expect(
+      flags.some((item) => isRecord(item) && item.key === "managed_qwen" && item.enabled),
+    ).toBe(true);
+    expect(
+      quotas.some((item) => isRecord(item) && item.key === "qwen_tasks_day" && item.limit === 50),
+    ).toBe(true);
+    expect(
+      quotas.some((item) => isRecord(item) && item.key === "devices" && item.limit === 2),
+    ).toBe(true);
+  });
+
+  it("rejects a third device when the starter device quota is two", async () => {
+    const { app } = createAuthApp();
+    const session = await signIn(app, EMAIL, DEVICE_ID);
+    expect(
+      (await bootstrapDevice(app, session.accessToken, DEVICE_ID, "idempotency-limit-a")).status,
+    ).toBe(200);
+    expect(
+      (await bootstrapDevice(app, session.accessToken, DEVICE_B, "idempotency-limit-b")).status,
+    ).toBe(200);
+    const third = "3fa85f64-5717-4562-b3fc-2c963f66afa8";
+    const blocked = await bootstrapDevice(app, session.accessToken, third, "idempotency-limit-c");
+    expect(blocked.status).toBe(409);
+    const body = await readJson(blocked);
+    expect(isRecord(body) && body.code).toBe("device_limit");
+  });
+
+  it("patches the profile and replaces settings with revision checks", async () => {
+    const { app } = createAuthApp();
+    const session = await signIn(app, EMAIL, DEVICE_ID);
+    await bootstrapDevice(app, session.accessToken, DEVICE_ID, "idempotency-key-settings-0");
+    const patched = await app.fetch(
+      new Request("http://localhost/v1/me", {
+        method: "PATCH",
+        headers: {
+          ...bearer(session.accessToken),
+          "content-type": "application/json",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-key-profile-1",
+        },
+        body: JSON.stringify({ displayName: "Reader One" }),
+      }),
+    );
+    expect(patched.status).toBe(200);
+    const profile = await readJson(patched);
+    expect(isRecord(profile) && profile.displayName).toBe("Reader One");
+
+    const current = await app.fetch(
+      new Request("http://localhost/v1/me/settings", {
+        headers: { ...bearer(session.accessToken), "X-Device-Id": DEVICE_ID },
+      }),
+    );
+    expect(current.status).toBe(200);
+    const settings = await readJson(current);
+    expect(isRecord(settings) && settings.revision).toBe(0);
+    if (!isRecord(settings)) {
+      return;
+    }
+    const updated = await app.fetch(
+      new Request("http://localhost/v1/me/settings", {
+        method: "PUT",
+        headers: {
+          ...bearer(session.accessToken),
+          "content-type": "application/json",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-key-settings-1",
+        },
+        body: JSON.stringify({
+          ...settings,
+          targetLanguage: "zh",
+        }),
+      }),
+    );
+    expect(updated.status).toBe(200);
+    const next = await readJson(updated);
+    expect(isRecord(next) && next.revision).toBe(1);
+    expect(isRecord(next) && next.targetLanguage).toBe("zh");
+
+    const stale = await app.fetch(
+      new Request("http://localhost/v1/me/settings", {
+        method: "PUT",
+        headers: {
+          ...bearer(session.accessToken),
+          "content-type": "application/json",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-key-settings-2",
+        },
+        body: JSON.stringify(settings),
+      }),
+    );
+    expect(stale.status).toBe(409);
   });
 
   it("rewrites local OAuth authorize URLs through a 302 onto the native callback", async () => {
@@ -688,6 +904,34 @@ describe("product authentication API", () => {
     expect(authorize.status).toBe(400);
     const body = await readJson(authorize);
     expect(isRecord(body) && body.code).toBe("bad_request");
+    expect(isRecord(body) && body.detail).toContain("redirectUri");
+  });
+
+  it("strips PKCE base64 padding and returns the field error in detail", async () => {
+    const { app } = createAuthApp();
+    const pkce = await pkcePair();
+    const authorize = await app.fetch(
+      jsonPost("/v1/auth/oauth/authorize", {
+        provider: "google",
+        redirectUri: "audioreader://auth/callback",
+        codeChallenge: `${pkce.challenge}==`,
+        state: "oauth-padded-challenge",
+      }),
+    );
+    expect(authorize.status).toBe(200);
+
+    const rejected = await app.fetch(
+      jsonPost("/v1/auth/oauth/authorize", {
+        provider: "google",
+        redirectUri: "audioreader://auth/callback",
+        codeChallenge: "short",
+        state: "oauth-short-challenge",
+      }),
+    );
+    expect(rejected.status).toBe(400);
+    const body = await readJson(rejected);
+    expect(isRecord(body) && body.detail).toBe("codeChallenge must be a PKCE S256 challenge.");
+    expect(isRecord(body) && Array.isArray(body.fieldErrors)).toBe(true);
   });
 
   it("completes Google and Microsoft OAuth PKCE and issues tokens", async () => {
@@ -766,6 +1010,16 @@ describe("product authentication API", () => {
       jsonPost("/v1/auth/token/refresh", { refreshToken: next.refreshToken }),
     );
     expect(afterLogout.status).toBe(401);
+  });
+
+  it("does not reject hosted refresh tokens shorter than 16 characters at the body gate", async () => {
+    const { app } = createAuthApp();
+    const rejected = await app.fetch(
+      jsonPost("/v1/auth/token/refresh", { refreshToken: "rt-short-token" }),
+    );
+    expect(rejected.status).toBe(401);
+    const body = await readJson(rejected);
+    expect(isRecord(body) && body.detail).not.toContain("at least 16 characters");
   });
 
   it("requires a session for GET /v1/me", async () => {

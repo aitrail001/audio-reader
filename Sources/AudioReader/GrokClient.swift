@@ -10,11 +10,14 @@ enum LLMError: LocalizedError {
     case http(Int, String)
     case empty
     case appleIntelligenceUnavailable(String)
+    case managedAccountRequired
 
     var errorDescription: String? {
         switch self {
         case .noAPIKey(let provider):
             "No \(provider.apiLabel) API key. Add \(provider.environmentKey) in Settings or configure it in the environment."
+        case .managedAccountRequired:
+            "Sign in to your AudioReader account in Settings to use Managed Qwen."
         case .grokBuildNotLoggedIn:
             "Grok Build is not signed in. Run `grok login`, or choose API key in Settings."
         case .codexUnavailable:
@@ -83,6 +86,7 @@ enum ResponsesFallbackPolicy {
 }
 
 enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
+    case managedQwen
     case grok
     case qwenCloud
     case openAI
@@ -92,6 +96,7 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
 
     var menuLabel: String {
         switch self {
+        case .managedQwen: "Managed Qwen (account)"
         case .grok: "Grok (xAI)"
         case .qwenCloud: "QwenCloud"
         case .openAI: "OpenAI / ChatGPT"
@@ -105,6 +110,7 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
 
     var environmentKey: String {
         switch self {
+        case .managedQwen: ""
         case .grok: "XAI_API_KEY"
         case .qwenCloud: "DASHSCOPE_API_KEY"
         case .openAI: "OPENAI_API_KEY"
@@ -114,6 +120,7 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
 
     var apiLabel: String {
         switch self {
+        case .managedQwen: "Managed Qwen"
         case .grok: "xAI"
         case .qwenCloud: "QwenCloud"
         case .openAI: "OpenAI"
@@ -123,6 +130,7 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
 
     var defaultEndpoint: String {
         switch self {
+        case .managedQwen: ""
         case .grok: "https://api.x.ai/v1"
         case .qwenCloud: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
         case .openAI: "https://api.openai.com/v1"
@@ -312,6 +320,7 @@ enum GrokAuthentication: String, CaseIterable, Identifiable, Codable, Sendable {
 }
 
 enum LLMConnectionChoice: String, CaseIterable, Identifiable, Sendable {
+    case managedQwen
     case grokBuild
     case grokAPIKey
     case qwenAPIKey
@@ -323,6 +332,7 @@ enum LLMConnectionChoice: String, CaseIterable, Identifiable, Sendable {
 
     var menuLabel: String {
         switch self {
+        case .managedQwen: "AudioReader · Managed Qwen"
         case .grokBuild: "xAI · Grok Build (OAuth)"
         case .grokAPIKey: "xAI · API key"
         case .qwenAPIKey: "Qwen · API key"
@@ -334,6 +344,7 @@ enum LLMConnectionChoice: String, CaseIterable, Identifiable, Sendable {
 
     var compactLabel: String {
         switch self {
+        case .managedQwen: "Managed Qwen"
         case .grokBuild: "xAI OAuth"
         case .grokAPIKey: "xAI API"
         case .qwenAPIKey: "Qwen API"
@@ -347,12 +358,14 @@ enum LLMConnectionChoice: String, CaseIterable, Identifiable, Sendable {
 #if os(macOS)
         allCases
 #else
-        [.grokAPIKey, .qwenAPIKey, .openAIAPIKey, .appleFoundation]
+        [.managedQwen, .grokAPIKey, .qwenAPIKey, .openAIAPIKey, .appleFoundation]
 #endif
     }
 
     static func selected(in settings: AppSettings) -> Self {
         switch LLMProvider(rawValue: settings.llmProvider) ?? .grok {
+        case .managedQwen:
+            .managedQwen
         case .grok:
             GrokAuthentication(rawValue: settings.grokAuthentication) == .apiKey
                 ? .grokAPIKey
@@ -370,6 +383,8 @@ enum LLMConnectionChoice: String, CaseIterable, Identifiable, Sendable {
 
     func apply(to settings: inout AppSettings) {
         switch self {
+        case .managedQwen:
+            settings.llmProvider = LLMProvider.managedQwen.rawValue
         case .grokBuild:
             settings.llmProvider = LLMProvider.grok.rawValue
             settings.grokAuthentication = GrokAuthentication.grokBuild.rawValue
@@ -702,6 +717,9 @@ actor GrokClient {
         grokAuthentication: GrokAuthentication = .apiKey,
         openAIAuthentication: OpenAIAuthentication = .apiKey
     ) async throws -> String {
+        if provider == .managedQwen {
+            return try await ManagedProductLLM.complete(system: system, user: user)
+        }
         if provider == .appleFoundation {
             return try await FoundationModelsClient.shared.complete(system: system, user: user)
         }
@@ -716,6 +734,8 @@ actor GrokClient {
         }
         let key: String?
         switch provider {
+        case .managedQwen:
+            throw LLMError.managedAccountRequired
         case .grok:
             key = grokAuthentication == .grokBuild
                 ? GrokBuildCredentialProvider.load()
@@ -775,6 +795,9 @@ actor GrokClient {
         grokAuthentication: GrokAuthentication = .apiKey,
         openAIAuthentication: OpenAIAuthentication = .apiKey
     ) async throws -> String {
+        if provider == .managedQwen {
+            return try await ManagedProductLLM.complete(system: system, user: user)
+        }
         if provider == .appleFoundation {
             return try await FoundationModelsClient.shared.completeStructuredJSON(
                 system: system,
@@ -792,6 +815,8 @@ actor GrokClient {
         }
         let key: String?
         switch provider {
+        case .managedQwen:
+            throw LLMError.managedAccountRequired
         case .grok:
             key = grokAuthentication == .grokBuild
                 ? GrokBuildCredentialProvider.load()
@@ -880,9 +905,13 @@ actor GrokClient {
         if provider == .appleFoundation {
             return ["Apple Intelligence"]
         }
+        if provider == .managedQwen {
+            return ["qwen3.7-plus"]
+        }
         let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
         let savedKey: String?
         switch provider {
+        case .managedQwen: return ["qwen3.7-plus"]
         case .grok: savedKey = APIKeyStore.load()
         case .qwenCloud: savedKey = QwenAPIKeyStore.load()
         case .openAI: savedKey = OpenAIAPIKeyStore.load()

@@ -25,6 +25,12 @@ struct IPadToolbarPlacementPolicyTests {
             isReaderActive: true,
             hasSelectedBook: true
         ) == .detail)
+        #expect(IPadBackgroundJobsToolbarPlacement.owner(
+            isVocabularySelected: false,
+            isReaderActive: false,
+            isSettingsSelected: true,
+            hasSelectedBook: false
+        ) == .detail)
     }
 
     @Test("Opening the reader focuses the detail column instead of keeping three equal columns")
@@ -49,5 +55,16 @@ struct IPadToolbarPlacementPolicyTests {
             isVocabularySelected: true,
             showsLibraryAlongside: false
         ) == .vocabularyFocused)
+    }
+
+    @Test("Settings uses a sidebar-plus-detail page instead of a sheet")
+    func settingsUsesSidebarAndDetail() {
+        #expect(IPadSplitColumnPolicy.mode(
+            isReaderActive: false,
+            isVocabularySelected: false,
+            isSettingsSelected: true,
+            showsLibraryAlongside: false
+        ) == .settings)
+        #expect(AppTab.allCases.contains(.settings))
     }
 }

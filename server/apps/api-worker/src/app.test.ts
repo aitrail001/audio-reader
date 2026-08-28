@@ -42,7 +42,7 @@ describe("api-worker HTTP contract", () => {
     expect(Number.isNaN(Date.parse(String(payload.time)))).toBe(false);
     expect(payload.dependencies).toEqual({
       database: "ok",
-      r2: "ok",
+      storage: "ok",
       qwen: "ok",
     });
   });
@@ -50,7 +50,7 @@ describe("api-worker HTTP contract", () => {
   it("GET /healthz is liveness and stays ok when dependencies are down", async () => {
     const app = createTestApp({
       database: createFakeDatabaseClient({ status: "unavailable" }),
-      r2: createFakeObjectStore({ status: "unavailable" }),
+      storage: createFakeObjectStore({ status: "unavailable" }),
       qwen: createFakeQwenClient({ status: "unavailable" }),
     });
     const response = await app.fetch(new Request("http://localhost/healthz"));
@@ -76,12 +76,12 @@ describe("api-worker HTTP contract", () => {
     expect(payload.status).toBe("ok");
     expect(payload.dependencies).toEqual({
       database: "ok",
-      r2: "ok",
+      storage: "ok",
       qwen: "ok",
     });
   });
 
-  it("GET /readyz returns problem+json 503 when a dependency is unavailable", async () => {
+  it("GET /readyz returns problem+json 503 when a required dependency is unavailable", async () => {
     const app = createTestApp({
       database: createFakeDatabaseClient({ status: "unavailable" }),
     });
@@ -100,9 +100,28 @@ describe("api-worker HTTP contract", () => {
     expect(payload.traceId).toBe(response.headers.get(REQUEST_ID_HEADER));
   });
 
+  it("GET /readyz stays 200 when only optional object storage is unavailable", async () => {
+    const app = createTestApp({
+      storage: createFakeObjectStore({ status: "unavailable" }),
+    });
+    const ready = await app.fetch(new Request("http://localhost/readyz"));
+    expect(ready.status).toBe(200);
+    const readyBody = await readJson(ready);
+    expect(isRecord(readyBody)).toBe(true);
+    if (!isRecord(readyBody)) {
+      return;
+    }
+    expect(readyBody.status).toBe("degraded");
+    expect(readyBody.dependencies).toMatchObject({
+      database: "ok",
+      storage: "unavailable",
+      qwen: "ok",
+    });
+  });
+
   it("GET /v1/health is degraded (still 200) when a dependency is unavailable", async () => {
     const app = createTestApp({
-      r2: createFakeObjectStore({ status: "unavailable" }),
+      storage: createFakeObjectStore({ status: "unavailable" }),
     });
     const response = await app.fetch(new Request("http://localhost/v1/health"));
     expect(response.status).toBe(200);
@@ -112,7 +131,7 @@ describe("api-worker HTTP contract", () => {
       return;
     }
     expect(payload.status).toBe("degraded");
-    expect(payload.dependencies).toMatchObject({ r2: "unavailable" });
+    expect(payload.dependencies).toMatchObject({ storage: "unavailable" });
   });
 
   it("unknown routes return structured application/problem+json", async () => {
@@ -300,7 +319,7 @@ describe("api-worker HTTP contract", () => {
     expect(healthBody.status).toBe("degraded");
     expect(healthBody.dependencies).toEqual({
       database: "unavailable",
-      r2: "unavailable",
+      storage: "unavailable",
       qwen: "unavailable",
     });
 

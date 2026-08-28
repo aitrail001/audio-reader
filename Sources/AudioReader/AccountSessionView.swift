@@ -10,6 +10,8 @@ struct AccountSessionView: View {
     @State private var email = ""
     @State private var code = ""
     @State private var confirmSignOut = false
+    @State private var confirmDelete = false
+    @State private var deletionReason = ""
     @State private var devicePendingRevoke: AccountDevice?
 
     var body: some View {
@@ -30,10 +32,24 @@ struct AccountSessionView: View {
             }
 
             if let error = session.errorMessage {
-                Text(error)
+                Label(error, systemImage: "exclamationmark.circle")
                     .font(.body)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Palette.dim)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Palette.goldSoft)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .accessibilityLabel("Account connection issue")
+                    .accessibilityValue(error)
+            }
+
+            if session.flagEnabled("maintenance_mode", default: false) {
+                Label("The hosted service is in maintenance mode. Reading on this device still works.", systemImage: "wrench.and.screwdriver")
+                    .font(.body)
+                    .foregroundStyle(Palette.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel("Hosted service is in maintenance mode")
             }
 
             if session.mode.isSignedIn {
@@ -48,7 +64,11 @@ struct AccountSessionView: View {
         .disabled(session.isBusy)
         .task(id: session.mode) {
             if session.mode.isSignedIn {
-                await session.refreshSession()
+                // Do not POST /token/refresh here. Sign-in just issued tokens;
+                // a second refresh with a hosted GoTrue token was rejected as
+                // "refreshToken must be at least 16 characters." Launch restore
+                // still refreshes. This only reloads the device list.
+                await session.refreshDevices()
             }
         }
         .alert("Sign out of AudioReader?", isPresented: $confirmSignOut) {
@@ -58,6 +78,15 @@ struct AccountSessionView: View {
             }
         } message: {
             Text("Books on this device stay here. Vocabulary, transcripts, and local files are not deleted.")
+        }
+        .alert("Delete this AudioReader account?", isPresented: $confirmDelete) {
+            TextField("Reason", text: $deletionReason)
+            Button("Cancel", role: .cancel) { deletionReason = "" }
+            Button("Delete Account", role: .destructive) {
+                Task { await session.deleteAccount(reason: deletionReason) }
+            }
+        } message: {
+            Text("This queues deletion on the server. Books already on this device stay until you remove them.")
         }
         .alert("Revoke this device?", isPresented: Binding(
             get: { devicePendingRevoke != nil },
@@ -136,7 +165,7 @@ struct AccountSessionView: View {
             .disabled(email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
             if session.pendingEmail != nil {
-                Text("Enter the six-digit code from your email.")
+                Text("Enter the sign-in code from your email.")
                     .font(.body)
                     .foregroundStyle(Palette.dim)
 
@@ -144,7 +173,7 @@ struct AccountSessionView: View {
                     .font(.body)
                     .textFieldStyle(.roundedBorder)
                     .frame(minHeight: 44)
-                    .accessibilityLabel("Six-digit email sign-in code")
+                    .accessibilityLabel("Email sign-in code")
 #if os(iOS)
                     .textContentType(.oneTimeCode)
                     .keyboardType(.numberPad)
@@ -159,7 +188,7 @@ struct AccountSessionView: View {
                 }
                 .buttonStyle(.bordered)
                 .accessibilityLabel("Verify email sign-in code")
-                .disabled(code.filter(\.isNumber).count != 6)
+                .disabled(!(6...12).contains(code.filter(\.isNumber).count))
             }
         }
     }
@@ -177,14 +206,20 @@ struct AccountSessionView: View {
 
             Toggle(isOn: Binding(
                 get: { session.mode.isSyncEnabled },
-                set: { session.setSyncEnabled($0) }
+                set: { enabled in
+                    session.setSyncEnabled(enabled)
+                    if enabled {
+                        Task { await session.synchronize() }
+                    }
+                }
             )) {
                 Text("Sync learning data across devices")
                     .font(.body)
             }
             .accessibilityLabel("Sync learning data across devices")
+            .disabled(!session.flagEnabled("account_sync"))
 
-            Text("Sync is optional. Turning it off keeps books and learning data on this device. This version does not push or pull a remote library.")
+            Text("Sync is optional. Turning it on pushes pending learning-data changes and pulls updates from your other devices. Books and media stay on this device unless you enable cloud media later.")
                 .font(.body)
                 .foregroundStyle(Palette.dim)
                 .fixedSize(horizontal: false, vertical: true)
@@ -197,15 +232,68 @@ struct AccountSessionView: View {
                 }
             }
 
+            if !session.quotas.isEmpty {
+                Text("Account allowances")
+                    .font(.body.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
+                ForEach(session.quotas, id: \.key) { quota in
+                    Text(quotaCaption(quota))
+                        .font(.body)
+                        .foregroundStyle(Palette.dim)
+                        .accessibilityLabel(quotaCaption(quota))
+                }
+            }
+
+            if let exportStatus = session.lastExportStatus {
+                Text(exportStatus)
+                    .font(.body)
+                    .foregroundStyle(Palette.dim)
+            }
+
+            Button {
+                Task { await session.exportAccount() }
+            } label: {
+                Text("Export account data")
+                    .font(.body)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Export account data")
+
             Button(role: .destructive) {
                 confirmSignOut = true
             } label: {
                 Text("Sign out")
+                    .font(.body.weight(.medium))
+                    .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.red)
+            .accessibilityLabel("Sign out of AudioReader account")
+
+            Button(role: .destructive) {
+                confirmDelete = true
+            } label: {
+                Text("Delete account")
                     .font(.body)
                     .frame(maxWidth: .infinity, minHeight: 44)
             }
-            .accessibilityLabel("Sign out of AudioReader account")
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.red)
+            .accessibilityLabel("Delete AudioReader account")
         }
+    }
+
+    private func quotaCaption(_ quota: Quota) -> String {
+        let used = quota.key == "cloud_media_bytes" ? byteCaption(quota.used) : "\(Int(quota.used))"
+        let limit = quota.key == "cloud_media_bytes" ? byteCaption(quota.limit) : "\(Int(quota.limit))"
+        return "\(quota.key.replacingOccurrences(of: "_", with: " ")): \(used) of \(limit)"
+    }
+
+    private func byteCaption(_ value: Double) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: Int64(value))
     }
 
     private func profileTitle(_ profile: AccountProfile) -> String {

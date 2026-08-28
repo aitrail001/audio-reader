@@ -9,18 +9,42 @@ CORS_ALLOWED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 MAX_BODY_BYTES = "1048576"
 LOCAL_DEV_OTP = "123456"
 
+# Named environments do not inherit top-level [vars]. Deploy only with
+# `wrangler deploy --env staging|production` (see server/scripts/deploy-worker.sh).
+# Bootstrap secrets: SUPABASE_URL, SUPABASE_JWT_SECRET, SUPABASE_ANON_KEY
+# (optional TURNSTILE_SECRET_KEY, PASSWORDLESS_HMAC_SECRET, OPERATOR_CONFIG_KEY).
+# Qwen and GCS can be set here as fallbacks, then changed from the admin portal
+# without a redeploy. Hosted PostgREST persistence is documented in server/README.md
+# and must be set with `wrangler secret put`, never [vars].
+
 [env.staging]
 name = "audio-reader-api-worker-staging"
+workers_dev = true
 
 [env.staging.vars]
 ENVIRONMENT = "staging"
-CORS_ALLOWED_ORIGINS = ""
+APP_VERSION = "1.0.0-draft.1"
+CORS_ALLOWED_ORIGINS = "https://audio-reader-admin.pages.dev,https://feature-cross-device-multi-u.audio-reader-admin.pages.dev"
+ADMIN_ORIGIN = "https://audio-reader-admin.pages.dev"
+MAX_BODY_BYTES = "1048576"
 LOCAL_DEV_OTP = ""
+QWEN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+QWEN_MODEL = "qwen3.7-plus"
+TURNSTILE_SITE_KEY = "0x4AAAAAAEeadYZs5to1Nu9q"
+OTP_FROM_EMAIL = "AudioReader <onboarding@resend.dev>"
 
 [env.production]
 name = "audio-reader-api-worker-production"
+workers_dev = true
 
 [env.production.vars]
 ENVIRONMENT = "production"
-CORS_ALLOWED_ORIGINS = ""
+APP_VERSION = "1.0.0-draft.1"
+CORS_ALLOWED_ORIGINS = "https://audio-reader-admin.pages.dev,https://feature-cross-device-multi-u.audio-reader-admin.pages.dev"
+ADMIN_ORIGIN = "https://audio-reader-admin.pages.dev"
+MAX_BODY_BYTES = "1048576"
 LOCAL_DEV_OTP = ""
+QWEN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+QWEN_MODEL = "qwen3.7-flash"
+TURNSTILE_SITE_KEY = "0x4AAAAAAEeadYZs5to1Nu9q"
+OTP_FROM_EMAIL = "AudioReader <onboarding@resend.dev>"

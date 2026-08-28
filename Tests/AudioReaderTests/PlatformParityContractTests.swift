@@ -210,7 +210,7 @@ struct PlatformParityContractTests {
 
     @Test("Provider availability is shared while ChatGPT-plan auth is explicitly macOS-only")
     func providerPlatformDifferenceIsExplicit() throws {
-        #expect(LLMProvider.allCases == [.grok, .qwenCloud, .openAI, .appleFoundation])
+        #expect(LLMProvider.allCases == [.managedQwen, .grok, .qwenCloud, .openAI, .appleFoundation])
 
         let appState = try source("Sources/AudioReader/AppState.swift")
         let settingsView = try source("Sources/AudioReader/SettingsView.swift")
@@ -226,6 +226,10 @@ struct PlatformParityContractTests {
         #expect(settingsView.contains("Using a ChatGPT-plan Codex session through AudioReader may violate OpenAI's terms"))
         #expect(settingsView.contains("value: $draft.grokEndpoint"))
         #expect(settingsView.contains("value: $draft.openAIEndpoint"))
+        #expect(settingsView.contains("managedQwenSettings"))
+        #expect(settingsView.contains("Uses the signed-in AudioReader account"))
+        #expect(settingsView.contains("case .managedQwen:"))
+        #expect(try source("Sources/AudioReader/GrokClient.swift").contains("Managed Qwen (account)"))
         #expect(codexClient.contains("return \"ChatGPT-plan access through Codex is available on macOS only.\""))
         #expect(codexClient.contains("throw LLMError.codexUnavailable"))
         #expect(settingsView.contains("appleFoundationSettings"))
@@ -251,10 +255,11 @@ struct PlatformParityContractTests {
         #expect(credentials.contains("AES.GCM.seal"))
         #expect(credentials.contains("AES.GCM.open"))
         #expect(credentials.contains("llm-credentials.vault"))
-        #expect(credentials.contains("SecItemCopyMatching"))
-        #expect(credentials.contains("SecItemAdd"))
-        #expect(credentials.contains("SecItemDelete"))
-        #expect(credentials.contains("credential-vault-wrapping-key"))
+        #expect(credentials.contains("credential-vault.key"))
+        #expect(credentials.contains("FileCredentialVaultKeyProvider"))
+        #expect(!credentials.contains("deleteLegacyKeychainKey"))
+        #expect(!credentials.contains("readLegacyKeychainKey"))
+        #expect(!credentials.contains("credential-vault-wrapping-key"))
         #expect(credentials.contains("private var cachedError: CredentialVaultKeyError?"))
         #expect(credentials.contains("if let cachedError { throw cachedError }"))
         #expect(!credentials.contains("kSecUseAuthenticationUIFail"))
@@ -262,6 +267,7 @@ struct PlatformParityContractTests {
         #expect(credentials.contains("interactionNotAllowed = true"))
         #expect(credentials.contains(".posixPermissions"))
         #expect(credentials.contains(".protectionKey"))
+        #expect(!credentials.contains("KeychainCredentialVaultKeyProvider"))
         #expect(!appStateBootSection.contains("refreshGrokModels"))
         #expect(!appStateBootSection.contains("refreshQwenModels"))
         #expect(!appStateBootSection.contains("refreshOpenAIModels"))
@@ -284,6 +290,38 @@ struct PlatformParityContractTests {
         #expect(appState.contains("retrieveOpenAIModels"))
     }
 
+    @Test("Settings is a first-class page on macOS and iPadOS")
+    func settingsIsAFirstClassPage() throws {
+        let settingsView = try source("Sources/AudioReader/SettingsView.swift")
+        let macRoot = try source("Sources/AudioReader/RootView.swift")
+        let iPadRoot = try source("Sources/AudioReader/IPadRootView.swift")
+        let models = try source("Sources/AudioReader/Models.swift")
+        let appState = try source("Sources/AudioReader/AppState.swift")
+
+        #expect(models.contains("case settings = \"Settings\""))
+        #expect(settingsView.contains(".navigationTitle(\"Settings\")"))
+        #expect(settingsView.contains(".formStyle(.grouped)"))
+        #expect(settingsView.contains("scrollContentBackground(.hidden)"))
+        #expect(settingsView.contains("listRowBackground(Palette.panel)"))
+        #expect(settingsView.contains("Save Settings"))
+        #expect(settingsView.contains(".accessibilityLabel(\"Save settings\")"))
+        #expect(!settingsView.contains("state.showSettings = false"))
+        #expect(!settingsView.contains(".frame(width: settingsWidth"))
+        #expect(!macRoot.contains(".sheet(isPresented: $state.showSettings)"))
+        #expect(!iPadRoot.contains(".sheet(isPresented: $state.showSettings)"))
+        #expect(macRoot.contains("case .settings:"))
+        #expect(iPadRoot.contains("case .settings:"))
+        #expect(iPadRoot.contains("sourceRow(.settings)"))
+        #expect(iPadRoot.contains("private var settingsSplit"))
+        #expect(iPadRoot.contains("private var librarySplit"))
+        #expect(iPadRoot.contains(".navigationSplitViewStyle(.automatic)"))
+        #expect(settingsView.contains("navigationBarBackButtonHidden(true)"))
+        #expect(appState.contains("func presentSettings()"))
+        #expect(appState.contains("tab = .settings"))
+        #expect(appState.contains("AUDIOREADER_OPEN_SETTINGS"))
+        #expect(!appState.contains("showSettings = true"))
+    }
+
     @Test("Shared settings and transcription copy does not present iPad as a Mac")
     func sharedCopyIsPlatformNeutral() throws {
         let settingsView = try source("Sources/AudioReader/SettingsView.swift")
@@ -292,7 +330,7 @@ struct PlatformParityContractTests {
         let settingsBody = try section(
             in: settingsView,
             from: "    var body: some View",
-            to: "    private var settingsWidth"
+            to: "    private var accountSection"
         )
         let dictionarySection = try section(
             in: settingsView,
@@ -300,7 +338,7 @@ struct PlatformParityContractTests {
             to: "    private var languageSection"
         )
 
-        #expect(settingsBody.contains("dictionarySection\n                    languageSection"))
+        #expect(settingsBody.contains("dictionarySection\n            languageSection"))
         #expect(!settingsBody.contains("#if os(macOS)\n                    dictionarySection"))
         #expect(dictionarySection.contains("#if os(iOS)"))
         #expect(dictionarySection.contains("Word definitions use the dictionaries installed in iPadOS."))

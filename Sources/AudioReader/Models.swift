@@ -938,6 +938,7 @@ enum AppTab: String, CaseIterable, Identifiable {
     case library = "Library"
     case player = "Player"
     case vocab = "Words"
+    case settings = "Settings"
 
     var id: String { rawValue }
     var symbol: String {
@@ -945,6 +946,7 @@ enum AppTab: String, CaseIterable, Identifiable {
         case .library: "books.vertical"
         case .player: "text.alignleft"
         case .vocab: "bookmark"
+        case .settings: "gearshape"
         }
     }
 }

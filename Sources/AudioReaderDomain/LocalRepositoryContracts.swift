@@ -50,3 +50,8 @@ public protocol SyncOutboxRepository: Sendable {
     func pendingMutations() throws -> [OutboxMutation]
     func markAcknowledged(id: MutationID) throws
 }
+
+public protocol SyncCursorStoring: Sendable {
+    func loadCursor() throws -> String
+    func saveCursor(_ cursor: String) throws
+}

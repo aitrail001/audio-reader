@@ -13,12 +13,26 @@ export type WorkerEnv = {
   ADMIN_ORIGIN?: string;
   MAX_BODY_BYTES?: string;
   SUPABASE_URL?: string;
+  SUPABASE_ANON_KEY?: string;
   SUPABASE_JWT_SECRET?: string;
   SUPABASE_JWT_AUDIENCE?: string;
+  SUPABASE_SERVICE_ROLE_KEY?: string;
+  SUPABASE_SECRET_KEY?: string;
+  QWEN_API_KEY?: string;
+  QWEN_BASE_URL?: string;
+  QWEN_MODEL?: string;
+  GCS_BUCKET?: string;
+  GCS_SERVICE_ACCOUNT_JSON?: string;
+  OPERATOR_CONFIG_KEY?: string;
+  ADMIN_BOOTSTRAP_EMAIL?: string;
   TURNSTILE_SECRET_KEY?: string;
+  TURNSTILE_SITE_KEY?: string;
   PASSWORDLESS_HMAC_SECRET?: string;
   CACHE_HMAC_SECRET?: string;
   LOCAL_DEV_OTP?: string;
+  RESEND_API_KEY?: string;
+  OTP_FROM_EMAIL?: string;
+  ASSETS?: R2Bucket;
 };
 
 export function parseEnvironment(value: string | undefined): AppEnvironment {
@@ -47,12 +61,14 @@ export function resolveJwtSigningConfig(
   const audience = env.SUPABASE_JWT_AUDIENCE?.trim() || "authenticated";
   const local = environment === "local" || environment === "test";
   if (secret !== "" && url !== "") {
+    const origin = url.replace(/\/$/, "");
     return {
-      issuer: `${url.replace(/\/$/, "")}/auth/v1`,
+      issuer: `${origin}/auth/v1`,
       audience,
       secret,
       accessTokenTtlSeconds: 3600,
       clockSkewSeconds: 0,
+      jwksUrl: `${origin}/auth/v1/.well-known/jwks.json`,
     };
   }
   if (local && secret === "") {
@@ -83,6 +99,21 @@ export function resolvePasswordlessHmacSecret(env: WorkerEnv): {
   return { secret: LOCAL_PASSWORDLESS_HMAC_SECRET, fromEnv: false };
 }
 
+export function resolveCacheHmacSecret(env: WorkerEnv): {
+  secret: string;
+  fromEnv: boolean;
+} {
+  const cache = env.CACHE_HMAC_SECRET?.trim() ?? "";
+  if (cache !== "") {
+    return { secret: cache, fromEnv: true };
+  }
+  const dedicated = env.PASSWORDLESS_HMAC_SECRET?.trim() ?? "";
+  if (dedicated !== "") {
+    return { secret: dedicated, fromEnv: true };
+  }
+  return { secret: LOCAL_PASSWORDLESS_HMAC_SECRET, fromEnv: false };
+}
+
 export function parseLocalDevOtp(env: WorkerEnv, environment: AppEnvironment): string | undefined {
   const raw = env.LOCAL_DEV_OTP?.trim() ?? "";
   if (raw === "") {
@@ -103,6 +134,67 @@ export function parseLocalDevOtp(env: WorkerEnv, environment: AppEnvironment): s
     throw new Error("LOCAL_DEV_OTP must be a 6-digit code when set in local or test.");
   }
   return raw;
+}
+
+export function resolveHostedAuthConfig(
+  env: WorkerEnv,
+  environment: AppEnvironment,
+): { url: string; anonKey: string } | undefined {
+  if (environment === "local" || environment === "test") {
+    return undefined;
+  }
+  const url = env.SUPABASE_URL?.trim() ?? "";
+  const anonKey = env.SUPABASE_ANON_KEY?.trim() ?? "";
+  if (url === "" || anonKey === "") {
+    return undefined;
+  }
+  return { url: url.replace(/\/$/, ""), anonKey };
+}
+
+export function resolveSupabaseRestConfig(
+  env: WorkerEnv,
+): { url: string; serviceRoleKey: string } | undefined {
+  const url = env.SUPABASE_URL?.trim() ?? "";
+  const serviceRoleKey =
+    env.SUPABASE_SERVICE_ROLE_KEY?.trim() || env.SUPABASE_SECRET_KEY?.trim() || "";
+  if (url === "" || serviceRoleKey === "") {
+    return undefined;
+  }
+  return { url: url.replace(/\/$/, ""), serviceRoleKey };
+}
+
+export type OperatorWrappingSource = "operator_config_key" | "cache_hmac" | "none";
+
+export function resolveOperatorWrappingSecret(env: WorkerEnv): {
+  secret: string;
+  fromEnv: boolean;
+  source: OperatorWrappingSource;
+} {
+  const dedicated = env.OPERATOR_CONFIG_KEY?.trim() ?? "";
+  if (dedicated !== "") {
+    return { secret: dedicated, fromEnv: true, source: "operator_config_key" };
+  }
+  const cache = resolveCacheHmacSecret(env);
+  if (cache.fromEnv) {
+    return { secret: cache.secret, fromEnv: true, source: "cache_hmac" };
+  }
+  return { secret: cache.secret, fromEnv: false, source: "none" };
+}
+
+export function resolveQwenConfig(
+  env: WorkerEnv,
+): { apiKey: string; baseUrl?: string; model?: string } | undefined {
+  const apiKey = env.QWEN_API_KEY?.trim() ?? "";
+  if (apiKey === "") {
+    return undefined;
+  }
+  const baseUrl = env.QWEN_BASE_URL?.trim() ?? "";
+  const model = env.QWEN_MODEL?.trim() ?? "";
+  return {
+    apiKey,
+    ...(baseUrl === "" ? {} : { baseUrl }),
+    ...(model === "" ? {} : { model }),
+  };
 }
 
 export function parsePositiveInt(value: string | undefined, fallback: number): number {

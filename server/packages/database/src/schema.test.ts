@@ -27,6 +27,7 @@ const JSON_COLUMNS_ALLOWED = new Map<string, readonly string[]>([
   ["sync_changes", ["payload"]],
   ["idempotency_records", ["response_headers"]],
   ["audit_events", ["metadata", "before_metadata", "after_metadata"]],
+  ["operator_settings", ["payload"]],
 ]);
 
 function loadMigrationSql(): string {

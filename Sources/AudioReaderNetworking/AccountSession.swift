@@ -1,5 +1,8 @@
 import Foundation
 import Observation
+#if canImport(AudioReaderDomain)
+import AudioReaderDomain
+#endif
 
 @MainActor
 @Observable
@@ -12,6 +15,9 @@ public final class AccountSession {
     public private(set) var errorMessage: String?
     public private(set) var isBusy = false
     public private(set) var pendingEmail: String?
+    public private(set) var featureFlags: [FeatureFlag] = []
+    public private(set) var quotas: [Quota] = []
+    public private(set) var lastExportStatus: String?
     var pendingOAuth: PendingOAuth?
     var pendingAuthorizationURL: URL?
 
@@ -23,6 +29,7 @@ public final class AccountSession {
     private let client: any AuthClient
     private let oauth: any OAuthBrowserSession
     private let environment: AccountDeviceEnvironment
+    private let syncRuntime: AccountSyncRuntime?
 
     public static let revokedDeviceRecoveryMessage =
         "This device is no longer signed in. Books on this device were kept. Sign in again to reconnect."
@@ -31,21 +38,30 @@ public final class AccountSession {
         client: any AuthClient,
         store: any AuthSessionStoring,
         oauth: any OAuthBrowserSession,
-        environment: AccountDeviceEnvironment
+        environment: AccountDeviceEnvironment,
+        syncRuntime: AccountSyncRuntime? = nil
     ) {
         self.client = client
         self.store = store
         self.oauth = oauth
         self.environment = environment
+        self.syncRuntime = syncRuntime
     }
 
     public static func isolated(
         client: FakeAuthClient = FakeAuthClient(),
         store: InMemoryAuthSessionStore = InMemoryAuthSessionStore(),
         oauth: ScriptedOAuthBrowserSession = .passthrough(),
-        environment: AccountDeviceEnvironment = .test
+        environment: AccountDeviceEnvironment = .test,
+        syncRuntime: AccountSyncRuntime? = nil
     ) -> AccountSession {
-        AccountSession(client: client, store: store, oauth: oauth, environment: environment)
+        AccountSession(
+            client: client,
+            store: store,
+            oauth: oauth,
+            environment: environment,
+            syncRuntime: syncRuntime
+        )
     }
 
     public func restore() async {
@@ -53,11 +69,15 @@ public final class AccountSession {
             mode = .local
             profile = nil
             accessToken = nil
+            publishManagedCredentials()
             return
         }
         mode = persisted.mode
         profile = persisted.profile
         await refreshSession()
+        if mode.isSyncEnabled {
+            await synchronize()
+        }
     }
 
     public func requestEmailCode(_ email: String) async {
@@ -80,8 +100,8 @@ public final class AccountSession {
             errorMessage = "Request an email sign-in code first."
             return
         }
-        guard digits.count == 6 else {
-            errorMessage = "Enter the six-digit email sign-in code."
+        guard (6...12).contains(digits.count) else {
+            errorMessage = "Enter the email sign-in code from your message."
             return
         }
         await run {
@@ -161,8 +181,42 @@ public final class AccountSession {
         }
     }
 
+    public func flagEnabled(_ key: String, default defaultValue: Bool = true) -> Bool {
+        featureFlags.first(where: { $0.key == key })?.enabled ?? defaultValue
+    }
+
+    public func exportAccount() async {
+        await run {
+            let deviceID = try store.deviceID()
+            let job = try await withAccessToken { access in
+                try await client.createAccountExport(accessToken: access, deviceID: deviceID, format: "zip_json")
+            }
+            lastExportStatus = "Export \(job.status)."
+            errorMessage = nil
+        }
+    }
+
+    public func deleteAccount(reason: String) async {
+        await run {
+            let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.count >= 5 else {
+                errorMessage = "Enter a short reason for deleting the account."
+                return
+            }
+            let deviceID = try store.deviceID()
+            try await withAccessToken { access in
+                try await client.requestAccountDeletion(accessToken: access, deviceID: deviceID, reason: trimmed)
+            }
+            clearLocalSession(recovery: "Account deletion was requested. This device is back in local mode.")
+        }
+    }
+
     public func setSyncEnabled(_ enabled: Bool) {
         guard mode.isSignedIn else { return }
+        guard !enabled || flagEnabled("account_sync") else {
+            errorMessage = "Account sync is turned off for this product right now."
+            return
+        }
         let previous = mode
         mode = enabled ? .signedInSyncOn : .signedInSyncOff
         do {
@@ -176,6 +230,13 @@ public final class AccountSession {
             mode = previous
             errorMessage = (error as? LocalizedError)?.errorDescription
                 ?? "Could not save the sync preference."
+        }
+    }
+
+    public func synchronize() async {
+        guard mode.isSyncEnabled, let runtime = syncRuntime else { return }
+        await run {
+            try await drainSync(runtime: runtime)
         }
     }
 
@@ -206,6 +267,7 @@ public final class AccountSession {
 
     func forgetAccessToken() {
         accessToken = nil
+        publishManagedCredentials()
     }
 
     public var currentDeviceID: String? {
@@ -229,6 +291,7 @@ public final class AccountSession {
 
     private func establishSession(tokens: TokenPair) async throws {
         accessToken = tokens.accessToken
+        publishManagedCredentials()
         let deviceID = try store.deviceID()
         let bootstrap = try await client.bootstrap(
             accessToken: tokens.accessToken,
@@ -243,11 +306,16 @@ public final class AccountSession {
             )
         )
         profile = bootstrap.profile
+        featureFlags = bootstrap.featureFlags
+        quotas = bootstrap.quotas
         mode = .signedInSyncOff
         pendingOAuth = nil
         recoveryMessage = nil
         errorMessage = nil
         try persist(tokens: tokens, profile: bootstrap.profile, mode: .signedInSyncOff)
+        if let cursor = bootstrap.syncCursor, let runtime = syncRuntime {
+            try runtime.cursor.saveCursor(cursor)
+        }
         try await loadDevices()
     }
 
@@ -299,6 +367,44 @@ public final class AccountSession {
         return accessToken
     }
 
+    private func drainSync(runtime: AccountSyncRuntime) async throws {
+        let deviceID = try store.deviceID()
+        for mutation in try runtime.snapshot() {
+            try runtime.outbox.enqueue(mutation)
+        }
+        let pending = try runtime.outbox.pendingMutations()
+        let cursor = try runtime.cursor.loadCursor()
+        if !pending.isEmpty {
+            let request = SyncPushRequest(
+                deviceId: deviceID,
+                batchId: UUID().uuidString.lowercased(),
+                baseCursor: cursor,
+                mutations: try pending.map { try $0.productMutation() }
+            )
+            let pushed = try await withAccessToken { access in
+                try await runtime.client.push(accessToken: access, deviceID: deviceID, request: request)
+            }
+            try runtime.cursor.saveCursor(pushed.cursor)
+            for result in pushed.results
+                where result.status == "applied" || result.status == "duplicate" || result.status == "conflict"
+            {
+                try runtime.outbox.markAcknowledged(id: MutationID(rawValue: result.mutationId))
+            }
+        }
+        let pulled = try await withAccessToken { access in
+            try await runtime.client.pull(
+                accessToken: access,
+                deviceID: deviceID,
+                cursor: try runtime.cursor.loadCursor(),
+                limit: 100
+            )
+        }
+        for change in pulled.changes {
+            try runtime.applyChange(change)
+        }
+        try runtime.cursor.saveCursor(pulled.cursor)
+    }
+
     private func refreshAccessTokenKeepingSession() async throws {
         guard let persisted = try store.load() else {
             throw AuthClientError.invalidResponse
@@ -306,6 +412,7 @@ public final class AccountSession {
         do {
             let tokens = try await client.refresh(refreshToken: persisted.refreshToken)
             accessToken = tokens.accessToken
+            publishManagedCredentials()
             try persist(tokens: tokens, profile: persisted.profile, mode: persisted.mode)
             recoveryMessage = nil
             errorMessage = nil
@@ -326,12 +433,23 @@ public final class AccountSession {
         mode = .local
         profile = nil
         accessToken = nil
+        publishManagedCredentials()
         devices = []
+        featureFlags = []
+        quotas = []
+        lastExportStatus = nil
         pendingOAuth = nil
         pendingAuthorizationURL = nil
         pendingEmail = nil
         errorMessage = nil
         recoveryMessage = recovery
+    }
+
+    private func publishManagedCredentials() {
+        ManagedAccountCredentials.publish(
+            accessToken: accessToken,
+            deviceID: try? store.deviceID()
+        )
     }
 
     private func isInvalidSession(_ error: Error) -> Bool {

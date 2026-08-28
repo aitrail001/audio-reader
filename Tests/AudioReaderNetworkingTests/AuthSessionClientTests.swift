@@ -59,6 +59,33 @@ struct AuthSessionClientTests {
         #expect(payload.redirectUri == ProductAPI.callbackURL.absoluteString)
     }
 
+    @Test("HTTP client surfaces problem fieldErrors instead of a generic body message")
+    func fieldErrorsOverrideGenericBodyDetail() async {
+        let http = StubHTTPClient()
+        let client = ProductAuthClient(http: http, baseURL: ProductAPI.defaultBaseURL)
+        http.enqueue(
+            status: 400,
+            json: """
+            {"type":"https://api.example.com/problems/bad_request","title":"Bad request","status":400,"code":"bad_request","detail":"The request body is invalid.","fieldErrors":[{"field":"codeVerifier","message":"codeVerifier must be a PKCE verifier."}]}
+            """
+        )
+
+        await #expect(throws: AuthClientError.problem(
+            status: 400,
+            code: "bad_request",
+            detail: "codeVerifier must be a PKCE verifier."
+        )) {
+            _ = try await client.exchangeOAuth(
+                provider: .google,
+                code: "auth-code-1",
+                codeVerifier: String(repeating: "a", count: 43),
+                redirectURI: ProductAPI.callbackURL,
+                state: "native-state",
+                deviceID: deviceID
+            )
+        }
+    }
+
     @Test("HTTP client maps a revoked-device bootstrap to deviceRevoked")
     func revokedDeviceProblemMapsToClientError() async {
         let http = StubHTTPClient()
@@ -192,6 +219,26 @@ struct AuthSessionClientTests {
         #expect(try store.deviceID() == deviceID)
         #expect(client.exchangeCount == 1)
         #expect(client.bootstrapCount == 1)
+        #expect(session.flagEnabled("managed_qwen"))
+        #expect(session.quotas.contains { $0.key == "qwen_tasks_day" && $0.limit == 50 })
+    }
+
+    @MainActor
+    @Test("email sign-in accepts 6 to 12 digit codes")
+    func emailSignInAcceptsLongerCodes() async throws {
+        let client = FakeAuthClient()
+        client.otpCode = "12345678"
+        let store = InMemoryAuthSessionStore(deviceID: deviceID)
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test
+        )
+        await session.requestEmailCode(email)
+        await session.verifyEmailCode("12345678")
+        #expect(session.mode == .signedInSyncOff)
+        #expect(session.errorMessage == nil)
     }
 
     @MainActor
@@ -224,7 +271,7 @@ struct AuthSessionClientTests {
     }
 
     @MainActor
-    @Test("expired or missing access token refreshes instead of clearing Keychain")
+    @Test("expired or missing access token refreshes instead of clearing the session store")
     func accessTokenFailureDoesNotClearRefreshSession() async throws {
         let client = FakeAuthClient()
         let store = InMemoryAuthSessionStore(deviceID: deviceID)
@@ -330,11 +377,13 @@ struct AuthSessionClientTests {
     }
 
     @MainActor
-    @Test("Keychain session store keeps the device ID after logout")
-    func keychainStoreSurvivesLogout() throws {
-        let service = "com.johnsonzhang.AudioReader.account-session.tests.\(UUID().uuidString)"
-        let store = KeychainAuthSessionStore(service: service)
-        defer { try? store.clear(); try? store.deleteDeviceID() }
+    @Test("Encrypted file session store keeps the device ID after logout")
+    func encryptedFileStoreSurvivesLogout() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioReader-Session-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = EncryptedFileAuthSessionStore(directory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
 
         let device = try store.deviceID()
         #expect(UUID(uuidString: device) != nil)

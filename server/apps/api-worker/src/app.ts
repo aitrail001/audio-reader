@@ -3,16 +3,24 @@ import {
   LOCAL_PASSWORDLESS_HMAC_SECRET,
   createCloudflareTurnstileVerifier,
   createFakePrincipal,
+  createHostedAuthService,
   createMemoryAuthService,
   createMemoryPasswordlessLimiter,
   type AuthService,
+  type HostedOtpMailer,
+  type JwtSigningConfig,
   type PasswordlessLimiter,
   type Principal,
   type TurnstileVerifier,
 } from "@audio-reader/auth";
-import { createFakeDatabaseClient } from "@audio-reader/database";
+import {
+  createFakeDatabaseClient,
+  createSupabaseDatabaseClient,
+  createUnavailableDatabaseClient,
+  type DatabaseClient,
+} from "@audio-reader/database";
 import { logSecurityEvent, logUnhandledError, resolveRequestId } from "@audio-reader/observability";
-import { createFakeQwenClient } from "@audio-reader/qwen";
+import { createFakeQwenClient, type QwenClient } from "@audio-reader/qwen";
 import { authMethodError, handleAuthRoute, isAuthPath } from "./auth-routes";
 import { DEFAULT_MAX_BODY_BYTES, validateRequestBody } from "./body";
 import { applyCorsHeaders, resolveCorsAllowlist } from "./cors";
@@ -21,15 +29,35 @@ import {
   parseLocalDevOtp,
   parseOriginList,
   parsePositiveInt,
+  resolveCacheHmacSecret,
+  resolveHostedAuthConfig,
   resolveJwtSigningConfig,
+  resolveOperatorWrappingSecret,
   resolvePasswordlessHmacSecret,
+  resolveSupabaseRestConfig,
   type AppEnvironment,
   type WorkerEnv,
 } from "./env";
-import { buildHealth, unavailableProbe, type DependencyProbe } from "./health";
+import { buildHealth, isServiceReady } from "./health";
 import { asHead, jsonResponse, problemResponse, withRequestId } from "./http";
 import { createMemoryIdempotencyStore, type IdempotencyStore } from "./idempotency";
-import { createFakeObjectStore } from "./object-store";
+import { createResendOtpMailer } from "./otp-mail";
+import {
+  createFakeObjectStore,
+  createResolvingObjectStore,
+  type ObjectStore,
+} from "./object-store";
+import {
+  createResolvingQwenClient,
+  createRuntimeConfigService,
+  type RuntimeConfigService,
+} from "./runtime-config";
+import { handleAssistantRoute, assistantMethodError, isAssistantPath } from "./assistant-routes";
+import { handleSyncRoute, isSyncPath, syncMethodError } from "./sync-routes";
+import { handleLibraryRoute, isLibraryPath, libraryMethodError } from "./library-routes";
+import { assetMethodError, handleAssetRoute, isAssetPath, isBinaryAssetPath } from "./asset-routes";
+import { handlePrivacyRoute, isPrivacyPath, privacyMethodError } from "./privacy-routes";
+import { adminMethodError, handleAdminRoute, isAdminPath } from "./admin-routes";
 
 const HEALTH_PATHS = new Set(["/v1/health", "/healthz", "/readyz"]);
 
@@ -41,15 +69,18 @@ export type AppOptions = {
   maxBodyBytes?: number;
   corsOrigins: readonly string[];
   adminOrigin?: string;
-  database: DependencyProbe;
-  r2: DependencyProbe;
-  qwen: DependencyProbe;
+  database: DatabaseClient;
+  storage: ObjectStore;
+  qwen: QwenClient;
+  runtime?: RuntimeConfigService;
   authenticate?: (request: Request) => Principal | Promise<Principal | null> | null;
   auth?: AuthService;
   idempotencyStore?: IdempotencyStore;
   passwordlessLimiter?: PasswordlessLimiter;
   verifyTurnstile?: TurnstileVerifier;
   hmacSecret?: string;
+  cacheHmacSecret?: string;
+  turnstileSiteKey?: string;
 };
 
 export type ApiApp = {
@@ -106,16 +137,26 @@ export function createApiApp(options: AppOptions): ApiApp {
 }
 
 export function createTestApp(overrides: Partial<AppOptions> = {}): ApiApp {
+  const { database: databaseOverride, runtime: runtimeOverride, ...rest } = overrides;
+  const database = databaseOverride ?? createFakeDatabaseClient();
+  const runtime =
+    runtimeOverride ??
+    createRuntimeConfigService({
+      env: { ENVIRONMENT: "test" },
+      ops: database.ops,
+      wrappingSecret: "test-operator-secret-key",
+    });
   return createApiApp({
     environment: "test",
     version: "1.0.0-draft.1",
     corsOrigins: ["http://localhost:5173"],
-    database: createFakeDatabaseClient(),
-    r2: createFakeObjectStore(),
+    storage: createFakeObjectStore(),
     qwen: createFakeQwenClient(),
     auth: createMemoryAuthService({ jwt: LOCAL_JWT_CONFIG }),
     authenticate: () => createFakePrincipal(),
-    ...overrides,
+    ...rest,
+    database,
+    runtime,
   });
 }
 
@@ -126,16 +167,54 @@ export function createApiAppFromEnv(env: WorkerEnv): ApiApp {
   const version = env.APP_VERSION?.trim();
   const jwt = resolveJwtSigningConfig(env, environment);
   const localOtp = parseLocalDevOtp(env, environment);
-  const auth =
-    jwt === undefined
-      ? undefined
-      : createMemoryAuthService({
-          jwt,
-          allowLocalIssuance: useFakes,
-          ...(localOtp === undefined ? {} : { generateOtp: () => localOtp }),
-        });
+  const hosted = resolveHostedAuthConfig(env, environment);
+  const database = resolveDatabaseClient(env, useFakes);
+  const rest = resolveSupabaseRestConfig(env);
+  const bootstrapEmail = env.ADMIN_BOOTSTRAP_EMAIL?.trim() ?? "";
+  const resendKey = env.RESEND_API_KEY?.trim() ?? "";
+  const otpFrom = env.OTP_FROM_EMAIL?.trim() ?? "";
+  const auth = createAuthServiceFromEnv({
+    jwt,
+    useFakes,
+    localOtp,
+    hosted,
+    ...(rest === undefined ? {} : { identity: database.identity }),
+    ...(bootstrapEmail === "" ? {} : { adminBootstrapEmail: bootstrapEmail }),
+    ...(rest === undefined ? {} : { serviceRoleKey: rest.serviceRoleKey }),
+    ...(resendKey === ""
+      ? {}
+      : {
+          sendOtpEmail: createResendOtpMailer({
+            apiKey: resendKey,
+            ...(otpFrom === "" ? {} : { from: otpFrom }),
+          }),
+        }),
+  });
   const turnstileSecret = env.TURNSTILE_SECRET_KEY?.trim() ?? "";
   const hmac = resolvePasswordlessHmacSecret(env);
+  const cacheHmac = resolveCacheHmacSecret(env);
+  const wrapping = resolveOperatorWrappingSecret(env);
+  const runtime = createRuntimeConfigService({
+    env,
+    ops: database.ops,
+    wrappingSecret: wrapping.secret,
+    wrappingSource: wrapping.source,
+  });
+  if (!useFakes) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: "operator_runtime_boot",
+        wrappingSource: wrapping.source,
+        wrappingConfigured: wrapping.secret.trim() !== "",
+        qwenEnvKeyConfigured: (env.QWEN_API_KEY?.trim() ?? "") !== "",
+        qwenEnvModel: env.QWEN_MODEL?.trim() ?? "",
+        qwenEnvBaseUrlConfigured: (env.QWEN_BASE_URL?.trim() ?? "") !== "",
+        operatorConfigKeyConfigured: (env.OPERATOR_CONFIG_KEY?.trim() ?? "") !== "",
+        cacheHmacConfigured: (env.CACHE_HMAC_SECRET?.trim() ?? "") !== "",
+      }),
+    );
+  }
   if (!useFakes && !hmac.fromEnv) {
     console.warn(
       JSON.stringify({
@@ -143,6 +222,26 @@ export function createApiAppFromEnv(env: WorkerEnv): ApiApp {
         message: "passwordless_hmac_secret_missing",
         detail:
           "PASSWORDLESS_HMAC_SECRET (or CACHE_HMAC_SECRET) is unset; hashes use the local-dev pepper.",
+      }),
+    );
+  }
+  if (!useFakes && jwt !== undefined && hosted === undefined) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: "hosted_auth_unconfigured",
+        detail:
+          "OTP and OAuth issuance require SUPABASE_ANON_KEY with SUPABASE_URL and SUPABASE_JWT_SECRET. JWT validation still works; login returns 503 until the anon key is set.",
+      }),
+    );
+  }
+  if (!useFakes && rest === undefined) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: "supabase_service_role_missing",
+        detail:
+          "SUPABASE_SERVICE_ROLE_KEY is unset; profiles, devices, settings, and sync stay isolate-local. Set it with wrangler secret put SUPABASE_SERVICE_ROLE_KEY.",
       }),
     );
   }
@@ -156,21 +255,82 @@ export function createApiAppFromEnv(env: WorkerEnv): ApiApp {
       }),
     );
   }
+  const verifyTurnstile: TurnstileVerifier = async (token, ip) => {
+    const secret = (await runtime.resolveTurnstileSecret()) ?? turnstileSecret;
+    if (secret === "") {
+      return useFakes ? token === "turnstile-ok" : false;
+    }
+    return createCloudflareTurnstileVerifier({ secretKey: secret })(token, ip);
+  };
   return createApiApp({
     environment,
     version: version === undefined || version === "" ? "1.0.0-draft.1" : version,
     maxBodyBytes: parsePositiveInt(env.MAX_BODY_BYTES, DEFAULT_MAX_BODY_BYTES),
     corsOrigins: parseOriginList(env.CORS_ALLOWED_ORIGINS),
     ...(adminOrigin !== undefined && adminOrigin !== "" ? { adminOrigin } : {}),
-    database: useFakes ? createFakeDatabaseClient() : unavailableProbe(),
-    r2: useFakes ? createFakeObjectStore() : unavailableProbe(),
-    qwen: useFakes ? createFakeQwenClient() : unavailableProbe(),
+    database,
+    storage: createResolvingObjectStore(() => runtime.resolveStorage({ useFakes })),
+    qwen: createResolvingQwenClient(() => runtime.resolveQwenClient({ useFakes })),
+    runtime,
     ...(auth === undefined ? {} : { auth }),
     authenticate: auth === undefined ? () => null : (request) => auth.authenticate(request),
     hmacSecret: hmac.secret,
-    ...(turnstileSecret === ""
-      ? {}
-      : { verifyTurnstile: createCloudflareTurnstileVerifier({ secretKey: turnstileSecret }) }),
+    cacheHmacSecret: cacheHmac.secret,
+    verifyTurnstile,
+    ...(env.TURNSTILE_SITE_KEY?.trim() ? { turnstileSiteKey: env.TURNSTILE_SITE_KEY.trim() } : {}),
+  });
+}
+
+function resolveDatabaseClient(env: WorkerEnv, useFakes: boolean): DatabaseClient {
+  if (useFakes) {
+    return createFakeDatabaseClient();
+  }
+  const rest = resolveSupabaseRestConfig(env);
+  if (rest !== undefined) {
+    return createSupabaseDatabaseClient(rest);
+  }
+  return createUnavailableDatabaseClient();
+}
+
+function createAuthServiceFromEnv(input: {
+  jwt: JwtSigningConfig | undefined;
+  useFakes: boolean;
+  localOtp: string | undefined;
+  hosted: { url: string; anonKey: string } | undefined;
+  identity?: DatabaseClient["identity"];
+  adminBootstrapEmail?: string;
+  serviceRoleKey?: string;
+  sendOtpEmail?: HostedOtpMailer;
+}): AuthService | undefined {
+  if (input.jwt === undefined) {
+    return undefined;
+  }
+  if (input.useFakes) {
+    const otp = input.localOtp;
+    return createMemoryAuthService({
+      jwt: input.jwt,
+      allowLocalIssuance: true,
+      ...(otp === undefined ? {} : { generateOtp: () => otp }),
+    });
+  }
+  if (input.hosted !== undefined) {
+    return createHostedAuthService({
+      jwt: input.jwt,
+      supabaseUrl: input.hosted.url,
+      supabaseAnonKey: input.hosted.anonKey,
+      ...(input.identity === undefined ? {} : { identity: input.identity }),
+      ...(input.adminBootstrapEmail === undefined || input.adminBootstrapEmail === ""
+        ? {}
+        : { adminBootstrapEmail: input.adminBootstrapEmail }),
+      ...(input.serviceRoleKey === undefined || input.serviceRoleKey === ""
+        ? {}
+        : { serviceRoleKey: input.serviceRoleKey }),
+      ...(input.sendOtpEmail === undefined ? {} : { sendOtpEmail: input.sendOtpEmail }),
+    });
+  }
+  return createMemoryAuthService({
+    jwt: input.jwt,
+    allowLocalIssuance: false,
   });
 }
 
@@ -234,10 +394,10 @@ async function handleRequest(
       version: options.version,
       includeDependencies,
       database: options.database,
-      r2: options.r2,
+      storage: options.storage,
       qwen: options.qwen,
     });
-    if (path === "/readyz" && health.status !== "ok") {
+    if (path === "/readyz" && !isServiceReady(health.dependencies)) {
       return asHead(
         request,
         problemResponse({
@@ -252,14 +412,23 @@ async function handleRequest(
     return asHead(request, jsonResponse(health));
   }
 
-  const methodError = authMethodError(path, request.method, requestId);
+  const methodError =
+    authMethodError(path, request.method, requestId) ??
+    syncMethodError(path, request.method, requestId) ??
+    assistantMethodError(path, request.method, requestId) ??
+    libraryMethodError(path, request.method, requestId) ??
+    assetMethodError(path, request.method, requestId) ??
+    privacyMethodError(path, request.method, requestId) ??
+    adminMethodError(path, request.method, requestId);
   if (methodError !== undefined) {
     return methodError;
   }
 
-  const bodyError = await validateRequestBody(request, maxBodyBytes, requestId);
-  if (bodyError !== undefined) {
-    return bodyError;
+  if (!isBinaryAssetPath(path)) {
+    const bodyError = await validateRequestBody(request, maxBodyBytes, requestId);
+    if (bodyError !== undefined) {
+      return bodyError;
+    }
   }
 
   if (isAuthPath(path)) {
@@ -270,6 +439,98 @@ async function handleRequest(
       authenticate,
       idempotencyStore,
       passwordlessLimiter,
+      localOAuthComplete: options.environment === "local" || options.environment === "test",
+      ops: options.database.ops,
+      ...(options.turnstileSiteKey === undefined || options.turnstileSiteKey === ""
+        ? {}
+        : { turnstileSiteKey: options.turnstileSiteKey }),
+    });
+    if (routed !== undefined) {
+      return routed;
+    }
+  }
+
+  if (isSyncPath(path)) {
+    const routed = await handleSyncRoute({
+      request,
+      requestId,
+      authenticate,
+      idempotencyStore,
+      sync: options.database.sync,
+    });
+    if (routed !== undefined) {
+      return routed;
+    }
+  }
+
+  if (isAssistantPath(path)) {
+    const routed = await handleAssistantRoute({
+      request,
+      requestId,
+      authenticate,
+      idempotencyStore,
+      qwen: options.qwen,
+      ops: options.database.ops,
+      cacheHmacSecret:
+        options.cacheHmacSecret ?? options.hmacSecret ?? LOCAL_PASSWORDLESS_HMAC_SECRET,
+      ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
+    });
+    if (routed !== undefined) {
+      return routed;
+    }
+  }
+
+  if (isLibraryPath(path)) {
+    const routed = await handleLibraryRoute({
+      request,
+      requestId,
+      authenticate,
+      idempotencyStore,
+      catalog: options.database.catalog,
+    });
+    if (routed !== undefined) {
+      return routed;
+    }
+  }
+
+  if (isAssetPath(path)) {
+    const routed = await handleAssetRoute({
+      request,
+      requestId,
+      authenticate,
+      idempotencyStore,
+      ops: options.database.ops,
+      objects: options.storage,
+    });
+    if (routed !== undefined) {
+      return routed;
+    }
+  }
+
+  if (isPrivacyPath(path)) {
+    const routed = await handlePrivacyRoute({
+      request,
+      requestId,
+      authenticate,
+      idempotencyStore,
+      ops: options.database.ops,
+      identity: options.database.identity,
+      objects: options.storage,
+    });
+    if (routed !== undefined) {
+      return routed;
+    }
+  }
+
+  if (isAdminPath(path)) {
+    const routed = await handleAdminRoute({
+      request,
+      requestId,
+      authenticate,
+      idempotencyStore,
+      ops: options.database.ops,
+      identity: options.database.identity,
+      ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
     });
     if (routed !== undefined) {
       return routed;

@@ -34,6 +34,8 @@ tags:
 - name: Admin Cache
 - name: Admin Jobs
 - name: Admin Operations
+- name: Admin Flags
+- name: Admin Privacy
 paths:
   /v1/health:
     get:
@@ -1413,6 +1415,39 @@ paths:
       - *id015
       - $ref: '#/components/parameters/DeviceId'
       - $ref: '#/components/parameters/IdempotencyKey'
+  /v1/admin/users/{userId}/grant-admin:
+    post:
+      operationId: adminGrantUserAdmin
+      security:
+      - AdminBearer: []
+      summary: Grant the operator role so the user's JWT is treated as admin
+      tags:
+      - Admin Users
+      responses:
+        '200':
+          description: User with operator role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminAction'
+      parameters:
+      - *id015
+      - $ref: '#/components/parameters/DeviceId'
+      - $ref: '#/components/parameters/IdempotencyKey'
   /v1/admin/llm/policies:
     get:
       operationId: adminListLlmPolicies
@@ -1743,6 +1778,340 @@ paths:
         in: query
         required: false
         schema: *id009
+      - name: action
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: requestId
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: resourceType
+        in: query
+        required: false
+        schema:
+          type: string
+  /v1/admin/runtime-config:
+    get:
+      operationId: adminGetRuntimeConfig
+      security:
+      - AdminBearer: []
+      summary: Get operator-managed runtime configuration
+      tags:
+      - Admin Operations
+      responses:
+        '200':
+          description: Runtime configuration with secrets masked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeConfig'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+    put:
+      operationId: adminPutRuntimeConfig
+      security:
+      - AdminBearer: []
+      summary: Update Qwen, GCS, and Turnstile configuration without a Worker redeploy
+      tags:
+      - Admin Operations
+      responses:
+        '200':
+          description: Updated runtime configuration with secrets masked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeConfig'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuntimeConfigPut'
+      parameters:
+      - $ref: '#/components/parameters/DeviceId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+  /v1/admin/diagnostics:
+    get:
+      operationId: adminGetDiagnostics
+      security:
+      - AdminBearer: []
+      summary: Operator diagnostics for Qwen, flags, quotas, and policies
+      tags:
+      - Admin Operations
+      parameters:
+      - name: probe
+        in: query
+        required: false
+        description: models pings /models; complete also runs a tiny chat completion
+        schema:
+          type: string
+          enum:
+          - models
+          - complete
+      responses:
+        '200':
+          description: Diagnostic snapshot without secrets
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatorDiagnostics'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+  /v1/admin/events:
+    get:
+      operationId: adminListOperatorEvents
+      security:
+      - AdminBearer: []
+      summary: Recent operator-visible events for Qwen, config, and probes
+      tags:
+      - Admin Operations
+      parameters:
+      - name: requestId
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: kind
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: task
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Recent events without secrets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OperatorEvent'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+  /v1/admin/feature-flags:
+    get:
+      operationId: adminListFeatureFlags
+      security:
+      - AdminBearer: []
+      summary: List product feature flags and kill switches
+      tags:
+      - Admin Flags
+      responses:
+        '200':
+          description: Feature flags
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FeatureFlag'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+  /v1/admin/feature-flags/{flagKey}:
+    patch:
+      operationId: adminPatchFeatureFlag
+      security:
+      - AdminBearer: []
+      summary: Enable, disable, or retarget a feature flag
+      tags:
+      - Admin Flags
+      responses:
+        '200':
+          description: Updated feature flag
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeatureFlag'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FeatureFlagPatch'
+      parameters:
+      - name: flagKey
+        in: path
+        required: true
+        schema:
+          type: string
+      - $ref: '#/components/parameters/DeviceId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+  /v1/admin/quotas:
+    get:
+      operationId: adminListQuotas
+      security:
+      - AdminBearer: []
+      summary: List starter product quotas
+      tags:
+      - Admin Operations
+      responses:
+        '200':
+          description: Quotas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Quota'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+  /v1/admin/quotas/{quotaKey}:
+    patch:
+      operationId: adminPatchQuota
+      security:
+      - AdminBearer: []
+      summary: Change a product quota limit
+      tags:
+      - Admin Operations
+      responses:
+        '200':
+          description: Updated quota
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quota'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuotaPatch'
+      parameters:
+      - name: quotaKey
+        in: path
+        required: true
+        schema:
+          type: string
+      - $ref: '#/components/parameters/DeviceId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+  /v1/admin/privacy-requests:
+    get:
+      operationId: adminListPrivacyRequests
+      security:
+      - AdminBearer: []
+      summary: List account export and deletion requests
+      tags:
+      - Admin Privacy
+      responses:
+        '200':
+          description: Privacy request page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CursorPagePrivacyRequests'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+      parameters:
+      - *id012
+      - *id013
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+  /v1/admin/privacy-requests/{requestId}/actions:
+    post:
+      operationId: adminActOnPrivacyRequest
+      security:
+      - AdminBearer: []
+      summary: Complete or cancel a privacy request
+      tags:
+      - Admin Privacy
+      responses:
+        '200':
+          description: Updated privacy request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrivacyRequest'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrivacyRequestAction'
+      parameters:
+      - name: requestId
+        in: path
+        required: true
+        schema: *id009
+      - $ref: '#/components/parameters/DeviceId'
+      - $ref: '#/components/parameters/IdempotencyKey'
 components:
   securitySchemes:
     bearerAuth:
@@ -2008,6 +2377,8 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AuthProvider'
+        turnstileSiteKey:
+          type: string
     AuthProvider:
       type: object
       additionalProperties: false
@@ -2165,6 +2536,10 @@ components:
           type: string
         createdAt: *id018
         lastSeenAt: *id018
+        quotas:
+          type: array
+          items:
+            $ref: '#/components/schemas/Quota'
         revoked:
           type: boolean
         revokedAt: *id026
@@ -2180,6 +2555,40 @@ components:
         enabled:
           type: boolean
         variant: *id025
+        rolloutPercent:
+          type: number
+          minimum: 0
+          maximum: 100
+        minAppVersion: *id025
+        platforms:
+          type: array
+          items:
+            type: string
+            enum:
+            - macos
+            - ios
+            - ipados
+    FeatureFlagPatch:
+      type: object
+      additionalProperties: false
+      required:
+      - reason
+      properties:
+        reason:
+          type: string
+          minLength: 5
+        enabled:
+          type: boolean
+        variant: *id025
+        rolloutPercent:
+          type: number
+          minimum: 0
+          maximum: 100
+        minAppVersion: *id025
+        platforms:
+          type: array
+          items:
+            type: string
     Quota:
       type: object
       additionalProperties: false
@@ -2198,6 +2607,69 @@ components:
           type: number
           minimum: 0
         periodEndsAt: *id018
+    QuotaPatch:
+      type: object
+      additionalProperties: false
+      required:
+      - reason
+      - limit
+      properties:
+        reason:
+          type: string
+          minLength: 5
+        limit:
+          type: number
+          minimum: 0
+    PrivacyRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - accountId
+      - kind
+      - status
+      - createdAt
+      properties:
+        id: *id009
+        accountId: *id009
+        kind:
+          type: string
+          enum:
+          - export
+          - deletion
+        status:
+          type: string
+          enum:
+          - queued
+          - running
+          - ready
+          - failed
+          - expired
+          - cancelled
+        format: *id025
+        assetId:
+          oneOf:
+          - *id009
+          - type: 'null'
+        error: *id025
+        reason: *id025
+        createdAt: *id018
+        completedAt: *id026
+    PrivacyRequestAction:
+      type: object
+      additionalProperties: false
+      required:
+      - action
+      - reason
+      properties:
+        action:
+          type: string
+          enum:
+          - complete
+          - cancel
+        reason:
+          type: string
+          minLength: 5
     BootstrapResponse:
       type: object
       additionalProperties: false
@@ -3553,6 +4025,10 @@ components:
           minimum: 0
         createdAt: *id018
         lastSeenAt: *id026
+        quotas:
+          type: array
+          items:
+            $ref: '#/components/schemas/Quota'
     AdminAction:
       type: object
       additionalProperties: false
@@ -3572,6 +4048,7 @@ components:
       - region
       - model
       - promptVersion
+      - systemPrompt
       - schemaVersion
       - policyVersion
       - enabled
@@ -3586,6 +4063,8 @@ components:
         model:
           type: string
         promptVersion:
+          type: string
+        systemPrompt:
           type: string
         schemaVersion:
           type: string
@@ -3627,6 +4106,8 @@ components:
           type: string
         promptVersion:
           type: string
+        systemPrompt:
+          type: string
         schemaVersion:
           type: string
         maxInputTokens:
@@ -3638,6 +4119,246 @@ components:
         timeoutMs:
           type: integer
           minimum: 1000
+    RuntimeConfig:
+      type: object
+      additionalProperties: false
+      required:
+      - qwen
+      - storage
+      - turnstile
+      - bootstrap
+      properties:
+        qwen:
+          type: object
+          additionalProperties: false
+          required:
+          - apiKeyConfigured
+          - baseUrl
+          - model
+          - source
+          properties:
+            apiKeyConfigured:
+              type: boolean
+            apiKeyLast4:
+              type: string
+            baseUrl:
+              type: string
+            model:
+              type: string
+            source:
+              type: string
+              enum:
+              - env
+              - admin
+              - none
+            ciphertextPresent:
+              type: boolean
+            secretsDecryptable:
+              type: boolean
+            wrappingSecretConfigured:
+              type: boolean
+            wrappingSecretSource:
+              type: string
+              enum:
+              - operator_config_key
+              - cache_hmac
+              - none
+        storage:
+          type: object
+          additionalProperties: false
+          required:
+          - provider
+          - serviceAccountConfigured
+          - source
+          properties:
+            provider:
+              type: string
+              enum:
+              - gcs
+              - supabase
+              - none
+            bucket:
+              type: string
+            serviceAccountConfigured:
+              type: boolean
+            clientEmail:
+              type: string
+            source:
+              type: string
+              enum:
+              - env
+              - admin
+              - none
+        turnstile:
+          type: object
+          additionalProperties: false
+          required:
+          - configured
+          - source
+          properties:
+            configured:
+              type: boolean
+            source:
+              type: string
+              enum:
+              - env
+              - admin
+              - none
+        bootstrap:
+          type: object
+          additionalProperties: false
+          required:
+          - supabaseUrlConfigured
+          - supabaseAnonKeyConfigured
+          - supabaseServiceRoleConfigured
+          - cacheHmacConfigured
+          - operatorConfigKeyConfigured
+          - adminBootstrapEmailConfigured
+          properties:
+            supabaseUrlConfigured:
+              type: boolean
+            supabaseAnonKeyConfigured:
+              type: boolean
+            supabaseServiceRoleConfigured:
+              type: boolean
+            cacheHmacConfigured:
+              type: boolean
+            operatorConfigKeyConfigured:
+              type: boolean
+            adminBootstrapEmailConfigured:
+              type: boolean
+            resendConfigured:
+              type: boolean
+            otpFromConfigured:
+              type: boolean
+            qwenEnvKeyConfigured:
+              type: boolean
+        updatedAt: *id018
+    OperatorEvent:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - at
+      - kind
+      - requestId
+      - summary
+      properties:
+        id:
+          type: string
+        at: *id018
+        kind:
+          type: string
+        requestId:
+          type: string
+        task:
+          type: string
+        status:
+          type: string
+        summary:
+          type: string
+        detail:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+    OperatorDiagnostics:
+      type: object
+      additionalProperties: false
+      required:
+      - runtime
+      - flags
+      - quotas
+      - policies
+      - qwenProbe
+      - notes
+      properties:
+        recentEvents:
+          type: array
+          items:
+            $ref: '#/components/schemas/OperatorEvent'
+        runtime:
+          $ref: '#/components/schemas/RuntimeConfig'
+        flags:
+          type: array
+          items:
+            $ref: '#/components/schemas/FeatureFlag'
+        quotas:
+          type: array
+          items:
+            $ref: '#/components/schemas/Quota'
+        policies:
+          type: array
+          items:
+            $ref: '#/components/schemas/LlmPolicy'
+        qwenProbe:
+          type: string
+        notes:
+          type: array
+          items:
+            type: string
+        qwenComplete:
+          $ref: '#/components/schemas/QwenCompleteProbe'
+    QwenCompleteProbe:
+      type: object
+      additionalProperties: false
+      required:
+      - status
+      properties:
+        status:
+          type: string
+          enum:
+          - ok
+          - rejected
+          - unavailable
+          - skipped
+          - no_key
+          - policy_disabled
+        httpStatus:
+          type: integer
+        model:
+          type: string
+        detail:
+          type: string
+    RuntimeConfigPut:
+      type: object
+      additionalProperties: false
+      required:
+      - reason
+      properties:
+        reason:
+          type: string
+          minLength: 5
+        qwen:
+          type: object
+          additionalProperties: false
+          properties:
+            apiKey:
+              oneOf:
+              - type: string
+              - type: 'null'
+            baseUrl:
+              type: string
+            model:
+              type: string
+        storage:
+          type: object
+          additionalProperties: false
+          properties:
+            bucket:
+              type: string
+            serviceAccountJson:
+              oneOf:
+              - type: string
+              - type: 'null'
+        turnstile:
+          type: object
+          additionalProperties: false
+          properties:
+            secretKey:
+              oneOf:
+              - type: string
+              - type: 'null'
     CacheEntry:
       type: object
       additionalProperties: false
@@ -3835,4 +4556,16 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AuditEvent'
+        nextCursor: *id025
+    CursorPagePrivacyRequests:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PrivacyRequest'
         nextCursor: *id025

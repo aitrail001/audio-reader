@@ -1172,15 +1172,30 @@ struct ImportParityTests {
             contentsOf: repository.appendingPathComponent("AudioReader.xcodeproj/project.pbxproj"),
             encoding: .utf8
         )
+        let xcodeMac = try String(
+            contentsOf: repository.appendingPathComponent("Xcode/Info-macOS.plist"),
+            encoding: .utf8
+        )
+        let xcodeIOS = try String(
+            contentsOf: repository.appendingPathComponent("Xcode/Info-iOS.plist"),
+            encoding: .utf8
+        )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.62")
-        #expect(plist["CFBundleVersion"] as? String == "63")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.62")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "63")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.62;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 63;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.74")
+        #expect(plist["CFBundleVersion"] as? String == "75")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.74")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "75")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.74;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 75;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
+        #expect(plist["ProductAPIBaseURL"] as? String == ProductAPI.hostedProductionBaseURL.absoluteString)
+        #expect(iPadPlist["ProductAPIBaseURL"] as? String == ProductAPI.hostedProductionBaseURL.absoluteString)
+        #expect(xcodeMac.contains("ProductAPIBaseURL"))
+        #expect(xcodeIOS.contains("ProductAPIBaseURL"))
+        #expect(iPadPlist["UIBackgroundModes"] as? [String] == ["audio"])
+        #expect(xcodeIOS.contains("UIBackgroundModes"))
+        #expect(xcodeIOS.contains("audio"))
         let macATS = try #require(plist["NSAppTransportSecurity"] as? [String: Any])
         let iPadATS = try #require(iPadPlist["NSAppTransportSecurity"] as? [String: Any])
         #expect(macATS["NSAllowsLocalNetworking"] as? Bool == true)

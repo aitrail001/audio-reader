@@ -23,7 +23,7 @@ export async function buildHealth(options: {
   version: string;
   includeDependencies: boolean;
   database: DependencyProbe;
-  r2: DependencyProbe;
+  storage: DependencyProbe;
   qwen: DependencyProbe;
 }): Promise<Health> {
   const time = new Date().toISOString();
@@ -36,7 +36,7 @@ export async function buildHealth(options: {
   }
   const dependencies = {
     database: await safePing(options.database),
-    r2: await safePing(options.r2),
+    storage: await safePing(options.storage),
     qwen: await safePing(options.qwen),
   };
   const ready = Object.values(dependencies).every((status) => status === "ok");
@@ -46,4 +46,14 @@ export async function buildHealth(options: {
     time,
     dependencies,
   };
+}
+
+/** Auth, sync, and managed Qwen can serve without optional object storage (ADR-003). */
+export function isServiceReady(
+  dependencies: NonNullable<Health["dependencies"]> | undefined,
+): boolean {
+  if (dependencies === undefined) {
+    return true;
+  }
+  return dependencies.database === "ok" && dependencies.qwen === "ok";
 }

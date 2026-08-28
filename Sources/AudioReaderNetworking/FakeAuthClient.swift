@@ -151,7 +151,21 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
                 revokedAt: nil
             )
             devices[request.deviceId] = device
-            return BootstrapResponse(profile: profiles[record.profileID]!, device: device, syncCursor: "0")
+            return BootstrapResponse(
+                profile: profiles[record.profileID]!,
+                device: device,
+                syncCursor: "0",
+                featureFlags: [
+                    FeatureFlag(key: "managed_qwen", enabled: true),
+                    FeatureFlag(key: "account_sync", enabled: true),
+                    FeatureFlag(key: "cloud_media", enabled: true),
+                    FeatureFlag(key: "maintenance_mode", enabled: false)
+                ],
+                quotas: [
+                    Quota(key: "qwen_tasks_day", used: 0, limit: 50, periodEndsAt: "9999-12-31T23:59:59.000Z"),
+                    Quota(key: "devices", used: Double(devices.count), limit: 2, periodEndsAt: "9999-12-31T23:59:59.000Z")
+                ]
+            )
         }
     }
 
@@ -174,6 +188,25 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
         try withLock {
             _ = try sessionLocked(accessToken: accessToken, deviceID: deviceID)
             applyRevocationLocked(targetDeviceID)
+        }
+    }
+
+    public func createAccountExport(accessToken: String, deviceID: String, format: String) async throws -> AccountExportJob {
+        try withLock {
+            _ = try sessionLocked(accessToken: accessToken, deviceID: deviceID)
+            return AccountExportJob(
+                id: UUID().uuidString.lowercased(),
+                status: "ready",
+                format: format,
+                createdAt: Self.timestamp()
+            )
+        }
+    }
+
+    public func requestAccountDeletion(accessToken: String, deviceID: String, reason: String) async throws {
+        try withLock {
+            _ = try sessionLocked(accessToken: accessToken, deviceID: deviceID)
+            _ = reason
         }
     }
 

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,10 +43,45 @@ describe("local development workspace", () => {
     expect(wrangler).toMatch(/^ENVIRONMENT = "local"$/m);
     expect(wrangler).toContain("[env.production.vars]");
     expect(wrangler).toMatch(/\[env\.production\.vars\][\s\S]*ENVIRONMENT = "production"/);
-    expect(wrangler).toMatch(/\[env\.production\.vars\][\s\S]*CORS_ALLOWED_ORIGINS = ""/);
+    expect(wrangler).toMatch(
+      /\[env\.production\.vars\][\s\S]*CORS_ALLOWED_ORIGINS = "https:\/\/audio-reader-admin\.pages\.dev/,
+    );
+    expect(wrangler).not.toMatch(
+      /\[env\.production\.vars\][\s\S]*CORS_ALLOWED_ORIGINS = "http:\/\/localhost/,
+    );
     expect(wrangler).toMatch(/^LOCAL_DEV_OTP = "123456"$/m);
     expect(wrangler).toMatch(/\[env\.production\.vars\][\s\S]*LOCAL_DEV_OTP = ""/);
     expect(wrangler).toMatch(/\[env\.staging\.vars\][\s\S]*LOCAL_DEV_OTP = ""/);
+    expect(wrangler).toContain("audio-reader-api-worker-staging");
+    expect(wrangler).toContain("audio-reader-api-worker-production");
+  });
+
+  it("provides named-environment deploy scripts that refuse local vars", () => {
+    const preflight = read(join(serverRoot, "scripts", "preflight-deploy.sh"));
+    const deploy = read(join(serverRoot, "scripts", "deploy-worker.sh"));
+    expect(preflight.startsWith("#!/usr/bin/env bash")).toBe(true);
+    expect(deploy.startsWith("#!/usr/bin/env bash")).toBe(true);
+    expect(preflight).toMatch(/staging\|production/);
+    expect(preflight).toMatch(/LOCAL_DEV_OTP/);
+    expect(preflight).toMatch(/SUPABASE_ANON_KEY/);
+    expect(preflight).toMatch(/wrangler login/);
+    expect(deploy).toMatch(/wrangler deploy --env/);
+    expect(deploy).toMatch(/preflight-deploy/);
+    const pkg = JSON.parse(read(join(serverRoot, "package.json"))) as {
+      scripts?: Record<string, string>;
+    };
+    expect(pkg.scripts?.["deploy:staging"]).toMatch(/deploy-worker\.sh staging/);
+    expect(pkg.scripts?.["deploy:production"]).toMatch(/deploy-worker\.sh production/);
+    expect(pkg.scripts?.["preflight:deploy"]).toMatch(/preflight-deploy/);
+    const missing = spawnSync("bash", [join(serverRoot, "scripts", "preflight-deploy.sh")], {
+      encoding: "utf8",
+    });
+    expect(missing.status).not.toBe(0);
+    expect(`${missing.stderr}${missing.stdout}`).toMatch(/staging\|production/);
+    const local = spawnSync("bash", [join(serverRoot, "scripts", "preflight-deploy.sh"), "local"], {
+      encoding: "utf8",
+    });
+    expect(local.status).not.toBe(0);
   });
 
   it("provides a Docker Compose local API stack", () => {

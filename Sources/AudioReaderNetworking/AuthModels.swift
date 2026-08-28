@@ -4,14 +4,41 @@ public enum ProductAPI: Sendable {
     public static let callbackScheme = "audioreader"
     public static let callbackURL = URL(string: "audioreader://auth/callback")!
     public static let defaultBaseURL = URL(string: "http://localhost:8787")!
+    public static let hostedProductionBaseURL = URL(
+        string: "https://audio-reader-api-worker-production.audio-reader-service.workers.dev"
+    )!
+    public static let environmentKey = "AUDIOREADER_API_BASE_URL"
+    public static let infoDictionaryKey = "ProductAPIBaseURL"
 
     public static var resolvedBaseURL: URL {
-        let raw = ProcessInfo.processInfo.environment["AUDIOREADER_API_BASE_URL"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if let url = URL(string: raw), !raw.isEmpty {
+        resolveBaseURL(
+            environment: ProcessInfo.processInfo.environment,
+            infoDictionary: Bundle.main.infoDictionary
+        )
+    }
+
+    public static func resolveBaseURL(
+        environment: [String: String],
+        infoDictionary: [String: Any]?
+    ) -> URL {
+        if let url = httpURL(environment[environmentKey]) {
+            return url
+        }
+        if let bundled = infoDictionary?[infoDictionaryKey] as? String, let url = httpURL(bundled) {
             return url
         }
         return defaultBaseURL
+    }
+
+    private static func httpURL(_ raw: String?) -> URL? {
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty, let url = URL(string: trimmed) else {
+            return nil
+        }
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            return nil
+        }
+        return url
     }
 }
 
@@ -178,15 +205,74 @@ public struct AuthBootstrapRequest: Codable, Equatable, Sendable {
     }
 }
 
+public struct FeatureFlag: Codable, Equatable, Sendable {
+    public var key: String
+    public var enabled: Bool
+    public var variant: String?
+
+    public init(key: String, enabled: Bool, variant: String? = nil) {
+        self.key = key
+        self.enabled = enabled
+        self.variant = variant
+    }
+}
+
+public struct Quota: Codable, Equatable, Sendable {
+    public var key: String
+    public var used: Double
+    public var limit: Double
+    public var periodEndsAt: String
+
+    public init(key: String, used: Double, limit: Double, periodEndsAt: String) {
+        self.key = key
+        self.used = used
+        self.limit = limit
+        self.periodEndsAt = periodEndsAt
+    }
+}
+
+public struct AccountExportJob: Codable, Equatable, Sendable {
+    public var id: String
+    public var status: String
+    public var format: String?
+    public var createdAt: String?
+
+    public init(id: String, status: String, format: String? = nil, createdAt: String? = nil) {
+        self.id = id
+        self.status = status
+        self.format = format
+        self.createdAt = createdAt
+    }
+}
+
 public struct BootstrapResponse: Codable, Equatable, Sendable {
     public var profile: AccountProfile
     public var device: AccountDevice
     public var syncCursor: String?
+    public var featureFlags: [FeatureFlag]
+    public var quotas: [Quota]
 
-    public init(profile: AccountProfile, device: AccountDevice, syncCursor: String?) {
+    public init(
+        profile: AccountProfile,
+        device: AccountDevice,
+        syncCursor: String?,
+        featureFlags: [FeatureFlag] = [],
+        quotas: [Quota] = []
+    ) {
         self.profile = profile
         self.device = device
         self.syncCursor = syncCursor
+        self.featureFlags = featureFlags
+        self.quotas = quotas
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        profile = try container.decode(AccountProfile.self, forKey: .profile)
+        device = try container.decode(AccountDevice.self, forKey: .device)
+        syncCursor = try container.decodeIfPresent(String.self, forKey: .syncCursor)
+        featureFlags = try container.decodeIfPresent([FeatureFlag].self, forKey: .featureFlags) ?? []
+        quotas = try container.decodeIfPresent([Quota].self, forKey: .quotas) ?? []
     }
 }
 
@@ -245,6 +331,12 @@ public struct APIProblem: Codable, Equatable, Sendable {
     public var code: String?
     public var detail: String?
     public var traceId: String?
+    public var fieldErrors: [APIProblemFieldError]?
+}
+
+public struct APIProblemFieldError: Codable, Equatable, Sendable {
+    public var field: String
+    public var message: String
 }
 
 public enum AuthClientError: Error, Equatable, LocalizedError {

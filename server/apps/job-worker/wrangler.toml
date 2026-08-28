@@ -1,3 +1,41 @@
 name = "audio-reader-job-worker"
 main = "src/worker.ts"
 compatibility_date = "2026-08-26"
+
+[triggers]
+crons = ["* * * * *"]
+
+[[queues.consumers]]
+queue = "audio-reader-jobs"
+max_batch_size = 16
+max_batch_timeout = 5
+
+[env.staging]
+name = "audio-reader-job-worker-staging"
+
+[env.staging.triggers]
+crons = ["* * * * *"]
+
+[[env.staging.queues.consumers]]
+queue = "audio-reader-jobs-staging"
+max_batch_size = 16
+max_batch_timeout = 5
+
+[env.staging.vars]
+QWEN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+QWEN_MODEL = "qwen3.7-plus"
+
+[env.production]
+name = "audio-reader-job-worker-production"
+
+[env.production.triggers]
+crons = ["* * * * *"]
+
+[[env.production.queues.consumers]]
+queue = "audio-reader-jobs"
+max_batch_size = 16
+max_batch_timeout = 5
+
+[env.production.vars]
+QWEN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+QWEN_MODEL = "qwen3.7-plus"

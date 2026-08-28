@@ -131,11 +131,15 @@ struct AccountSessionFlowTests {
         #expect(view.contains(".accessibilityLabel(\"Sign in with Microsoft\")"))
         #expect(view.contains(".accessibilityLabel(\"Email address for sign-in code\")"))
         #expect(view.contains(".accessibilityLabel(\"Send email sign-in code\")"))
-        #expect(view.contains(".accessibilityLabel(\"Six-digit email sign-in code\")"))
+        #expect(view.contains(".accessibilityLabel(\"Email sign-in code\")"))
         #expect(view.contains(".accessibilityLabel(\"Verify email sign-in code\")"))
         #expect(view.contains(".accessibilityLabel(\"Sign out of AudioReader account\")"))
+        #expect(view.contains(".accessibilityLabel(\"Export account data\")"))
+        #expect(view.contains(".accessibilityLabel(\"Delete AudioReader account\")"))
         #expect(view.contains(".accessibilityLabel(\"Sync learning data across devices\")"))
         #expect(view.contains(".accessibilityLabel(\"Account session recovery\")"))
+        #expect(view.contains(".accessibilityLabel(\"Account connection issue\")"))
+        #expect(!view.contains(".foregroundStyle(.red)"))
         #expect(view.contains("Revoke"))
         #expect(view.contains("Books on this device stay here"))
         #expect(view.contains("minHeight: 44"))
@@ -154,6 +158,10 @@ struct AccountSessionFlowTests {
 
         #expect(macRoot.contains("SettingsView(state: state)"))
         #expect(iPadRoot.contains("SettingsView(state: state)"))
+        #expect(!macRoot.contains(".sheet(isPresented: $state.showSettings)"))
+        #expect(!iPadRoot.contains(".sheet(isPresented: $state.showSettings)"))
+        #expect(macRoot.contains("case .settings:"))
+        #expect(iPadRoot.contains("case .settings:"))
         #expect(settings.contains("accountSection"))
         #expect(appState.contains("await account.restore()"))
         #expect(appState.contains("init(composition: AppComposition"))
@@ -181,6 +189,11 @@ struct AccountSessionFlowTests {
         #expect(settings.contains("draft.openAIAuthentication = OpenAIAuthentication.apiKey.rawValue"))
         #expect(appState.contains("settings.openAIAuthentication = OpenAIAuthentication.apiKey.rawValue"))
         #expect(live.contains("ProductAuthClient"))
+        #expect(live.contains("EncryptedFileAuthSessionStore"))
+        #expect(live.contains("legacy: nil"))
+        #expect(!live.contains("KeychainAuthSessionStore()"))
+        let sessionStore = try source("Sources/AudioReaderNetworking/AuthSessionStore.swift")
+        #expect(sessionStore.contains("legacy: KeychainAuthSessionStore? = nil"))
         #expect(!live.contains("OpenAIAPIKeyStore"))
         #expect(!live.contains("codex login"))
     }
@@ -267,6 +280,111 @@ struct AccountSessionFlowTests {
         #expect(!session.contains("deleteBook"))
         #expect(!session.contains("LibraryStore"))
         #expect(!session.contains("books = []"))
+    }
+
+    @Test("Sync snapshot enqueues UUID vocabulary and known lemmas")
+    func syncSnapshotEnqueuesVocabularyAndLemmas() throws {
+        let vocabID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let mutations = try AccountSyncApplicator.snapshot(
+            settings: .default,
+            vocabulary: [
+                VocabEntry(
+                    id: vocabID,
+                    word: "loom",
+                    context: "Call me Ishmael",
+                    bookID: "book-1",
+                    bookTitle: "Moby-Dick",
+                    chapterID: "ch-1",
+                    chapterTitle: "Loomings",
+                    timestamp: 4,
+                    addedAt: Date(timeIntervalSince1970: 1_777_000_000),
+                    isInLearnList: true
+                )
+            ],
+            lemmas: [
+                KnownLemmaRecord(language: "en", form: "whale", updatedAt: Date(timeIntervalSince1970: 1_777_000_000))
+            ]
+        )
+        #expect(mutations.contains(where: { $0.entityType == .settings }))
+        #expect(mutations.contains(where: { $0.entityType == .vocabulary && $0.entityID == vocabID }))
+        #expect(mutations.contains(where: { $0.entityType == .lexemeState }))
+        #expect(AccountSyncApplicator.isUUID(AccountSyncApplicator.uuidForLemma(language: "en", form: "whale")))
+    }
+
+    @Test("Sync snapshot enqueues books, transcripts, reviews, and progress")
+    func syncSnapshotEnqueuesLibraryLearningData() throws {
+        let bookID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        let chapterID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        let vocabID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let mutations = try AccountSyncApplicator.snapshot(
+            settings: .default,
+            vocabulary: [
+                VocabEntry(
+                    id: vocabID,
+                    word: "ice",
+                    context: "the ice",
+                    bookID: bookID,
+                    bookTitle: "Moby-Dick",
+                    chapterID: chapterID,
+                    chapterTitle: "Loomings",
+                    timestamp: 1,
+                    addedAt: Date(timeIntervalSince1970: 1_777_000_000),
+                    reviewCount: 2,
+                    lastReviewedAt: Date(timeIntervalSince1970: 1_777_000_100),
+                    lastReviewQuality: .remember,
+                    isInLearnList: true
+                )
+            ],
+            lemmas: [],
+            books: [
+                StoredBook(
+                    id: BookID(rawValue: bookID),
+                    title: "Moby-Dick",
+                    author: "Herman Melville",
+                    source: "local_folder",
+                    chapters: [
+                        StoredChapter(id: ChapterID(rawValue: chapterID), index: 0, title: "Loomings")
+                    ]
+                )
+            ],
+            transcripts: [
+                StoredTranscript(
+                    chapterID: ChapterID(rawValue: chapterID),
+                    localMediaKey: "audio",
+                    createdAt: Date(timeIntervalSince1970: 1_777_000_000),
+                    locale: "en-US",
+                    source: "spoken",
+                    ebookAligned: false,
+                    segments: []
+                )
+            ],
+            reviews: [
+                StoredReviewEvent(
+                    id: ReviewEventID(rawValue: "dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+                    vocabularyID: VocabularyOccurrenceID(rawValue: vocabID),
+                    face: "recognition",
+                    rating: "remember",
+                    reviewedAt: Date(timeIntervalSince1970: 1_777_000_100)
+                )
+            ]
+        )
+        #expect(mutations.contains(where: { $0.entityType == .book && $0.entityID == bookID }))
+        #expect(mutations.contains(where: { $0.entityType == .transcript && $0.entityID == chapterID }))
+        #expect(mutations.contains(where: { $0.entityType == .reviewEvent }))
+        #expect(mutations.contains(where: { $0.entityType == .progress && $0.entityID == vocabID }))
+    }
+
+    @Test("Managed Qwen is a shared account provider with no local API key")
+    func managedQwenIsSharedAccountProvider() {
+        #expect(LLMProvider.managedQwen.menuLabel == "Managed Qwen (account)")
+        #expect(LLMProvider.managedQwen.environmentKey.isEmpty)
+        #expect(LLMProvider.managedQwen.defaultEndpoint.isEmpty)
+        #expect(LLMProvider.managedQwen.usesRemoteAPI)
+        var settings = AppSettings.default
+        LLMConnectionChoice.managedQwen.apply(to: &settings)
+        #expect(settings.llmProvider == LLMProvider.managedQwen.rawValue)
+        #expect(LLMConnectionChoice.selected(in: settings) == .managedQwen)
+        #expect(LLMError.managedAccountRequired.localizedDescription.contains("Sign in"))
     }
 
     private func source(_ relativePath: String) throws -> String {

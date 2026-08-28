@@ -512,6 +512,7 @@ struct AppSettings: Codable, Equatable {
 
     func endpoint(for provider: LLMProvider) -> String {
         switch provider {
+        case .managedQwen: ""
         case .grok: grokEndpoint
         case .qwenCloud: qwenEndpoint
         case .openAI: openAIEndpoint

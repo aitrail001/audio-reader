@@ -62,12 +62,25 @@ export type BootstrapDeviceInput = {
   timeZone?: string;
 };
 
+export type ProductFeatureFlag = {
+  key: string;
+  enabled: boolean;
+  variant?: string | null;
+};
+
+export type ProductQuota = {
+  key: string;
+  used: number;
+  limit: number;
+  periodEndsAt: string;
+};
+
 export type BootstrapSession = {
   profile: ProductProfile;
   device: ProductDevice;
   settings: ProductSettings;
-  featureFlags: readonly [];
-  quotas: readonly [];
+  featureFlags: readonly ProductFeatureFlag[];
+  quotas: readonly ProductQuota[];
   syncCursor: string;
 };
 
@@ -134,6 +147,45 @@ export type MemoryAuthServiceOptions = {
   allowLocalIssuance?: boolean;
 };
 
+export type AuthIdentityStore = {
+  ensureProfile(input: { userId: string; email: string }): Promise<ProductProfile>;
+  getProfileByUserId(userId: string): Promise<ProductProfile | undefined>;
+  patchProfile(
+    userId: string,
+    patch: { displayName?: string | null; avatarUrl?: string | null },
+  ): Promise<ProductProfile | undefined>;
+  getSettings(userId: string): Promise<ProductSettings>;
+  putSettings(
+    userId: string,
+    settings: ProductSettings,
+  ): Promise<
+    { ok: true; value: ProductSettings } | { ok: false; code: "conflict"; current: ProductSettings }
+  >;
+  bootstrapDevice(
+    userId: string,
+    input: BootstrapDeviceInput,
+  ): Promise<
+    | {
+        ok: true;
+        profile: ProductProfile;
+        device: ProductDevice;
+        settings: ProductSettings;
+        syncCursor: string;
+      }
+    | { ok: false; code: "device_revoked" }
+  >;
+  listDevices(userId: string): Promise<ProductDevice[]>;
+  revokeDevice(userId: string, deviceId: string): Promise<DeviceRevokeResult>;
+  isDeviceRevoked(userId: string, deviceId: string): Promise<boolean>;
+  hasAdminRole?(userId: string): Promise<boolean>;
+  grantAdminRole?(userId: string): Promise<void>;
+};
+
+export type SettingsPutResult =
+  | { ok: true; value: ProductSettings }
+  | { ok: false; code: "conflict"; current: ProductSettings }
+  | { ok: false; code: "not_found" };
+
 export type AuthService = {
   authConfig(): { providers: readonly { id: AuthProviderId }[] };
   canIssueSessions(): boolean;
@@ -152,14 +204,23 @@ export type AuthService = {
     refreshToken: string,
   ): Promise<AuthResult<{ tokens: SessionTokens; principal: Principal }>>;
   logout(refreshToken: string): Promise<void>;
-  getProfile(principal: Principal): ProductProfile | undefined;
-  bootstrap(principal: Principal, input: BootstrapDeviceInput): AuthResult<BootstrapSession>;
-  listDevices(principal: Principal): ProductDevice[];
-  revokeDevice(principal: Principal, deviceId: string): DeviceRevokeResult;
+  getProfile(principal: Principal): Promise<ProductProfile | undefined>;
+  patchProfile(
+    principal: Principal,
+    patch: { displayName?: string | null; avatarUrl?: string | null },
+  ): Promise<ProductProfile | undefined>;
+  getSettings(principal: Principal): Promise<ProductSettings | undefined>;
+  putSettings(principal: Principal, settings: ProductSettings): Promise<SettingsPutResult>;
+  bootstrap(
+    principal: Principal,
+    input: BootstrapDeviceInput,
+  ): Promise<AuthResult<BootstrapSession>>;
+  listDevices(principal: Principal): Promise<ProductDevice[]>;
+  revokeDevice(principal: Principal, deviceId: string): Promise<DeviceRevokeResult>;
   linkIdentity(
     principal: Principal,
     input: LinkIdentityInput,
-  ): AuthResult<{ profile: ProductProfile }>;
+  ): Promise<AuthResult<{ profile: ProductProfile }>>;
 };
 
 type IdentityRecord = {
@@ -577,7 +638,58 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
     },
 
     getProfile(principal) {
-      return profiles.get(principal.profileId) ?? profileForSubject(principal.subject);
+      return Promise.resolve(
+        profiles.get(principal.profileId) ?? profileForSubject(principal.subject),
+      );
+    },
+
+    patchProfile(principal, patch) {
+      const profile = ensureProfile(principal);
+      if (patch.displayName !== undefined) {
+        profile.displayName = patch.displayName;
+      }
+      if (patch.avatarUrl !== undefined) {
+        profile.avatarUrl = patch.avatarUrl;
+      }
+      profile.updatedAt = currentIso();
+      return Promise.resolve({ ...profile });
+    },
+
+    getSettings(principal) {
+      const profile = ensureProfile(principal);
+      const timestamp = currentIso();
+      let userSettings = settings.get(profile.accountId);
+      if (userSettings === undefined) {
+        userSettings = {
+          revision: 0,
+          sourceLanguage: "en",
+          targetLanguage: "en",
+          readerLevel: "intermediate",
+          playbackRate: 1,
+          skipSeconds: 15,
+          appearance: "system",
+          updatedAt: timestamp,
+        };
+        settings.set(profile.accountId, userSettings);
+      }
+      return Promise.resolve({ ...userSettings });
+    },
+
+    async putSettings(principal, incoming) {
+      const current = await this.getSettings(principal);
+      if (current === undefined) {
+        return { ok: false, code: "not_found" };
+      }
+      if (incoming.revision !== current.revision) {
+        return { ok: false, code: "conflict", current };
+      }
+      const next: ProductSettings = {
+        ...incoming,
+        revision: current.revision + 1,
+        updatedAt: currentIso(),
+      };
+      settings.set(principal.accountId, next);
+      return { ok: true, value: { ...next } };
     },
 
     bootstrap(principal, input) {
@@ -586,7 +698,7 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
       const key = deviceKey(profile.accountId, input.deviceId);
       const existing = devices.get(key);
       if (existing?.revoked) {
-        return { ok: false, code: "device_revoked" };
+        return Promise.resolve({ ok: false, code: "device_revoked" });
       }
       const device: ProductDevice = {
         id: input.deviceId,
@@ -617,7 +729,7 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
         };
         settings.set(profile.accountId, userSettings);
       }
-      return {
+      return Promise.resolve({
         ok: true,
         value: {
           profile,
@@ -627,7 +739,7 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
           quotas: [],
           syncCursor: "0",
         },
-      };
+      });
     },
 
     listDevices(principal) {
@@ -642,31 +754,31 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
         const created = left.createdAt.localeCompare(right.createdAt);
         return created === 0 ? left.id.localeCompare(right.id) : created;
       });
-      return listed;
+      return Promise.resolve(listed);
     },
 
     revokeDevice(principal, deviceId) {
       const existing = devices.get(deviceKey(principal.accountId, deviceId));
       if (existing === undefined) {
-        return { ok: false, code: "not_found" };
+        return Promise.resolve({ ok: false, code: "not_found" });
       }
       if (!existing.revoked) {
         existing.revoked = true;
         existing.revokedAt = currentIso();
       }
       dropRefreshTokens(principal.subject, deviceId);
-      return { ok: true };
+      return Promise.resolve({ ok: true });
     },
 
     linkIdentity(principal, input) {
       const profile = profiles.get(principal.profileId);
       if (profile === undefined) {
-        return { ok: false, code: "invalid_token" };
+        return Promise.resolve({ ok: false, code: "invalid_token" });
       }
       const key = identityKey(input.provider, input.providerSubject);
       const existing = identities.get(key);
       if (existing !== undefined && existing.accountId !== principal.accountId) {
-        return { ok: false, code: "already_linked" };
+        return Promise.resolve({ ok: false, code: "already_linked" });
       }
       if (existing === undefined) {
         identities.set(key, {
@@ -676,7 +788,7 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
           accountId: principal.accountId,
         });
       }
-      return { ok: true, value: { profile } };
+      return Promise.resolve({ ok: true, value: { profile } });
     },
   };
 }

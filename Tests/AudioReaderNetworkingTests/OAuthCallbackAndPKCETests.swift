@@ -32,6 +32,14 @@ struct OAuthCallbackAndPKCETests {
         #expect(try OAuthCallbackValidator.authorizationCode(from: url, pending: pending) == "auth-code-1")
     }
 
+    @Test("hosted GoTrue callback with code and no state yields the authorization code")
+    func hostedCallbackWithoutStateYieldsCode() throws {
+        let pending = samplePending()
+        let url = callbackURL(code: "auth-code-hosted", state: nil)
+
+        #expect(try OAuthCallbackValidator.authorizationCode(from: url, pending: pending) == "auth-code-hosted")
+    }
+
     @Test("callback state mismatch is rejected before code exchange")
     func callbackStateMismatchIsRejected() {
         let pending = samplePending()
@@ -87,13 +95,16 @@ struct OAuthCallbackAndPKCETests {
         )
     }
 
-    private func callbackURL(code: String?, state: String) -> URL {
+    private func callbackURL(code: String?, state: String?) -> URL {
         var components = URLComponents(url: ProductAPI.callbackURL, resolvingAgainstBaseURL: false)!
-        var items = [URLQueryItem(name: "state", value: state)]
+        var items: [URLQueryItem] = []
         if let code {
-            items.insert(URLQueryItem(name: "code", value: code), at: 0)
+            items.append(URLQueryItem(name: "code", value: code))
         }
-        components.queryItems = items
+        if let state {
+            items.append(URLQueryItem(name: "state", value: state))
+        }
+        components.queryItems = items.isEmpty ? nil : items
         return components.url!
     }
 }

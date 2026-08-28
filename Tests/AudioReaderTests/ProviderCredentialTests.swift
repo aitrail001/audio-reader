@@ -8,7 +8,7 @@ struct ProviderCredentialTests {
     @Test("Top-bar connections distinguish provider-managed sign-in from API keys")
     func topBarConnectionChoices() {
         #expect(LLMConnectionChoice.allCases == [
-            .grokBuild, .grokAPIKey, .qwenAPIKey, .chatGPTPlan, .openAIAPIKey, .appleFoundation
+            .managedQwen, .grokBuild, .grokAPIKey, .qwenAPIKey, .chatGPTPlan, .openAIAPIKey, .appleFoundation
         ])
 
         var settings = AppSettings.default
@@ -24,7 +24,7 @@ struct ProviderCredentialTests {
         #expect(LLMConnectionChoice.availableOnCurrentPlatform == LLMConnectionChoice.allCases)
 #else
         #expect(LLMConnectionChoice.availableOnCurrentPlatform == [
-            .grokAPIKey, .qwenAPIKey, .openAIAPIKey, .appleFoundation
+            .managedQwen, .grokAPIKey, .qwenAPIKey, .openAIAPIKey, .appleFoundation
         ])
 #endif
     }
@@ -72,6 +72,28 @@ struct ProviderCredentialTests {
             ProviderAPIKeyStore.savedCredentialSourceLabel
                 == "Ready — API key stored in encrypted local vault"
         )
+    }
+
+    @Test("Wrapping key is a 256-bit file and never Keychain for new vaults")
+    func wrappingKeyLivesInAProtectedFile() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioReader-Wrapping-Key-\(UUID().uuidString)", isDirectory: true)
+        let keyURL = root.appendingPathComponent("credential-vault.key")
+        let vaultURL = root.appendingPathComponent("credentials.vault")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let provider = FileCredentialVaultKeyProvider(fileURL: keyURL)
+        let vault = EncryptedFileCredentialVault(fileURL: vaultURL, keyProvider: provider)
+        #expect(vault.save("sk-test-secret", account: LLMProvider.openAI.rawValue))
+        #expect(FileManager.default.fileExists(atPath: keyURL.path))
+        let keyData = try Data(contentsOf: keyURL)
+        #expect(keyData.count == 32)
+#if os(macOS)
+        let attributes = try FileManager.default.attributesOfItem(atPath: keyURL.path)
+        #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+#endif
+        #expect(vault.read(account: LLMProvider.openAI.rawValue) == "sk-test-secret")
     }
 
     @Test("Encrypted credential vault round-trips without plaintext on disk")

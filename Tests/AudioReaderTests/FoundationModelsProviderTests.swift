@@ -6,7 +6,7 @@ import Testing
 struct FoundationModelsProviderTests {
     @Test("Apple Intelligence is a first-class local provider with no remote API")
     func providerIsLocalOnly() {
-        #expect(LLMProvider.allCases == [.grok, .qwenCloud, .openAI, .appleFoundation])
+        #expect(LLMProvider.allCases == [.managedQwen, .grok, .qwenCloud, .openAI, .appleFoundation])
         #expect(LLMProvider.appleFoundation.menuLabel == "Apple Intelligence")
         #expect(LLMProvider.appleFoundation.usesRemoteAPI == false)
         #expect(LLMProvider.appleFoundation.environmentKey.isEmpty)

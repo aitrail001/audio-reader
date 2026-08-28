@@ -46,6 +46,10 @@ export function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+export function emptyResponse(status = 204): Response {
+  return new Response(null, { status });
+}
+
 export function withRequestId(response: Response, requestId: string): Response {
   const headers = new Headers(response.headers);
   headers.set(REQUEST_ID_HEADER, requestId);

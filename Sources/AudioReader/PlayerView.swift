@@ -340,6 +340,9 @@ struct PlayerView: View {
         .frame(maxWidth: 210)
 
         switch state.llmProvider {
+        case .managedQwen:
+            Text(state.account.mode.isSignedIn ? "Managed Qwen" : "Sign in for Managed Qwen")
+                .foregroundStyle(state.account.mode.isSignedIn ? Palette.gold : Palette.dim)
         case .grok:
             Picker("Model", selection: $state.settings.grokModel) {
                 ForEach(state.grokTextModels) { model in
@@ -506,6 +509,8 @@ struct PlayerView: View {
             }
 
             switch state.llmProvider {
+            case .managedQwen:
+                Text(state.account.mode.isSignedIn ? "Managed Qwen · server policy" : "Sign in to use Managed Qwen")
             case .grok:
                 Picker("Model", selection: $state.settings.grokModel) {
                     ForEach(state.grokTextModels) { model in

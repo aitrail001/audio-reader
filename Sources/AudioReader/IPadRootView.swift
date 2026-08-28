@@ -7,9 +7,10 @@ enum IPadBackgroundJobsToolbarPlacement: Equatable {
     static func owner(
         isVocabularySelected: Bool,
         isReaderActive: Bool,
+        isSettingsSelected: Bool = false,
         hasSelectedBook: Bool
     ) -> Self {
-        isVocabularySelected || isReaderActive || hasSelectedBook ? .detail : .content
+        isVocabularySelected || isReaderActive || isSettingsSelected || hasSelectedBook ? .detail : .content
     }
 }
 
@@ -26,13 +27,18 @@ enum IPadSplitColumnPolicy: Equatable {
         case readingFocused
         case readingWithLibrary
         case vocabularyFocused
+        case settings
     }
 
     static func mode(
         isReaderActive: Bool,
         isVocabularySelected: Bool,
+        isSettingsSelected: Bool = false,
         showsLibraryAlongside: Bool
     ) -> Mode {
+        if isSettingsSelected {
+            return .settings
+        }
         if isReaderActive {
             return showsLibraryAlongside ? .readingWithLibrary : .readingFocused
         }
@@ -55,6 +61,7 @@ private enum IPadLibrarySource: String, CaseIterable, Identifiable {
     case files
     case folders
     case vocabulary
+    case settings
 
     var id: String { rawValue }
 
@@ -65,6 +72,7 @@ private enum IPadLibrarySource: String, CaseIterable, Identifiable {
         case .files: "Files"
         case .folders: "Folders"
         case .vocabulary: "Vocabulary"
+        case .settings: "Settings"
         }
     }
 
@@ -75,6 +83,7 @@ private enum IPadLibrarySource: String, CaseIterable, Identifiable {
         case .files: "doc"
         case .folders: "folder"
         case .vocabulary: "bookmark"
+        case .settings: "gearshape"
         }
     }
 }
@@ -127,31 +136,15 @@ struct IPadRootView: View {
     @State private var pendingBookDelete: Book?
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            sourceSidebar
-                .navigationTitle("Library")
-                .navigationSplitViewColumnWidth(
-                    min: IPadSplitColumnPolicy.sidebarMin,
-                    ideal: IPadSplitColumnPolicy.sidebarIdeal,
-                    max: IPadSplitColumnPolicy.sidebarMax
-                )
-        } content: {
-            contentColumn
-                .navigationSplitViewColumnWidth(
-                    min: IPadSplitColumnPolicy.contentMin,
-                    ideal: IPadSplitColumnPolicy.contentIdeal,
-                    max: IPadSplitColumnPolicy.contentMax
-                )
-                .toolbar {
-                    backgroundJobsToolbar(for: .content)
-                }
-        } detail: {
-            detailColumn
-                .toolbar {
-                    backgroundJobsToolbar(for: .detail)
-                }
+        Group {
+            if source == .settings {
+                settingsSplit
+                    .navigationSplitViewStyle(.automatic)
+            } else {
+                librarySplit
+                    .navigationSplitViewStyle(.prominentDetail)
+            }
         }
-        .navigationSplitViewStyle(.prominentDetail)
         .tint(Palette.terracotta)
         .overlay {
             if state.isScanning, let progress = state.libraryScanProgress {
@@ -170,9 +163,6 @@ struct IPadRootView: View {
         }
         .sheet(item: $state.chapterStudyPresentation) { _ in
             ChapterStudyListView(state: state)
-        }
-        .sheet(isPresented: $state.showSettings) {
-            SettingsView(state: state)
         }
         .alert("Could Not Open Background Job", isPresented: Binding(
             get: { state.backgroundJobNavigationError != nil },
@@ -216,6 +206,14 @@ struct IPadRootView: View {
         }
         .task {
             await state.boot()
+            if state.tab == .settings {
+                source = .settings
+                applyColumnMode(
+                    isReaderActive: false,
+                    isSettingsSelected: true,
+                    showsLibraryAlongsideReader: false
+                )
+            }
         }
         .onChange(of: source) { _, selected in
             if selected == .deviceAudiobooks {
@@ -223,14 +221,20 @@ struct IPadRootView: View {
             }
             if selected == .vocabulary {
                 state.tab = .vocab
-            } else if state.tab == .vocab {
+            } else if selected == .settings {
+                state.tab = .settings
+            } else if state.tab == .vocab || state.tab == .settings {
                 state.tab = .library
             }
         }
         .onChange(of: state.tab) { _, tab in
+            if tab == .settings {
+                source = .settings
+            }
             applyColumnMode(
                 isReaderActive: tab == .player,
                 isVocabularySelected: tab == .vocab,
+                isSettingsSelected: tab == .settings,
                 showsLibraryAlongsideReader: false
             )
         }
@@ -239,20 +243,64 @@ struct IPadRootView: View {
     private func applyColumnMode(
         isReaderActive: Bool,
         isVocabularySelected: Bool = false,
+        isSettingsSelected: Bool = false,
         showsLibraryAlongsideReader: Bool
     ) {
         self.showsLibraryAlongsideReader = showsLibraryAlongsideReader
         switch IPadSplitColumnPolicy.mode(
             isReaderActive: isReaderActive,
             isVocabularySelected: isVocabularySelected,
+            isSettingsSelected: isSettingsSelected,
             showsLibraryAlongside: showsLibraryAlongsideReader
         ) {
-        case .library:
+        case .library, .settings:
             columnVisibility = .all
         case .readingFocused, .vocabularyFocused:
             columnVisibility = .detailOnly
         case .readingWithLibrary:
             columnVisibility = .doubleColumn
+        }
+    }
+
+    private var librarySidebar: some View {
+        sourceSidebar
+            .navigationTitle("Library")
+            .navigationSplitViewColumnWidth(
+                min: IPadSplitColumnPolicy.sidebarMin,
+                ideal: IPadSplitColumnPolicy.sidebarIdeal,
+                max: IPadSplitColumnPolicy.sidebarMax
+            )
+    }
+
+    private var librarySplit: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            librarySidebar
+        } content: {
+            contentColumn
+                .navigationSplitViewColumnWidth(
+                    min: IPadSplitColumnPolicy.contentMin,
+                    ideal: IPadSplitColumnPolicy.contentIdeal,
+                    max: IPadSplitColumnPolicy.contentMax
+                )
+                .toolbar {
+                    backgroundJobsToolbar(for: .content)
+                }
+        } detail: {
+            detailColumn
+                .toolbar {
+                    backgroundJobsToolbar(for: .detail)
+                }
+        }
+    }
+
+    private var settingsSplit: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            librarySidebar
+        } detail: {
+            SettingsView(state: state)
+                .toolbar {
+                    backgroundJobsToolbar(for: .detail)
+                }
         }
     }
 
@@ -267,17 +315,11 @@ struct IPadRootView: View {
             Section("Study") {
                 sourceRow(.vocabulary)
             }
-        }
-        .listStyle(.sidebar)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    state.showSettings = true
-                } label: {
-                    Label("Settings", systemImage: "gear")
-                }
+            Section {
+                sourceRow(.settings)
             }
         }
+        .listStyle(.sidebar)
     }
 
     private func sourceRow(_ item: IPadLibrarySource) -> some View {
@@ -309,6 +351,9 @@ struct IPadRootView: View {
                 onDelete: { pendingBookDelete = $0 }
             )
             .navigationTitle("Apple Books & Device")
+        case .settings:
+            Color.clear
+                .accessibilityHidden(true)
         case .vocabulary:
             List {
                 Section("Saved") {
@@ -408,7 +453,7 @@ struct IPadRootView: View {
         case .files: state.books.filter { $0.source == .files }
         case .folders: state.books.filter { $0.source == .localFolder }
         case .deviceAudiobooks: state.books.filter { $0.source == .deviceAudiobooks }
-        case .vocabulary: []
+        case .vocabulary, .settings: []
         }
     }
 
@@ -416,6 +461,7 @@ struct IPadRootView: View {
         .owner(
             isVocabularySelected: source == .vocabulary,
             isReaderActive: state.tab == .player,
+            isSettingsSelected: source == .settings,
             hasSelectedBook: state.selectedBook != nil
         )
     }

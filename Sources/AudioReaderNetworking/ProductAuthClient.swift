@@ -128,6 +128,24 @@ public struct ProductAuthClient: AuthClient, Sendable {
         )
     }
 
+    public func createAccountExport(accessToken: String, deviceID: String, format: String) async throws -> AccountExportJob {
+        try await send(
+            method: "POST",
+            path: "/v1/exports",
+            headers: authenticatedHeaders(accessToken: accessToken, deviceID: deviceID),
+            body: ["format": format]
+        )
+    }
+
+    public func requestAccountDeletion(accessToken: String, deviceID: String, reason: String) async throws {
+        try await sendVoid(
+            method: "POST",
+            path: "/v1/me/deletion",
+            headers: authenticatedHeaders(accessToken: accessToken, deviceID: deviceID),
+            body: DeletionBody(confirmation: "DELETE MY ACCOUNT", reason: reason)
+        )
+    }
+
     private func authenticatedHeaders(accessToken: String, deviceID: String) -> [String: String] {
         [
             "Authorization": "Bearer \(accessToken)",
@@ -199,8 +217,17 @@ public struct ProductAuthClient: AuthClient, Sendable {
 
     private func mapProblem(status: Int, body: Data) -> AuthClientError {
         let problem = (try? decoder.decode(APIProblem.self, from: body))
-        let detail = problem?.detail?.trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? problem?.title
+        let fieldDetail = problem?.fieldErrors?
+            .map(\.message)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: " ")
+        let detail = [
+            fieldDetail,
+            problem?.detail?.trimmingCharacters(in: .whitespacesAndNewlines),
+            problem?.title,
+        ]
+        .compactMap { $0 }
+        .first { !$0.isEmpty }
             ?? "Account request failed (\(status))."
         let code = problem?.code ?? ""
         let looksRevoked = code == "device_revoked"
@@ -227,6 +254,11 @@ private struct OAuthAuthorizeBody: Encodable {
     var codeChallenge: String
     var codeChallengeMethod: String
     var state: String
+}
+
+private struct DeletionBody: Encodable {
+    var confirmation: String
+    var reason: String
 }
 
 private struct OAuthExchangeBody: Encodable {

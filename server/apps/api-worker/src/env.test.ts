@@ -3,8 +3,13 @@ import { describe, expect, it } from "vitest";
 import {
   parseEnvironment,
   parseLocalDevOtp,
+  resolveCacheHmacSecret,
+  resolveHostedAuthConfig,
   resolveJwtSigningConfig,
+  resolveOperatorWrappingSecret,
   resolvePasswordlessHmacSecret,
+  resolveQwenConfig,
+  resolveSupabaseRestConfig,
 } from "./env";
 
 describe("parseEnvironment", () => {
@@ -72,6 +77,107 @@ describe("resolveJwtSigningConfig", () => {
       issuer: "https://example.supabase.co/auth/v1",
       audience: "authenticated",
       secret: "super-secret",
+      jwksUrl: "https://example.supabase.co/auth/v1/.well-known/jwks.json",
+    });
+  });
+});
+
+describe("resolveHostedAuthConfig", () => {
+  it("is local/test only when issuance stays in-memory", () => {
+    expect(
+      resolveHostedAuthConfig(
+        {
+          SUPABASE_URL: "https://example.supabase.co",
+          SUPABASE_ANON_KEY: "anon-key",
+        },
+        "local",
+      ),
+    ).toBeUndefined();
+    expect(
+      resolveHostedAuthConfig(
+        {
+          SUPABASE_URL: "https://example.supabase.co",
+          SUPABASE_ANON_KEY: "anon-key",
+        },
+        "test",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("requires both the project URL and anon key outside local and test", () => {
+    expect(
+      resolveHostedAuthConfig({ SUPABASE_URL: "https://example.supabase.co" }, "production"),
+    ).toBeUndefined();
+    expect(resolveHostedAuthConfig({ SUPABASE_ANON_KEY: "anon-key" }, "staging")).toBeUndefined();
+    expect(
+      resolveHostedAuthConfig(
+        {
+          SUPABASE_URL: "https://example.supabase.co/",
+          SUPABASE_ANON_KEY: "anon-key",
+        },
+        "production",
+      ),
+    ).toEqual({ url: "https://example.supabase.co", anonKey: "anon-key" });
+  });
+});
+
+describe("resolveSupabaseRestConfig", () => {
+  it("requires both the project URL and service role key", () => {
+    expect(
+      resolveSupabaseRestConfig({ SUPABASE_URL: "https://example.supabase.co" }),
+    ).toBeUndefined();
+    expect(
+      resolveSupabaseRestConfig({ SUPABASE_SERVICE_ROLE_KEY: "service-role" }),
+    ).toBeUndefined();
+    expect(
+      resolveSupabaseRestConfig({
+        SUPABASE_URL: "https://example.supabase.co/",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role",
+      }),
+    ).toEqual({ url: "https://example.supabase.co", serviceRoleKey: "service-role" });
+    expect(
+      resolveSupabaseRestConfig({
+        SUPABASE_URL: "https://example.supabase.co",
+        SUPABASE_SECRET_KEY: "secret-role",
+      }),
+    ).toEqual({ url: "https://example.supabase.co", serviceRoleKey: "secret-role" });
+  });
+});
+
+describe("resolveOperatorWrappingSecret", () => {
+  it("prefers OPERATOR_CONFIG_KEY then the cache HMAC secret", () => {
+    expect(
+      resolveOperatorWrappingSecret({
+        OPERATOR_CONFIG_KEY: "operator",
+        CACHE_HMAC_SECRET: "cache",
+      }),
+    ).toEqual({ secret: "operator", fromEnv: true, source: "operator_config_key" });
+    expect(resolveOperatorWrappingSecret({ CACHE_HMAC_SECRET: "cache" })).toEqual({
+      secret: "cache",
+      fromEnv: true,
+      source: "cache_hmac",
+    });
+    expect(resolveOperatorWrappingSecret({})).toMatchObject({
+      fromEnv: false,
+      source: "none",
+    });
+  });
+});
+
+describe("resolveQwenConfig", () => {
+  it("is absent without an API key and keeps optional overrides exact", () => {
+    expect(resolveQwenConfig({})).toBeUndefined();
+    expect(resolveQwenConfig({ QWEN_API_KEY: "sk-test" })).toEqual({ apiKey: "sk-test" });
+    expect(
+      resolveQwenConfig({
+        QWEN_API_KEY: "sk-test",
+        QWEN_BASE_URL: "https://example.invalid/v1",
+        QWEN_MODEL: "qwen-turbo",
+      }),
+    ).toEqual({
+      apiKey: "sk-test",
+      baseUrl: "https://example.invalid/v1",
+      model: "qwen-turbo",
     });
   });
 });
@@ -95,6 +201,28 @@ describe("resolvePasswordlessHmacSecret", () => {
 
   it("uses the local-dev pepper when no env secret is set", () => {
     expect(resolvePasswordlessHmacSecret({})).toEqual({
+      secret: LOCAL_PASSWORDLESS_HMAC_SECRET,
+      fromEnv: false,
+    });
+  });
+});
+
+describe("resolveCacheHmacSecret", () => {
+  it("prefers CACHE_HMAC_SECRET over the passwordless secret", () => {
+    expect(
+      resolveCacheHmacSecret({
+        CACHE_HMAC_SECRET: "cache",
+        PASSWORDLESS_HMAC_SECRET: "dedicated",
+      }),
+    ).toEqual({ secret: "cache", fromEnv: true });
+  });
+
+  it("falls back to PASSWORDLESS_HMAC_SECRET then the local-dev pepper", () => {
+    expect(resolveCacheHmacSecret({ PASSWORDLESS_HMAC_SECRET: "dedicated" })).toEqual({
+      secret: "dedicated",
+      fromEnv: true,
+    });
+    expect(resolveCacheHmacSecret({})).toEqual({
       secret: LOCAL_PASSWORDLESS_HMAC_SECRET,
       fromEnv: false,
     });

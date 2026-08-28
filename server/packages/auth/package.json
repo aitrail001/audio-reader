@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@audio-reader/database": "workspace:*",
     "@cloudflare/workers-types": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

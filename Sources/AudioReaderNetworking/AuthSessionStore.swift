@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 
@@ -141,13 +142,144 @@ public struct KeychainAuthSessionStore: AuthSessionStoring, Sendable {
 public enum AuthSessionStoreError: Error, Equatable, LocalizedError {
     case keychain(OSStatus)
     case saveFailed
+    case unavailable
 
     public var errorDescription: String? {
         switch self {
-        case .keychain:
-            "The account session could not be stored in Keychain."
+        case .keychain, .unavailable:
+            "The account session could not be stored in the encrypted local vault."
         case .saveFailed:
             "The account session could not be saved."
         }
+    }
+}
+
+public final class EncryptedFileAuthSessionStore: AuthSessionStoring, @unchecked Sendable {
+    private struct Envelope: Codable {
+        var version: Int
+        var sealedData: Data
+    }
+
+    private struct Document: Codable {
+        var deviceID: String
+        var session: PersistedAuthSession?
+    }
+
+    private let directory: URL
+    private let legacy: KeychainAuthSessionStore?
+    private let lock = NSLock()
+
+    public init(directory: URL, legacy: KeychainAuthSessionStore? = nil) {
+        self.directory = directory
+        self.legacy = legacy
+    }
+
+    public func load() throws -> PersistedAuthSession? {
+        try withLock {
+            try migrateLegacyIfNeeded()
+            return try readDocument().session
+        }
+    }
+
+    public func save(_ session: PersistedAuthSession) throws {
+        try withLock {
+            try migrateLegacyIfNeeded()
+            var document = try readDocument()
+            document.session = session
+            try writeDocument(document)
+            try legacy?.clear()
+        }
+    }
+
+    public func clear() throws {
+        try withLock {
+            try migrateLegacyIfNeeded()
+            var document = try readDocument()
+            document.session = nil
+            try writeDocument(document)
+            try legacy?.clear()
+        }
+    }
+
+    public func deviceID() throws -> String {
+        try withLock {
+            try migrateLegacyIfNeeded()
+            return try readDocument().deviceID
+        }
+    }
+
+    private func withLock<T>(_ body: () throws -> T) throws -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body()
+    }
+
+    private var vaultURL: URL { directory.appendingPathComponent("account-session.vault") }
+    private var keyURL: URL { directory.appendingPathComponent("account-session.key") }
+
+    private func migrateLegacyIfNeeded() throws {
+        if FileManager.default.fileExists(atPath: vaultURL.path) { return }
+        guard let legacy else { return }
+        let session = try? legacy.load()
+        let device = (try? legacy.deviceID()) ?? UUID().uuidString.lowercased()
+        try writeDocument(Document(deviceID: device, session: session))
+        try legacy.clear()
+        try? legacy.deleteDeviceID()
+    }
+
+    private func readDocument() throws -> Document {
+        let exists = FileManager.default.fileExists(atPath: vaultURL.path)
+        let key = try wrappingKey(vaultExists: exists)
+        guard exists else {
+            let created = Document(deviceID: UUID().uuidString.lowercased(), session: nil)
+            try writeDocument(created, key: key)
+            return created
+        }
+        let data = try Data(contentsOf: vaultURL)
+        let envelope = try JSONDecoder().decode(Envelope.self, from: data)
+        guard envelope.version == 1 else { throw AuthSessionStoreError.unavailable }
+        let box = try AES.GCM.SealedBox(combined: envelope.sealedData)
+        let plain = try AES.GCM.open(box, using: key)
+        return try JSONDecoder().decode(Document.self, from: plain)
+    }
+
+    private func writeDocument(_ document: Document, key: SymmetricKey? = nil) throws {
+        let wrapping = try key ?? wrappingKey(vaultExists: FileManager.default.fileExists(atPath: vaultURL.path))
+        let plaintext = try JSONEncoder().encode(document)
+        let sealed = try AES.GCM.seal(plaintext, using: wrapping)
+        guard let combined = sealed.combined else { throw AuthSessionStoreError.unavailable }
+        let data = try JSONEncoder().encode(Envelope(version: 1, sealedData: combined))
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try data.write(to: vaultURL, options: .atomic)
+        try protect(vaultURL)
+    }
+
+    private func wrappingKey(vaultExists: Bool) throws -> SymmetricKey {
+        if FileManager.default.fileExists(atPath: keyURL.path) {
+            let data = try Data(contentsOf: keyURL)
+            guard data.count == 32 else { throw AuthSessionStoreError.unavailable }
+            return SymmetricKey(data: data)
+        }
+        guard !vaultExists else { throw AuthSessionStoreError.unavailable }
+        let key = SymmetricKey(size: .bits256)
+        let data = key.withUnsafeBytes { Data($0) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try data.write(to: keyURL, options: .atomic)
+        try protect(keyURL)
+        return key
+    }
+
+    private func protect(_ url: URL) throws {
+#if os(iOS)
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: url.path
+        )
+#elseif os(macOS)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: url.path
+        )
+#endif
     }
 }

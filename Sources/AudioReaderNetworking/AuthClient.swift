@@ -24,6 +24,8 @@ public protocol AuthClient: Sendable {
     func profile(accessToken: String, deviceID: String) async throws -> AccountProfile
     func listDevices(accessToken: String, deviceID: String) async throws -> [AccountDevice]
     func revokeDevice(accessToken: String, deviceID: String, targetDeviceID: String) async throws
+    func createAccountExport(accessToken: String, deviceID: String, format: String) async throws -> AccountExportJob
+    func requestAccountDeletion(accessToken: String, deviceID: String, reason: String) async throws
 }
 
 public protocol OAuthBrowserSession: Sendable {

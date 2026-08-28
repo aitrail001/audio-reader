@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createFakePrincipal, packageId } from "./index";
+import { createFakePrincipal, createHostedAuthService, packageId } from "./index";
 
 describe("@audio-reader/auth", () => {
   it("identifies the auth package", () => {
@@ -17,5 +17,9 @@ describe("@audio-reader/auth", () => {
     expect(principal.accountId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     );
+  });
+
+  it("exports a hosted GoTrue auth adapter", () => {
+    expect(typeof createHostedAuthService).toBe("function");
   });
 });
