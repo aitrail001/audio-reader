@@ -10,3 +10,4 @@ AudioReader.app/
 .grok/
 .cursor/
 .worktree/
+.wrangler/

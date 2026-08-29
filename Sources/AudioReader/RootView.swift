@@ -28,6 +28,12 @@ struct RootView: View {
             }
         }
         .background(Palette.bg)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            WorkStatusBanner(
+                library: state.libraryScanProgress,
+                accountMessage: state.account.activityMessage
+            )
+        }
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 Picker("Section", selection: $state.tab) {

@@ -65,6 +65,11 @@ import { handleLibraryRoute, isLibraryPath, libraryMethodError } from "./library
 import { assetMethodError, handleAssetRoute, isAssetPath, isBinaryAssetPath } from "./asset-routes";
 import { handlePrivacyRoute, isPrivacyPath, privacyMethodError } from "./privacy-routes";
 import { adminMethodError, handleAdminRoute, isAdminPath } from "./admin-routes";
+import {
+  handleProductEventRoute,
+  isProductEventPath,
+  productEventMethodError,
+} from "./product-events";
 
 const HEALTH_PATHS = new Set(["/v1/health", "/healthz", "/readyz"]);
 
@@ -450,6 +455,7 @@ async function handleRequest(
     libraryMethodError(path, request.method, requestId) ??
     assetMethodError(path, request.method, requestId) ??
     privacyMethodError(path, request.method, requestId) ??
+    productEventMethodError(path, request.method, requestId) ??
     adminMethodError(path, request.method, requestId);
   if (methodError !== undefined) {
     return methodError;
@@ -549,7 +555,20 @@ async function handleRequest(
       idempotencyStore,
       ops: options.database.ops,
       identity: options.database.identity,
+      catalog: options.database.catalog,
       objects: options.storage,
+    });
+    if (routed !== undefined) {
+      return routed;
+    }
+  }
+
+  if (isProductEventPath(path)) {
+    const routed = await handleProductEventRoute({
+      request,
+      requestId,
+      authenticate,
+      ops: options.database.ops,
     });
     if (routed !== undefined) {
       return routed;
@@ -564,6 +583,7 @@ async function handleRequest(
       idempotencyStore,
       ops: options.database.ops,
       identity: options.database.identity,
+      catalog: options.database.catalog,
       ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
     });
     if (routed !== undefined) {

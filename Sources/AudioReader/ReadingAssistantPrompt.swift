@@ -207,6 +207,24 @@ enum SentenceTranslationContract {
 }
 
 enum ReadingAssistantPrompt {
+    static func neighbors(
+        around target: TranscriptSegment,
+        in transcript: Transcript?,
+        limit: Int = 10
+    ) -> (previous: [String], next: [String]) {
+        guard let segments = transcript?.segments,
+              let index = segments.firstIndex(where: { $0.id == target.id })
+        else {
+            return ([], [])
+        }
+        let start = max(segments.startIndex, index - limit)
+        let previous = Array(segments[start..<index].map(\.displayText))
+        let nextStart = index + 1
+        let end = min(segments.endIndex, nextStart + limit)
+        let next = nextStart < end ? Array(segments[nextStart..<end].map(\.displayText)) : []
+        return (previous, next)
+    }
+
     static func sentenceContext(
         around targets: [TranscriptSegment],
         in transcript: Transcript?,

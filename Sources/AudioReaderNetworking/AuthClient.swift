@@ -25,6 +25,8 @@ public protocol AuthClient: Sendable {
     func listDevices(accessToken: String, deviceID: String) async throws -> [AccountDevice]
     func revokeDevice(accessToken: String, deviceID: String, targetDeviceID: String) async throws
     func createAccountExport(accessToken: String, deviceID: String, format: String) async throws -> AccountExportJob
+    func downloadAccountExport(accessToken: String, deviceID: String, assetID: String) async throws -> Data
+    func recordProductEvents(accessToken: String, deviceID: String, events: [ProductUsageEvent]) async throws
     func requestAccountDeletion(accessToken: String, deviceID: String, reason: String) async throws
 }
 

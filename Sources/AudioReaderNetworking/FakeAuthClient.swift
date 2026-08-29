@@ -6,6 +6,7 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
     public private(set) var exchangeCount = 0
     public private(set) var bootstrapCount = 0
     public private(set) var logoutTokens: [String] = []
+    public private(set) var recordedUsage: [ProductUsageEvent] = []
 
     private let lock = NSLock()
     private var otpEmails: Set<String> = []
@@ -16,6 +17,7 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
     private var revokedDeviceIDs: Set<String> = []
     private var profiles: [String: AccountProfile] = [:]
     private var tokenSerial = 0
+    private var exportAssets: [String: Data] = [:]
 
     public init() {}
 
@@ -194,12 +196,29 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
     public func createAccountExport(accessToken: String, deviceID: String, format: String) async throws -> AccountExportJob {
         try withLock {
             _ = try sessionLocked(accessToken: accessToken, deviceID: deviceID)
+            let assetID = "00000000-0000-4000-8000-00000000e001"
+            exportAssets[assetID] = Data(#"{"account":{"email":"reader@example.com"}}"#.utf8)
             return AccountExportJob(
                 id: UUID().uuidString.lowercased(),
                 status: "ready",
                 format: format,
+                assetId: assetID,
                 createdAt: Self.timestamp()
             )
+        }
+    }
+
+    public func downloadAccountExport(accessToken: String, deviceID: String, assetID: String) async throws -> Data {
+        try withLock {
+            _ = try sessionLocked(accessToken: accessToken, deviceID: deviceID)
+            return exportAssets[assetID] ?? Data("{}".utf8)
+        }
+    }
+
+    public func recordProductEvents(accessToken: String, deviceID: String, events: [ProductUsageEvent]) async throws {
+        try withLock {
+            _ = try sessionLocked(accessToken: accessToken, deviceID: deviceID)
+            recordedUsage.append(contentsOf: events)
         }
     }
 

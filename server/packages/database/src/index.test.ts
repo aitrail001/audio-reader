@@ -7,13 +7,14 @@ describe("@audio-reader/database", () => {
   });
 
   it("exports the core multi-user table contract", () => {
-    expect(CORE_TABLES).toHaveLength(32);
+    expect(CORE_TABLES).toHaveLength(33);
     expect(CORE_TABLES).toContain("chat_messages");
     expect(CORE_TABLES).toContain("passwordless_hits");
     expect(CORE_TABLES).toContain("profiles");
     expect(CORE_TABLES).toContain("assistant_cache_entries");
     expect(CORE_TABLES).toContain("operator_settings");
     expect(CORE_TABLES).toContain("quota_limits");
+    expect(CORE_TABLES).toContain("product_events");
   });
 
   it("exports privileged transaction function names", () => {
@@ -91,6 +92,7 @@ describe("@audio-reader/database", () => {
       "translation",
     ]);
     expect(policies.every((policy) => policy.systemPrompt.length > 20)).toBe(true);
+    expect(policies.every((policy) => policy.userPrompt.includes("{{"))).toBe(true);
     expect(new Set(policies.map((policy) => policy.systemPrompt)).size).toBe(3);
   });
 });

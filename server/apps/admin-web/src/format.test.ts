@@ -3,10 +3,13 @@ import {
   extractAccessToken,
   extractSession,
   formatBytes,
+  formatJson,
   hrefCarriesSessionTokens,
   nextCursorOf,
   pageItems,
   reasonReady,
+  rowCountLabel,
+  shortId,
   statusTone,
 } from "./format";
 
@@ -22,6 +25,15 @@ describe("operator format helpers", () => {
     expect(formatBytes(0)).toBe("0 B");
     expect(formatBytes(512)).toBe("512 B");
     expect(formatBytes(2048)).toBe("2 KB");
+  });
+
+  it("clips identifiers and counts rows", () => {
+    expect(shortId("")).toBe("—");
+    expect(shortId("abc")).toBe("abc");
+    expect(shortId("00000000-0000-4000-8000-000000000031")).toBe("00000000…");
+    expect(rowCountLabel(1, "entry", "entries")).toBe("1 entry");
+    expect(rowCountLabel(2, "entry", "entries")).toBe("2 entries");
+    expect(formatJson({ hits: 3 })).toContain("hits");
   });
 
   it("gates mutations on a five-character reason", () => {

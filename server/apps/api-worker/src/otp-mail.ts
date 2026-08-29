@@ -28,6 +28,17 @@ export function createResendOtpMailer(input: {
         ].join("\n"),
       }),
     });
+    if (!response.ok) {
+      const fromHost = /@([^>]+)/.exec(from)?.[1] ?? "unset";
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          message: "otp_mail_failed",
+          status: response.status,
+          fromHost,
+        }),
+      );
+    }
     return response.ok;
   };
 }

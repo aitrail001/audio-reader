@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const root = dirname(fileURLToPath(import.meta.url));
-const source = ["app.tsx", "api.ts"]
+const source = ["app.tsx", "api.ts", "operator-table.tsx"]
   .map((name) => readFileSync(join(root, name), "utf8"))
   .join("\n");
 
@@ -37,7 +37,31 @@ describe("operator console coverage", () => {
       "/v1/admin/diagnostics",
       "probe=complete",
       "systemPrompt",
+      "userPrompt",
       "/v1/admin/events",
+      "/v1/admin/product-events",
+      "VITE_ADMIN_VERSION",
+      "Operator console",
+      "Activity",
+      "User activity",
+      "ai. or account.signed_in",
+      "does not write this table",
+      "ai.translation.cached",
+      "ai.chat.*",
+      "cacheOriginal",
+      "cacheBook",
+      "prose-block",
+      "cell-clip",
+      "row-open",
+      "prose-pair",
+      "Last hit",
+      "Translation",
+      "Account id",
+      "label=\"account id\"",
+      "user.accountId",
+      "Find in this page",
+      "OperatorTable",
+      "Sentence context",
     ];
     for (const route of routes) {
       expect(source).toContain(route);

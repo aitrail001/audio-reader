@@ -16,6 +16,7 @@ function seedPolicy(model = "qwen3.7-plus"): Row {
     model,
     prompt_version: "qwen-managed-v1",
     system_prompt: "Return JSON with keys translation and notes.",
+    user_prompt: "Translate {{source}} into {{targetLanguage}}.",
     schema_version: "1",
     policy_version: "qwen-managed-v1",
     enabled: true,
@@ -403,6 +404,95 @@ describe("supabase flag, quota, settings, and audit writes", () => {
       }),
     );
     expect(await ops.listFlags()).toEqual([]);
+  });
+
+  it("stores assistant cache in Postgres so listCache reloads the row", async () => {
+    const rows: Row[] = [];
+    const ops = createSupabaseOpsStore(opsRest({ tables: { "/assistant_cache_entries": rows } }));
+    const stored = await ops.putCache({
+      id: "00000000-0000-4000-8000-0000000000c1",
+      cacheKey: "ck-1",
+      task: "translation",
+      state: "active",
+      sourceLanguage: "en",
+      targetLanguage: "zh",
+      editionFingerprint: "ed-1",
+      policyVersion: "qwen-managed-v1",
+      payload: { translation: "你好" },
+    });
+    expect(stored.cacheKey).toBe("ck-1");
+    expect(stored.task).toBe("translation");
+    expect(rows).toHaveLength(1);
+    const listed = await ops.listCache({ task: "translation" });
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.id).toBe(stored.id);
+    expect(listed[0]?.payload).toEqual({ translation: "你好" });
+    expect(await ops.lookupCache("ck-1")).toEqual(expect.objectContaining({ id: stored.id }));
+  });
+
+  it("maps bigint cache counters that PostgREST returns as strings", async () => {
+    const ops = createSupabaseOpsStore(
+      opsRest({
+        tables: {
+          "/assistant_cache_entries": [
+            {
+              id: "00000000-0000-4000-8000-0000000000c3",
+              cache_key: "ck-hits",
+              task_type: "translation",
+              source_language: "en",
+              target_language: "zh",
+              edition_fingerprint: "ed-1",
+              state: "active",
+              policy_version: "qwen-managed-v1",
+              hit_count: "14",
+              accept_count: "2",
+              reject_count: "1",
+              result: { source: "ice", translation: "冰", bookTitle: "Frankenstein" },
+              created_at: "2026-08-29T00:00:00.000Z",
+              last_hit_at: "2026-08-29T01:00:00.000Z",
+            },
+          ],
+        },
+      }),
+    );
+    const listed = await ops.listCache();
+    expect(listed[0]?.hitCount).toBe(14);
+    expect(listed[0]?.acceptCount).toBe(2);
+    expect(listed[0]?.payload).toEqual({
+      source: "ice",
+      translation: "冰",
+      bookTitle: "Frankenstein",
+    });
+  });
+
+  it("does not pretend a failed cache insert succeeded", async () => {
+    const ops = createSupabaseOpsStore(
+      opsRest({
+        tables: { "/assistant_cache_entries": [] },
+        fail: {
+          method: "POST",
+          path: "/assistant_cache_entries",
+          response: {
+            status: 400,
+            body: { code: "PGRST204", message: "Could not find the 'result' column" },
+          },
+        },
+      }),
+    );
+    await expect(
+      ops.putCache({
+        id: "00000000-0000-4000-8000-0000000000c2",
+        cacheKey: "ck-fail",
+        task: "chapter_summary",
+        state: "active",
+        sourceLanguage: "en",
+        targetLanguage: "zh",
+        editionFingerprint: "ed-2",
+        policyVersion: "qwen-managed-v1",
+        payload: { overview: "Nope" },
+      }),
+    ).rejects.toBeInstanceOf(RestPersistenceError);
+    expect(await ops.listCache()).toEqual([]);
   });
 });
 

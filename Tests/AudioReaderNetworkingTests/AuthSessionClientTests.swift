@@ -379,6 +379,20 @@ struct AuthSessionClientTests {
     }
 
     @MainActor
+    @Test("export downloads account JSON for the save panel")
+    func exportDownloadsAccountJSON() async throws {
+        let session = try await signedInSession()
+        await session.exportAccount()
+        #expect(session.pendingExport != nil)
+        #expect(session.pendingExport?.fileName.hasSuffix(".json") == true)
+        #expect(String(data: session.pendingExport?.data ?? Data(), encoding: .utf8)?.contains("reader@example.com") == true)
+        #expect(session.lastExportStatus?.contains("Choose where to save") == true)
+        session.markExportSaved()
+        #expect(session.pendingExport == nil)
+        #expect(session.lastExportStatus?.hasPrefix("Saved ") == true)
+    }
+
+    @MainActor
     @Test("Encrypted file session store keeps the device ID after logout")
     func encryptedFileStoreSurvivesLogout() throws {
         let directory = FileManager.default.temporaryDirectory

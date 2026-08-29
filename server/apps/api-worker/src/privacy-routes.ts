@@ -1,10 +1,13 @@
 import type { Principal } from "@audio-reader/auth";
 import type { components } from "@audio-reader/contract";
-import type { IdentityStore, OpsStore } from "@audio-reader/database";
+import type { CatalogStore, IdentityStore, OpsStore } from "@audio-reader/database";
+import { sha256Hex } from "@audio-reader/qwen";
+import { buildAccountExportPayload } from "./account-export";
 import { readJsonObject } from "./body";
 import { asHead, jsonResponse } from "./http";
 import { withIdempotency, type IdempotencyStore } from "./idempotency";
 import type { ObjectStore } from "./object-store";
+import { captureProductEvent } from "./product-events";
 import {
   UUID_PATTERN,
   fieldError,
@@ -26,6 +29,7 @@ export type PrivacyRouteContext = {
   idempotencyStore: IdempotencyStore;
   ops?: OpsStore;
   identity?: IdentityStore;
+  catalog?: CatalogStore;
   objects?: ObjectStore;
 };
 
@@ -110,30 +114,58 @@ async function createExport(
       const rawFormat = typeof body.value.format === "string" ? body.value.format : "zip_json";
       const format = rawFormat === "csv" || rawFormat === "anki_package" ? rawFormat : "zip_json";
       const created = await ops.createExport(principal.accountId, format);
+      const payload = await buildAccountExportPayload({
+        accountId: principal.accountId,
+        ...(context.identity === undefined ? {} : { identity: context.identity }),
+        ...(context.catalog === undefined ? {} : { catalog: context.catalog }),
+      });
+      const json = JSON.stringify(payload, null, 2);
+      const bytes = new TextEncoder().encode(json);
+      const digest = await sha256Hex(json);
+      const fileName = `audioreader-account-${created.id.slice(0, 8)}.json`;
+      const asset = await ops.createAsset(principal.accountId, {
+        kind: "account_export",
+        contentType: "application/json",
+        sizeBytes: bytes.byteLength,
+        sha256: digest,
+        fileName,
+      });
+      if (context.objects !== undefined) {
+        await context.objects.put(asset.objectKey, bytes);
+        await ops.completeAsset(principal.accountId, asset.uploadId);
+      }
       await ops.createPrivacyRequest({
         accountId: principal.accountId,
         kind: "export",
         status: "ready",
         format,
+        assetId: asset.id,
       });
-      const asset = await ops.createAsset(principal.accountId, {
-        kind: "account_export",
-        contentType: "application/json",
-        sizeBytes: 2,
-        sha256: "export",
-        fileName: `export-${created.id}.json`,
-      });
-      if (context.objects !== undefined) {
-        await context.objects.put(asset.objectKey, new TextEncoder().encode("{}"));
-        await ops.completeAsset(principal.accountId, asset.uploadId);
-      }
       const ready = await ops.completeExport(principal.accountId, created.id, asset.id);
       const job = await ops.createJob({
         accountId: principal.accountId,
         kind: "account_export",
-        payload: { exportId: created.id },
+        payload: { exportId: created.id, assetId: asset.id, fileName },
       });
       await ops.updateJob(job.id, { status: "succeeded", finishedAt: new Date().toISOString() });
+      await captureProductEvent(ops, {
+        accountId: principal.accountId,
+        deviceId,
+        name: "account.export.created",
+        requestId: context.requestId,
+        properties: { format, bytes: bytes.byteLength },
+      });
+      console.warn(
+        JSON.stringify({
+          level: "info",
+          message: "account_export_ready",
+          requestId: context.requestId,
+          accountId: principal.accountId,
+          exportId: created.id,
+          assetId: asset.id,
+          bytes: bytes.byteLength,
+        }),
+      );
       return jsonResponse(toExport(ready ?? created), 202);
     },
     context.requestId,

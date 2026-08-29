@@ -55,6 +55,9 @@ export type RuntimeConfigView = {
     otpFromConfigured: boolean;
     qwenEnvKeyConfigured: boolean;
   };
+  assistant: {
+    sentenceContextCount: number;
+  };
   updatedAt?: string;
 };
 
@@ -78,6 +81,9 @@ export type RuntimeConfigPut = {
   turnstile?: {
     secretKey?: string | null;
   };
+  assistant?: {
+    sentenceContextCount?: number;
+  };
 };
 
 export type OperatorPublicPayload = {
@@ -85,6 +91,7 @@ export type OperatorPublicPayload = {
   qwenModel?: string;
   gcsBucket?: string;
   gcsClientEmail?: string;
+  sentenceContextCount?: number;
 };
 
 export type RuntimeConfigService = {
@@ -305,6 +312,9 @@ export function createRuntimeConfigService(input: {
         otpFromConfigured: (input.env.OTP_FROM_EMAIL?.trim() ?? "") !== "",
         qwenEnvKeyConfigured: (input.env.QWEN_API_KEY?.trim() ?? "") !== "",
       },
+      assistant: {
+        sentenceContextCount: sentenceContextCountOf(snapshot.state.publicPayload),
+      },
       ...(snapshot.state.updatedAt === undefined ? {} : { updatedAt: snapshot.state.updatedAt }),
     };
   }
@@ -365,6 +375,12 @@ export function createRuntimeConfigService(input: {
         patch.turnstile.secretKey.trim() !== ""
       ) {
         nextSecrets.turnstileSecret = patch.turnstile.secretKey.trim();
+      }
+
+      if (patch.assistant?.sentenceContextCount !== undefined) {
+        nextPublic.sentenceContextCount = sentenceContextCountOf({
+          sentenceContextCount: patch.assistant.sentenceContextCount,
+        });
       }
 
       const encrypting = Object.keys(nextSecrets).length > 0;
@@ -551,5 +567,16 @@ function asPublicPayload(value: Record<string, unknown>): OperatorPublicPayload 
     ...(typeof value.qwenModel === "string" ? { qwenModel: value.qwenModel } : {}),
     ...(typeof value.gcsBucket === "string" ? { gcsBucket: value.gcsBucket } : {}),
     ...(typeof value.gcsClientEmail === "string" ? { gcsClientEmail: value.gcsClientEmail } : {}),
+    sentenceContextCount: sentenceContextCountOf(value),
   };
+}
+
+export function sentenceContextCountOf(value: {
+  sentenceContextCount?: unknown;
+}): number {
+  const raw = value.sentenceContextCount;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return 1;
+  }
+  return Math.min(10, Math.max(0, Math.trunc(raw)));
 }

@@ -72,4 +72,20 @@ describe("runtime config wrapping", () => {
       ),
     ).rejects.toBeInstanceOf(OperatorWrappingNotConfiguredError);
   });
+
+  it("persists Managed Qwen sentence context count on the public payload", async () => {
+    const database = createFakeDatabaseClient();
+    const runtime = createRuntimeConfigService({
+      env: { ENVIRONMENT: "test" },
+      ops: database.ops,
+      wrappingSecret: "test-operator-secret-key",
+    });
+    expect((await runtime.view()).assistant.sentenceContextCount).toBe(1);
+    const saved = await runtime.put(
+      { assistant: { sentenceContextCount: 3 } },
+      "00000000-0000-4000-8000-000000000002",
+    );
+    expect(saved.assistant.sentenceContextCount).toBe(3);
+    expect((await runtime.view()).assistant.sentenceContextCount).toBe(3);
+  });
 });

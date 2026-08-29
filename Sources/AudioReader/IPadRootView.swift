@@ -146,20 +146,11 @@ struct IPadRootView: View {
             }
         }
         .tint(Palette.terracotta)
-        .overlay {
-            if state.isScanning, let progress = state.libraryScanProgress {
-                VStack(spacing: 12) {
-                    ProgressView(value: progress.fraction)
-                        .frame(width: 220)
-                    Text(progress.stage)
-                        .font(.headline)
-                    Text(progress.detail)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(24)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-            }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            WorkStatusBanner(
+                library: state.libraryScanProgress,
+                accountMessage: state.account.activityMessage
+            )
         }
         .sheet(item: $state.chapterStudyPresentation) { _ in
             ChapterStudyListView(state: state)

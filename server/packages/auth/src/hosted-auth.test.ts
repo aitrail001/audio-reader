@@ -110,6 +110,31 @@ describe("hosted GoTrue auth service", () => {
     expect(sent).toEqual([{ to: EMAIL, code: "42424201" }]);
   });
 
+  it("falls back to GoTrue /otp when Resend cannot send the generated code", async () => {
+    const { fetch, calls } = createFetch((call) => {
+      if (call.url.endsWith("/admin/generate_link")) {
+        return jsonResponse(200, { email_otp: "42424201", hashed_token: "hash" });
+      }
+      if (call.url.endsWith("/otp")) {
+        return jsonResponse(200, null);
+      }
+      return jsonResponse(500, { message: "unexpected" });
+    });
+    const auth = createHostedAuthService({
+      jwt: JWT,
+      supabaseUrl: "https://example.supabase.co",
+      supabaseAnonKey: "anon-key",
+      serviceRoleKey: "service-role",
+      sendOtpEmail: () => Promise.resolve(false),
+      fetch,
+    });
+    expect(await auth.requestEmailOtp(EMAIL)).toEqual({ ok: true, value: { accepted: true } });
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://example.supabase.co/auth/v1/admin/generate_link",
+      "https://example.supabase.co/auth/v1/otp",
+    ]);
+  });
+
   it("returns not_ready when GoTrue OTP is unreachable", async () => {
     const { fetch } = createFetch(() => jsonResponse(503, { message: "down" }));
     const auth = createHostedAuthService({

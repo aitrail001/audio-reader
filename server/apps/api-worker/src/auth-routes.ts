@@ -173,7 +173,22 @@ async function requestEmailOtp(context: AuthRouteContext): Promise<Response> {
   }
   const requested = await auth.requestEmailOtp(email);
   if (!requested.ok) {
-    return issuanceUnavailable(context.requestId);
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: "email_otp_request_not_ready",
+        requestId: context.requestId,
+        code: requested.code,
+      }),
+    );
+    return problemResponse({
+      status: 503,
+      code: "not_ready",
+      title: "Service unavailable",
+      detail:
+        "Could not send a sign-in email. Check Resend and that OTP_FROM_EMAIL uses a verified domain.",
+      traceId: context.requestId,
+    });
   }
   return new Response(null, { status: 202 });
 }

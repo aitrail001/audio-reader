@@ -10,14 +10,16 @@ transaction functions. Tables, policies, and RPCs come from versioned SQL in
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Private, synchronized | `profiles`, `devices`, `user_settings`, `books`, `book_assets`, `chapters`, `reading_progress`, `transcript_revisions`, `transcript_segments`, `vocabulary_occurrences`, `known_lemmas`, `review_cards`, `review_events`, `user_assistant_results` |
 | Private, user-filed   | `privacy_requests` (authenticated JWT may CRUD own rows)                                                                                                                                                                                           |
-| Private, server-owned | `assistant_jobs`, `usage_ledger`, `sync_changes`, `idempotency_records`, `admin_roles`, `chat_messages`                                                                                                                                              |
+| Private, server-owned | `assistant_jobs`, `usage_ledger`, `sync_changes`, `idempotency_records`, `admin_roles`, `chat_messages`, `product_events`                                                                                                                            |
 | Global / operational  | `canonical_works`, `canonical_editions`, `assistant_cache_entries`, `feature_flags`, `quota_limits`, `model_policies`, `audit_events`, `operator_settings`, `passwordless_hits`, `passwordless_cooldowns`, `passwordless_blocked_attempts`               |
 
 Synchronized private rows carry `id`, `user_id`, `created_at`, `updated_at`,
 `server_version`, `deleted_at`, and `last_mutation_id`. Authorization fields are
 relational columns, not JSON. Child rows use composite tenant FKs such as
 `(user_id, book_id) REFERENCES books (user_id, id)`. `assistant_cache_entries`
-stores no `user_id` and no source passage. In-flight `assistant_jobs` keep their
+stores no `user_id` and no source passage. Sentence rows key on source text plus
+languages/level/edition/policy; word rows also digest the containing sentence.
+In-flight `assistant_jobs` keep their
 `cache_key` claim if the first requester is deleted (`user_id` is `ON DELETE SET NULL`).
 
 ## Entity relationship
@@ -35,6 +37,7 @@ erDiagram
   profiles ||--o{ admin_roles : assigned
   profiles ||--o{ privacy_requests : files
   profiles ||--o{ chat_messages : chats
+  profiles ||--o{ product_events : emits
   canonical_works ||--o{ canonical_editions : groups
   canonical_works ||--o{ books : optional
   canonical_editions ||--o{ books : optional
@@ -53,8 +56,8 @@ erDiagram
 
 Operational tables with no user FK: `feature_flags`, `quota_limits`, `model_policies`,
 `audit_events`, `operator_settings`, `passwordless_hits`, `passwordless_cooldowns`,
-`passwordless_blocked_attempts`. `chat_messages` are Worker-owned (`user_id` set,
-no JWT policies). `idempotency_records.user_id` is a UUID without a profiles FK so
+`passwordless_blocked_attempts`. `chat_messages` and `product_events` are Worker-owned
+(`user_id` set, no JWT policies). `idempotency_records.user_id` is a UUID without a profiles FK so
 anonymous OTP writes can share claims.
 
 ## Row Level Security
@@ -68,7 +71,7 @@ Authenticated JWTs are scoped with `auth.uid()` and `public.current_user_is_acti
 - `assistant_cache_entries`, `model_policies`, `admin_roles`, `audit_events`,
   `operator_settings`, `idempotency_records`, `feature_flags`, `quota_limits`,
   `canonical_works`, `canonical_editions`, `chat_messages`, `passwordless_hits`,
-  `passwordless_cooldowns`, and `passwordless_blocked_attempts`: no JWT policies
+  `passwordless_cooldowns`, `passwordless_blocked_attempts`, and `product_events`: no JWT policies
   (normal clients cannot query them)
 
 Suspended profiles (`account_status` other than `active`, or `deleted_at` set)

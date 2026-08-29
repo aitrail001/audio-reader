@@ -31,6 +31,29 @@ export function formatWhen(value: string | null | undefined): string {
   }).format(date);
 }
 
+export function shortId(value: string, keep = 8): string {
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    return "—";
+  }
+  if (trimmed.length <= keep + 1) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, keep)}…`;
+}
+
+export function formatJson(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? {}, null, 2);
+  } catch {
+    return "—";
+  }
+}
+
+export function rowCountLabel(count: number, singular: string, plural = `${singular}s`): string {
+  return `${String(count)} ${count === 1 ? singular : plural}`;
+}
+
 export function formatBytes(bytes: number | undefined): string {
   if (bytes === undefined || !Number.isFinite(bytes) || bytes <= 0) {
     return "0 B";

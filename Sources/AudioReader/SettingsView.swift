@@ -17,6 +17,8 @@ struct SettingsView: View {
     @State private var removeQwenKey = false
     @State private var removeOpenAIKey = false
     @State private var saveFeedback: SaveFeedback?
+    @State private var dictionaryNames: [String] = []
+    @State private var dictionariesLoading = false
 
     init(state: AppState) {
         self.state = state
@@ -79,6 +81,13 @@ struct SettingsView: View {
 #endif
         }
         .tint(Palette.terracotta)
+        .task {
+#if os(macOS)
+            dictionariesLoading = true
+            dictionaryNames = await DictionaryLookup.installedNamesOffMain()
+            dictionariesLoading = false
+#endif
+        }
     }
 
     private var isDirty: Bool {
@@ -181,12 +190,21 @@ struct SettingsView: View {
                 helper("Word definitions use the dictionaries installed in iPadOS. Use Look Up in the reader to view all available entries.")
 #else
                 settingRow("Preferred dictionary") {
-                    Picker("Preferred dictionary", selection: $draft.preferredDictionary) {
-                        ForEach(DictionaryLookup.installedNames(), id: \.self) { name in
-                            Text(name).tag(name)
+                    if dictionariesLoading && dictionaryNames.isEmpty {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Loading installed dictionaries…")
+                                .foregroundStyle(Palette.dim)
                         }
+                        .accessibilityLabel("Loading installed dictionaries")
+                    } else {
+                        Picker("Preferred dictionary", selection: $draft.preferredDictionary) {
+                            ForEach(dictionaryNames, id: \.self) { name in
+                                Text(name).tag(name)
+                            }
+                        }
+                        .labelsHidden()
                     }
-                    .labelsHidden()
                 }
                 helper("Changing Translate into automatically selects a matching installed dictionary when available. English definitions are used as the fallback.")
                 Button("Open Dictionary.app") { DictionaryLookup.openDictionaryApp() }
@@ -227,7 +245,7 @@ struct SettingsView: View {
                         guard let language = StudyLanguage(rawValue: rawLanguage),
                               let name = DictionaryLookup.recommendedName(
                                 language: language,
-                                installedNames: DictionaryLookup.installedNames()
+                                installedNames: dictionaryNames
                               )
                         else { return }
                         draft.preferredDictionary = name
@@ -241,7 +259,15 @@ struct SettingsView: View {
                     Toggle("Play audio when tapping a sentence or word", isOn: $draft.playOnSelect)
                 }
                 settingRow("Sentence context") {
-                    countStepper(value: $draft.sentenceContextCount, range: 0...10, suffix: "before and after")
+                    countStepper(
+                        value: $draft.sentenceContextCount,
+                        range: 0...10,
+                        suffix: "before and after"
+                    )
+                    .disabled(draft.llmProvider == LLMProvider.managedQwen.rawValue)
+                }
+                if draft.llmProvider == LLMProvider.managedQwen.rawValue {
+                    helper("Managed Qwen uses the operator Desk sentence context. Translate into on this page still chooses the language.")
                 }
                 settingRow("Chapter block") {
                     countStepper(value: $draft.chapterTranslationBlockSize, range: 1...20, suffix: "sentences per request")
@@ -302,14 +328,10 @@ struct SettingsView: View {
                 !state.account.flagEnabled("managed_qwen")
                     ? "Managed Qwen is turned off for this product right now."
                     : state.account.mode.isSignedIn
-                    ? "Translations, summaries, and chapter chat go to the product API. Exact translations can reuse the shared cache."
+                    ? "Translations, summaries, and chapter chat go to the product API. The operator console chooses the model per task. This device does not pick a model."
                     : "Open Account above, sign in, then save Managed Qwen.",
                 muted: true
             )
-            settingRow("Model") {
-                Text("qwen3.7-plus (server policy)")
-                    .foregroundStyle(Palette.ink)
-            }
         }
     }
 
@@ -822,6 +844,7 @@ struct SettingsView: View {
         }
 
         state.settings = draft
+        state.account.recordUsage(name: "settings.saved")
         state.selectedDictionaryName = draft.preferredDictionary
         xAIKey = ""
         qwenKey = ""

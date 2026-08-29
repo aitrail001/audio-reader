@@ -718,6 +718,7 @@ actor GrokClient {
         openAIAuthentication: OpenAIAuthentication = .apiKey
     ) async throws -> String {
         if provider == .managedQwen {
+            // Chat path. Translation/summary call ManagedProductLLM.translate/summarize from AppState.
             return try await ManagedProductLLM.complete(system: system, user: user)
         }
         if provider == .appleFoundation {
@@ -906,12 +907,12 @@ actor GrokClient {
             return ["Apple Intelligence"]
         }
         if provider == .managedQwen {
-            return ["qwen3.7-plus"]
+            return ["Managed Qwen"]
         }
         let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
         let savedKey: String?
         switch provider {
-        case .managedQwen: return ["qwen3.7-plus"]
+        case .managedQwen: return ["Managed Qwen"]
         case .grok: savedKey = APIKeyStore.load()
         case .qwenCloud: savedKey = QwenAPIKeyStore.load()
         case .openAI: savedKey = OpenAIAPIKeyStore.load()

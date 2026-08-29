@@ -137,6 +137,25 @@ public struct ProductAuthClient: AuthClient, Sendable {
         )
     }
 
+    public func downloadAccountExport(accessToken: String, deviceID: String, assetID: String) async throws -> Data {
+        let response = try await raw(
+            method: "GET",
+            path: "/v1/assets/\(assetID)/content",
+            headers: authenticatedHeaders(accessToken: accessToken, deviceID: deviceID),
+            data: nil
+        )
+        return response.body
+    }
+
+    public func recordProductEvents(accessToken: String, deviceID: String, events: [ProductUsageEvent]) async throws {
+        try await sendVoid(
+            method: "POST",
+            path: "/v1/me/events",
+            headers: authenticatedHeaders(accessToken: accessToken, deviceID: deviceID),
+            body: ProductEventBatch(events: events)
+        )
+    }
+
     public func requestAccountDeletion(accessToken: String, deviceID: String, reason: String) async throws {
         try await sendVoid(
             method: "POST",
@@ -246,6 +265,10 @@ private struct EmailOTPVerifyBody: Encodable {
     var email: String
     var code: String
     var deviceId: String
+}
+
+private struct ProductEventBatch: Encodable {
+    var events: [ProductUsageEvent]
 }
 
 private struct OAuthAuthorizeBody: Encodable {

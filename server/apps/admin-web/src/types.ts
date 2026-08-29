@@ -5,6 +5,21 @@ export type HealthPayload = {
   dependencies?: Record<string, string>;
 };
 
+export type AdminUserDevice = {
+  id: string;
+  platform: string;
+  name?: string | null;
+  appVersion?: string;
+  lastSeenAt: string;
+  revoked: boolean;
+};
+
+export type AdminUserBook = {
+  id: string;
+  title: string;
+  chapterCount?: number;
+};
+
 export type AdminUser = {
   id: string;
   accountId: string;
@@ -17,6 +32,8 @@ export type AdminUser = {
   createdAt: string;
   lastSeenAt?: string | null;
   quotas?: Quota[];
+  devices?: AdminUserDevice[];
+  books?: AdminUserBook[];
 };
 
 export type Job = {
@@ -40,6 +57,7 @@ export type Policy = {
   model: string;
   promptVersion: string;
   systemPrompt?: string;
+  userPrompt?: string;
   schemaVersion?: string;
   policyVersion?: string;
   enabled: boolean;
@@ -64,6 +82,8 @@ export type CacheEntry = {
   rejectCount?: number;
   createdAt: string;
   lastHitAt?: string | null;
+  cacheKey?: string;
+  payload?: Record<string, unknown>;
 };
 
 export type AuditEvent = {
@@ -93,6 +113,7 @@ export type MetricsSnapshot = {
   storage?: { bytes?: number; [key: string]: unknown };
   flags?: { enabled?: number; disabled?: number; [key: string]: unknown };
   quotas?: { count?: number; [key: string]: unknown };
+  usage?: { events?: number; failed?: number; [key: string]: unknown };
 };
 
 export type RuntimeConfig = {
@@ -125,6 +146,9 @@ export type RuntimeConfig = {
     resendConfigured?: boolean;
     otpFromConfigured?: boolean;
     qwenEnvKeyConfigured?: boolean;
+  };
+  assistant: {
+    sentenceContextCount: number;
   };
   updatedAt?: string;
 };
@@ -223,11 +247,24 @@ export type Section =
   | "flags"
   | "quotas"
   | "privacy"
-  | "trace";
+  | "trace"
+  | "usage";
 
 export type PolicyDraft = {
   model: string;
   promptVersion: string;
   systemPrompt: string;
+  userPrompt: string;
   canaryPercent: string;
+};
+
+export type ProductEvent = {
+  id: string;
+  accountId: string;
+  deviceId?: string;
+  name: string;
+  outcome: string;
+  requestId?: string;
+  properties?: Record<string, unknown>;
+  createdAt: string;
 };

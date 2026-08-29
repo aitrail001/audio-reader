@@ -257,29 +257,43 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
           apiKey: serviceRoleKey,
           body: { type: "magiclink", email },
         });
-        if (
-          generated.status === 0 ||
-          generated.status >= 500 ||
-          generated.status === 401 ||
-          generated.status === 429
-        ) {
-          return { ok: false, code: "not_ready" };
-        }
+        logAuthEvent({
+          message: "hosted_otp_generate_link",
+          requestId: "auth",
+          outcome: generated.status === 0 ? "network" : `http_${String(generated.status)}`,
+        });
         const code = extractEmailOtp(generated.body);
         if (code !== undefined) {
           const sent = await sendOtpEmail({ to: email, code });
           if (sent) {
+            logAuthEvent({
+              message: "hosted_otp_request",
+              requestId: "auth",
+              outcome: "code_mailed",
+            });
             return { ok: true, value: { accepted: true } };
           }
-          return { ok: false, code: "not_ready" };
-        }
-        if (generated.status < 400) {
-          return { ok: false, code: "not_ready" };
+          logAuthEvent({
+            message: "hosted_otp_request",
+            requestId: "auth",
+            outcome: "mailer_failed",
+          });
+        } else if (generated.status > 0 && generated.status < 400) {
+          logAuthEvent({
+            message: "hosted_otp_request",
+            requestId: "auth",
+            outcome: "missing_code",
+          });
         }
       }
       const result = await gotrue("/otp", {
         method: "POST",
         body: { email, create_user: true },
+      });
+      logAuthEvent({
+        message: "hosted_otp_gotrue",
+        requestId: "auth",
+        outcome: result.status === 0 ? "network" : `http_${String(result.status)}`,
       });
       if (
         result.status === 0 ||

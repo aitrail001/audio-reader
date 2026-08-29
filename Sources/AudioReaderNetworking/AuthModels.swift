@@ -235,13 +235,47 @@ public struct AccountExportJob: Codable, Equatable, Sendable {
     public var id: String
     public var status: String
     public var format: String?
+    public var assetId: String?
     public var createdAt: String?
 
-    public init(id: String, status: String, format: String? = nil, createdAt: String? = nil) {
+    public init(
+        id: String,
+        status: String,
+        format: String? = nil,
+        assetId: String? = nil,
+        createdAt: String? = nil
+    ) {
         self.id = id
         self.status = status
         self.format = format
+        self.assetId = assetId
         self.createdAt = createdAt
+    }
+}
+
+public struct AccountExportFile: Equatable, Sendable, Identifiable {
+    public var id: String
+    public var fileName: String
+    public var data: Data
+
+    public init(id: String, fileName: String, data: Data) {
+        self.id = id
+        self.fileName = fileName
+        self.data = data
+    }
+}
+
+public struct ProductUsageEvent: Codable, Equatable, Sendable {
+    public var name: String
+    public var outcome: String
+    public var properties: [String: String]
+    public var occurredAt: String
+
+    public init(name: String, outcome: String = "ok", properties: [String: String] = [:], occurredAt: String) {
+        self.name = name
+        self.outcome = outcome
+        self.properties = properties
+        self.occurredAt = occurredAt
     }
 }
 

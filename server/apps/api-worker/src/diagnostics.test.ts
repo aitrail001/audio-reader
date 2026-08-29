@@ -1,6 +1,11 @@
-import { DEFAULT_ASSISTANT_PROMPTS } from "@audio-reader/database";
+import {
+  DEFAULT_ASSISTANT_PROMPTS,
+  DEFAULT_ASSISTANT_USER_PROMPTS,
+  createFakeDatabaseClient,
+} from "@audio-reader/database";
+import { createFakeQwenClient } from "@audio-reader/qwen";
 import { describe, expect, it } from "vitest";
-import { diagnosticNotes, formatQwenProbe, resolveTaskModel } from "./diagnostics";
+import { buildOperatorDiagnostics, diagnosticNotes, formatQwenProbe, resolveTaskModel } from "./diagnostics";
 import type { RuntimeConfigView } from "./runtime-config";
 
 function runtime(overrides: Partial<RuntimeConfigView["qwen"]> = {}): RuntimeConfigView {
@@ -23,6 +28,7 @@ function runtime(overrides: Partial<RuntimeConfigView["qwen"]> = {}): RuntimeCon
       source: "none",
     },
     turnstile: { configured: false, source: "none" },
+    assistant: { sentenceContextCount: 1 },
     bootstrap: {
       supabaseUrlConfigured: true,
       supabaseAnonKeyConfigured: true,
@@ -51,6 +57,7 @@ describe("operator diagnostics helpers", () => {
       source: "desk",
       promptVersion: "qwen-managed-v1",
       systemPrompt: DEFAULT_ASSISTANT_PROMPTS.translation,
+      userPrompt: DEFAULT_ASSISTANT_USER_PROMPTS.translation,
     });
   });
 
@@ -67,6 +74,7 @@ describe("operator diagnostics helpers", () => {
       source: "policy",
       promptVersion: "qwen-managed-v1",
       systemPrompt: DEFAULT_ASSISTANT_PROMPTS.translation,
+      userPrompt: DEFAULT_ASSISTANT_USER_PROMPTS.translation,
     });
   });
 
@@ -83,6 +91,7 @@ describe("operator diagnostics helpers", () => {
       source: "desk",
       promptVersion: "qwen-managed-v1",
       systemPrompt: DEFAULT_ASSISTANT_PROMPTS.chat,
+      userPrompt: DEFAULT_ASSISTANT_USER_PROMPTS.chat,
     });
   });
 
@@ -106,6 +115,7 @@ describe("operator diagnostics helpers", () => {
           model: "qwen3.7-plus",
           promptVersion: "v1",
           systemPrompt: DEFAULT_ASSISTANT_PROMPTS.translation,
+          userPrompt: DEFAULT_ASSISTANT_USER_PROMPTS.translation,
           schemaVersion: "1",
           policyVersion: "1",
           enabled: true,
@@ -119,5 +129,27 @@ describe("operator diagnostics helpers", () => {
     expect(notes.some((note) => note.includes("No Qwen API key"))).toBe(true);
     expect(notes.some((note) => note.includes("Desk model qwen3.7-flash is live"))).toBe(true);
     expect(notes.some((note) => note.includes("No quotas loaded"))).toBe(true);
+  });
+});
+
+describe("operator diagnostics cache notes", () => {
+  it("tells operators which routes fill the shared cache", async () => {
+    const database = createFakeDatabaseClient();
+    const diagnostics = await buildOperatorDiagnostics({
+      runtime: runtime(),
+      flags: [{ key: "managed_qwen", enabled: true }],
+      quotas: [],
+      policies: [],
+      qwen: createFakeQwenClient(),
+      probeComplete: false,
+      requestId: "diag-cache",
+      ops: database.ops,
+    });
+    expect(
+      diagnostics.notes.some((note) => note.includes("POST /v1/ai/translation-batches")),
+    ).toBe(true);
+    expect(diagnostics.notes.some((note) => note.includes("POST /v1/ai/chat does not write"))).toBe(
+      true,
+    );
   });
 });

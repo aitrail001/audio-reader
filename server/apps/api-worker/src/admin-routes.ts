@@ -1,6 +1,11 @@
 import type { Principal } from "@audio-reader/auth";
 import type { components } from "@audio-reader/contract";
-import { RestPersistenceError, type IdentityStore, type OpsStore } from "@audio-reader/database";
+import {
+  RestPersistenceError,
+  type CatalogStore,
+  type IdentityStore,
+  type OpsStore,
+} from "@audio-reader/database";
 import { readJsonObject } from "./body";
 import { asHead, jsonResponse, problemResponse } from "./http";
 import { withIdempotency, type IdempotencyStore } from "./idempotency";
@@ -16,6 +21,7 @@ import {
 } from "./route-helpers";
 import { buildOperatorDiagnostics } from "./diagnostics";
 import { listOperatorEvents, operatorEventFromAudit, recordOperatorEvent } from "./operator-events";
+import { toProductEvent } from "./product-events";
 import {
   OperatorWrappingNotConfiguredError,
   type RuntimeConfigPut,
@@ -53,6 +59,7 @@ export type AdminRouteContext = {
   idempotencyStore: IdempotencyStore;
   ops?: OpsStore;
   identity?: IdentityStore;
+  catalog?: CatalogStore;
   runtime?: RuntimeConfigService;
 };
 
@@ -70,6 +77,7 @@ export function isAdminPath(path: string): boolean {
     path === "/v1/admin/feature-flags" ||
     path === "/v1/admin/quotas" ||
     path === "/v1/admin/privacy-requests" ||
+    path === "/v1/admin/product-events" ||
     USER_ITEM.test(path) ||
     USER_SUSPEND.test(path) ||
     USER_UNSUSPEND.test(path) ||
@@ -104,6 +112,7 @@ export function adminMethodError(
       path === "/v1/admin/privacy-requests" ||
       path === "/v1/admin/diagnostics" ||
       path === "/v1/admin/events" ||
+      path === "/v1/admin/product-events" ||
       USER_ITEM.test(path) ||
       CACHE_ITEM.test(path)) &&
     upper !== "GET" &&
@@ -187,7 +196,29 @@ export async function handleAdminRoute(context: AdminRouteContext): Promise<Resp
       return notFound(context.requestId);
     }
     const quotas = await ops.quotasFor(user.accountId);
-    return asHead(context.request, jsonResponse(toAdminUser(user, quotas.map(toQuota))));
+    const devices = (await context.identity?.listDevices(user.accountId)) ?? [];
+    const books = (await context.catalog?.listBooks(user.accountId)) ?? [];
+    return asHead(
+      context.request,
+      jsonResponse(
+        toAdminUser(user, {
+          quotas: quotas.map(toQuota),
+          devices: devices.map((device) => ({
+            id: device.id,
+            platform: device.platform,
+            name: device.name,
+            appVersion: device.appVersion,
+            lastSeenAt: device.lastSeenAt,
+            revoked: device.revoked,
+          })),
+          books: books.map((book) => ({
+            id: book.id,
+            title: book.title,
+            chapterCount: book.chapterCount,
+          })),
+        }),
+      ),
+    );
   }
   const suspend = USER_SUSPEND.exec(path);
   if (suspend?.[1] !== undefined) {
@@ -229,9 +260,11 @@ export async function handleAdminRoute(context: AdminRouteContext): Promise<Resp
     }
     const task = url.searchParams.get("task");
     const state = url.searchParams.get("state");
+    const editionFingerprint = url.searchParams.get("editionFingerprint");
     const items = await ops.listCache({
       ...(task === null || task === "" ? {} : { task }),
       ...(state === null || state === "" ? {} : { state }),
+      ...(editionFingerprint === null || editionFingerprint === "" ? {} : { editionFingerprint }),
     });
     return asHead(
       context.request,
@@ -293,6 +326,15 @@ export async function handleAdminRoute(context: AdminRouteContext): Promise<Resp
     for (const job of jobs) {
       jobsByStatus[job.status] = (jobsByStatus[job.status] ?? 0) + 1;
     }
+    const usageEvents = await ops.listProductEvents({
+      from: from.toISOString(),
+      to: to.toISOString(),
+      limit: 500,
+    });
+    const byName: Record<string, number> = {};
+    for (const event of usageEvents) {
+      byName[event.name] = (byName[event.name] ?? 0) + 1;
+    }
     const snapshot: MetricsSnapshot = {
       from: from.toISOString(),
       to: to.toISOString(),
@@ -310,6 +352,11 @@ export async function handleAdminRoute(context: AdminRouteContext): Promise<Resp
         disabled: flags.filter((flag) => !flag.enabled).length,
       },
       quotas: { count: quotas.length },
+      usage: {
+        events: usageEvents.length,
+        failed: usageEvents.filter((event) => event.outcome === "failed").length,
+        ...byName,
+      },
     };
     return asHead(context.request, jsonResponse(snapshot));
   }
@@ -331,6 +378,27 @@ export async function handleAdminRoute(context: AdminRouteContext): Promise<Resp
     return asHead(
       context.request,
       jsonResponse(pageCursor(events.map(toAudit), url.searchParams.get("cursor"), limit)),
+    );
+  }
+  if (path === "/v1/admin/product-events") {
+    const limit = parseLimit(url, context.requestId, 500);
+    if (limit instanceof Response) {
+      return limit;
+    }
+    const name = url.searchParams.get("name") ?? "";
+    const accountId = url.searchParams.get("accountId") ?? "";
+    const from = url.searchParams.get("from") ?? "";
+    const to = url.searchParams.get("to") ?? "";
+    const events = await ops.listProductEvents({
+      ...(accountId.trim() === "" ? {} : { accountId: accountId.trim() }),
+      ...(name.trim() === "" ? {} : { name: name.trim() }),
+      ...(from.trim() === "" ? {} : { from: from.trim() }),
+      ...(to.trim() === "" ? {} : { to: to.trim() }),
+      limit,
+    });
+    return asHead(
+      context.request,
+      jsonResponse(pageCursor(events.map(toProductEvent), url.searchParams.get("cursor"), limit)),
     );
   }
   if (path === "/v1/admin/events") {
@@ -381,6 +449,7 @@ export async function handleAdminRoute(context: AdminRouteContext): Promise<Resp
       qwen: client,
       probeComplete: probe === "complete",
       requestId: context.requestId,
+      ops,
     });
     return asHead(context.request, jsonResponse(snapshot));
   }
@@ -683,6 +752,18 @@ function parseRuntimeConfigPut(value: Record<string, unknown>): RuntimeConfigPut
         : {}),
     };
   }
+  if (value.assistant !== undefined) {
+    if (!isRecord(value.assistant)) {
+      throw new Error("assistant must be an object.");
+    }
+    const count = value.assistant.sentenceContextCount;
+    if (count !== undefined && (typeof count !== "number" || !Number.isFinite(count))) {
+      throw new Error("assistant.sentenceContextCount must be a number.");
+    }
+    patch.assistant = {
+      ...(typeof count === "number" ? { sentenceContextCount: count } : {}),
+    };
+  }
   return patch;
 }
 
@@ -762,6 +843,9 @@ async function patchPolicy(
           ...(typeof body.value.systemPrompt === "string"
             ? { systemPrompt: body.value.systemPrompt }
             : {}),
+          ...(typeof body.value.userPrompt === "string"
+            ? { userPrompt: body.value.userPrompt }
+            : {}),
           ...(typeof body.value.canaryPercent === "number"
             ? { canaryPercent: body.value.canaryPercent }
             : {}),
@@ -791,6 +875,7 @@ async function patchPolicy(
                   promptVersion: before.promptVersion,
                   enabled: before.enabled,
                   systemPromptChars: before.systemPrompt.length,
+                  userPromptChars: before.userPrompt.length,
                   canaryPercent: before.canaryPercent,
                 },
           after: {
@@ -798,6 +883,7 @@ async function patchPolicy(
             promptVersion: patched.promptVersion,
             enabled: patched.enabled,
             systemPromptChars: patched.systemPrompt.length,
+            userPromptChars: patched.userPrompt.length,
             canaryPercent: patched.canaryPercent,
           },
         },
@@ -1158,7 +1244,11 @@ function toPrivacy(
 
 function toAdminUser(
   user: Awaited<ReturnType<OpsStore["adminUsers"]>>[number],
-  quotas?: Quota[],
+  extras?: {
+    quotas?: Quota[];
+    devices?: NonNullable<AdminUser["devices"]>;
+    books?: NonNullable<AdminUser["books"]>;
+  },
 ): AdminUser {
   return {
     id: user.id,
@@ -1171,7 +1261,9 @@ function toAdminUser(
     storageBytes: user.storageBytes,
     createdAt: user.createdAt,
     lastSeenAt: user.lastSeenAt,
-    ...(quotas === undefined || quotas.length === 0 ? {} : { quotas }),
+    ...(extras?.quotas === undefined ? {} : { quotas: extras.quotas }),
+    ...(extras?.devices === undefined ? {} : { devices: extras.devices }),
+    ...(extras?.books === undefined ? {} : { books: extras.books }),
   };
 }
 
@@ -1183,6 +1275,7 @@ function toPolicy(policy: NonNullable<Awaited<ReturnType<OpsStore["getPolicy"]>>
     model: policy.model,
     promptVersion: policy.promptVersion,
     systemPrompt: policy.systemPrompt,
+    userPrompt: policy.userPrompt,
     schemaVersion: policy.schemaVersion,
     policyVersion: policy.policyVersion,
     enabled: policy.enabled,
@@ -1209,6 +1302,8 @@ function toCache(entry: NonNullable<Awaited<ReturnType<OpsStore["getCache"]>>>):
     rejectCount: entry.rejectCount,
     createdAt: entry.createdAt,
     lastHitAt: entry.lastHitAt,
+    cacheKey: entry.cacheKey,
+    payload: entry.payload,
   };
 }
 

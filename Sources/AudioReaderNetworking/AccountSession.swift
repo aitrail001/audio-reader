@@ -15,10 +15,13 @@ public final class AccountSession {
     public private(set) var recoveryMessage: String?
     public private(set) var errorMessage: String?
     public private(set) var isBusy = false
+    /// Operator-visible status for restore, sync, and other cloud work. Settings must stay interactive while this is set.
+    public private(set) var activityMessage: String?
     public private(set) var pendingEmail: String?
     public private(set) var featureFlags: [FeatureFlag] = []
     public private(set) var quotas: [Quota] = []
     public private(set) var lastExportStatus: String?
+    public private(set) var pendingExport: AccountExportFile?
     var pendingOAuth: PendingOAuth?
     var pendingAuthorizationURL: URL?
 
@@ -34,6 +37,7 @@ public final class AccountSession {
     /// Reloads in-memory learning state after a pull so a later local save cannot clobber it.
     public var onLearningDataApplied: (@MainActor () -> Void)?
     private static let syncLog = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "account-sync")
+    private static let usageLog = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "product-usage")
     private static let syncPushBatchSize = 500
     private static let syncPullPageLimit = 100
     private static let syncPullPageCap = 64
@@ -71,6 +75,8 @@ public final class AccountSession {
         )
     }
 
+    /// Reloads a persisted session without blocking the library UI. Callers should run this
+    /// beside `rescan()` and read `activityMessage` instead of greying out Settings.
     public func restore() async {
         guard let persisted = try? store.load() else {
             mode = .local
@@ -81,6 +87,11 @@ public final class AccountSession {
         }
         mode = persisted.mode
         profile = persisted.profile
+        Self.syncLog.info("account_restore_start message=account_restore_start")
+        defer {
+            activityMessage = nil
+            Self.syncLog.info("account_restore_finished message=account_restore_finished signedIn=\(self.mode.isSignedIn, privacy: .public)")
+        }
         await refreshSession()
         if mode.isSyncEnabled {
             await synchronize()
@@ -93,7 +104,7 @@ public final class AccountSession {
             errorMessage = "Enter a valid email address."
             return
         }
-        await run {
+        await run(activity: "Sending sign-in code…") {
             try await client.requestEmailOTP(email: trimmed)
             pendingEmail = trimmed
             errorMessage = nil
@@ -111,7 +122,7 @@ public final class AccountSession {
             errorMessage = "Enter the email sign-in code from your message."
             return
         }
-        await run {
+        await run(activity: "Signing in…") {
             let tokens = try await client.verifyEmailOTP(
                 email: email,
                 code: digits,
@@ -119,11 +130,12 @@ public final class AccountSession {
             )
             try await establishSession(tokens: tokens)
             pendingEmail = nil
+            recordUsage(name: "account.signed_in", properties: ["method": "email_otp"])
         }
     }
 
     public func beginOAuth(_ provider: AuthOAuthProvider) async {
-        await run {
+        await run(activity: "Opening sign-in…") {
             let pkce = PKCEPair.generate()
             let state = PKCEPair.randomState()
             let pending = PendingOAuth(
@@ -150,7 +162,7 @@ public final class AccountSession {
     public func signInWithOAuth(_ provider: AuthOAuthProvider) async {
         await beginOAuth(provider)
         guard let pending = pendingOAuth, let authorizationURL = pendingAuthorizationURL, errorMessage == nil else { return }
-        await run {
+        await run(activity: "Signing in…") {
             let callback = try await oauth.start(
                 authorizationURL: authorizationURL,
                 callbackScheme: ProductAPI.callbackScheme
@@ -164,14 +176,14 @@ public final class AccountSession {
             errorMessage = OAuthCallbackError.missingPendingSession.errorDescription
             return
         }
-        await run {
+        await run(activity: "Signing in…") {
             try await finishOAuth(callbackURL: callbackURL, pending: pending)
         }
     }
 
     public func refreshSession() async {
         guard (try? store.load()) != nil else { return }
-        await run {
+        await run(activity: activityMessage ?? "Refreshing your account…") {
             try await refreshAccessTokenKeepingSession()
             guard mode.isSignedIn else { return }
             try await loadDevices()
@@ -202,7 +214,8 @@ public final class AccountSession {
     }
 
     public func signOut() async {
-        await run {
+        recordUsage(name: "account.signed_out")
+        await run(activity: "Signing out…") {
             let refreshToken = try? store.load()?.refreshToken
             if let refreshToken {
                 try? await client.logout(refreshToken: refreshToken)
@@ -216,18 +229,88 @@ public final class AccountSession {
     }
 
     public func exportAccount() async {
-        await run {
+        if pendingExport != nil {
+            lastExportStatus = "Choose where to save your account data."
+            return
+        }
+        var prepared: AccountExportFile?
+        await run(activity: "Preparing export…") {
             let deviceID = try store.deviceID()
+            lastExportStatus = "Preparing export…"
             let job = try await withAccessToken { access in
                 try await client.createAccountExport(accessToken: access, deviceID: deviceID, format: "zip_json")
             }
-            lastExportStatus = "Export \(job.status)."
+            guard let assetID = job.assetId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !assetID.isEmpty
+            else {
+                lastExportStatus = "Export \(job.status)."
+                Self.syncLog.error(
+                    "account_export_missing_asset message=account_export_missing_asset status=\(job.status, privacy: .public)"
+                )
+                return
+            }
+            lastExportStatus = "Downloading export…"
+            let data = try await withAccessToken { access in
+                try await client.downloadAccountExport(accessToken: access, deviceID: deviceID, assetID: assetID)
+            }
+            let fileName = "audioreader-account-\(ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")).json"
+            prepared = AccountExportFile(id: job.id, fileName: fileName, data: data)
             errorMessage = nil
+            recordUsage(name: "account.export.created", properties: ["bytes": "\(data.count)"])
+            Self.usageLog.info(
+                "account_export_ready message=account_export_ready bytes=\(data.count, privacy: .public)"
+            )
+        }
+        if let prepared {
+            pendingExport = prepared
+            lastExportStatus = "Choose where to save your account data."
+        }
+    }
+
+    public func markExportSaved() {
+        if let pendingExport {
+            lastExportStatus = "Saved \(pendingExport.fileName)."
+        }
+        pendingExport = nil
+        recordUsage(name: "account.export.saved")
+    }
+
+    public func markExportSaveCancelled() {
+        lastExportStatus = "Export is ready. Tap Save export to pick a location."
+    }
+
+    /// Fire-and-forget usage row. Must not toggle isBusy or block reading.
+    public func recordUsage(name: String, outcome: String = "ok", properties: [String: String] = [:]) {
+        guard mode.isSignedIn, let accessToken else { return }
+        let deviceID: String
+        do {
+            deviceID = try store.deviceID()
+        } catch {
+            return
+        }
+        let event = ProductUsageEvent(
+            name: name,
+            outcome: outcome,
+            properties: properties,
+            occurredAt: ISO8601DateFormatter().string(from: Date())
+        )
+        Task { [client, accessToken, deviceID] in
+            do {
+                try await client.recordProductEvents(
+                    accessToken: accessToken,
+                    deviceID: deviceID,
+                    events: [event]
+                )
+            } catch {
+                Self.usageLog.error(
+                    "product_usage_failed message=product_usage_failed name=\(name, privacy: .public)"
+                )
+            }
         }
     }
 
     public func deleteAccount(reason: String) async {
-        await run {
+        await run(activity: "Deleting account…") {
             let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
             guard trimmed.count >= 5 else {
                 errorMessage = "Enter a short reason for deleting the account."
@@ -249,6 +332,7 @@ public final class AccountSession {
         }
         let previous = mode
         mode = enabled ? .signedInSyncOn : .signedInSyncOff
+        recordUsage(name: enabled ? "account.sync_enabled" : "account.sync_disabled")
         do {
             guard var persisted = try store.load() else {
                 throw AuthSessionStoreError.saveFailed
@@ -265,20 +349,23 @@ public final class AccountSession {
 
     public func synchronize() async {
         guard mode.isSyncEnabled, let runtime = syncRuntime else { return }
-        await run {
+        await run(activity: activityMessage ?? "Syncing learning data…") {
             try await drainSync(runtime: runtime)
         }
     }
 
+    /// Reloads the device list without toggling `isBusy`. Settings stay scrollable.
     public func refreshDevices() async {
         guard mode.isSignedIn else { return }
-        await run {
+        do {
             try await loadDevices()
+        } catch {
+            present(error)
         }
     }
 
     public func revokeDevice(_ device: AccountDevice) async {
-        await run {
+        await run(activity: "Revoking device…") {
             let currentID = try store.deviceID()
             try await withAccessToken { access in
                 try await client.revokeDevice(
@@ -317,6 +404,7 @@ public final class AccountSession {
         pendingOAuth = nil
         pendingAuthorizationURL = nil
         try await establishSession(tokens: tokens)
+        recordUsage(name: "account.signed_in", properties: ["method": pending.provider.rawValue])
     }
 
     private func establishSession(tokens: TokenPair) async throws {
@@ -584,6 +672,7 @@ public final class AccountSession {
         featureFlags = []
         quotas = []
         lastExportStatus = nil
+        pendingExport = nil
         pendingOAuth = nil
         pendingAuthorizationURL = nil
         pendingEmail = nil
@@ -617,9 +706,17 @@ public final class AccountSession {
         }
     }
 
-    private func run(_ operation: () async throws -> Void) async {
+    private func run(activity: String? = nil, _ operation: () async throws -> Void) async {
         isBusy = true
-        defer { isBusy = false }
+        if let activity {
+            activityMessage = activity
+        }
+        defer {
+            isBusy = false
+            if let activity, activityMessage == activity {
+                activityMessage = nil
+            }
+        }
         do {
             try await operation()
         } catch {

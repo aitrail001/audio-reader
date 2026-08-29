@@ -1,4 +1,4 @@
-import { defaultAssistantPrompt } from "./assistant-prompts";
+import { defaultAssistantPrompt, defaultAssistantUserPrompt } from "./assistant-prompts";
 import type { CatalogStore } from "./catalog";
 import type { IdentityProfile, IdentityStore } from "./identity";
 import {
@@ -95,6 +95,7 @@ export type OpsPolicy = {
   model: string;
   promptVersion: string;
   systemPrompt: string;
+  userPrompt: string;
   schemaVersion: string;
   policyVersion: string;
   enabled: boolean;
@@ -115,6 +116,17 @@ export type OpsAuditEvent = {
   reason: string;
   traceId: string | null;
   metadata: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type OpsProductEvent = {
+  id: string;
+  accountId: string;
+  deviceId: string | null;
+  name: string;
+  outcome: "ok" | "failed" | "cancelled" | "started";
+  requestId: string | null;
+  properties: Record<string, unknown>;
   createdAt: string;
 };
 
@@ -202,7 +214,11 @@ export type OpsStore = {
     },
   ): Promise<OpsCacheEntry>;
   touchCache(id: string): Promise<OpsCacheEntry | undefined>;
-  listCache(filter?: { task?: string; state?: string }): Promise<OpsCacheEntry[]>;
+  listCache(filter?: {
+    task?: string;
+    state?: string;
+    editionFingerprint?: string;
+  }): Promise<OpsCacheEntry[]>;
   getCache(id: string): Promise<OpsCacheEntry | undefined>;
   actOnCache(
     id: string,
@@ -234,6 +250,16 @@ export type OpsStore = {
     requestId?: string;
     resourceType?: string;
   }): Promise<OpsAuditEvent[]>;
+  recordProductEvent(
+    event: Omit<OpsProductEvent, "id" | "createdAt"> & { createdAt?: string },
+  ): Promise<OpsProductEvent>;
+  listProductEvents(filter?: {
+    accountId?: string;
+    name?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+  }): Promise<OpsProductEvent[]>;
   createExport(userId: string, format: string): Promise<OpsExport>;
   getExport(userId: string, id: string): Promise<OpsExport | undefined>;
   completeExport(userId: string, id: string, assetId: string): Promise<OpsExport | undefined>;
@@ -307,6 +333,7 @@ export function createMemoryOpsStore(
   const jobs = new Map<string, OpsJob>();
   const policies = new Map<string, OpsPolicy>();
   const audit: OpsAuditEvent[] = [];
+  const productEvents: OpsProductEvent[] = [];
   const exports = new Map<string, OpsExport>();
   const usage = new Map<string, UsageWindow>();
   const flags = new Map<string, OpsFeatureFlag>();
@@ -425,6 +452,12 @@ export function createMemoryOpsStore(
         if (filter?.state !== undefined && item.state !== filter.state) {
           return false;
         }
+        if (
+          filter?.editionFingerprint !== undefined &&
+          item.editionFingerprint !== filter.editionFingerprint
+        ) {
+          return false;
+        }
         return true;
       });
       return Promise.resolve(items.map((item) => ({ ...item, payload: { ...item.payload } })));
@@ -539,6 +572,41 @@ export function createMemoryOpsStore(
           .filter((event) => (requestId === "" ? true : event.traceId === requestId))
           .filter((event) => (resourceType === "" ? true : event.resourceType === resourceType))
           .map((event) => ({ ...event, metadata: { ...event.metadata } })),
+      );
+    },
+
+    recordProductEvent(event) {
+      const created: OpsProductEvent = {
+        id: crypto.randomUUID(),
+        accountId: event.accountId,
+        deviceId: event.deviceId,
+        name: event.name,
+        outcome: event.outcome,
+        requestId: event.requestId,
+        properties: { ...event.properties },
+        createdAt: event.createdAt ?? now(),
+      };
+      productEvents.unshift(created);
+      if (productEvents.length > 5000) {
+        productEvents.length = 5000;
+      }
+      return Promise.resolve({ ...created, properties: { ...created.properties } });
+    },
+
+    listProductEvents(filter) {
+      const accountId = filter?.accountId?.trim() ?? "";
+      const name = filter?.name?.trim() ?? "";
+      const from = filter?.from?.trim() ?? "";
+      const to = filter?.to?.trim() ?? "";
+      const limit = Math.min(Math.max(filter?.limit ?? 100, 1), 500);
+      return Promise.resolve(
+        productEvents
+          .filter((event) => (accountId === "" ? true : event.accountId === accountId))
+          .filter((event) => (name === "" ? true : productEventNameMatches(event.name, name)))
+          .filter((event) => (from === "" ? true : event.createdAt >= from))
+          .filter((event) => (to === "" ? true : event.createdAt <= to))
+          .slice(0, limit)
+          .map((event) => ({ ...event, properties: { ...event.properties } })),
       );
     },
 
@@ -774,6 +842,8 @@ export function createUnavailableOpsStore(): OpsStore {
     patchPolicy: () => Promise.resolve(undefined),
     appendAudit: fail,
     listAudit: () => Promise.resolve([]),
+    recordProductEvent: fail,
+    listProductEvents: () => Promise.resolve([]),
     createExport: fail,
     getExport: () => Promise.resolve(undefined),
     completeExport: () => Promise.resolve(undefined),
@@ -810,78 +880,44 @@ export function createSupabaseOpsStore(
   return {
     ...memory,
     async lookupCache(cacheKey) {
-      const response = await rest.request({
-        method: "GET",
-        path: "/assistant_cache_entries",
-        query: {
-          select: "*",
-          cache_key: `eq.${cacheKey}`,
-          state: "eq.active",
-          limit: "1",
-        },
-      });
-      const mapped = mapCacheRow(restRow(response.body));
-      if (mapped !== undefined) {
-        return mapped;
-      }
-      return memory.lookupCache(cacheKey);
+      return fetchCacheByKey(rest, cacheKey);
     },
     async putCache(input) {
-      const existingResponse = await rest.request({
-        method: "GET",
-        path: "/assistant_cache_entries",
-        query: {
-          select: "*",
-          cache_key: `eq.${input.cacheKey}`,
-          state: "eq.active",
-          limit: "1",
-        },
-      });
-      const existing = mapCacheRow(restRow(existingResponse.body));
-      if (existing !== undefined) {
-        return existing;
-      }
-      const response = await rest.request({
-        method: "POST",
-        path: "/assistant_cache_entries",
-        prefer: "return=representation",
-        body: {
-          id: input.id,
-          cache_key: input.cacheKey,
-          task_type: input.task,
-          source_language: input.sourceLanguage,
-          target_language: input.targetLanguage,
-          edition_fingerprint: input.editionFingerprint,
-          state: input.state,
-          policy_version: input.policyVersion,
-          result: input.payload,
-        },
-      });
-      const mapped = mapCacheRow(restRow(response.body));
-      if (mapped !== undefined) {
-        return mapped;
-      }
-      return memory.putCache(input);
+      return persistCacheEntry(rest, input);
     },
     async getCache(id) {
+      return fetchCacheById(rest, id);
+    },
+    async listCache(filter) {
+      const query: Record<string, string> = {
+        select: "*",
+        order: "created_at.desc",
+        limit: "500",
+      };
+      if ((filter?.task?.trim() ?? "") !== "") {
+        query.task_type = `eq.${filter?.task?.trim() ?? ""}`;
+      }
+      if ((filter?.state?.trim() ?? "") !== "") {
+        query.state = `eq.${filter?.state?.trim() ?? ""}`;
+      }
+      if ((filter?.editionFingerprint?.trim() ?? "") !== "") {
+        query.edition_fingerprint = `eq.${filter?.editionFingerprint?.trim() ?? ""}`;
+      }
       const response = await rest.request({
         method: "GET",
         path: "/assistant_cache_entries",
-        query: { select: "*", id: `eq.${id}`, limit: "1" },
+        query,
       });
-      const mapped = mapCacheRow(restRow(response.body));
-      if (mapped !== undefined) {
-        return mapped;
+      if (!restOk(response) || isErrorBody(response.body)) {
+        logPersistence("cache_list_failed", { status: response.status });
+        return [];
       }
-      return memory.getCache(id);
+      return restRows(response.body)
+        .map(mapCacheRow)
+        .filter((row): row is OpsCacheEntry => row !== undefined);
     },
     async touchCache(id) {
-      const currentResponse = await rest.request({
-        method: "GET",
-        path: "/assistant_cache_entries",
-        query: { select: "*", id: `eq.${id}`, limit: "1" },
-      });
-      const current = mapCacheRow(restRow(currentResponse.body)) ?? (await memory.getCache(id));
+      const current = await fetchCacheById(rest, id);
       const hits = (current?.hitCount ?? 0) + 1;
       const response = await rest.request({
         method: "PATCH",
@@ -893,11 +929,48 @@ export function createSupabaseOpsStore(
           last_hit_at: new Date().toISOString(),
         },
       });
-      const mapped = mapCacheRow(restRow(response.body));
+      const mapped = mappedWriteRow(response, mapCacheRow);
       if (mapped !== undefined) {
         return mapped;
       }
-      return memory.touchCache(id);
+      logPersistence("cache_touch_failed", { id, status: response.status });
+      return current === undefined
+        ? undefined
+        : { ...current, hitCount: hits, lastHitAt: new Date().toISOString() };
+    },
+    async actOnCache(id, action) {
+      const state =
+        action === "quarantine"
+          ? "quarantined"
+          : action === "activate"
+            ? "active"
+            : action === "expire"
+              ? "expired"
+              : "purged";
+      const response = await rest.request({
+        method: "PATCH",
+        path: "/assistant_cache_entries",
+        query: { id: `eq.${id}` },
+        prefer: "return=representation",
+        body: {
+          state,
+          updated_at: new Date().toISOString(),
+        },
+      });
+      const mapped = mappedWriteRow(response, mapCacheRow);
+      if (mapped !== undefined) {
+        logPersistence("cache_act_ok", { id, action, state });
+        return mapped;
+      }
+      const replay = await fetchCacheById(rest, id);
+      if (replay !== undefined && replay.state === state) {
+        return replay;
+      }
+      logPersistence("cache_act_failed", { id, action, status: response.status });
+      throw new RestPersistenceError(
+        response.status === 0 ? 502 : 502,
+        restErrorDetail(response.body) ?? "Postgres did not update the cache entry.",
+      );
     },
     async recordAssistantUse(userId, input) {
       await rest.request({
@@ -1147,6 +1220,39 @@ export function createSupabaseOpsStore(
     async appendAudit(event) {
       return persistAuditEvent(rest, event);
     },
+    async recordProductEvent(event) {
+      return persistProductEvent(rest, event);
+    },
+    async listProductEvents(filter) {
+      const query: Record<string, string> = {
+        select: "*",
+        order: "created_at.desc",
+        limit: String(Math.min(Math.max(filter?.limit ?? 100, 1), 500)),
+      };
+      if ((filter?.accountId?.trim() ?? "") !== "") {
+        query.user_id = `eq.${filter?.accountId?.trim() ?? ""}`;
+      }
+      if ((filter?.name?.trim() ?? "") !== "") {
+        query.name = productEventNameQuery(filter?.name?.trim() ?? "");
+      }
+      if ((filter?.from?.trim() ?? "") !== "") {
+        query.created_at = `gte.${filter?.from?.trim() ?? ""}`;
+      }
+      if ((filter?.to?.trim() ?? "") !== "") {
+        query.created_at = `${query.created_at === undefined ? "" : `${query.created_at},`}lte.${filter?.to?.trim() ?? ""}`;
+      }
+      const response = await rest.request({
+        method: "GET",
+        path: "/product_events",
+        query,
+      });
+      if (response.status >= 400 || response.status === 0) {
+        return memory.listProductEvents(filter);
+      }
+      return restRows(response.body)
+        .map(mapProductEventRow)
+        .filter((row): row is OpsProductEvent => row !== undefined);
+    },
     async putChatMessage(message) {
       const response = await rest.request({
         method: "POST",
@@ -1226,8 +1332,27 @@ function mapChatRow(row: Record<string, unknown> | undefined):
   };
 }
 
+/** PostgREST may return bigint counters as numbers or decimal strings. */
+function asNonNegativeInt(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+    return Math.trunc(value);
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return Math.trunc(parsed);
+    }
+  }
+  return 0;
+}
+
 function mapCacheRow(row: Record<string, unknown> | undefined): OpsCacheEntry | undefined {
-  if (row === undefined) {
+  if (
+    row === undefined ||
+    isErrorBody(row) ||
+    typeof row.cache_key !== "string" ||
+    row.cache_key === ""
+  ) {
     return undefined;
   }
   const payload =
@@ -1247,9 +1372,9 @@ function mapCacheRow(row: Record<string, unknown> | undefined): OpsCacheEntry | 
     targetLanguage: typeof row.target_language === "string" ? row.target_language : "",
     editionFingerprint: typeof row.edition_fingerprint === "string" ? row.edition_fingerprint : "",
     policyVersion: typeof row.policy_version === "string" ? row.policy_version : "qwen-managed-v1",
-    hitCount: typeof row.hit_count === "number" ? row.hit_count : 0,
-    acceptCount: typeof row.accept_count === "number" ? row.accept_count : 0,
-    rejectCount: typeof row.reject_count === "number" ? row.reject_count : 0,
+    hitCount: asNonNegativeInt(row.hit_count),
+    acceptCount: asNonNegativeInt(row.accept_count),
+    rejectCount: asNonNegativeInt(row.reject_count),
     payload,
     createdAt: typeof row.created_at === "string" ? row.created_at : new Date().toISOString(),
     lastHitAt: typeof row.last_hit_at === "string" ? row.last_hit_at : null,
@@ -1385,6 +1510,7 @@ function seedDefaultPolicies(policies: Map<string, OpsPolicy>, timestamp: string
       model: "qwen3.7-flash",
       promptVersion: "qwen-managed-v1",
       systemPrompt: defaultAssistantPrompt(task),
+      userPrompt: defaultAssistantUserPrompt(task),
       schemaVersion: "1",
       policyVersion: "qwen-managed-v1",
       enabled: true,
@@ -1430,6 +1556,26 @@ function mapAuditRow(row: Record<string, unknown> | undefined): OpsAuditEvent | 
 
 function logPersistence(message: string, fields: Record<string, unknown>): void {
   console.warn(JSON.stringify({ level: "warn", message, ...fields }));
+}
+
+function productEventNameMatches(eventName: string, filter: string): boolean {
+  if (filter.endsWith("*")) {
+    return eventName.startsWith(filter.slice(0, -1));
+  }
+  if (filter.endsWith(".")) {
+    return eventName.startsWith(filter);
+  }
+  return eventName === filter;
+}
+
+function productEventNameQuery(filter: string): string {
+  if (filter.includes("*")) {
+    return `like.${filter}`;
+  }
+  if (filter.endsWith(".")) {
+    return `like.${filter}*`;
+  }
+  return `eq.${filter}`;
 }
 
 function pendingHasSubstantiveWrite(pending: Record<string, unknown>): boolean {
@@ -1554,6 +1700,9 @@ async function patchModelPolicy(
   }
   if (patch.systemPrompt !== undefined) {
     pending.system_prompt = patch.systemPrompt;
+  }
+  if (patch.userPrompt !== undefined) {
+    pending.user_prompt = patch.userPrompt;
   }
   if (patch.schemaVersion !== undefined) {
     pending.schema_version = patch.schemaVersion;
@@ -1828,6 +1977,131 @@ async function persistAuditEvent(
   );
 }
 
+async function persistProductEvent(
+  rest: RestClient,
+  event: Omit<OpsProductEvent, "id" | "createdAt"> & { createdAt?: string },
+): Promise<OpsProductEvent> {
+  logPersistence("product_event_append_start", {
+    name: event.name,
+    outcome: event.outcome,
+    accountId: event.accountId,
+  });
+  const response = await rest.request({
+    method: "POST",
+    path: "/product_events",
+    prefer: "return=representation",
+    body: {
+      user_id: event.accountId,
+      device_id: event.deviceId,
+      name: event.name,
+      outcome: event.outcome,
+      request_id: event.requestId,
+      properties: event.properties,
+      ...(event.createdAt === undefined ? {} : { created_at: event.createdAt }),
+    },
+  });
+  const mapped = mappedWriteRow(response, mapProductEventRow);
+  if (mapped !== undefined) {
+    logPersistence("product_event_append_ok", { id: mapped.id, name: event.name });
+    return mapped;
+  }
+  logPersistence("product_event_append_failed", { name: event.name, status: response.status });
+  throw new RestPersistenceError(
+    response.status === 0 ? 502 : 502,
+    restErrorDetail(response.body) ?? "Postgres did not store the product event.",
+  );
+}
+
+async function fetchCacheByKey(
+  rest: RestClient,
+  cacheKey: string,
+): Promise<OpsCacheEntry | undefined> {
+  const response = await rest.request({
+    method: "GET",
+    path: "/assistant_cache_entries",
+    query: {
+      select: "*",
+      cache_key: `eq.${cacheKey}`,
+      state: "eq.active",
+      limit: "1",
+    },
+  });
+  if (!restOk(response) || isErrorBody(response.body)) {
+    logPersistence("cache_lookup_failed", { status: response.status });
+    return undefined;
+  }
+  return mapCacheRow(restRow(response.body));
+}
+
+async function fetchCacheById(rest: RestClient, id: string): Promise<OpsCacheEntry | undefined> {
+  const response = await rest.request({
+    method: "GET",
+    path: "/assistant_cache_entries",
+    query: { select: "*", id: `eq.${id}`, limit: "1" },
+  });
+  if (!restOk(response) || isErrorBody(response.body)) {
+    logPersistence("cache_get_failed", { id, status: response.status });
+    return undefined;
+  }
+  return mapCacheRow(restRow(response.body));
+}
+
+/**
+ * Shared translation/summary cache is Postgres-backed. A silent in-memory
+ * fallback hid rows from the admin Cache rail and the table editor.
+ */
+async function persistCacheEntry(
+  rest: RestClient,
+  input: Omit<
+    OpsCacheEntry,
+    "hitCount" | "acceptCount" | "rejectCount" | "createdAt" | "lastHitAt"
+  > & {
+    payload: Record<string, unknown>;
+  },
+): Promise<OpsCacheEntry> {
+  logPersistence("cache_put_start", { cacheKey: input.cacheKey, task: input.task, id: input.id });
+  const existing = await fetchCacheByKey(rest, input.cacheKey);
+  if (existing !== undefined) {
+    logPersistence("cache_put_existing", { id: existing.id, cacheKey: input.cacheKey });
+    return existing;
+  }
+  const response = await rest.request({
+    method: "POST",
+    path: "/assistant_cache_entries",
+    prefer: "return=representation",
+    body: {
+      id: input.id,
+      cache_key: input.cacheKey,
+      task_type: input.task,
+      source_language: input.sourceLanguage,
+      target_language: input.targetLanguage,
+      edition_fingerprint: input.editionFingerprint,
+      state: input.state,
+      policy_version: input.policyVersion,
+      result: input.payload,
+    },
+  });
+  const mapped = mappedWriteRow(response, mapCacheRow);
+  if (mapped !== undefined) {
+    logPersistence("cache_put_ok", { id: mapped.id, cacheKey: input.cacheKey, task: input.task });
+    return mapped;
+  }
+  const replay = await fetchCacheByKey(rest, input.cacheKey);
+  if (replay !== undefined) {
+    logPersistence("cache_put_replay", { id: replay.id, cacheKey: input.cacheKey, status: response.status });
+    return replay;
+  }
+  logPersistence("cache_put_failed", {
+    cacheKey: input.cacheKey,
+    status: response.status,
+    detail: restErrorDetail(response.body) ?? "",
+  });
+  throw new RestPersistenceError(
+    response.status === 0 ? 502 : 502,
+    restErrorDetail(response.body) ?? "Postgres did not store the assistant cache entry.",
+  );
+}
+
 function policyWriteApplied(policy: OpsPolicy, written: Record<string, unknown>): boolean {
   if (typeof written.model === "string" && policy.model !== written.model) {
     return false;
@@ -1842,6 +2116,9 @@ function policyWriteApplied(policy: OpsPolicy, written: Record<string, unknown>)
     return false;
   }
   if (typeof written.system_prompt === "string" && policy.systemPrompt !== written.system_prompt) {
+    return false;
+  }
+  if (typeof written.user_prompt === "string" && policy.userPrompt !== written.user_prompt) {
     return false;
   }
   const canary = finiteNumber(written.canary_percent);
@@ -1939,6 +2216,10 @@ function mapPolicyRow(row: Record<string, unknown> | undefined): OpsPolicy | und
       typeof row.system_prompt === "string" && row.system_prompt.trim() !== ""
         ? row.system_prompt
         : defaultAssistantPrompt(row.task),
+    userPrompt:
+      typeof row.user_prompt === "string" && row.user_prompt.trim() !== ""
+        ? row.user_prompt
+        : defaultAssistantUserPrompt(row.task),
     schemaVersion: typeof row.schema_version === "string" ? row.schema_version : "",
     policyVersion: typeof row.policy_version === "string" ? row.policy_version : "",
     enabled: row.enabled !== false,
@@ -1948,6 +2229,36 @@ function mapPolicyRow(row: Record<string, unknown> | undefined): OpsPolicy | und
     timeoutMs: finiteNumber(row.timeout_ms) ?? null,
     createdAt: typeof row.created_at === "string" ? row.created_at : new Date().toISOString(),
     updatedAt: typeof row.updated_at === "string" ? row.updated_at : new Date().toISOString(),
+  };
+}
+
+function mapProductEventRow(row: Record<string, unknown> | undefined): OpsProductEvent | undefined {
+  if (
+    row === undefined ||
+    isErrorBody(row) ||
+    typeof row.id !== "string" ||
+    row.id === "" ||
+    typeof row.name !== "string"
+  ) {
+    return undefined;
+  }
+  const properties =
+    typeof row.properties === "object" && row.properties !== null && !Array.isArray(row.properties)
+      ? (row.properties as Record<string, unknown>)
+      : {};
+  const outcome =
+    row.outcome === "failed" || row.outcome === "cancelled" || row.outcome === "started"
+      ? row.outcome
+      : "ok";
+  return {
+    id: row.id,
+    accountId: typeof row.user_id === "string" ? row.user_id : "",
+    deviceId: typeof row.device_id === "string" ? row.device_id : null,
+    name: row.name,
+    outcome,
+    requestId: typeof row.request_id === "string" ? row.request_id : null,
+    properties,
+    createdAt: typeof row.created_at === "string" ? row.created_at : new Date().toISOString(),
   };
 }
 

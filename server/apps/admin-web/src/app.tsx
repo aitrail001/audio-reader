@@ -18,14 +18,17 @@ import {
   extractAccessToken,
   extractSession,
   formatBytes,
+  formatJson,
   formatWhen,
   hrefCarriesSessionTokens,
   nextCursorOf,
   pageItems,
   pipClass,
   reasonReady,
+  shortId,
   statusTone,
 } from "./format";
+import { OperatorTable } from "./operator-table";
 import {
   PREVIEW_AUDIT,
   PREVIEW_BLOCKED,
@@ -39,6 +42,7 @@ import {
   PREVIEW_PRIVACY,
   PREVIEW_QUOTAS,
   PREVIEW_RUNTIME,
+  PREVIEW_USAGE,
   PREVIEW_USERS,
   isPreviewMode,
 } from "./preview-data";
@@ -57,6 +61,7 @@ import type {
   Policy,
   PolicyDraft,
   PrivacyRequest,
+  ProductEvent,
   Quota,
   RuntimeConfig,
   Section,
@@ -74,6 +79,7 @@ const RAIL: ({ type: "label"; label: string } | { type: "item"; id: Section; lab
   { type: "item", id: "cache", label: "Cache" },
   { type: "item", id: "access", label: "Access" },
   { type: "item", id: "metrics", label: "Metrics" },
+  { type: "item", id: "usage", label: "Activity" },
   { type: "item", id: "trace", label: "Trace" },
   { type: "item", id: "audit", label: "Audit" },
   { type: "item", id: "privacy", label: "Privacy" },
@@ -107,6 +113,67 @@ function cacheActionsFor(state: string): CacheAction[] {
   }
 }
 
+function stringPayload(payload: Record<string, unknown> | undefined, key: string): string {
+  if (payload === undefined) {
+    return "";
+  }
+  const value = payload[key];
+  return typeof value === "string" ? value : "";
+}
+
+function cacheOriginal(entry: CacheEntry): string {
+  const payload = entry.payload;
+  return (
+    stringPayload(payload, "source") ||
+    stringPayload(payload, "overview") ||
+    stringPayload(payload, "chapterId") ||
+    entry.editionFingerprint ||
+    ""
+  );
+}
+
+function cacheResult(entry: CacheEntry): string {
+  const payload = entry.payload;
+  return stringPayload(payload, "translation") || stringPayload(payload, "overview") || "";
+}
+
+function cacheKind(entry: CacheEntry): string {
+  const kind = stringPayload(entry.payload, "task") || entry.task;
+  if (kind === "word" || kind === "word_context") {
+    return "word";
+  }
+  if (kind === "sentence" || kind === "chapter_batch") {
+    return "sentence";
+  }
+  return kind.replaceAll("_", " ");
+}
+
+function cacheBook(entry: CacheEntry): string {
+  return (
+    stringPayload(entry.payload, "bookTitle") ||
+    entry.editionFingerprint ||
+    stringPayload(entry.payload, "editionFingerprint") ||
+    ""
+  );
+}
+
+function cacheChapter(entry: CacheEntry): string {
+  return (
+    stringPayload(entry.payload, "chapterTitle") ||
+    stringPayload(entry.payload, "chapterFingerprint") ||
+    stringPayload(entry.payload, "chapterId") ||
+    ""
+  );
+}
+
+function clipText(value: string, limit = 140): string {
+  const trimmed = value.replace(/\s+/g, " ").trim();
+  if (trimmed.length <= limit) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, limit - 1)}…`;
+}
+
 function draftsFrom(policies: Policy[]): Record<string, PolicyDraft> {
   const next: Record<string, PolicyDraft> = {};
   for (const policy of policies) {
@@ -114,6 +181,7 @@ function draftsFrom(policies: Policy[]): Record<string, PolicyDraft> {
       model: policy.model,
       promptVersion: policy.promptVersion,
       systemPrompt: policy.systemPrompt ?? "",
+      userPrompt: policy.userPrompt ?? "",
       canaryPercent: String(policy.canaryPercent ?? 0),
     };
   }
@@ -157,6 +225,9 @@ export function App() {
   const [events, setEvents] = useState<OperatorEvent[]>([]);
   const [eventRequestId, setEventRequestId] = useState("");
   const [eventKind, setEventKind] = useState("");
+  const [usageEvents, setUsageEvents] = useState<ProductEvent[]>([]);
+  const [usageName, setUsageName] = useState("");
+  const [usageAccountId, setUsageAccountId] = useState("");
   const [blocked, setBlocked] = useState<BlockedAttempt[]>([]);
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
   const [flags, setFlags] = useState<FeatureFlag[]>([]);
@@ -167,6 +238,7 @@ export function App() {
   const [qwenKey, setQwenKey] = useState("");
   const [qwenBaseUrl, setQwenBaseUrl] = useState("");
   const [qwenModel, setQwenModel] = useState("");
+  const [sentenceContextCount, setSentenceContextCount] = useState("1");
   const [gcsBucket, setGcsBucket] = useState("");
   const [gcsJson, setGcsJson] = useState("");
   const [turnstileSecret, setTurnstileSecret] = useState("");
@@ -257,6 +329,7 @@ export function App() {
     setQwenBaseUrl(config.qwen.baseUrl);
     setQwenModel(config.qwen.model);
     setGcsBucket(config.storage.bucket ?? "");
+    setSentenceContextCount(String(config.assistant.sentenceContextCount));
   };
 
   const loadAdmin = useCallback(
@@ -279,6 +352,7 @@ export function App() {
         setPrivacy(PREVIEW_PRIVACY);
         setDiagnostics(PREVIEW_DIAGNOSTICS);
         setEvents(PREVIEW_EVENTS);
+        setUsageEvents(PREVIEW_USAGE);
         setAdminError(null);
         setStatus(null);
         return;
@@ -326,6 +400,13 @@ export function App() {
         if (eventKind.trim() !== "") {
           eventsQuery.set("kind", eventKind.trim());
         }
+        const usageQuery = new URLSearchParams();
+        if (usageName.trim() !== "") {
+          usageQuery.set("name", usageName.trim());
+        }
+        if (usageAccountId.trim() !== "") {
+          usageQuery.set("accountId", usageAccountId.trim());
+        }
         const [
           usersPayload,
           jobsPayload,
@@ -340,6 +421,7 @@ export function App() {
           privacyPayload,
           diagnosticsPayload,
           eventsPayload,
+          usagePayload,
         ] = await Promise.all([
           getJson<unknown>(`/v1/admin/users?${usersQuery.toString()}`, access),
           getJson<unknown>(`/v1/admin/jobs?${jobQuery.toString()}`, access),
@@ -360,6 +442,7 @@ export function App() {
             `/v1/admin/events${eventsQuery.toString() === "" ? "" : `?${eventsQuery.toString()}`}`,
             access,
           ),
+          getJsonOrNull<unknown>(`/v1/admin/product-events?${usageQuery.toString()}`, access),
         ]);
         const nextPolicies = pageItems<Policy>(policiesPayload);
         setUsers(pageItems<AdminUser>(usersPayload));
@@ -383,6 +466,7 @@ export function App() {
         setEvents(
           Array.isArray(eventsPayload) ? eventsPayload : (diagnosticsPayload?.recentEvents ?? []),
         );
+        setUsageEvents(pageItems<ProductEvent>(usagePayload ?? { items: [] }));
         setCursors({
           users: nextCursorOf(usersPayload),
           jobs: nextCursorOf(jobsPayload),
@@ -415,6 +499,8 @@ export function App() {
       eventKind,
       eventRequestId,
       jobStatus,
+      usageAccountId,
+      usageName,
       metricsFrom,
       metricsTo,
       preview,
@@ -509,6 +595,9 @@ export function App() {
         ...(turnstileSecret.trim() === ""
           ? {}
           : { turnstile: { secretKey: turnstileSecret.trim() } }),
+        assistant: {
+          sentenceContextCount: Number.parseInt(sentenceContextCount, 10) || 1,
+        },
         ...extra,
       };
       const config = await sendJson<RuntimeConfig>(
@@ -650,8 +739,8 @@ export function App() {
       return;
     }
     setOpenUserId(user.accountId);
+    setUserDetail(user);
     if (preview) {
-      setUserDetail(user);
       return;
     }
     try {
@@ -857,12 +946,14 @@ export function App() {
               }}
               qwenBaseUrl={qwenBaseUrl}
               qwenModel={qwenModel}
+              sentenceContextCount={sentenceContextCount}
               qwenKey={qwenKey}
               gcsBucket={gcsBucket}
               gcsJson={gcsJson}
               turnstileSecret={turnstileSecret}
               onQwenBaseUrl={setQwenBaseUrl}
               onQwenModel={setQwenModel}
+              onSentenceContextCount={setSentenceContextCount}
               onQwenKey={setQwenKey}
               onGcsBucket={setGcsBucket}
               onGcsJson={setGcsJson}
@@ -948,6 +1039,7 @@ export function App() {
                     model: draft.model.trim(),
                     promptVersion: draft.promptVersion.trim(),
                     systemPrompt: draft.systemPrompt,
+                    userPrompt: draft.userPrompt,
                     ...(Number.isFinite(canary) ? { canaryPercent: canary } : {}),
                   },
                   `${policy.task} policy saved.`,
@@ -1024,6 +1116,20 @@ export function App() {
               busy={busy}
               onFrom={setMetricsFrom}
               onTo={setMetricsTo}
+              onApply={() => {
+                void loadAdmin();
+              }}
+            />
+          ) : null}
+
+          {section === "usage" ? (
+            <UsagePanel
+              events={usageEvents}
+              name={usageName}
+              accountId={usageAccountId}
+              busy={busy}
+              onName={setUsageName}
+              onAccountId={setUsageAccountId}
               onApply={() => {
                 void loadAdmin();
               }}
@@ -1132,6 +1238,8 @@ export function App() {
   );
 }
 
+const ADMIN_VERSION = import.meta.env.VITE_ADMIN_VERSION ?? "0.0.0";
+
 function TopBar(props: {
   health: HealthPayload | null;
   busy: boolean;
@@ -1143,12 +1251,17 @@ function TopBar(props: {
     <header className="topbar">
       <h1 className="brand">
         AudioReader
-        <span>Operator console</span>
+        <span>
+          Operator console {ADMIN_VERSION}
+          {props.health?.version !== undefined && props.health.version !== ""
+            ? ` · api ${props.health.version}`
+            : ""}
+        </span>
       </h1>
       <div className="health-pips" aria-label="API health">
         <span className={`pip ${pipClass(props.health?.status)}`}>
           <i />
-          {props.health?.status ?? "loading"}
+          api {props.health?.status ?? "loading"}
         </span>
         {props.health?.dependencies !== undefined
           ? Object.entries(props.health.dependencies).map(([name, value]) => (
@@ -1235,12 +1348,14 @@ function DeskPanel(props: {
   onProbe: () => void;
   qwenBaseUrl: string;
   qwenModel: string;
+  sentenceContextCount: string;
   qwenKey: string;
   gcsBucket: string;
   gcsJson: string;
   turnstileSecret: string;
   onQwenBaseUrl: (value: string) => void;
   onQwenModel: (value: string) => void;
+  onSentenceContextCount: (value: string) => void;
   onQwenKey: (value: string) => void;
   onGcsBucket: (value: string) => void;
   onGcsJson: (value: string) => void;
@@ -1354,6 +1469,12 @@ function DeskPanel(props: {
                     .join(" · ") || "none"}
                 </td>
               </tr>
+              <tr>
+                <td>Sentence context</td>
+                <td>
+                  {String(props.runtime?.assistant.sentenceContextCount ?? 1)} before and after
+                </td>
+              </tr>
             </tbody>
           </table>
           <div className="actions">
@@ -1457,6 +1578,20 @@ function DeskPanel(props: {
             />
           </label>
         </div>
+        <label>
+          Sentence context
+          <input
+            inputMode="numeric"
+            value={props.sentenceContextCount}
+            onChange={(event) => {
+              props.onSentenceContextCount(event.target.value);
+            }}
+          />
+        </label>
+        <p className="lede tight">
+          Previous and next sentences included for Managed Qwen translation. Translate into still
+          comes from the app.
+        </p>
         <label>
           Qwen API key (leave blank to keep)
           <input
@@ -1586,6 +1721,59 @@ function ConfirmButton(props: {
   );
 }
 
+function RowOpen(props: { open: boolean; label: string; hint?: string; onToggle: () => void }) {
+  return (
+    <button type="button" className="row-open" aria-expanded={props.open} onClick={props.onToggle}>
+      <svg
+        className={props.open ? "chevron open" : "chevron"}
+        viewBox="0 0 16 16"
+        width="12"
+        height="12"
+        aria-hidden="true"
+      >
+        <path
+          d="M6 3.5 11 8l-5 4.5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+      <span>
+        {props.label}
+        {props.hint !== undefined && props.hint !== "" ? <small className="mono">{props.hint}</small> : null}
+      </span>
+    </button>
+  );
+}
+
+function CopyValue(props: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <span className="copy-value">
+      <code className="mono">{props.value}</code>
+      <button
+        type="button"
+        className="ghost"
+        onClick={() => {
+          void navigator.clipboard.writeText(props.value).then(
+            () => {
+              setCopied(true);
+              window.setTimeout(() => {
+                setCopied(false);
+              }, 1200);
+            },
+            () => undefined,
+          );
+        }}
+      >
+        {copied ? "Copied" : `Copy ${props.label}`}
+      </button>
+    </span>
+  );
+}
+
 function UsersPanel(props: {
   users: AdminUser[];
   userQuery: string;
@@ -1605,57 +1793,134 @@ function UsersPanel(props: {
   return (
     <>
       <h2>Users</h2>
-      <p className="lede">Search, inspect, suspend, restore, revoke devices, or grant operator.</p>
-      <div className="toolbar">
-        <label>
-          Search
-          <input
-            value={props.userQuery}
-            onChange={(event) => {
-              props.onQuery(event.target.value);
-            }}
-          />
-        </label>
-        <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
-          Apply
-        </button>
-      </div>
-      {props.users.length === 0 ? (
-        <p className="empty">No users match this view. Try a different search or refresh.</p>
-      ) : (
-        <div className="scroll-table">
-          <table className="data">
-            <caption>Support-safe account metadata</caption>
-            <thead>
-              <tr>
-                <th>Email</th>
-                <th>Status</th>
-                <th>Devices</th>
-                <th>Books</th>
-                <th>Storage</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {props.users.map((user) => (
-                <UserRows
-                  key={user.accountId}
-                  user={user}
-                  open={props.openUserId === user.accountId}
-                  detail={props.openUserId === user.accountId ? props.userDetail : null}
-                  canMutate={props.canMutate}
-                  armed={props.armed}
-                  onToggle={() => {
-                    props.onToggle(user);
-                  }}
-                  onArm={props.onArm}
-                  onMutate={props.onMutate}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <p className="lede">
+        Search by email or account id. Open a row for the full account id, devices, books, and
+        quotas. Suspend, restore, revoke devices, or grant operator from the row actions.
+      </p>
+      <OperatorTable
+        caption="Support-safe account metadata"
+        noun="user"
+        plural="users"
+        leading={
+          <>
+            <label>
+              Search
+              <input
+                value={props.userQuery}
+                placeholder="Email or account id"
+                onChange={(event) => {
+                  props.onQuery(event.target.value);
+                }}
+              />
+            </label>
+            <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
+              Apply
+            </button>
+          </>
+        }
+        rows={props.users}
+        rowKey={(user) => user.accountId}
+        empty="No users match this view. Try a different search or refresh."
+        expandedId={props.openUserId}
+        columns={[
+          {
+            id: "account",
+            header: "Account",
+            sortValue: (user) => user.displayName?.trim() || user.email,
+            searchValue: (user) => `${user.displayName ?? ""} ${user.email}`,
+            render: (user) => (
+              <RowOpen
+                open={props.openUserId === user.accountId}
+                label={user.displayName?.trim() || user.email}
+                {...(user.displayName?.trim() ? { hint: user.email } : {})}
+                onToggle={() => {
+                  props.onToggle(user);
+                }}
+              />
+            ),
+          },
+          {
+            id: "accountId",
+            header: "Account id",
+            sortValue: (user) => user.accountId,
+            searchValue: (user) => user.accountId,
+            render: (user) => (
+              <span className="mono cell-now" title={user.accountId}>
+                {user.accountId}
+              </span>
+            ),
+          },
+          {
+            id: "status",
+            header: "Status",
+            sortValue: (user) => user.status,
+            searchValue: (user) => user.status,
+            render: (user) => <span className={`pill ${statusTone(user.status)}`}>{user.status}</span>,
+          },
+          {
+            id: "devices",
+            header: "Devices",
+            numeric: true,
+            sortValue: (user) => user.deviceCount,
+            render: (user) => user.deviceCount,
+          },
+          {
+            id: "books",
+            header: "Books",
+            numeric: true,
+            sortValue: (user) => user.bookCount,
+            render: (user) => user.bookCount,
+          },
+          {
+            id: "storage",
+            header: "Storage",
+            numeric: true,
+            sortValue: (user) => user.storageBytes,
+            searchValue: (user) => formatBytes(user.storageBytes),
+            render: (user) => formatBytes(user.storageBytes),
+          },
+          {
+            id: "created",
+            header: "Created",
+            sortValue: (user) => Date.parse(user.createdAt) || 0,
+            searchValue: (user) => user.createdAt,
+            render: (user) => formatWhen(user.createdAt),
+          },
+          {
+            id: "lastSeen",
+            header: "Last seen",
+            sortValue: (user) => Date.parse(user.lastSeenAt ?? "") || 0,
+            searchValue: (user) => user.lastSeenAt ?? "",
+            render: (user) => formatWhen(user.lastSeenAt),
+          },
+          {
+            id: "actions",
+            header: "Actions",
+            render: (user) => (
+              <UserActions
+                user={user}
+                canMutate={props.canMutate}
+                armed={props.armed}
+                onArm={props.onArm}
+                onMutate={props.onMutate}
+              />
+            ),
+          },
+        ]}
+        renderExpand={(user) => {
+          const detail = props.openUserId === user.accountId ? (props.userDetail ?? user) : user;
+          return (
+            <UserDetail
+              user={detail}
+              loaded={
+                detail.devices !== undefined ||
+                detail.books !== undefined ||
+                detail.quotas !== undefined
+              }
+            />
+          );
+        }}
+      />
       {props.nextCursor !== null ? (
         <div className="actions">
           <button type="button" className="ghost" disabled={props.busy} onClick={props.onLoadMore}>
@@ -1667,123 +1932,209 @@ function UsersPanel(props: {
   );
 }
 
-function UserRows(props: {
+function UserActions(props: {
   user: AdminUser;
-  open: boolean;
-  detail: AdminUser | null;
   canMutate: boolean;
   armed: string | null;
-  onToggle: () => void;
   onArm: (id: string | null) => void;
   onMutate: (path: string, message: string) => void;
 }) {
-  const user = props.detail ?? props.user;
+  const user = props.user;
+  return (
+    <div className="row-actions">
+      {user.status === "active" ? (
+        <ConfirmButton
+          id={`suspend:${user.accountId}`}
+          armed={props.armed}
+          disabled={!props.canMutate}
+          kind="danger"
+          label="Suspend"
+          confirm="Confirm suspend"
+          onArm={props.onArm}
+          onConfirm={() => {
+            props.onMutate(`/v1/admin/users/${user.accountId}/suspend`, `Suspended ${user.email}.`);
+          }}
+        />
+      ) : null}
+      {user.status === "suspended" ? (
+        <button
+          type="button"
+          className="ghost"
+          disabled={!props.canMutate}
+          onClick={() => {
+            props.onMutate(
+              `/v1/admin/users/${user.accountId}/unsuspend`,
+              `Restored ${user.email}.`,
+            );
+          }}
+        >
+          Restore
+        </button>
+      ) : null}
+      <ConfirmButton
+        id={`revoke:${user.accountId}`}
+        armed={props.armed}
+        disabled={!props.canMutate}
+        label="Revoke sessions"
+        confirm="Confirm revoke"
+        onArm={props.onArm}
+        onConfirm={() => {
+          props.onMutate(
+            `/v1/admin/users/${user.accountId}/revoke-sessions`,
+            `Revoked sessions for ${user.email}.`,
+          );
+        }}
+      />
+      <ConfirmButton
+        id={`grant:${user.accountId}`}
+        armed={props.armed}
+        disabled={!props.canMutate}
+        label="Grant admin"
+        confirm="Confirm grant"
+        onArm={props.onArm}
+        onConfirm={() => {
+          props.onMutate(
+            `/v1/admin/users/${user.accountId}/grant-admin`,
+            `Granted operator to ${user.email}.`,
+          );
+        }}
+      />
+    </div>
+  );
+}
+
+function UserDetail(props: { user: AdminUser; loaded: boolean }) {
+  const user = props.user;
+  const devices = user.devices ?? [];
+  const books = user.books ?? [];
+  const quotas = user.quotas ?? [];
   return (
     <>
-      <tr className={props.open ? "selected" : undefined}>
-        <td>
-          <button type="button" className="ghost" onClick={props.onToggle}>
-            {props.open ? "Hide" : "Open"} {user.email}
-          </button>
-          <div className="mono">{user.accountId}</div>
-        </td>
-        <td>
-          <span className={`pill ${statusTone(user.status)}`}>{user.status}</span>
-        </td>
-        <td>{user.deviceCount}</td>
-        <td>{user.bookCount}</td>
-        <td>{formatBytes(user.storageBytes)}</td>
-        <td className="row-actions">
-          {user.status === "active" ? (
-            <ConfirmButton
-              id={`suspend:${user.accountId}`}
-              armed={props.armed}
-              disabled={!props.canMutate}
-              kind="danger"
-              label="Suspend"
-              confirm="Confirm suspend"
-              onArm={props.onArm}
-              onConfirm={() => {
-                props.onMutate(
-                  `/v1/admin/users/${user.accountId}/suspend`,
-                  `Suspended ${user.email}.`,
-                );
-              }}
-            />
-          ) : null}
-          {user.status === "suspended" ? (
-            <button
-              type="button"
-              className="ghost"
-              disabled={!props.canMutate}
-              onClick={() => {
-                props.onMutate(
-                  `/v1/admin/users/${user.accountId}/unsuspend`,
-                  `Restored ${user.email}.`,
-                );
-              }}
-            >
-              Restore
-            </button>
-          ) : null}
-          <ConfirmButton
-            id={`revoke:${user.accountId}`}
-            armed={props.armed}
-            disabled={!props.canMutate}
-            label="Revoke sessions"
-            confirm="Confirm revoke"
-            onArm={props.onArm}
-            onConfirm={() => {
-              props.onMutate(
-                `/v1/admin/users/${user.accountId}/revoke-sessions`,
-                `Revoked sessions for ${user.email}.`,
-              );
-            }}
-          />
-          <ConfirmButton
-            id={`grant:${user.accountId}`}
-            armed={props.armed}
-            disabled={!props.canMutate}
-            label="Grant admin"
-            confirm="Confirm grant"
-            onArm={props.onArm}
-            onConfirm={() => {
-              props.onMutate(
-                `/v1/admin/users/${user.accountId}/grant-admin`,
-                `Granted operator to ${user.email}.`,
-              );
-            }}
-          />
-        </td>
-      </tr>
-      {props.open ? (
-        <tr className="expand">
-          <td colSpan={6}>
-            <dl className="detail-grid">
+            <dl className="detail-grid wide">
+              <dt>Email</dt>
+              <dd>{user.email}</dd>
               <dt>Display name</dt>
               <dd>{user.displayName ?? "—"}</dd>
+              <dt>Account id</dt>
+              <dd>
+                <CopyValue value={user.accountId} label="account id" />
+              </dd>
+              <dt>User id</dt>
+              <dd>
+                <CopyValue value={user.id} label="user id" />
+              </dd>
               <dt>Created</dt>
               <dd>{formatWhen(user.createdAt)}</dd>
               <dt>Last seen</dt>
               <dd>{formatWhen(user.lastSeenAt)}</dd>
-              <dt>User id</dt>
-              <dd className="mono">{user.id}</dd>
-              <dt>Quotas</dt>
+              <dt>Storage</dt>
+              <dd>{formatBytes(user.storageBytes)}</dd>
+              <dt>Status</dt>
               <dd>
-                {(user.quotas ?? []).length === 0
-                  ? "Open this row to load live usage, or apply quota_limits SQL."
-                  : user.quotas
-                      ?.map((quota) =>
-                        quota.key === "cloud_media_bytes"
-                          ? `${quota.key} ${formatBytes(quota.used)}/${formatBytes(quota.limit)}`
-                          : `${quota.key} ${String(quota.used)}/${String(quota.limit)}`,
-                      )
-                      .join(" · ")}
+                <span className={`pill ${statusTone(user.status)}`}>{user.status}</span>
               </dd>
             </dl>
-          </td>
-        </tr>
-      ) : null}
+            <div className="prose-pair">
+              <figure>
+                <figcaption>Devices ({String(devices.length || user.deviceCount)})</figcaption>
+                {devices.length === 0 ? (
+                  <p className="empty">
+                    {props.loaded ? "No devices registered." : "Open this row to load live devices."}
+                  </p>
+                ) : (
+                  <table className="service-table">
+                    <thead>
+                      <tr>
+                        <th>Device id</th>
+                        <th>Platform</th>
+                        <th>Name</th>
+                        <th>App</th>
+                        <th>Last seen</th>
+                        <th>State</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {devices.map((device) => (
+                        <tr key={device.id}>
+                          <td className="mono">{device.id}</td>
+                          <td>{device.platform}</td>
+                          <td>{device.name ?? "—"}</td>
+                          <td>{device.appVersion ?? "—"}</td>
+                          <td>{formatWhen(device.lastSeenAt)}</td>
+                          <td>
+                            <span className={`pill ${device.revoked ? "bad" : "ok"}`}>
+                              {device.revoked ? "revoked" : "active"}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </figure>
+              <figure>
+                <figcaption>Books ({String(books.length || user.bookCount)})</figcaption>
+                {books.length === 0 ? (
+                  <p className="empty">{props.loaded ? "No cloud books." : "Open this row to load live books."}</p>
+                ) : (
+                  <table className="service-table">
+                    <thead>
+                      <tr>
+                        <th>Book id</th>
+                        <th>Title</th>
+                        <th className="num">Chapters</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {books.map((book) => (
+                        <tr key={book.id}>
+                          <td className="mono">{book.id}</td>
+                          <td>{book.title}</td>
+                          <td className="num">{book.chapterCount ?? "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </figure>
+            </div>
+            <figure className="prose-field">
+              <figcaption>Quotas</figcaption>
+              {quotas.length === 0 ? (
+                <p className="empty">
+                  Open this row to load live usage, or apply quota_limits SQL.
+                </p>
+              ) : (
+                <table className="service-table">
+                  <thead>
+                    <tr>
+                      <th>Key</th>
+                      <th>Used</th>
+                      <th>Limit</th>
+                      <th>Period</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {quotas.map((quota) => (
+                      <tr key={quota.key}>
+                        <td className="mono">{quota.key}</td>
+                        <td>
+                          {quota.key === "cloud_media_bytes"
+                            ? formatBytes(quota.used)
+                            : quota.used}
+                        </td>
+                        <td>
+                          {quota.key === "cloud_media_bytes"
+                            ? formatBytes(quota.limit)
+                            : quota.limit}
+                        </td>
+                        <td>{formatWhen(quota.periodEndsAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </figure>
     </>
   );
 }
@@ -1801,10 +2152,12 @@ function PoliciesPanel(props: {
     <>
       <h2>Policies</h2>
       <p className="lede">
-        Each Managed Qwen task has its own model, canary, and system prompt. Saving writes them to
-        Postgres. Canary 0 uses the Desk model when Desk is set; canary 100 uses this policy model
-        for every account. Translation and chapter summary must still return the JSON shape the app
-        parses. Prompt version is a cache label; editing the system prompt also busts shared cache.
+        Each Managed Qwen task has its own model, canary, system prompt, and user prompt. Saving
+        writes them to Postgres. Canary 0 uses the Desk model when Desk is set; canary 100 uses this
+        policy model for every account. Translation and chapter summary must still return the JSON
+        shape the app parses. Prompt version is a cache label; editing either prompt also busts
+        shared cache. User-prompt placeholders include source, sourceLanguage, targetLanguage,
+        learnerLevel, task, chapterId, segments, question, and context.
       </p>
       {props.policies.length === 0 ? (
         <p className="empty">No Qwen policies loaded.</p>
@@ -1822,7 +2175,7 @@ function PoliciesPanel(props: {
               <p className="lede tight mono">
                 {policy.region} · policy {policy.policyVersion ?? "v?"}
               </p>
-              <div className="grid-2">
+              <div className="grid-3">
                 <label>
                   Model
                   <input
@@ -1841,17 +2194,17 @@ function PoliciesPanel(props: {
                     }}
                   />
                 </label>
+                <label>
+                  Canary %
+                  <input
+                    inputMode="numeric"
+                    value={draft?.canaryPercent ?? String(policy.canaryPercent ?? 0)}
+                    onChange={(event) => {
+                      props.onDraft(policy.id, { canaryPercent: event.target.value });
+                    }}
+                  />
+                </label>
               </div>
-              <label>
-                Canary percent
-                <input
-                  inputMode="numeric"
-                  value={draft?.canaryPercent ?? String(policy.canaryPercent ?? 0)}
-                  onChange={(event) => {
-                    props.onDraft(policy.id, { canaryPercent: event.target.value });
-                  }}
-                />
-              </label>
               <label>
                 System prompt
                 <textarea
@@ -1860,6 +2213,17 @@ function PoliciesPanel(props: {
                   value={draft?.systemPrompt ?? policy.systemPrompt ?? ""}
                   onChange={(event) => {
                     props.onDraft(policy.id, { systemPrompt: event.target.value });
+                  }}
+                />
+              </label>
+              <label>
+                User prompt
+                <textarea
+                  className="prompt-editor"
+                  spellCheck={false}
+                  value={draft?.userPrompt ?? policy.userPrompt ?? ""}
+                  onChange={(event) => {
+                    props.onDraft(policy.id, { userPrompt: event.target.value });
                   }}
                 />
               </label>
@@ -1906,97 +2270,157 @@ function JobsPanel(props: {
   onArm: (id: string | null) => void;
   onMutate: (path: string, message: string) => void;
 }) {
+  const [openId, setOpenId] = useState<string | null>(null);
   return (
     <>
       <h2>Jobs</h2>
       <p className="lede">Retry a failed run or cancel work still in the queue.</p>
-      <div className="toolbar">
-        <label>
-          Status
-          <select
-            value={props.jobStatus}
-            onChange={(event) => {
-              props.onStatus(event.target.value);
-            }}
-          >
-            <option value="">Any</option>
-            <option value="queued">queued</option>
-            <option value="running">running</option>
-            <option value="failed">failed</option>
-            <option value="succeeded">succeeded</option>
-            <option value="cancelled">cancelled</option>
-            <option value="dead_letter">dead_letter</option>
-          </select>
-        </label>
-        <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
-          Apply
-        </button>
-      </div>
-      {props.jobs.length === 0 ? (
-        <p className="empty">No jobs in this filter.</p>
-      ) : (
-        <div className="scroll-table">
-          <table className="data">
-            <caption>Background jobs</caption>
-            <thead>
-              <tr>
-                <th>Kind</th>
-                <th>Status</th>
-                <th>Attempts</th>
-                <th>Error</th>
-                <th>Updated</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {props.jobs.map((job) => (
-                <tr key={job.id}>
-                  <td>
-                    {job.kind}
-                    <div className="mono">{job.id}</div>
-                  </td>
-                  <td>
-                    <span className={`pill ${statusTone(job.status)}`}>{job.status}</span>
-                  </td>
-                  <td>
-                    {job.attempts ?? 0}/{job.maxAttempts ?? "—"}
-                  </td>
-                  <td>{job.lastError ?? "—"}</td>
-                  <td>{formatWhen(job.updatedAt)}</td>
-                  <td className="row-actions">
-                    {job.status === "failed" || job.status === "dead_letter" ? (
-                      <button
-                        type="button"
-                        className="ghost"
-                        disabled={!props.canMutate}
-                        onClick={() => {
-                          props.onMutate(`/v1/admin/jobs/${job.id}/retry`, "Job queued again.");
-                        }}
-                      >
-                        Retry
-                      </button>
-                    ) : null}
-                    {job.status === "queued" || job.status === "running" ? (
-                      <ConfirmButton
-                        id={`cancel:${job.id}`}
-                        armed={props.armed}
-                        disabled={!props.canMutate}
-                        kind="danger"
-                        label="Cancel"
-                        confirm="Confirm cancel"
-                        onArm={props.onArm}
-                        onConfirm={() => {
-                          props.onMutate(`/v1/admin/jobs/${job.id}/cancel`, "Job cancelled.");
-                        }}
-                      />
-                    ) : null}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <OperatorTable
+        caption="Background jobs"
+        noun="job"
+        leading={
+          <>
+            <label>
+              Status
+              <select
+                value={props.jobStatus}
+                onChange={(event) => {
+                  props.onStatus(event.target.value);
+                }}
+              >
+                <option value="">Any</option>
+                <option value="queued">queued</option>
+                <option value="running">running</option>
+                <option value="failed">failed</option>
+                <option value="succeeded">succeeded</option>
+                <option value="cancelled">cancelled</option>
+                <option value="dead_letter">dead_letter</option>
+              </select>
+            </label>
+            <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
+              Apply
+            </button>
+          </>
+        }
+        rows={props.jobs}
+        rowKey={(job) => job.id}
+        empty="No jobs in this filter."
+        expandedId={openId}
+        columns={[
+          {
+            id: "kind",
+            header: "Kind",
+            sortValue: (job) => job.kind,
+            searchValue: (job) => `${job.kind} ${job.id}`,
+            render: (job) => (
+              <RowOpen
+                open={openId === job.id}
+                label={job.kind.replaceAll("_", " ")}
+                hint={shortId(job.id)}
+                onToggle={() => {
+                  setOpenId(openId === job.id ? null : job.id);
+                }}
+              />
+            ),
+          },
+          {
+            id: "status",
+            header: "Status",
+            sortValue: (job) => job.status,
+            searchValue: (job) => job.status,
+            render: (job) => <span className={`pill ${statusTone(job.status)}`}>{job.status}</span>,
+          },
+          {
+            id: "account",
+            header: "Account",
+            sortValue: (job) => job.accountId ?? "",
+            searchValue: (job) => job.accountId ?? "",
+            render: (job) => <span className="mono">{job.accountId ? shortId(job.accountId) : "—"}</span>,
+          },
+          {
+            id: "attempts",
+            header: "Attempts",
+            numeric: true,
+            sortValue: (job) => job.attempts ?? 0,
+            render: (job) => `${String(job.attempts ?? 0)}/${String(job.maxAttempts ?? "—")}`,
+          },
+          {
+            id: "error",
+            header: "Error",
+            sortValue: (job) => job.lastError ?? "",
+            searchValue: (job) => job.lastError ?? "",
+            render: (job) => (
+              <div className="cell-clip" title={job.lastError ?? undefined}>
+                {job.lastError ?? "—"}
+              </div>
+            ),
+          },
+          {
+            id: "updated",
+            header: "Updated",
+            sortValue: (job) => Date.parse(job.updatedAt) || 0,
+            render: (job) => formatWhen(job.updatedAt),
+          },
+          {
+            id: "actions",
+            header: "Actions",
+            render: (job) => (
+              <div className="row-actions">
+                {job.status === "failed" || job.status === "dead_letter" ? (
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={!props.canMutate}
+                    onClick={() => {
+                      props.onMutate(`/v1/admin/jobs/${job.id}/retry`, "Job queued again.");
+                    }}
+                  >
+                    Retry
+                  </button>
+                ) : null}
+                {job.status === "queued" || job.status === "running" ? (
+                  <ConfirmButton
+                    id={`cancel:${job.id}`}
+                    armed={props.armed}
+                    disabled={!props.canMutate}
+                    kind="danger"
+                    label="Cancel"
+                    confirm="Confirm cancel"
+                    onArm={props.onArm}
+                    onConfirm={() => {
+                      props.onMutate(`/v1/admin/jobs/${job.id}/cancel`, "Job cancelled.");
+                    }}
+                  />
+                ) : null}
+              </div>
+            ),
+          },
+        ]}
+        renderExpand={(job) => (
+          <>
+            <dl className="detail-grid wide">
+              <dt>Id</dt>
+              <dd className="mono">{job.id}</dd>
+              <dt>Account</dt>
+              <dd className="mono">{job.accountId ?? "—"}</dd>
+              <dt>Created</dt>
+              <dd>{formatWhen(job.createdAt)}</dd>
+              <dt>Started</dt>
+              <dd>{formatWhen(job.startedAt)}</dd>
+              <dt>Finished</dt>
+              <dd>{formatWhen(job.finishedAt)}</dd>
+              <dt>Updated</dt>
+              <dd>{formatWhen(job.updatedAt)}</dd>
+            </dl>
+            {job.lastError ? (
+              <figure className="prose-field">
+                <figcaption>Last error</figcaption>
+                <pre className="prose-block">{job.lastError}</pre>
+              </figure>
+            ) : null}
+          </>
+        )}
+      />
       {props.nextCursor !== null ? (
         <div className="actions">
           <button type="button" className="ghost" disabled={props.busy} onClick={props.onLoadMore}>
@@ -2032,84 +2456,180 @@ function CachePanel(props: {
     <>
       <h2>Cache</h2>
       <p className="lede">
-        Quarantine, restore, expire, purge, or regenerate an exact-content entry.
+        Shared translation and summary rows. The table shows kind, original, result, book, and
+        hits. Open a row for cache id, cache key, chapter, context, and notes. Chat
+        does not write this table.
       </p>
-      <div className="toolbar">
-        <label>
-          State
-          <select
-            value={props.cacheState}
-            onChange={(event) => {
-              props.onState(event.target.value);
-            }}
-          >
-            <option value="">Any</option>
-            <option value="active">active</option>
-            <option value="quarantined">quarantined</option>
-            <option value="expired">expired</option>
-            <option value="superseded">superseded</option>
-            <option value="purged">purged</option>
-          </select>
-        </label>
-        <label>
-          Task
-          <input
-            value={props.cacheTask}
-            onChange={(event) => {
-              props.onTask(event.target.value);
-            }}
-          />
-        </label>
-        <label>
-          Edition fingerprint
-          <input
-            value={props.cacheFingerprint}
-            onChange={(event) => {
-              props.onFingerprint(event.target.value);
-            }}
-          />
-        </label>
-        <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
-          Apply
-        </button>
-      </div>
-      {props.entries.length === 0 ? (
-        <p className="empty">No cache entries in this filter.</p>
-      ) : (
-        <div className="scroll-table">
-          <table className="data">
-            <caption>Shared derived cache</caption>
-            <thead>
-              <tr>
-                <th>Task</th>
-                <th>State</th>
-                <th>Hits</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {props.entries.map((entry) => {
-                const detail =
-                  props.openCacheId === entry.id ? (props.cacheDetail ?? entry) : entry;
-                return (
-                  <CacheRows
-                    key={entry.id}
-                    entry={detail}
-                    open={props.openCacheId === entry.id}
-                    canMutate={props.canMutate}
-                    armed={props.armed}
-                    onToggle={() => {
-                      props.onToggle(entry);
-                    }}
-                    onArm={props.onArm}
-                    onAction={props.onAction}
-                  />
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <OperatorTable
+        caption="Shared derived cache"
+        noun="entry"
+        plural="entries"
+        leading={
+          <>
+            <label>
+              State
+              <select
+                value={props.cacheState}
+                onChange={(event) => {
+                  props.onState(event.target.value);
+                }}
+              >
+                <option value="">Any</option>
+                <option value="active">active</option>
+                <option value="quarantined">quarantined</option>
+                <option value="expired">expired</option>
+                <option value="superseded">superseded</option>
+                <option value="purged">purged</option>
+              </select>
+            </label>
+            <label>
+              Task
+              <input
+                value={props.cacheTask}
+                onChange={(event) => {
+                  props.onTask(event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              Edition fingerprint
+              <input
+                value={props.cacheFingerprint}
+                onChange={(event) => {
+                  props.onFingerprint(event.target.value);
+                }}
+              />
+            </label>
+            <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
+              Apply
+            </button>
+          </>
+        }
+        rows={props.entries}
+        rowKey={(entry) => entry.id}
+        empty="No cache entries in this filter."
+        expandedId={props.openCacheId}
+        columns={[
+          {
+            id: "kind",
+            header: "Kind",
+            sortValue: (entry) => cacheKind(entry),
+            searchValue: (entry) => `${cacheKind(entry)} ${entry.id} ${entry.sourceLanguage} ${entry.targetLanguage}`,
+            render: (entry) => (
+              <RowOpen
+                open={props.openCacheId === entry.id}
+                label={cacheKind(entry)}
+                hint={`${entry.sourceLanguage} → ${entry.targetLanguage}`}
+                onToggle={() => {
+                  props.onToggle(entry);
+                }}
+              />
+            ),
+          },
+          {
+            id: "original",
+            header: "Original",
+            sortValue: (entry) => cacheOriginal(entry),
+            searchValue: (entry) => cacheOriginal(entry),
+            render: (entry) => {
+              const original = cacheOriginal(entry);
+              return (
+                <div className="cell-clip" title={original || undefined}>
+                  {original === "" ? "—" : clipText(original, 160)}
+                </div>
+              );
+            },
+          },
+          {
+            id: "translation",
+            header: "Translation",
+            sortValue: (entry) => cacheResult(entry),
+            searchValue: (entry) => cacheResult(entry),
+            render: (entry) => {
+              const result = cacheResult(entry);
+              return (
+                <div className="cell-clip" title={result || undefined}>
+                  {result === "" ? "—" : clipText(result, 160)}
+                </div>
+              );
+            },
+          },
+          {
+            id: "book",
+            header: "Book",
+            sortValue: (entry) => cacheBook(entry),
+            searchValue: (entry) => `${cacheBook(entry)} ${entry.editionFingerprint ?? ""}`,
+            render: (entry) => {
+              const book = cacheBook(entry);
+              return (
+                <span className="cell-now" title={book || undefined}>
+                  {book === "" ? "—" : book}
+                </span>
+              );
+            },
+          },
+          {
+            id: "hits",
+            header: "Hits",
+            numeric: true,
+            sortValue: (entry) => entry.hitCount,
+            render: (entry) => entry.hitCount,
+          },
+          {
+            id: "state",
+            header: "State",
+            sortValue: (entry) => entry.state,
+            searchValue: (entry) => entry.state,
+            render: (entry) => <span className={`pill ${statusTone(entry.state)}`}>{entry.state}</span>,
+          },
+          {
+            id: "lastHit",
+            header: "Last hit",
+            sortValue: (entry) => Date.parse(entry.lastHitAt ?? entry.createdAt) || 0,
+            render: (entry) => formatWhen(entry.lastHitAt ?? entry.createdAt),
+          },
+          {
+            id: "actions",
+            header: "Actions",
+            render: (entry) => (
+              <div className="row-actions">
+                {cacheActionsFor(entry.state).map((action) =>
+                  action === "purge" ? (
+                    <ConfirmButton
+                      key={action}
+                      id={`purge:${entry.id}`}
+                      armed={props.armed}
+                      disabled={!props.canMutate}
+                      kind="danger"
+                      label="purge"
+                      confirm="Confirm purge"
+                      onArm={props.onArm}
+                      onConfirm={() => {
+                        props.onAction(entry, action);
+                      }}
+                    />
+                  ) : (
+                    <button
+                      key={action}
+                      type="button"
+                      className="ghost"
+                      disabled={!props.canMutate}
+                      onClick={() => {
+                        props.onAction(entry, action);
+                      }}
+                    >
+                      {action}
+                    </button>
+                  ),
+                )}
+              </div>
+            ),
+          },
+        ]}
+        renderExpand={(entry) => (
+          <CacheDetail entry={props.openCacheId === entry.id ? (props.cacheDetail ?? entry) : entry} />
+        )}
+      />
       {props.nextCursor !== null ? (
         <div className="actions">
           <button type="button" className="ghost" disabled={props.busy} onClick={props.onLoadMore}>
@@ -2121,85 +2641,69 @@ function CachePanel(props: {
   );
 }
 
-function CacheRows(props: {
-  entry: CacheEntry;
-  open: boolean;
-  canMutate: boolean;
-  armed: string | null;
-  onToggle: () => void;
-  onArm: (id: string | null) => void;
-  onAction: (entry: CacheEntry, action: CacheAction) => void;
-}) {
+function CacheDetail(props: { entry: CacheEntry }) {
   const entry = props.entry;
+  const original = cacheOriginal(entry);
+  const result = cacheResult(entry);
+  const book = cacheBook(entry);
+  const chapter = cacheChapter(entry);
+  const notes = Array.isArray(entry.payload?.notes) ? entry.payload.notes : [];
+  const kind = cacheKind(entry);
   return (
     <>
-      <tr className={props.open ? "selected" : undefined}>
-        <td>
-          <button type="button" className="ghost" onClick={props.onToggle}>
-            {props.open ? "Hide" : "Open"} {entry.task}
-          </button>
-          <div className="mono">
-            {entry.sourceLanguage} → {entry.targetLanguage}
-          </div>
-        </td>
-        <td>
-          <span className={`pill ${statusTone(entry.state)}`}>{entry.state}</span>
-        </td>
-        <td>{entry.hitCount}</td>
-        <td className="row-actions">
-          {cacheActionsFor(entry.state).map((action) =>
-            action === "purge" ? (
-              <ConfirmButton
-                key={action}
-                id={`purge:${entry.id}`}
-                armed={props.armed}
-                disabled={!props.canMutate}
-                kind="danger"
-                label="purge"
-                confirm="Confirm purge"
-                onArm={props.onArm}
-                onConfirm={() => {
-                  props.onAction(entry, action);
-                }}
-              />
-            ) : (
-              <button
-                key={action}
-                type="button"
-                className="ghost"
-                disabled={!props.canMutate}
-                onClick={() => {
-                  props.onAction(entry, action);
-                }}
-              >
-                {action}
-              </button>
-            ),
-          )}
-        </td>
-      </tr>
-      {props.open ? (
-        <tr className="expand">
-          <td colSpan={4}>
-            <dl className="detail-grid">
-              <dt>Fingerprint</dt>
-              <dd className="mono">{entry.editionFingerprint ?? "—"}</dd>
+            <dl className="detail-grid wide">
+              <dt>Id</dt>
+              <dd className="mono">{entry.id}</dd>
+              <dt>Cache key</dt>
+              <dd className="mono">{entry.cacheKey ?? "—"}</dd>
+              <dt>Book</dt>
+              <dd>{book || "—"}</dd>
+              <dt>Edition id</dt>
+              <dd className="mono">
+                {entry.editionFingerprint || stringPayload(entry.payload, "editionFingerprint") || "—"}
+              </dd>
+              <dt>Chapter</dt>
+              <dd>{chapter || "—"}</dd>
+              <dt>Languages</dt>
+              <dd>
+                {entry.sourceLanguage} → {entry.targetLanguage}
+              </dd>
+              <dt>Task</dt>
+              <dd>
+                {kind}
+                {entry.task !== kind ? ` · ${entry.task}` : ""}
+              </dd>
               <dt>Policy</dt>
               <dd>{entry.policyVersion ?? "—"}</dd>
+              <dt>Hits</dt>
+              <dd>
+                {entry.hitCount} · last {formatWhen(entry.lastHitAt)}
+              </dd>
               <dt>Accept / reject</dt>
               <dd>
                 {entry.acceptCount ?? 0} / {entry.rejectCount ?? 0}
               </dd>
               <dt>Created</dt>
               <dd>{formatWhen(entry.createdAt)}</dd>
-              <dt>Last hit</dt>
-              <dd>{formatWhen(entry.lastHitAt)}</dd>
-              <dt>Id</dt>
-              <dd className="mono">{entry.id}</dd>
             </dl>
-          </td>
-        </tr>
-      ) : null}
+            <div className="prose-pair">
+              <figure>
+                <figcaption>Original</figcaption>
+                <pre className="prose-block">{original || "—"}</pre>
+              </figure>
+              <figure>
+                <figcaption>Translation</figcaption>
+                <pre className="prose-block">{result || "—"}</pre>
+              </figure>
+              <figure>
+                <figcaption>Context</figcaption>
+                <pre className="prose-block">{stringPayload(entry.payload, "context") || "—"}</pre>
+              </figure>
+              <figure>
+                <figcaption>Notes</figcaption>
+                <pre className="prose-block">{notes.length === 0 ? "—" : formatJson(notes)}</pre>
+              </figure>
+            </div>
     </>
   );
 }
@@ -2212,43 +2716,234 @@ function AccessPanel(props: { attempts: BlockedAttempt[] }) {
         Passwordless attempts this Worker process blocked for rate or a missing Turnstile challenge.
         Hashed identifiers only.
       </p>
-      {props.attempts.length === 0 ? (
-        <p className="empty">No blocked attempts in this Worker isolate.</p>
-      ) : (
-        <div className="scroll-table">
-          <table className="data">
-            <caption>Blocked passwordless attempts</caption>
-            <thead>
-              <tr>
-                <th>When</th>
-                <th>Action</th>
-                <th>Reason</th>
-                <th>Email hash</th>
-                <th>IP hash</th>
-              </tr>
-            </thead>
-            <tbody>
-              {props.attempts.map((attempt) => (
-                <tr key={attempt.id}>
-                  <td>{formatWhen(attempt.at)}</td>
-                  <td>{attempt.action}</td>
-                  <td>
-                    <span className={`pill ${statusTone(attempt.reason)}`}>{attempt.reason}</span>
-                  </td>
-                  <td className="mono">{attempt.emailHash}</td>
-                  <td className="mono">{attempt.ipHash}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <OperatorTable
+        caption="Blocked passwordless attempts"
+        noun="attempt"
+        rows={props.attempts}
+        rowKey={(attempt) => attempt.id}
+        empty="No blocked attempts in this Worker isolate."
+        columns={[
+          {
+            id: "when",
+            header: "When",
+            sortValue: (attempt) => Date.parse(attempt.at) || 0,
+            render: (attempt) => formatWhen(attempt.at),
+          },
+          {
+            id: "action",
+            header: "Action",
+            sortValue: (attempt) => attempt.action,
+            searchValue: (attempt) => attempt.action,
+            render: (attempt) => attempt.action.replaceAll("_", " "),
+          },
+          {
+            id: "reason",
+            header: "Reason",
+            sortValue: (attempt) => attempt.reason,
+            searchValue: (attempt) => attempt.reason,
+            render: (attempt) => (
+              <span className={`pill ${statusTone(attempt.reason)}`}>{attempt.reason}</span>
+            ),
+          },
+          {
+            id: "email",
+            header: "Email hash",
+            sortValue: (attempt) => attempt.emailHash,
+            searchValue: (attempt) => attempt.emailHash,
+            render: (attempt) => (
+              <span className="mono" title={attempt.emailHash}>
+                {shortId(attempt.emailHash, 12)}
+              </span>
+            ),
+          },
+          {
+            id: "ip",
+            header: "IP hash",
+            sortValue: (attempt) => attempt.ipHash,
+            searchValue: (attempt) => attempt.ipHash,
+            render: (attempt) => (
+              <span className="mono" title={attempt.ipHash}>
+                {shortId(attempt.ipHash, 12)}
+              </span>
+            ),
+          },
+          {
+            id: "device",
+            header: "Device",
+            sortValue: (attempt) => attempt.deviceId ?? "",
+            render: (attempt) => (
+              <span className="mono">{attempt.deviceId ? shortId(attempt.deviceId) : "—"}</span>
+            ),
+          },
+          {
+            id: "request",
+            header: "Request",
+            sortValue: (attempt) => attempt.requestId ?? "",
+            searchValue: (attempt) => attempt.requestId ?? "",
+            render: (attempt) => (
+              <span className="mono">{attempt.requestId ? shortId(attempt.requestId, 12) : "—"}</span>
+            ),
+          },
+        ]}
+      />
     </>
   );
 }
 
 function metricNumber(value: unknown): string {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : "—";
+}
+
+function formatEventProperties(value: Record<string, unknown> | undefined): string {
+  if (value === undefined) {
+    return "—";
+  }
+  const parts = Object.entries(value).map(([key, item]) => `${key}=${String(item)}`);
+  return parts.length === 0 ? "—" : parts.join(" · ");
+}
+
+function UsagePanel(props: {
+  events: ProductEvent[];
+  name: string;
+  accountId: string;
+  busy: boolean;
+  onName: (value: string) => void;
+  onAccountId: (value: string) => void;
+  onApply: () => void;
+}) {
+  const [openId, setOpenId] = useState<string | null>(null);
+  return (
+    <>
+      <h2>Activity</h2>
+      <p className="lede">
+        Latest persisted product events, not clipped to the Metrics date window. Filter by exact
+        name, a prefix such as <span className="mono">ai.</span>, or account id. After a Managed
+        Qwen translate you should see <span className="mono">ai.translation.started</span> then
+        <span className="mono">ai.translation.cached</span> or
+        <span className="mono">ai.translation.cache_failed</span>. Chat-only traffic shows
+        <span className="mono">ai.chat.*</span>.
+      </p>
+      <OperatorTable
+        leading={
+          <>
+            <label>
+              Event name
+              <input
+                value={props.name}
+                placeholder="ai. or account.signed_in"
+                onChange={(event) => {
+                  props.onName(event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              Account id
+              <input
+                value={props.accountId}
+                onChange={(event) => {
+                  props.onAccountId(event.target.value);
+                }}
+              />
+            </label>
+            <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
+              Apply
+            </button>
+          </>
+        }
+        caption="User activity"
+        noun="event"
+        rows={props.events}
+        rowKey={(event) => event.id}
+        empty="No activity in this window yet."
+        expandedId={openId}
+        columns={[
+          {
+            id: "when",
+            header: "When",
+            sortValue: (event) => Date.parse(event.createdAt) || 0,
+            render: (event) => (
+              <RowOpen
+                open={openId === event.id}
+                label={formatWhen(event.createdAt)}
+                onToggle={() => {
+                  setOpenId(openId === event.id ? null : event.id);
+                }}
+              />
+            ),
+          },
+          {
+            id: "name",
+            header: "Name",
+            sortValue: (event) => event.name,
+            searchValue: (event) => event.name,
+            render: (event) => (
+              <span className="mono" title={event.id}>
+                {event.name}
+              </span>
+            ),
+          },
+          {
+            id: "outcome",
+            header: "Outcome",
+            sortValue: (event) => event.outcome,
+            searchValue: (event) => event.outcome,
+            render: (event) => (
+              <span className={`pill ${statusTone(event.outcome)}`}>{event.outcome}</span>
+            ),
+          },
+          {
+            id: "account",
+            header: "Account",
+            sortValue: (event) => event.accountId,
+            searchValue: (event) => event.accountId,
+            render: (event) => (
+              <span className="mono" title={event.accountId}>
+                {shortId(event.accountId)}
+              </span>
+            ),
+          },
+          {
+            id: "device",
+            header: "Device",
+            sortValue: (event) => event.deviceId ?? "",
+            render: (event) => (
+              <span className="mono" title={event.deviceId}>
+                {event.deviceId ? shortId(event.deviceId) : "—"}
+              </span>
+            ),
+          },
+          {
+            id: "detail",
+            header: "Detail",
+            searchValue: (event) => formatEventProperties(event.properties),
+            render: (event) => (
+              <div className="cell-clip" title={formatEventProperties(event.properties)}>
+                {formatEventProperties(event.properties)}
+              </div>
+            ),
+          },
+        ]}
+        renderExpand={(event) => (
+          <>
+            <dl className="detail-grid wide">
+              <dt>Event id</dt>
+              <dd className="mono">{event.id}</dd>
+              <dt>Request id</dt>
+              <dd className="mono">{event.requestId ?? "—"}</dd>
+              <dt>Account</dt>
+              <dd className="mono">{event.accountId}</dd>
+              <dt>Device</dt>
+              <dd className="mono">{event.deviceId ?? "—"}</dd>
+            </dl>
+            <figure className="prose-field">
+              <figcaption>Properties</figcaption>
+              <pre className="prose-block">{formatJson(event.properties ?? {})}</pre>
+            </figure>
+          </>
+        )}
+      />
+    </>
+  );
 }
 
 function MetricsPanel(props: {
@@ -2274,6 +2969,7 @@ function MetricsPanel(props: {
           ["Qwen failed", String(props.metrics.llm?.qwenFailed ?? 0)],
           ["Flags on", String(props.metrics.flags?.enabled ?? "—")],
           ["Quota keys", String(props.metrics.quotas?.count ?? "—")],
+          ["Usage events", metricNumber(props.metrics.usage?.events)],
           ["Stored bytes", formatBytes(props.metrics.storage?.bytes)],
         ];
   return (
@@ -2359,108 +3055,128 @@ function AuditPanel(props: {
         Immutable operator actions and persisted Qwen failures. Open a row for before/after metadata
         and the request id.
       </p>
-      <div className="toolbar">
-        <label>
-          Actor id
-          <input
-            value={props.actor}
-            onChange={(event) => {
-              props.onActor(event.target.value);
-            }}
-          />
-        </label>
-        <label>
-          Action
-          <input
-            value={props.action}
-            onChange={(event) => {
-              props.onAction(event.target.value);
-            }}
-          />
-        </label>
-        <label>
-          Request id
-          <input
-            value={props.requestId}
-            onChange={(event) => {
-              props.onRequestId(event.target.value);
-            }}
-          />
-        </label>
-        <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
-          Apply
-        </button>
-      </div>
-      {props.events.length === 0 ? (
-        <p className="empty">No audit events loaded.</p>
-      ) : (
-        <div className="scroll-table">
-          <table className="data">
-            <caption>Operator audit log</caption>
-            <thead>
-              <tr>
-                <th>When</th>
-                <th>Action</th>
-                <th>Resource</th>
-                <th>Reason</th>
-              </tr>
-            </thead>
-            <tbody>
-              {props.events.map((event) => (
-                <AuditRows
-                  key={event.id}
-                  event={event}
-                  open={props.openId === event.id}
-                  onToggle={() => {
-                    props.onOpen(props.openId === event.id ? null : event.id);
-                  }}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <OperatorTable
+        caption="Operator audit log"
+        noun="event"
+        leading={
+          <>
+            <label>
+              Actor id
+              <input
+                value={props.actor}
+                onChange={(event) => {
+                  props.onActor(event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              Action
+              <input
+                value={props.action}
+                onChange={(event) => {
+                  props.onAction(event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              Request id
+              <input
+                value={props.requestId}
+                onChange={(event) => {
+                  props.onRequestId(event.target.value);
+                }}
+              />
+            </label>
+            <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
+              Apply
+            </button>
+          </>
+        }
+        rows={props.events}
+        rowKey={(event) => event.id}
+        empty="No audit events loaded."
+        expandedId={props.openId}
+        columns={[
+          {
+            id: "when",
+            header: "When",
+            sortValue: (event) => Date.parse(event.createdAt) || 0,
+            render: (event) => (
+              <RowOpen
+                open={props.openId === event.id}
+                label={formatWhen(event.createdAt)}
+                onToggle={() => {
+                  props.onOpen(props.openId === event.id ? null : event.id);
+                }}
+              />
+            ),
+          },
+          {
+            id: "action",
+            header: "Action",
+            sortValue: (event) => event.action,
+            searchValue: (event) => event.action,
+            render: (event) => event.action.replaceAll("_", " "),
+          },
+          {
+            id: "actor",
+            header: "Actor",
+            sortValue: (event) => event.actorId,
+            searchValue: (event) => event.actorId,
+            render: (event) => (
+              <span className="mono" title={event.actorId}>
+                {shortId(event.actorId)}
+              </span>
+            ),
+          },
+          {
+            id: "resource",
+            header: "Resource",
+            sortValue: (event) => event.resourceType,
+            searchValue: (event) => `${event.resourceType} ${event.resourceId}`,
+            render: (event) => (
+              <>
+                {event.resourceType}
+                <div className="mono">{shortId(event.resourceId)}</div>
+              </>
+            ),
+          },
+          {
+            id: "reason",
+            header: "Reason",
+            searchValue: (event) => event.reason,
+            render: (event) => (
+              <div className="cell-clip" title={event.reason}>
+                {event.reason}
+              </div>
+            ),
+          },
+        ]}
+        renderExpand={(event) => (
+          <>
+            <dl className="detail-grid wide">
+              <dt>Event id</dt>
+              <dd className="mono">{event.id}</dd>
+              <dt>Actor</dt>
+              <dd className="mono">{event.actorId}</dd>
+              <dt>Resource id</dt>
+              <dd className="mono">{event.resourceId}</dd>
+              <dt>Request id</dt>
+              <dd className="mono">{event.traceId ?? "—"}</dd>
+            </dl>
+            <figure className="prose-field">
+              <figcaption>Metadata</figcaption>
+              <pre className="prose-block">{formatJson(event.metadata ?? {})}</pre>
+            </figure>
+          </>
+        )}
+      />
       {props.nextCursor !== null ? (
         <div className="actions">
           <button type="button" className="ghost" disabled={props.busy} onClick={props.onLoadMore}>
             Load more
           </button>
         </div>
-      ) : null}
-    </>
-  );
-}
-
-function AuditRows(props: { event: AuditEvent; open: boolean; onToggle: () => void }) {
-  const event = props.event;
-  return (
-    <>
-      <tr className={props.open ? "selected" : undefined}>
-        <td>
-          <button type="button" className="ghost" onClick={props.onToggle}>
-            {formatWhen(event.createdAt)}
-          </button>
-        </td>
-        <td>{event.action}</td>
-        <td>
-          {event.resourceType}
-          <div className="mono">{event.resourceId}</div>
-        </td>
-        <td>{event.reason}</td>
-      </tr>
-      {props.open ? (
-        <tr className="expand">
-          <td colSpan={4}>
-            <dl className="detail-grid">
-              <dt>Actor</dt>
-              <dd className="mono">{event.actorId}</dd>
-              <dt>Request id</dt>
-              <dd className="mono">{event.traceId ?? "—"}</dd>
-              <dt>Metadata</dt>
-              <dd className="mono">{JSON.stringify(event.metadata ?? {}, null, 2)}</dd>
-            </dl>
-          </td>
-        </tr>
       ) : null}
     </>
   );
@@ -2475,6 +3191,7 @@ function TracePanel(props: {
   onKind: (value: string) => void;
   onApply: () => void;
 }) {
+  const [openId, setOpenId] = useState<string | null>(null);
   return (
     <>
       <h2>Trace</h2>
@@ -2482,66 +3199,119 @@ function TracePanel(props: {
         Live Worker events for Managed Qwen and operator changes. Paste an app request id to see
         what that call did. Failures are also written to Audit so they survive a new isolate.
       </p>
-      <div className="toolbar">
-        <label>
-          Request id
-          <input
-            value={props.requestId}
-            onChange={(event) => {
-              props.onRequestId(event.target.value);
-            }}
-          />
-        </label>
-        <label>
-          Kind
-          <input
-            value={props.kind}
-            onChange={(event) => {
-              props.onKind(event.target.value);
-            }}
-          />
-        </label>
-        <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
-          Apply
-        </button>
-      </div>
-      {props.events.length === 0 ? (
-        <p className="empty">No events in this isolate yet. Probe Qwen on Desk or use the app.</p>
-      ) : (
-        <div className="scroll-table">
-          <table className="data">
-            <caption>Operator event log</caption>
-            <thead>
-              <tr>
-                <th>When</th>
-                <th>Kind</th>
-                <th>Task</th>
-                <th>Summary</th>
-              </tr>
-            </thead>
-            <tbody>
-              {props.events.map((event) => (
-                <tr key={event.id}>
-                  <td className="mono">{formatWhen(event.at)}</td>
-                  <td>
-                    <span className={`pill ${statusTone(event.status ?? event.kind)}`}>
-                      {event.kind}
-                    </span>
-                  </td>
-                  <td>{event.task ?? "—"}</td>
-                  <td>
-                    {event.summary}
-                    <div className="mono">{event.requestId}</div>
-                    {event.detail !== undefined && event.detail !== "" ? (
-                      <div>{event.detail}</div>
-                    ) : null}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <OperatorTable
+        caption="Operator event log"
+        noun="event"
+        leading={
+          <>
+            <label>
+              Request id
+              <input
+                value={props.requestId}
+                onChange={(event) => {
+                  props.onRequestId(event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              Kind
+              <input
+                value={props.kind}
+                onChange={(event) => {
+                  props.onKind(event.target.value);
+                }}
+              />
+            </label>
+            <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
+              Apply
+            </button>
+          </>
+        }
+        rows={props.events}
+        rowKey={(event) => event.id}
+        empty="No events in this isolate yet. Probe Qwen on Desk or use the app."
+        expandedId={openId}
+        columns={[
+          {
+            id: "when",
+            header: "When",
+            sortValue: (event) => Date.parse(event.at) || 0,
+            render: (event) => (
+              <RowOpen
+                open={openId === event.id}
+                label={formatWhen(event.at)}
+                onToggle={() => {
+                  setOpenId(openId === event.id ? null : event.id);
+                }}
+              />
+            ),
+          },
+          {
+            id: "kind",
+            header: "Kind",
+            sortValue: (event) => event.kind,
+            searchValue: (event) => event.kind,
+            render: (event) => (
+              <span className={`pill ${statusTone(event.status ?? event.kind)}`}>
+                {event.kind.replaceAll("_", " ")}
+              </span>
+            ),
+          },
+          {
+            id: "task",
+            header: "Task",
+            sortValue: (event) => event.task ?? "",
+            render: (event) => event.task ?? "—",
+          },
+          {
+            id: "request",
+            header: "Request",
+            sortValue: (event) => event.requestId,
+            searchValue: (event) => event.requestId,
+            render: (event) => (
+              <span className="mono" title={event.requestId}>
+                {shortId(event.requestId, 12)}
+              </span>
+            ),
+          },
+          {
+            id: "summary",
+            header: "Summary",
+            searchValue: (event) => event.summary,
+            render: (event) => (
+              <div className="cell-clip" title={event.summary}>
+                {event.summary}
+              </div>
+            ),
+          },
+        ]}
+        renderExpand={(event) => (
+          <>
+            <dl className="detail-grid wide">
+              <dt>Event id</dt>
+              <dd className="mono">{event.id}</dd>
+              <dt>Request id</dt>
+              <dd className="mono">{event.requestId}</dd>
+              <dt>Status</dt>
+              <dd>{event.status ?? "—"}</dd>
+              <dt>Task</dt>
+              <dd>{event.task ?? "—"}</dd>
+            </dl>
+            {event.detail !== undefined && event.detail !== "" ? (
+              <figure className="prose-field">
+                <figcaption>Detail</figcaption>
+                <pre className="prose-block">{event.detail}</pre>
+              </figure>
+            ) : null}
+            {event.metadata !== undefined ? (
+              <figure className="prose-field">
+                <figcaption>Metadata</figcaption>
+                <pre className="prose-block">{formatJson(event.metadata)}</pre>
+              </figure>
+            ) : null}
+          </>
+        )}
+      />
     </>
   );
 }
@@ -2593,59 +3363,70 @@ function FlagsPanel(props: {
         Kill switches for managed Qwen, account sync, optional cloud media, and maintenance. Rollout
         is the percent of signed-in sessions that should see the flag.
       </p>
-      {props.flags.length === 0 ? (
-        <p className="empty">No flags loaded.</p>
-      ) : (
-        <div className="scroll-table">
-          <table className="data">
-            <caption>Product feature flags</caption>
-            <thead>
-              <tr>
-                <th>Key</th>
-                <th>State</th>
-                <th>Rollout</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {props.flags.map((flag) => (
-                <tr key={flag.key}>
-                  <td>
-                    <div>{flag.key.replaceAll("_", " ")}</div>
-                    <div className="mono">{flag.key}</div>
-                  </td>
-                  <td>
-                    <span className={`pill ${flag.enabled ? "ok" : "warn"}`}>
-                      {flag.enabled ? "on" : "off"}
-                    </span>
-                  </td>
-                  <td>
-                    <FlagRollout
-                      value={flag.rolloutPercent ?? 100}
-                      disabled={!props.canMutate || props.busy}
-                      onSave={(rollout) => {
-                        props.onSave(flag, rollout);
-                      }}
-                    />
-                  </td>
-                  <td className="row-actions">
-                    <button
-                      type="button"
-                      className="ghost"
-                      disabled={!props.canMutate || props.busy}
-                      onClick={() => {
-                        props.onToggle(flag);
-                      }}
-                    >
-                      {flag.enabled ? "Disable" : "Enable"}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <OperatorTable
+        caption="Product feature flags"
+        noun="flag"
+        rows={props.flags}
+        rowKey={(flag) => flag.key}
+        empty="No flags loaded."
+        columns={[
+          {
+            id: "key",
+            header: "Key",
+            sortValue: (flag) => flag.key,
+            searchValue: (flag) => flag.key,
+            render: (flag) => (
+              <>
+                <div>{flag.key.replaceAll("_", " ")}</div>
+                <div className="mono">{flag.key}</div>
+              </>
+            ),
+          },
+          {
+            id: "state",
+            header: "State",
+            sortValue: (flag) => (flag.enabled ? 1 : 0),
+            render: (flag) => (
+              <span className={`pill ${flag.enabled ? "ok" : "warn"}`}>
+                {flag.enabled ? "on" : "off"}
+              </span>
+            ),
+          },
+          {
+            id: "rollout",
+            header: "Rollout",
+            numeric: true,
+            sortValue: (flag) => flag.rolloutPercent ?? 100,
+            render: (flag) => (
+              <FlagRollout
+                value={flag.rolloutPercent ?? 100}
+                disabled={!props.canMutate || props.busy}
+                onSave={(rollout) => {
+                  props.onSave(flag, rollout);
+                }}
+              />
+            ),
+          },
+          {
+            id: "actions",
+            header: "Actions",
+            render: (flag) => (
+              <div className="row-actions">
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={!props.canMutate || props.busy}
+                  onClick={() => {
+                    props.onToggle(flag);
+                  }}
+                >
+                  {flag.enabled ? "Disable" : "Enable"}
+                </button>
+              </div>
+            ),
+          },
+        ]}
+      />
     </>
   );
 }
@@ -2665,60 +3446,75 @@ function QuotasPanel(props: {
         Starter limits from the product plan: 50 managed Qwen tasks a day, 250 MB cloud media, three
         cloud books, and two devices.
       </p>
-      {props.quotas.length === 0 ? (
-        <p className="empty">No quotas loaded.</p>
-      ) : (
-        <div className="scroll-table">
-          <table className="data">
-            <caption>Account starter quotas</caption>
-            <thead>
-              <tr>
-                <th>Key</th>
-                <th>Used</th>
-                <th>Limit</th>
-                <th>Period</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {props.quotas.map((quota) => (
-                <tr key={quota.key}>
-                  <td>
-                    <div>{quota.key.replaceAll("_", " ")}</div>
-                    <div className="mono">{quota.key}</div>
-                  </td>
-                  <td>
-                    {quota.key === "cloud_media_bytes" ? formatBytes(quota.used) : quota.used}
-                  </td>
-                  <td>
-                    <input
-                      value={props.drafts[quota.key] ?? String(quota.limit)}
-                      inputMode="decimal"
-                      disabled={!props.canMutate}
-                      onChange={(event) => {
-                        props.onDraft(quota.key, event.target.value);
-                      }}
-                    />
-                  </td>
-                  <td>{formatWhen(quota.periodEndsAt)}</td>
-                  <td className="row-actions">
-                    <button
-                      type="button"
-                      className="ghost"
-                      disabled={!props.canMutate || props.busy}
-                      onClick={() => {
-                        props.onSave(quota);
-                      }}
-                    >
-                      Save limit
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <OperatorTable
+        caption="Account starter quotas"
+        noun="quota"
+        rows={props.quotas}
+        rowKey={(quota) => quota.key}
+        empty="No quotas loaded."
+        columns={[
+          {
+            id: "key",
+            header: "Key",
+            sortValue: (quota) => quota.key,
+            searchValue: (quota) => quota.key,
+            render: (quota) => (
+              <>
+                <div>{quota.key.replaceAll("_", " ")}</div>
+                <div className="mono">{quota.key}</div>
+              </>
+            ),
+          },
+          {
+            id: "used",
+            header: "Used",
+            numeric: true,
+            sortValue: (quota) => quota.used,
+            render: (quota) =>
+              quota.key === "cloud_media_bytes" ? formatBytes(quota.used) : quota.used,
+          },
+          {
+            id: "limit",
+            header: "Limit",
+            numeric: true,
+            sortValue: (quota) => quota.limit,
+            render: (quota) => (
+              <input
+                value={props.drafts[quota.key] ?? String(quota.limit)}
+                inputMode="decimal"
+                disabled={!props.canMutate}
+                onChange={(event) => {
+                  props.onDraft(quota.key, event.target.value);
+                }}
+              />
+            ),
+          },
+          {
+            id: "period",
+            header: "Period",
+            sortValue: (quota) => Date.parse(quota.periodEndsAt) || 0,
+            render: (quota) => formatWhen(quota.periodEndsAt),
+          },
+          {
+            id: "actions",
+            header: "Actions",
+            render: (quota) => (
+              <div className="row-actions">
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={!props.canMutate || props.busy}
+                  onClick={() => {
+                    props.onSave(quota);
+                  }}
+                >
+                  Save limit
+                </button>
+              </div>
+            ),
+          },
+        ]}
+      />
     </>
   );
 }
@@ -2735,77 +3531,112 @@ function PrivacyPanel(props: {
     <>
       <h2>Privacy</h2>
       <p className="lede">Export and deletion requests. Completing a deletion revokes sessions.</p>
-      {props.requests.length === 0 ? (
-        <p className="empty">No privacy requests in this window.</p>
-      ) : (
-        <div className="scroll-table">
-          <table className="data">
-            <caption>Privacy requests</caption>
-            <thead>
-              <tr>
-                <th>Account</th>
-                <th>Kind</th>
-                <th>Status</th>
-                <th>Opened</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {props.requests.map((request) => (
-                <tr key={request.id}>
-                  <td>
-                    <div className="mono">{request.accountId}</div>
-                  </td>
-                  <td>{request.kind}</td>
-                  <td>
-                    <span className={`pill ${statusTone(request.status)}`}>{request.status}</span>
-                  </td>
-                  <td>{formatWhen(request.createdAt)}</td>
-                  <td className="row-actions">
-                    {request.status === "queued" || request.status === "running" ? (
-                      <>
-                        <ConfirmButton
-                          id={`privacy-complete:${request.id}`}
-                          armed={props.armed}
-                          disabled={!props.canMutate || props.busy}
-                          label="Complete"
-                          confirm="Confirm complete"
-                          onArm={props.onArm}
-                          onConfirm={() => {
-                            props.onMutate(
-                              `/v1/admin/privacy-requests/${request.id}/actions`,
-                              "complete",
-                              "Privacy request completed.",
-                            );
-                          }}
-                        />
-                        <ConfirmButton
-                          id={`privacy-cancel:${request.id}`}
-                          armed={props.armed}
-                          disabled={!props.canMutate || props.busy}
-                          kind="danger"
-                          label="Cancel"
-                          confirm="Confirm cancel"
-                          onArm={props.onArm}
-                          onConfirm={() => {
-                            props.onMutate(
-                              `/v1/admin/privacy-requests/${request.id}/actions`,
-                              "cancel",
-                              "Privacy request cancelled.",
-                            );
-                          }}
-                        />
-                      </>
-                    ) : (
-                      <span className="mute">No action</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <OperatorTable
+        caption="Privacy requests"
+        noun="request"
+        rows={props.requests}
+        rowKey={(request) => request.id}
+        empty="No privacy requests in this window."
+        columns={[
+          {
+            id: "id",
+            header: "Id",
+            sortValue: (request) => request.id,
+            searchValue: (request) => request.id,
+            render: (request) => (
+              <span className="mono" title={request.id}>
+                {shortId(request.id)}
+              </span>
+            ),
+          },
+          {
+            id: "account",
+            header: "Account",
+            sortValue: (request) => request.accountId,
+            searchValue: (request) => request.accountId,
+            render: (request) => (
+              <span className="mono" title={request.accountId}>
+                {shortId(request.accountId)}
+              </span>
+            ),
+          },
+          {
+            id: "kind",
+            header: "Kind",
+            sortValue: (request) => request.kind,
+            render: (request) => request.kind,
+          },
+          {
+            id: "status",
+            header: "Status",
+            sortValue: (request) => request.status,
+            render: (request) => (
+              <span className={`pill ${statusTone(request.status)}`}>{request.status}</span>
+            ),
+          },
+          {
+            id: "error",
+            header: "Error",
+            searchValue: (request) => request.error ?? "",
+            render: (request) => (
+              <div className="cell-clip" title={request.error ?? undefined}>
+                {request.error ?? "—"}
+              </div>
+            ),
+          },
+          {
+            id: "opened",
+            header: "Opened",
+            sortValue: (request) => Date.parse(request.createdAt) || 0,
+            render: (request) => formatWhen(request.createdAt),
+          },
+          {
+            id: "actions",
+            header: "Actions",
+            render: (request) => (
+              <div className="row-actions">
+                {request.status === "queued" || request.status === "running" ? (
+                  <>
+                    <ConfirmButton
+                      id={`privacy-complete:${request.id}`}
+                      armed={props.armed}
+                      disabled={!props.canMutate || props.busy}
+                      label="Complete"
+                      confirm="Confirm complete"
+                      onArm={props.onArm}
+                      onConfirm={() => {
+                        props.onMutate(
+                          `/v1/admin/privacy-requests/${request.id}/actions`,
+                          "complete",
+                          "Privacy request completed.",
+                        );
+                      }}
+                    />
+                    <ConfirmButton
+                      id={`privacy-cancel:${request.id}`}
+                      armed={props.armed}
+                      disabled={!props.canMutate || props.busy}
+                      kind="danger"
+                      label="Cancel"
+                      confirm="Confirm cancel"
+                      onArm={props.onArm}
+                      onConfirm={() => {
+                        props.onMutate(
+                          `/v1/admin/privacy-requests/${request.id}/actions`,
+                          "cancel",
+                          "Privacy request cancelled.",
+                        );
+                      }}
+                    />
+                  </>
+                ) : (
+                  <span className="mute">No action</span>
+                )}
+              </div>
+            ),
+          },
+        ]}
+      />
     </>
   );
 }

@@ -46,6 +46,12 @@ describe("admin and privacy API", () => {
       }),
     );
     expect(policies.status).toBe(200);
+    const usage = await app.fetch(
+      new Request("http://localhost/v1/admin/product-events", {
+        headers: { authorization: "Bearer admin" },
+      }),
+    );
+    expect(usage.status).toBe(200);
     const policyBody = await readJson(policies);
     expect(Array.isArray(policyBody)).toBe(true);
     if (Array.isArray(policyBody) && isRecord(policyBody[0])) {
@@ -81,6 +87,7 @@ describe("admin and privacy API", () => {
           reason: "tune translation prompt",
           promptVersion: "qwen-managed-v2",
           systemPrompt: "Return JSON with keys translation and notes. Be terse.",
+          userPrompt: "Translate {{source}} into {{targetLanguage}}.",
         }),
       }),
     );
@@ -90,6 +97,7 @@ describe("admin and privacy API", () => {
     expect(isRecord(body) && body.systemPrompt).toBe(
       "Return JSON with keys translation and notes. Be terse.",
     );
+    expect(isRecord(body) && body.userPrompt).toBe("Translate {{source}} into {{targetLanguage}}.");
     const events = await app.fetch(
       new Request("http://localhost/v1/admin/events", {
         headers: { authorization: "Bearer admin" },
@@ -110,6 +118,8 @@ describe("admin and privacy API", () => {
     expect(user.status).toBe(200);
     const userBody = await readJson(user);
     expect(isRecord(userBody) && Array.isArray(userBody.quotas)).toBe(true);
+    expect(isRecord(userBody) && userBody.accountId).toBe(USER_ID);
+    expect(isRecord(userBody) && Array.isArray(userBody.devices)).toBe(true);
   });
 
   it("does not report a policy save when Postgres rejected the write", async () => {
@@ -373,7 +383,8 @@ describe("admin and privacy API", () => {
     expect(exported.status).toBe(202);
     const job = await readJson(exported);
     expect(isRecord(job) && job.status).toBe("ready");
-    if (!isRecord(job) || typeof job.id !== "string") {
+    expect(isRecord(job) && typeof job.assetId === "string").toBe(true);
+    if (!isRecord(job) || typeof job.id !== "string" || typeof job.assetId !== "string") {
       return;
     }
     const fetched = await app.fetch(
@@ -382,6 +393,23 @@ describe("admin and privacy API", () => {
       }),
     );
     expect(fetched.status).toBe(200);
+    const content = await app.fetch(
+      new Request(`http://localhost/v1/assets/${job.assetId}/content`, {
+        headers: {
+          authorization: "Bearer test",
+          "X-Device-Id": DEVICE_ID,
+        },
+      }),
+    );
+    expect(content.status).toBe(200);
+    const payload = await readJson(content);
+    expect(isRecord(payload) && isRecord(payload.account)).toBe(true);
+    const usage = await app.fetch(
+      new Request("http://localhost/v1/admin/product-events", {
+        headers: { authorization: "Bearer admin" },
+      }),
+    );
+    expect(usage.status).toBe(403);
     const deletion = await app.fetch(
       new Request("http://localhost/v1/me/deletion", {
         method: "POST",

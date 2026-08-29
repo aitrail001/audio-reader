@@ -38,11 +38,6 @@ struct LibraryView: View {
             .padding(24)
         }
         .background(Palette.bg)
-        .safeAreaInset(edge: .top, spacing: 0) {
-            if let progress = state.libraryScanProgress, !state.books.isEmpty {
-                LibraryProgressBanner(progress: progress)
-            }
-        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if let book = state.selectedBook {
                 ChapterStrip(
@@ -269,26 +264,54 @@ private struct ChapterStrip: View {
     }
 }
 
-private struct LibraryProgressBanner: View {
-    let progress: LibraryScanProgress
+/// Slim status strip for library scan and account cloud work. Must not cover the
+/// rest of the window — Settings and reading stay interactive while this is visible.
+struct WorkStatusBanner: View {
+    var library: LibraryScanProgress?
+    var accountMessage: String?
 
     var body: some View {
-        HStack(spacing: 12) {
-            ProgressView(value: progress.fraction)
-                .progressViewStyle(.linear)
-                .frame(width: 180)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(progress.stage)
-                    .font(.system(size: 12, weight: .semibold))
-                Text(progress.detail)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+        if library == nil && (accountMessage == nil || accountMessage?.isEmpty == true) {
+            EmptyView()
+        } else {
+            HStack(spacing: 12) {
+                if let library, let fraction = library.fraction {
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
+                        .frame(width: 160)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    if let library {
+                        Text(library.stage)
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(library.detail)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    if let accountMessage, !accountMessage.isEmpty {
+                        Text(accountMessage)
+                            .font(.system(size: 12, weight: library == nil ? .semibold : .regular))
+                            .foregroundStyle(library == nil ? Palette.ink : Palette.dim)
+                    }
+                }
+                Spacer()
             }
-            Spacer()
+            .padding(.horizontal, 24)
+            .padding(.vertical, 12)
+            .background(.regularMaterial)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("AudioReader activity")
+            .accessibilityValue(statusValue)
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 12)
-        .background(.regularMaterial)
-        .accessibilityElement(children: .combine)
+    }
+
+    private var statusValue: String {
+        [library.map { "\($0.stage). \($0.detail)" }, accountMessage]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: ". ")
     }
 }

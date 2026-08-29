@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 #if canImport(AudioReaderNetworking)
 import AudioReaderNetworking
 #endif
@@ -13,6 +14,7 @@ struct AccountSessionView: View {
     @State private var confirmDelete = false
     @State private var deletionReason = ""
     @State private var devicePendingRevoke: AccountDevice?
+    @State private var showingExportSaver = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: stackSpacing) {
@@ -52,6 +54,20 @@ struct AccountSessionView: View {
                     .accessibilityLabel("Hosted service is in maintenance mode")
             }
 
+            if session.isBusy || session.activityMessage != nil {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(session.activityMessage ?? "Working with your account…")
+                        .font(.body)
+                        .foregroundStyle(Palette.dim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Account activity")
+                .accessibilityValue(session.activityMessage ?? "Working with your account…")
+            }
+
             if session.mode.isSignedIn {
                 signedInContent
             } else {
@@ -61,7 +77,22 @@ struct AccountSessionView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, dynamicTypeSize.isAccessibilitySize ? 8 : 0)
         .dynamicTypeSize(.xSmall ... .accessibility5)
-        .disabled(session.isBusy)
+        .onChange(of: session.pendingExport?.id) { _, newID in
+            showingExportSaver = newID != nil
+        }
+        .fileExporter(
+            isPresented: $showingExportSaver,
+            document: AccountExportDocument(data: session.pendingExport?.data ?? Data()),
+            contentType: .json,
+            defaultFilename: session.pendingExport?.fileName ?? "audioreader-account.json"
+        ) { result in
+            switch result {
+            case .success:
+                session.markExportSaved()
+            case .failure:
+                session.markExportSaveCancelled()
+            }
+        }
         .task(id: session.mode) {
             if session.mode.isSignedIn {
                 // Do not POST /token/refresh here. Sign-in just issued tokens;
@@ -125,6 +156,7 @@ struct AccountSessionView: View {
                     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
             }
             .accessibilityLabel("Sign in with Google")
+            .disabled(session.isBusy)
 
             Button {
                 Task { await session.signInWithOAuth(.microsoft) }
@@ -134,6 +166,7 @@ struct AccountSessionView: View {
                     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
             }
             .accessibilityLabel("Sign in with Microsoft")
+            .disabled(session.isBusy)
 
             Text("Or request a one-time email code. The same confirmation is shown whether or not the address already has an account.")
                 .font(.body)
@@ -162,7 +195,7 @@ struct AccountSessionView: View {
             .buttonStyle(.borderedProminent)
             .tint(Palette.terracotta)
             .accessibilityLabel("Send email sign-in code")
-            .disabled(email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(session.isBusy || email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
             if session.pendingEmail != nil {
                 Text("Enter the sign-in code from your email.")
@@ -188,7 +221,7 @@ struct AccountSessionView: View {
                 }
                 .buttonStyle(.bordered)
                 .accessibilityLabel("Verify email sign-in code")
-                .disabled(!(6...12).contains(code.filter(\.isNumber).count))
+                .disabled(session.isBusy || !(6...12).contains(code.filter(\.isNumber).count))
             }
         }
     }
@@ -217,7 +250,7 @@ struct AccountSessionView: View {
                     .font(.body)
             }
             .accessibilityLabel("Sync learning data across devices")
-            .disabled(!session.flagEnabled("account_sync", default: false))
+            .disabled(session.isBusy || !session.flagEnabled("account_sync", default: false))
 
             Text("Sync is optional. Turning it on pushes pending learning-data changes and pulls updates from your other devices. Books and media stay on this device unless you enable cloud media later.")
                 .font(.body)
@@ -251,14 +284,19 @@ struct AccountSessionView: View {
             }
 
             Button {
-                Task { await session.exportAccount() }
+                if session.pendingExport != nil {
+                    showingExportSaver = true
+                } else {
+                    Task { await session.exportAccount() }
+                }
             } label: {
-                Text("Export account data")
+                Text(session.pendingExport == nil ? "Export account data" : "Save export")
                     .font(.body)
                     .frame(maxWidth: .infinity, minHeight: 44)
             }
             .buttonStyle(.bordered)
-            .accessibilityLabel("Export account data")
+            .accessibilityLabel(session.pendingExport == nil ? "Export account data" : "Save export")
+            .disabled(session.isBusy && session.pendingExport == nil)
 
             Button(role: .destructive) {
                 confirmSignOut = true
@@ -270,6 +308,7 @@ struct AccountSessionView: View {
             .buttonStyle(.plain)
             .foregroundStyle(Color.red)
             .accessibilityLabel("Sign out of AudioReader account")
+            .disabled(session.isBusy)
 
             Button(role: .destructive) {
                 confirmDelete = true
@@ -281,6 +320,7 @@ struct AccountSessionView: View {
             .buttonStyle(.plain)
             .foregroundStyle(Color.red)
             .accessibilityLabel("Delete AudioReader account")
+            .disabled(session.isBusy)
         }
     }
 
@@ -318,7 +358,27 @@ struct AccountSessionView: View {
             .font(.body)
             .frame(minHeight: 44)
             .accessibilityLabel("Revoke \(device.displayName)")
+            .disabled(session.isBusy)
         }
         .accessibilityElement(children: .contain)
+    }
+}
+
+private struct AccountExportDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+    static var writableContentTypes: [UTType] { [.json] }
+
+    var data: Data
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
     }
 }
