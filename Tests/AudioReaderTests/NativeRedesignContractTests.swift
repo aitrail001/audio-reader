@@ -79,7 +79,8 @@ struct NativeRedesignContractTests {
 
         #expect(vocabulary.contains("Review due — "))
         #expect(vocabulary.contains("words.reviewDue"))
-        #expect(vocabulary.contains("VocabReviewScheduler.dueEntries"))
+        #expect(vocabulary.contains("VocabularyLearningAnalytics.queue(entries: filtered, at: Date()).due"))
+        #expect(!vocabulary.contains("VocabReviewScheduler.dueEntries(in: filtered"))
         #expect(vocabulary.contains("minHeight: 44"))
     }
 

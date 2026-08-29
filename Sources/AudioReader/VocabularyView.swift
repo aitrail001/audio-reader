@@ -61,7 +61,7 @@ struct VocabularyView: View {
     }
 
     private var dueEntries: [VocabEntry] {
-        VocabReviewScheduler.dueEntries(in: filtered, at: Date())
+        VocabularyLearningAnalytics.queue(entries: filtered, at: Date()).due
     }
 
     private var learningSnapshot: VocabularyLearningSnapshot {
