@@ -256,6 +256,7 @@ export type OpsStore = {
   listProductEvents(filter?: {
     accountId?: string;
     name?: string;
+    requestId?: string;
     from?: string;
     to?: string;
     limit?: number;
@@ -596,6 +597,7 @@ export function createMemoryOpsStore(
     listProductEvents(filter) {
       const accountId = filter?.accountId?.trim() ?? "";
       const name = filter?.name?.trim() ?? "";
+      const requestId = filter?.requestId?.trim() ?? "";
       const from = filter?.from?.trim() ?? "";
       const to = filter?.to?.trim() ?? "";
       const limit = Math.min(Math.max(filter?.limit ?? 100, 1), 500);
@@ -603,6 +605,7 @@ export function createMemoryOpsStore(
         productEvents
           .filter((event) => (accountId === "" ? true : event.accountId === accountId))
           .filter((event) => (name === "" ? true : productEventNameMatches(event.name, name)))
+          .filter((event) => (requestId === "" ? true : event.requestId === requestId))
           .filter((event) => (from === "" ? true : event.createdAt >= from))
           .filter((event) => (to === "" ? true : event.createdAt <= to))
           .slice(0, limit)
@@ -1235,6 +1238,9 @@ export function createSupabaseOpsStore(
       if ((filter?.name?.trim() ?? "") !== "") {
         query.name = productEventNameQuery(filter?.name?.trim() ?? "");
       }
+      if ((filter?.requestId?.trim() ?? "") !== "") {
+        query.request_id = `eq.${filter?.requestId?.trim() ?? ""}`;
+      }
       if ((filter?.from?.trim() ?? "") !== "") {
         query.created_at = `gte.${filter?.from?.trim() ?? ""}`;
       }
@@ -1658,7 +1664,7 @@ async function patchRestRow<T>(input: {
         column: unknown,
         id: input.id,
       });
-      delete pending[unknown];
+      Reflect.deleteProperty(pending, unknown);
       if (!pendingHasSubstantiveWrite(pending)) {
         logPersistence(`${input.resource}_patch_empty_after_unknown_columns`, { id: input.id });
         throw new RestPersistenceError(
@@ -2088,7 +2094,11 @@ async function persistCacheEntry(
   }
   const replay = await fetchCacheByKey(rest, input.cacheKey);
   if (replay !== undefined) {
-    logPersistence("cache_put_replay", { id: replay.id, cacheKey: input.cacheKey, status: response.status });
+    logPersistence("cache_put_replay", {
+      id: replay.id,
+      cacheKey: input.cacheKey,
+      status: response.status,
+    });
     return replay;
   }
   logPersistence("cache_put_failed", {

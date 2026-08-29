@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   API_BASE,
+  AdminApiError,
   AdminSessionError,
   fetchAuthConfig,
   getJson,
@@ -14,6 +15,13 @@ import {
   verifyOtp,
   type StoredSession,
 } from "./api";
+import {
+  destinationQuery,
+  initialOperatorLocation,
+  mutationSummary,
+  policyDraftErrors,
+  quotaReductionNeedsConfirmation,
+} from "./operator-state";
 import {
   extractAccessToken,
   extractSession,
@@ -69,20 +77,22 @@ import type {
 
 const RAIL: ({ type: "label"; label: string } | { type: "item"; id: Section; label: string })[] = [
   { type: "item", id: "overview", label: "Desk" },
+  { type: "label", label: "People" },
   { type: "item", id: "users", label: "Users" },
-  { type: "label", label: "Product" },
+  { type: "item", id: "access", label: "Access" },
+  { type: "item", id: "privacy", label: "Privacy" },
+  { type: "label", label: "AI" },
+  { type: "item", id: "policies", label: "Policies" },
+  { type: "item", id: "cache", label: "Cache" },
+  { type: "label", label: "Delivery" },
+  { type: "item", id: "jobs", label: "Jobs" },
   { type: "item", id: "flags", label: "Flags" },
   { type: "item", id: "quotas", label: "Quotas" },
-  { type: "item", id: "policies", label: "Policies" },
-  { type: "label", label: "Operations" },
-  { type: "item", id: "jobs", label: "Jobs" },
-  { type: "item", id: "cache", label: "Cache" },
-  { type: "item", id: "access", label: "Access" },
+  { type: "label", label: "Observe" },
   { type: "item", id: "metrics", label: "Metrics" },
   { type: "item", id: "usage", label: "Activity" },
   { type: "item", id: "trace", label: "Trace" },
   { type: "item", id: "audit", label: "Audit" },
-  { type: "item", id: "privacy", label: "Privacy" },
 ];
 
 const BOOTSTRAP_LABELS: Record<string, string> = {
@@ -174,6 +184,16 @@ function clipText(value: string, limit = 140): string {
   return `${trimmed.slice(0, limit - 1)}…`;
 }
 
+function describeAdminError(cause: unknown): string {
+  if (!(cause instanceof AdminApiError)) {
+    return cause instanceof Error ? cause.message : "Operator request failed.";
+  }
+  const retry =
+    cause.retryAfterSeconds === null ? "" : ` Retry in ${String(cause.retryAfterSeconds)}s.`;
+  const trace = cause.traceId === "" ? "" : ` Trace ${cause.traceId}.`;
+  return `${cause.message}${retry}${trace}`;
+}
+
 function draftsFrom(policies: Policy[]): Record<string, PolicyDraft> {
   const next: Record<string, PolicyDraft> = {};
   for (const policy of policies) {
@@ -183,6 +203,10 @@ function draftsFrom(policies: Policy[]): Record<string, PolicyDraft> {
       systemPrompt: policy.systemPrompt ?? "",
       userPrompt: policy.userPrompt ?? "",
       canaryPercent: String(policy.canaryPercent ?? 0),
+      schemaVersion: policy.schemaVersion ?? "1",
+      maxInputTokens: String(policy.maxInputTokens ?? 8_000),
+      maxOutputTokens: String(policy.maxOutputTokens ?? 2_000),
+      timeoutMs: String(policy.timeoutMs ?? 30_000),
     };
   }
   return next;
@@ -190,7 +214,8 @@ function draftsFrom(policies: Policy[]): Record<string, PolicyDraft> {
 
 export function App() {
   const preview = isPreviewMode();
-  const [section, setSection] = useState<Section>("overview");
+  const initialLocation = useRef(initialOperatorLocation(window.location.search));
+  const [section, setSection] = useState<Section>(initialLocation.current.section);
   const [health, setHealth] = useState<HealthPayload | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [token, setToken] = useState(() =>
@@ -202,37 +227,56 @@ export function App() {
   const [turnstileSiteKey, setTurnstileSiteKey] = useState("");
   const [turnstileToken, setTurnstileToken] = useState("");
   const [showChallenge, setShowChallenge] = useState(false);
-  const [reason, setReason] = useState("operator update");
+  const [reason, setReason] = useState("");
+  const [mutationPreview, setMutationPreview] = useState("");
   const [busy, setBusy] = useState(false);
   const [adminError, setAdminError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [panelErrors, setPanelErrors] = useState<Partial<Record<Section, string>>>({});
+  const panelLoadCounts = useRef<Partial<Record<Section, number>>>({});
+  const [loadingPanels, setLoadingPanels] = useState<Partial<Record<Section, boolean>>>({});
   const [users, setUsers] = useState<AdminUser[]>([]);
-  const [userQuery, setUserQuery] = useState("");
+  const [userQuery, setUserQuery] = useState(initialLocation.current.filters.userQuery ?? "");
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [jobStatus, setJobStatus] = useState("");
+  const [jobStatus, setJobStatus] = useState(initialLocation.current.filters.jobStatus ?? "");
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [drafts, setDrafts] = useState<Record<string, PolicyDraft>>({});
   const [cache, setCache] = useState<CacheEntry[]>([]);
-  const [cacheState, setCacheState] = useState("");
-  const [cacheTask, setCacheTask] = useState("");
-  const [cacheFingerprint, setCacheFingerprint] = useState("");
+  const [cacheState, setCacheState] = useState(initialLocation.current.filters.cacheState ?? "");
+  const [cacheTask, setCacheTask] = useState(initialLocation.current.filters.cacheTask ?? "");
+  const [cacheFingerprint, setCacheFingerprint] = useState(
+    initialLocation.current.filters.cacheFingerprint ?? "",
+  );
   const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null);
   const [audit, setAudit] = useState<AuditEvent[]>([]);
-  const [auditActor, setAuditActor] = useState("");
-  const [auditAction, setAuditAction] = useState("");
-  const [auditRequestId, setAuditRequestId] = useState("");
+  const [auditActor, setAuditActor] = useState(initialLocation.current.filters.auditActor ?? "");
+  const [auditAction, setAuditAction] = useState(initialLocation.current.filters.auditAction ?? "");
+  const [auditRequestId, setAuditRequestId] = useState(
+    initialLocation.current.filters.auditRequestId ?? "",
+  );
   const [openAuditId, setOpenAuditId] = useState<string | null>(null);
   const [events, setEvents] = useState<OperatorEvent[]>([]);
-  const [eventRequestId, setEventRequestId] = useState("");
-  const [eventKind, setEventKind] = useState("");
+  const [eventRequestId, setEventRequestId] = useState(
+    initialLocation.current.filters.eventRequestId ?? "",
+  );
+  const [eventKind, setEventKind] = useState(initialLocation.current.filters.eventKind ?? "");
+  const [eventTask, setEventTask] = useState(initialLocation.current.filters.eventTask ?? "");
   const [usageEvents, setUsageEvents] = useState<ProductEvent[]>([]);
-  const [usageName, setUsageName] = useState("");
-  const [usageAccountId, setUsageAccountId] = useState("");
+  const [usageName, setUsageName] = useState(initialLocation.current.filters.usageName ?? "");
+  const [usageAccountId, setUsageAccountId] = useState(
+    initialLocation.current.filters.usageAccountId ?? "",
+  );
+  const [usageRequestId, setUsageRequestId] = useState(
+    initialLocation.current.filters.usageRequestId ?? "",
+  );
   const [blocked, setBlocked] = useState<BlockedAttempt[]>([]);
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
   const [flags, setFlags] = useState<FeatureFlag[]>([]);
   const [quotas, setQuotas] = useState<Quota[]>([]);
   const [privacy, setPrivacy] = useState<PrivacyRequest[]>([]);
+  const [privacyStatus, setPrivacyStatus] = useState(
+    initialLocation.current.filters.privacyStatus ?? "",
+  );
   const [quotaDrafts, setQuotaDrafts] = useState<Record<string, string>>({});
   const [diagnostics, setDiagnostics] = useState<OperatorDiagnostics | null>(null);
   const [qwenKey, setQwenKey] = useState("");
@@ -252,7 +296,9 @@ export function App() {
     jobs: string | null;
     cache: string | null;
     audit: string | null;
-  }>({ users: null, jobs: null, cache: null, audit: null });
+    usage: string | null;
+    privacy: string | null;
+  }>({ users: null, jobs: null, cache: null, audit: null, usage: null, privacy: null });
   const [metricsFrom, setMetricsFrom] = useState(() =>
     new Date(Date.now() - 86_400_000).toISOString().slice(0, 16),
   );
@@ -282,6 +328,45 @@ export function App() {
       window.clearInterval(timer);
     };
   }, []);
+
+  useEffect(() => {
+    const filters = {
+      userQuery,
+      jobStatus,
+      cacheState,
+      cacheTask,
+      cacheFingerprint,
+      auditActor,
+      auditAction,
+      auditRequestId,
+      eventRequestId,
+      eventKind,
+      eventTask,
+      usageName,
+      usageAccountId,
+      usageRequestId,
+      privacyStatus,
+    };
+    const query = destinationQuery(section, filters).toString();
+    window.history.replaceState({}, document.title, `${window.location.pathname}?${query}`);
+  }, [
+    auditAction,
+    auditActor,
+    auditRequestId,
+    cacheFingerprint,
+    cacheState,
+    cacheTask,
+    eventKind,
+    eventRequestId,
+    eventTask,
+    jobStatus,
+    section,
+    usageAccountId,
+    usageName,
+    usageRequestId,
+    privacyStatus,
+    userQuery,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -407,6 +492,36 @@ export function App() {
         if (usageAccountId.trim() !== "") {
           usageQuery.set("accountId", usageAccountId.trim());
         }
+        if (usageRequestId.trim() !== "") {
+          usageQuery.set("requestId", usageRequestId.trim());
+        }
+        if (eventTask.trim() !== "") {
+          eventsQuery.set("task", eventTask.trim());
+        }
+        const privacyQuery = new URLSearchParams();
+        if (privacyStatus !== "") privacyQuery.set("status", privacyStatus);
+        setPanelErrors({});
+        const independent = async <T,>(
+          panel: Section,
+          request: Promise<T>,
+          stale: T | null,
+        ): Promise<T | null> => {
+          const pending = (panelLoadCounts.current[panel] ?? 0) + 1;
+          panelLoadCounts.current[panel] = pending;
+          setLoadingPanels((current) => ({ ...current, [panel]: true }));
+          try {
+            return await request;
+          } catch (cause: unknown) {
+            if (cause instanceof AdminSessionError) throw cause;
+            const message = describeAdminError(cause);
+            setPanelErrors((current) => ({ ...current, [panel]: message }));
+            return stale;
+          } finally {
+            const remaining = Math.max(0, (panelLoadCounts.current[panel] ?? 1) - 1);
+            panelLoadCounts.current[panel] = remaining;
+            setLoadingPanels((current) => ({ ...current, [panel]: remaining > 0 }));
+          }
+        };
         const [
           usersPayload,
           jobsPayload,
@@ -423,26 +538,75 @@ export function App() {
           eventsPayload,
           usagePayload,
         ] = await Promise.all([
-          getJson<unknown>(`/v1/admin/users?${usersQuery.toString()}`, access),
-          getJson<unknown>(`/v1/admin/jobs?${jobQuery.toString()}`, access),
-          getJson<Policy[] | { items?: Policy[] }>("/v1/admin/llm/policies", access),
-          getJson<unknown>(`/v1/admin/cache?${cacheQuery.toString()}`, access),
-          getJson<RuntimeConfig>("/v1/admin/runtime-config", access),
-          getJson<MetricsSnapshot>(
-            `/v1/admin/metrics?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
-            access,
+          independent(
+            "users",
+            getJson<unknown>(`/v1/admin/users?${usersQuery.toString()}`, access),
+            { items: users, nextCursor: cursors.users },
           ),
-          getJson<unknown>(`/v1/admin/audit-events?${auditQuery.toString()}`, access),
-          getJson<unknown>("/v1/admin/auth/blocked-attempts", access),
-          getJsonOrNull<FeatureFlag[]>("/v1/admin/feature-flags", access),
-          getJsonOrNull<Quota[]>("/v1/admin/quotas", access),
-          getJsonOrNull<unknown>("/v1/admin/privacy-requests", access),
-          getJsonOrNull<OperatorDiagnostics>("/v1/admin/diagnostics", access),
-          getJsonOrNull<OperatorEvent[]>(
-            `/v1/admin/events${eventsQuery.toString() === "" ? "" : `?${eventsQuery.toString()}`}`,
-            access,
+          independent("jobs", getJson<unknown>(`/v1/admin/jobs?${jobQuery.toString()}`, access), {
+            items: jobs,
+            nextCursor: cursors.jobs,
+          }),
+          independent(
+            "policies",
+            getJson<Policy[] | { items?: Policy[] }>("/v1/admin/llm/policies", access),
+            policies,
           ),
-          getJsonOrNull<unknown>(`/v1/admin/product-events?${usageQuery.toString()}`, access),
+          independent(
+            "cache",
+            getJson<unknown>(`/v1/admin/cache?${cacheQuery.toString()}`, access),
+            { items: cache, nextCursor: cursors.cache },
+          ),
+          independent(
+            "overview",
+            getJson<RuntimeConfig>("/v1/admin/runtime-config", access),
+            runtime,
+          ),
+          independent(
+            "metrics",
+            getJson<MetricsSnapshot>(
+              `/v1/admin/metrics?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+              access,
+            ),
+            metrics,
+          ),
+          independent(
+            "audit",
+            getJson<unknown>(`/v1/admin/audit-events?${auditQuery.toString()}`, access),
+            { items: audit, nextCursor: cursors.audit },
+          ),
+          independent("access", getJson<unknown>("/v1/admin/auth/blocked-attempts", access), {
+            items: blocked,
+          }),
+          independent(
+            "flags",
+            getJsonOrNull<FeatureFlag[]>("/v1/admin/feature-flags", access),
+            flags,
+          ),
+          independent("quotas", getJsonOrNull<Quota[]>("/v1/admin/quotas", access), quotas),
+          independent(
+            "privacy",
+            getJsonOrNull<unknown>(`/v1/admin/privacy-requests?${privacyQuery.toString()}`, access),
+            { items: privacy, nextCursor: cursors.privacy },
+          ),
+          independent(
+            "overview",
+            getJsonOrNull<OperatorDiagnostics>("/v1/admin/diagnostics", access),
+            diagnostics,
+          ),
+          independent(
+            "trace",
+            getJsonOrNull<OperatorEvent[]>(
+              `/v1/admin/events${eventsQuery.toString() === "" ? "" : `?${eventsQuery.toString()}`}`,
+              access,
+            ),
+            events,
+          ),
+          independent(
+            "usage",
+            getJsonOrNull<unknown>(`/v1/admin/product-events?${usageQuery.toString()}`, access),
+            { items: usageEvents, nextCursor: cursors.usage },
+          ),
         ]);
         const nextPolicies = pageItems<Policy>(policiesPayload);
         setUsers(pageItems<AdminUser>(usersPayload));
@@ -450,7 +614,7 @@ export function App() {
         setPolicies(nextPolicies);
         setDrafts(draftsFrom(nextPolicies));
         setCache(pageItems<CacheEntry>(cachePayload));
-        applyRuntime(runtimePayload);
+        if (runtimePayload !== null) applyRuntime(runtimePayload);
         setMetrics(metricsPayload);
         setAudit(pageItems<AuditEvent>(auditPayload));
         setBlocked(pageItems<BlockedAttempt>(blockedPayload));
@@ -472,6 +636,8 @@ export function App() {
           jobs: nextCursorOf(jobsPayload),
           cache: nextCursorOf(cachePayload),
           audit: nextCursorOf(auditPayload),
+          usage: nextCursorOf(usagePayload),
+          privacy: nextCursorOf(privacyPayload),
         });
         setAdminError(null);
         setStatus("Operator data loaded.");
@@ -498,12 +664,15 @@ export function App() {
       cacheTask,
       eventKind,
       eventRequestId,
+      eventTask,
       jobStatus,
       usageAccountId,
       usageName,
+      usageRequestId,
       metricsFrom,
       metricsTo,
       preview,
+      privacyStatus,
       token,
       userQuery,
     ],
@@ -570,13 +739,21 @@ export function App() {
     }
   }
 
-  async function saveRuntime(extra: Record<string, unknown> = {}): Promise<void> {
+  async function saveRuntime(
+    extra: Record<string, unknown> = {},
+    summary = mutationSummary("Runtime configuration", "current settings", "draft settings"),
+  ): Promise<void> {
+    if (mutationPreview !== summary) {
+      setMutationPreview(summary);
+      setReason("");
+      setAdminError(null);
+      return;
+    }
     if (preview) {
       setStatus("Synthetic sample cannot change live configuration.");
       return;
     }
     if (!reasonReady(reason)) {
-      setAdminError("Change reason must be at least 5 characters.");
       return;
     }
     setBusy(true);
@@ -610,6 +787,8 @@ export function App() {
       setQwenKey("");
       setGcsJson("");
       setTurnstileSecret("");
+      setReason("");
+      setMutationPreview("");
       setAdminError(null);
       setStatus("Runtime configuration saved. Workers pick it up without a redeploy.");
       await loadAdmin();
@@ -655,13 +834,19 @@ export function App() {
     method: string,
     body: unknown,
     okMessage: string,
+    summary: string,
   ): Promise<void> {
+    if (mutationPreview !== summary) {
+      setMutationPreview(summary);
+      setReason("");
+      setAdminError(null);
+      return;
+    }
     if (preview) {
       setStatus("Synthetic sample cannot change live configuration.");
       return;
     }
     if (!reasonReady(reason)) {
-      setAdminError("Change reason must be at least 5 characters.");
       return;
     }
     setBusy(true);
@@ -669,6 +854,8 @@ export function App() {
       await sendJson(path, token, method, body);
       setArmed(null);
       setStatus(okMessage);
+      setReason("");
+      setMutationPreview("");
       await loadAdmin();
     } catch (cause: unknown) {
       setAdminError(cause instanceof Error ? cause.message : "request failed");
@@ -677,7 +864,9 @@ export function App() {
     }
   }
 
-  async function loadMore(kind: "users" | "jobs" | "cache" | "audit"): Promise<void> {
+  async function loadMore(
+    kind: "users" | "jobs" | "cache" | "audit" | "usage" | "privacy",
+  ): Promise<void> {
     const cursor = cursors[kind];
     if (cursor === null || preview) {
       return;
@@ -709,6 +898,18 @@ export function App() {
         if (auditActor.trim() !== "") {
           params.set("actorId", auditActor.trim());
         }
+        if (auditAction.trim() !== "") params.set("action", auditAction.trim());
+        if (auditRequestId.trim() !== "") params.set("requestId", auditRequestId.trim());
+      }
+      if (kind === "usage") {
+        path = "/v1/admin/product-events";
+        if (usageName.trim() !== "") params.set("name", usageName.trim());
+        if (usageAccountId.trim() !== "") params.set("accountId", usageAccountId.trim());
+        if (usageRequestId.trim() !== "") params.set("requestId", usageRequestId.trim());
+      }
+      if (kind === "privacy") {
+        path = "/v1/admin/privacy-requests";
+        if (privacyStatus !== "") params.set("status", privacyStatus);
       }
       const payload = await getJson<unknown>(`${path}?${params.toString()}`, token);
       const extraUsers = pageItems<AdminUser>(payload);
@@ -723,6 +924,12 @@ export function App() {
       }
       if (kind === "audit") {
         setAudit((current) => [...current, ...pageItems<AuditEvent>(payload)]);
+      }
+      if (kind === "usage") {
+        setUsageEvents((current) => [...current, ...pageItems<ProductEvent>(payload)]);
+      }
+      if (kind === "privacy") {
+        setPrivacy((current) => [...current, ...pageItems<PrivacyRequest>(payload)]);
       }
       setCursors((current) => ({ ...current, [kind]: nextCursorOf(payload) }));
     } catch (cause: unknown) {
@@ -770,8 +977,9 @@ export function App() {
     }
   }
 
-  const canMutate = reasonReady(reason) && !busy;
+  const canMutate = !busy;
   const signedIn = token.trim() !== "";
+  const activePanelBusy = loadingPanels[section] === true;
 
   if (!signedIn) {
     return (
@@ -904,20 +1112,8 @@ export function App() {
               </button>
             ),
           )}
-          <div className="reason-dock">
-            <label>
-              Change reason
-              <input
-                value={reason}
-                aria-invalid={!reasonReady(reason)}
-                onChange={(event) => {
-                  setReason(event.target.value);
-                }}
-              />
-            </label>
-          </div>
         </nav>
-        <main className="stage" aria-busy={busy}>
+        <main className="stage" aria-busy={activePanelBusy}>
           {preview ? (
             <p className="banner">
               Synthetic operator sample — labeled for layout review, not live data.
@@ -925,7 +1121,41 @@ export function App() {
           ) : null}
           {healthError !== null ? <p role="alert">{healthError}</p> : null}
           {adminError !== null ? <p role="alert">{adminError}</p> : null}
-          {status !== null ? <p className="status-line">{status}</p> : null}
+          {panelErrors[section] !== undefined ? (
+            <div className="panel-error" role="alert">
+              <span>{panelErrors[section]}</span>
+              <button
+                type="button"
+                className="ghost"
+                disabled={busy}
+                onClick={() => void loadAdmin()}
+              >
+                Retry this view
+              </button>
+            </div>
+          ) : null}
+          <p className="status-line" role="status" aria-live="polite">
+            {activePanelBusy ? "Loading this view…" : busy ? "Applying change…" : (status ?? "")}
+          </p>
+          {mutationPreview !== "" ? (
+            <section className="mutation-bar" aria-label="Change review">
+              <div>
+                <strong>Review change</strong>
+                <span>{mutationPreview}</span>
+              </div>
+              <label>
+                Reason (5+ characters)
+                <input
+                  value={reason}
+                  placeholder="Why is this change needed?"
+                  aria-invalid={reason !== "" && !reasonReady(reason)}
+                  onChange={(event) => {
+                    setReason(event.target.value);
+                  }}
+                />
+              </label>
+            </section>
+          ) : null}
           {busy && users.length === 0 && runtime === null ? (
             <div className="skeleton" aria-hidden="true">
               <i />
@@ -939,6 +1169,9 @@ export function App() {
               health={health}
               runtime={runtime}
               diagnostics={diagnostics}
+              jobs={jobs}
+              quotas={quotas}
+              events={events}
               reasonReady={canMutate}
               busy={busy}
               onProbe={() => {
@@ -962,15 +1195,32 @@ export function App() {
                 void saveRuntime();
               }}
               onClearQwen={() => {
-                void saveRuntime({
-                  qwen: { apiKey: null, baseUrl: qwenBaseUrl, model: qwenModel },
-                });
+                if (
+                  window.confirm(
+                    "Remove the stored Managed Qwen secret? Existing requests may fail.",
+                  )
+                ) {
+                  const summary = mutationSummary("Managed Qwen secret", "stored", "removed");
+                  void saveRuntime(
+                    { qwen: { apiKey: null, baseUrl: qwenBaseUrl, model: qwenModel } },
+                    summary,
+                  );
+                }
               }}
               onClearStorage={() => {
-                void saveRuntime({ storage: { bucket: gcsBucket, serviceAccountJson: null } });
+                if (window.confirm("Remove the stored GCS service-account secret?")) {
+                  const summary = mutationSummary("GCS secret", "stored", "removed");
+                  void saveRuntime(
+                    { storage: { bucket: gcsBucket, serviceAccountJson: null } },
+                    summary,
+                  );
+                }
               }}
               onClearTurnstile={() => {
-                void saveRuntime({ turnstile: { secretKey: null } });
+                if (window.confirm("Remove the stored Turnstile secret?")) {
+                  const summary = mutationSummary("Turnstile secret", "stored", "removed");
+                  void saveRuntime({ turnstile: { secretKey: null } }, summary);
+                }
               }}
             />
           ) : null}
@@ -997,7 +1247,8 @@ export function App() {
               }}
               onArm={setArmed}
               onMutate={(path, message) => {
-                void mutate(path, "POST", { reason: reason.trim() }, message);
+                const summary = mutationSummary("User access", "current state", message);
+                void mutate(path, "POST", { reason: reason.trim() }, message, summary);
               }}
             />
           ) : null}
@@ -1018,11 +1269,18 @@ export function App() {
                 });
               }}
               onToggle={(policy) => {
+                const summary = mutationSummary(
+                  policy.task,
+                  policy.enabled ? "enabled" : "disabled",
+                  policy.enabled ? "disabled" : "enabled",
+                );
+                setMutationPreview(summary);
                 void mutate(
                   `/v1/admin/llm/policies/${policy.id}`,
                   "PATCH",
                   { reason: reason.trim(), enabled: !policy.enabled },
                   `${policy.task} ${policy.enabled ? "disabled" : "enabled"}.`,
+                  summary,
                 );
               }}
               onSave={(policy) => {
@@ -1030,7 +1288,18 @@ export function App() {
                 if (draft === undefined) {
                   return;
                 }
+                const errors = policyDraftErrors(draft);
+                if (Object.keys(errors).length > 0) {
+                  setAdminError(Object.values(errors)[0] ?? "Policy fields are invalid.");
+                  return;
+                }
                 const canary = Number(draft.canaryPercent);
+                const summary = mutationSummary(
+                  policy.task,
+                  policy.policyVersion ?? "current policy",
+                  `${draft.model.trim()} / ${draft.promptVersion.trim()}`,
+                );
+                setMutationPreview(summary);
                 void mutate(
                   `/v1/admin/llm/policies/${policy.id}`,
                   "PATCH",
@@ -1040,9 +1309,14 @@ export function App() {
                     promptVersion: draft.promptVersion.trim(),
                     systemPrompt: draft.systemPrompt,
                     userPrompt: draft.userPrompt,
+                    schemaVersion: draft.schemaVersion.trim(),
+                    maxInputTokens: Number(draft.maxInputTokens),
+                    maxOutputTokens: Number(draft.maxOutputTokens),
+                    timeoutMs: Number(draft.timeoutMs),
                     ...(Number.isFinite(canary) ? { canaryPercent: canary } : {}),
                   },
                   `${policy.task} policy saved.`,
+                  summary,
                 );
               }}
             />
@@ -1065,7 +1339,8 @@ export function App() {
               }}
               onArm={setArmed}
               onMutate={(path, message) => {
-                void mutate(path, "POST", { reason: reason.trim() }, message);
+                const summary = mutationSummary("Job", "current state", message);
+                void mutate(path, "POST", { reason: reason.trim() }, message, summary);
               }}
             />
           ) : null}
@@ -1096,11 +1371,13 @@ export function App() {
               }}
               onArm={setArmed}
               onAction={(entry, action) => {
+                const summary = mutationSummary("Cache entry", entry.state, action);
                 void mutate(
                   `/v1/admin/cache/${entry.id}/actions`,
                   "POST",
                   { action, reason: reason.trim() },
                   `Cache ${action} queued.`,
+                  summary,
                 );
               }}
             />
@@ -1127,12 +1404,16 @@ export function App() {
               events={usageEvents}
               name={usageName}
               accountId={usageAccountId}
+              requestId={usageRequestId}
               busy={busy}
+              nextCursor={cursors.usage}
               onName={setUsageName}
               onAccountId={setUsageAccountId}
+              onRequestId={setUsageRequestId}
               onApply={() => {
                 void loadAdmin();
               }}
+              onLoadMore={() => void loadMore("usage")}
             />
           ) : null}
 
@@ -1141,9 +1422,11 @@ export function App() {
               events={events}
               requestId={eventRequestId}
               kind={eventKind}
+              task={eventTask}
               busy={busy}
               onRequestId={setEventRequestId}
               onKind={setEventKind}
+              onTask={setEventTask}
               onApply={() => {
                 void loadAdmin();
               }}
@@ -1178,19 +1461,35 @@ export function App() {
               busy={busy}
               canMutate={canMutate}
               onToggle={(flag) => {
+                if (
+                  flag.key === "managed_qwen" &&
+                  flag.enabled &&
+                  !window.confirm("Disable Managed Qwen for eligible users?")
+                )
+                  return;
+                const summary = mutationSummary(
+                  flag.key,
+                  flag.enabled ? "enabled" : "disabled",
+                  flag.enabled ? "disabled" : "enabled",
+                );
+                setMutationPreview(summary);
                 void mutate(
                   `/v1/admin/feature-flags/${flag.key}`,
                   "PATCH",
                   { reason: reason.trim(), enabled: !flag.enabled },
                   `${flag.key} ${flag.enabled ? "disabled" : "enabled"}.`,
+                  summary,
                 );
               }}
-              onSave={(flag, rollout) => {
+              onSave={(flag, patch) => {
+                const summary = mutationSummary(flag.key, "current targeting", "updated targeting");
+                setMutationPreview(summary);
                 void mutate(
                   `/v1/admin/feature-flags/${flag.key}`,
                   "PATCH",
-                  { reason: reason.trim(), rolloutPercent: rollout },
-                  `${flag.key} rollout set to ${String(rollout)}%.`,
+                  { reason: reason.trim(), ...patch },
+                  `${flag.key} targeting saved.`,
+                  summary,
                 );
               }}
             />
@@ -1210,11 +1509,21 @@ export function App() {
                 if (!Number.isFinite(draft)) {
                   return;
                 }
+                if (
+                  quotaReductionNeedsConfirmation(quota.limit, draft) &&
+                  !window.confirm(
+                    `Reduce ${quota.key} from ${String(quota.limit)} to ${String(draft)}?`,
+                  )
+                )
+                  return;
+                const summary = mutationSummary(quota.key, String(quota.limit), String(draft));
+                setMutationPreview(summary);
                 void mutate(
                   `/v1/admin/quotas/${quota.key}`,
                   "PATCH",
                   { reason: reason.trim(), limit: draft },
                   `${quota.key} limit saved.`,
+                  summary,
                 );
               }}
             />
@@ -1223,13 +1532,20 @@ export function App() {
           {section === "privacy" ? (
             <PrivacyPanel
               requests={privacy}
+              status={privacyStatus}
               busy={busy}
               canMutate={canMutate}
               armed={armed}
               onArm={setArmed}
               onMutate={(path, action, message) => {
-                void mutate(path, "POST", { reason: reason.trim(), action }, message);
+                const summary = mutationSummary("Privacy request", "pending", action);
+                setMutationPreview(summary);
+                void mutate(path, "POST", { reason: reason.trim(), action }, message, summary);
               }}
+              nextCursor={cursors.privacy}
+              onLoadMore={() => void loadMore("privacy")}
+              onStatus={setPrivacyStatus}
+              onApply={() => void loadAdmin()}
             />
           ) : null}
         </main>
@@ -1343,6 +1659,9 @@ function DeskPanel(props: {
   health: HealthPayload | null;
   runtime: RuntimeConfig | null;
   diagnostics: OperatorDiagnostics | null;
+  jobs: Job[];
+  quotas: Quota[];
+  events: OperatorEvent[];
   reasonReady: boolean;
   busy: boolean;
   onProbe: () => void;
@@ -1366,10 +1685,66 @@ function DeskPanel(props: {
   onClearTurnstile: () => void;
 }) {
   const dependencies = props.health?.dependencies;
+  const degraded = Object.entries(dependencies ?? {}).filter(([, value]) => value !== "ok");
+  const failedJobs = props.jobs.filter(
+    (job) => job.status === "failed" || job.status === "dead_letter",
+  );
+  const pressuredQuotas = props.quotas.filter(
+    (quota) => quota.limit > 0 && quota.used / quota.limit >= 0.8,
+  );
+  const recentErrors = props.events
+    .filter((event) => statusTone(event.status ?? event.kind) === "bad")
+    .slice(0, 5);
+  const drift = props.diagnostics?.notes ?? [];
   return (
     <>
       <h2>Desk</h2>
-      <p className="lede">Live health and the configuration that used to live in Worker secrets.</p>
+      <p className="lede">
+        Start with what needs attention, then follow its request id through Activity, Trace, and
+        Audit.
+      </p>
+      <section className="incident-desk" aria-label="Current incidents">
+        <h3>Needs attention</h3>
+        {degraded.length +
+          failedJobs.length +
+          pressuredQuotas.length +
+          drift.length +
+          recentErrors.length ===
+        0 ? (
+          <p className="status-line">No active incidents in this snapshot.</p>
+        ) : (
+          <ul>
+            {degraded.map(([name, value]) => (
+              <li key={`dependency-${name}`}>
+                <strong>{name}</strong> is {value}.
+              </li>
+            ))}
+            {failedJobs.slice(0, 5).map((job) => (
+              <li key={job.id}>
+                <strong>Failed job:</strong> {job.kind}{" "}
+                <span className="mono">{shortId(job.id)}</span>
+              </li>
+            ))}
+            {pressuredQuotas.map((quota) => (
+              <li key={quota.key}>
+                <strong>Quota pressure:</strong> {quota.key} {String(quota.used)}/
+                {String(quota.limit)}
+              </li>
+            ))}
+            {drift.map((note) => (
+              <li key={note}>
+                <strong>Configuration drift:</strong> {note}
+              </li>
+            ))}
+            {recentErrors.map((event) => (
+              <li key={event.id}>
+                <strong>Recent error:</strong> {event.summary}{" "}
+                <CopyValue value={event.requestId} label="request id" />
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
       {props.diagnostics !== null ? (
         <section className="ledger">
           <h3>Diagnostics</h3>
@@ -1378,13 +1753,13 @@ function DeskPanel(props: {
             exercise the same path the app uses.
           </p>
           {props.diagnostics.notes.length > 0 ? (
-            <ul className="diag-notes">
-              {props.diagnostics.notes.map((note) => (
-                <li key={note} role="alert">
-                  {note}
-                </li>
-              ))}
-            </ul>
+            <div role="alert">
+              <ul className="diag-notes">
+                {props.diagnostics.notes.map((note) => (
+                  <li key={note}>{note}</li>
+                ))}
+              </ul>
+            </div>
           ) : (
             <p className="status-line">No configuration warnings from this snapshot.</p>
           )}
@@ -1742,7 +2117,9 @@ function RowOpen(props: { open: boolean; label: string; hint?: string; onToggle:
       </svg>
       <span>
         {props.label}
-        {props.hint !== undefined && props.hint !== "" ? <small className="mono">{props.hint}</small> : null}
+        {props.hint !== undefined && props.hint !== "" ? (
+          <small className="mono">{props.hint}</small>
+        ) : null}
       </span>
     </button>
   );
@@ -1855,7 +2232,9 @@ function UsersPanel(props: {
             header: "Status",
             sortValue: (user) => user.status,
             searchValue: (user) => user.status,
-            render: (user) => <span className={`pill ${statusTone(user.status)}`}>{user.status}</span>,
+            render: (user) => (
+              <span className={`pill ${statusTone(user.status)}`}>{user.status}</span>
+            ),
           },
           {
             id: "devices",
@@ -2010,131 +2389,127 @@ function UserDetail(props: { user: AdminUser; loaded: boolean }) {
   const quotas = user.quotas ?? [];
   return (
     <>
-            <dl className="detail-grid wide">
-              <dt>Email</dt>
-              <dd>{user.email}</dd>
-              <dt>Display name</dt>
-              <dd>{user.displayName ?? "—"}</dd>
-              <dt>Account id</dt>
-              <dd>
-                <CopyValue value={user.accountId} label="account id" />
-              </dd>
-              <dt>User id</dt>
-              <dd>
-                <CopyValue value={user.id} label="user id" />
-              </dd>
-              <dt>Created</dt>
-              <dd>{formatWhen(user.createdAt)}</dd>
-              <dt>Last seen</dt>
-              <dd>{formatWhen(user.lastSeenAt)}</dd>
-              <dt>Storage</dt>
-              <dd>{formatBytes(user.storageBytes)}</dd>
-              <dt>Status</dt>
-              <dd>
-                <span className={`pill ${statusTone(user.status)}`}>{user.status}</span>
-              </dd>
-            </dl>
-            <div className="prose-pair">
-              <figure>
-                <figcaption>Devices ({String(devices.length || user.deviceCount)})</figcaption>
-                {devices.length === 0 ? (
-                  <p className="empty">
-                    {props.loaded ? "No devices registered." : "Open this row to load live devices."}
-                  </p>
-                ) : (
-                  <table className="service-table">
-                    <thead>
-                      <tr>
-                        <th>Device id</th>
-                        <th>Platform</th>
-                        <th>Name</th>
-                        <th>App</th>
-                        <th>Last seen</th>
-                        <th>State</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {devices.map((device) => (
-                        <tr key={device.id}>
-                          <td className="mono">{device.id}</td>
-                          <td>{device.platform}</td>
-                          <td>{device.name ?? "—"}</td>
-                          <td>{device.appVersion ?? "—"}</td>
-                          <td>{formatWhen(device.lastSeenAt)}</td>
-                          <td>
-                            <span className={`pill ${device.revoked ? "bad" : "ok"}`}>
-                              {device.revoked ? "revoked" : "active"}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </figure>
-              <figure>
-                <figcaption>Books ({String(books.length || user.bookCount)})</figcaption>
-                {books.length === 0 ? (
-                  <p className="empty">{props.loaded ? "No cloud books." : "Open this row to load live books."}</p>
-                ) : (
-                  <table className="service-table">
-                    <thead>
-                      <tr>
-                        <th>Book id</th>
-                        <th>Title</th>
-                        <th className="num">Chapters</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {books.map((book) => (
-                        <tr key={book.id}>
-                          <td className="mono">{book.id}</td>
-                          <td>{book.title}</td>
-                          <td className="num">{book.chapterCount ?? "—"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </figure>
-            </div>
-            <figure className="prose-field">
-              <figcaption>Quotas</figcaption>
-              {quotas.length === 0 ? (
-                <p className="empty">
-                  Open this row to load live usage, or apply quota_limits SQL.
-                </p>
-              ) : (
-                <table className="service-table">
-                  <thead>
-                    <tr>
-                      <th>Key</th>
-                      <th>Used</th>
-                      <th>Limit</th>
-                      <th>Period</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {quotas.map((quota) => (
-                      <tr key={quota.key}>
-                        <td className="mono">{quota.key}</td>
-                        <td>
-                          {quota.key === "cloud_media_bytes"
-                            ? formatBytes(quota.used)
-                            : quota.used}
-                        </td>
-                        <td>
-                          {quota.key === "cloud_media_bytes"
-                            ? formatBytes(quota.limit)
-                            : quota.limit}
-                        </td>
-                        <td>{formatWhen(quota.periodEndsAt)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </figure>
+      <dl className="detail-grid wide">
+        <dt>Email</dt>
+        <dd>{user.email}</dd>
+        <dt>Display name</dt>
+        <dd>{user.displayName ?? "—"}</dd>
+        <dt>Account id</dt>
+        <dd>
+          <CopyValue value={user.accountId} label="account id" />
+        </dd>
+        <dt>User id</dt>
+        <dd>
+          <CopyValue value={user.id} label="user id" />
+        </dd>
+        <dt>Created</dt>
+        <dd>{formatWhen(user.createdAt)}</dd>
+        <dt>Last seen</dt>
+        <dd>{formatWhen(user.lastSeenAt)}</dd>
+        <dt>Storage</dt>
+        <dd>{formatBytes(user.storageBytes)}</dd>
+        <dt>Status</dt>
+        <dd>
+          <span className={`pill ${statusTone(user.status)}`}>{user.status}</span>
+        </dd>
+      </dl>
+      <div className="prose-pair">
+        <figure>
+          <figcaption>Devices ({String(devices.length || user.deviceCount)})</figcaption>
+          {devices.length === 0 ? (
+            <p className="empty">
+              {props.loaded ? "No devices registered." : "Open this row to load live devices."}
+            </p>
+          ) : (
+            <table className="service-table">
+              <thead>
+                <tr>
+                  <th>Device id</th>
+                  <th>Platform</th>
+                  <th>Name</th>
+                  <th>App</th>
+                  <th>Last seen</th>
+                  <th>State</th>
+                </tr>
+              </thead>
+              <tbody>
+                {devices.map((device) => (
+                  <tr key={device.id}>
+                    <td className="mono">{device.id}</td>
+                    <td>{device.platform}</td>
+                    <td>{device.name ?? "—"}</td>
+                    <td>{device.appVersion ?? "—"}</td>
+                    <td>{formatWhen(device.lastSeenAt)}</td>
+                    <td>
+                      <span className={`pill ${device.revoked ? "bad" : "ok"}`}>
+                        {device.revoked ? "revoked" : "active"}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </figure>
+        <figure>
+          <figcaption>Books ({String(books.length || user.bookCount)})</figcaption>
+          {books.length === 0 ? (
+            <p className="empty">
+              {props.loaded ? "No cloud books." : "Open this row to load live books."}
+            </p>
+          ) : (
+            <table className="service-table">
+              <thead>
+                <tr>
+                  <th>Book id</th>
+                  <th>Title</th>
+                  <th className="num">Chapters</th>
+                </tr>
+              </thead>
+              <tbody>
+                {books.map((book) => (
+                  <tr key={book.id}>
+                    <td className="mono">{book.id}</td>
+                    <td>{book.title}</td>
+                    <td className="num">{book.chapterCount ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </figure>
+      </div>
+      <figure className="prose-field">
+        <figcaption>Quotas</figcaption>
+        {quotas.length === 0 ? (
+          <p className="empty">Open this row to load live usage, or apply quota_limits SQL.</p>
+        ) : (
+          <table className="service-table">
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th>Used</th>
+                <th>Limit</th>
+                <th>Period</th>
+              </tr>
+            </thead>
+            <tbody>
+              {quotas.map((quota) => (
+                <tr key={quota.key}>
+                  <td className="mono">{quota.key}</td>
+                  <td>
+                    {quota.key === "cloud_media_bytes" ? formatBytes(quota.used) : quota.used}
+                  </td>
+                  <td>
+                    {quota.key === "cloud_media_bytes" ? formatBytes(quota.limit) : quota.limit}
+                  </td>
+                  <td>{formatWhen(quota.periodEndsAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </figure>
     </>
   );
 }
@@ -2201,6 +2576,47 @@ function PoliciesPanel(props: {
                     value={draft?.canaryPercent ?? String(policy.canaryPercent ?? 0)}
                     onChange={(event) => {
                       props.onDraft(policy.id, { canaryPercent: event.target.value });
+                    }}
+                  />
+                </label>
+              </div>
+              <div className="grid-4">
+                <label>
+                  Schema version
+                  <input
+                    value={draft?.schemaVersion ?? policy.schemaVersion ?? "1"}
+                    onChange={(event) => {
+                      props.onDraft(policy.id, { schemaVersion: event.target.value });
+                    }}
+                  />
+                </label>
+                <label>
+                  Input token limit
+                  <input
+                    inputMode="numeric"
+                    value={draft?.maxInputTokens ?? String(policy.maxInputTokens ?? 8_000)}
+                    onChange={(event) => {
+                      props.onDraft(policy.id, { maxInputTokens: event.target.value });
+                    }}
+                  />
+                </label>
+                <label>
+                  Output token limit
+                  <input
+                    inputMode="numeric"
+                    value={draft?.maxOutputTokens ?? String(policy.maxOutputTokens ?? 2_000)}
+                    onChange={(event) => {
+                      props.onDraft(policy.id, { maxOutputTokens: event.target.value });
+                    }}
+                  />
+                </label>
+                <label>
+                  Timeout (ms)
+                  <input
+                    inputMode="numeric"
+                    value={draft?.timeoutMs ?? String(policy.timeoutMs ?? 30_000)}
+                    onChange={(event) => {
+                      props.onDraft(policy.id, { timeoutMs: event.target.value });
                     }}
                   />
                 </label>
@@ -2335,7 +2751,9 @@ function JobsPanel(props: {
             header: "Account",
             sortValue: (job) => job.accountId ?? "",
             searchValue: (job) => job.accountId ?? "",
-            render: (job) => <span className="mono">{job.accountId ? shortId(job.accountId) : "—"}</span>,
+            render: (job) => (
+              <span className="mono">{job.accountId ? shortId(job.accountId) : "—"}</span>
+            ),
           },
           {
             id: "attempts",
@@ -2456,9 +2874,9 @@ function CachePanel(props: {
     <>
       <h2>Cache</h2>
       <p className="lede">
-        Shared translation and summary rows. The table shows kind, original, result, book, and
-        hits. Open a row for cache id, cache key, chapter, context, and notes. Chat
-        does not write this table.
+        Shared translation and summary rows. The table shows kind, original, result, book, and hits.
+        Open a row for cache id, cache key, chapter, context, and notes. Chat does not write this
+        table.
       </p>
       <OperatorTable
         caption="Shared derived cache"
@@ -2514,7 +2932,8 @@ function CachePanel(props: {
             id: "kind",
             header: "Kind",
             sortValue: (entry) => cacheKind(entry),
-            searchValue: (entry) => `${cacheKind(entry)} ${entry.id} ${entry.sourceLanguage} ${entry.targetLanguage}`,
+            searchValue: (entry) =>
+              `${cacheKind(entry)} ${entry.id} ${entry.sourceLanguage} ${entry.targetLanguage}`,
             render: (entry) => (
               <RowOpen
                 open={props.openCacheId === entry.id}
@@ -2580,7 +2999,9 @@ function CachePanel(props: {
             header: "State",
             sortValue: (entry) => entry.state,
             searchValue: (entry) => entry.state,
-            render: (entry) => <span className={`pill ${statusTone(entry.state)}`}>{entry.state}</span>,
+            render: (entry) => (
+              <span className={`pill ${statusTone(entry.state)}`}>{entry.state}</span>
+            ),
           },
           {
             id: "lastHit",
@@ -2627,7 +3048,9 @@ function CachePanel(props: {
           },
         ]}
         renderExpand={(entry) => (
-          <CacheDetail entry={props.openCacheId === entry.id ? (props.cacheDetail ?? entry) : entry} />
+          <CacheDetail
+            entry={props.openCacheId === entry.id ? (props.cacheDetail ?? entry) : entry}
+          />
         )}
       />
       {props.nextCursor !== null ? (
@@ -2651,59 +3074,59 @@ function CacheDetail(props: { entry: CacheEntry }) {
   const kind = cacheKind(entry);
   return (
     <>
-            <dl className="detail-grid wide">
-              <dt>Id</dt>
-              <dd className="mono">{entry.id}</dd>
-              <dt>Cache key</dt>
-              <dd className="mono">{entry.cacheKey ?? "—"}</dd>
-              <dt>Book</dt>
-              <dd>{book || "—"}</dd>
-              <dt>Edition id</dt>
-              <dd className="mono">
-                {entry.editionFingerprint || stringPayload(entry.payload, "editionFingerprint") || "—"}
-              </dd>
-              <dt>Chapter</dt>
-              <dd>{chapter || "—"}</dd>
-              <dt>Languages</dt>
-              <dd>
-                {entry.sourceLanguage} → {entry.targetLanguage}
-              </dd>
-              <dt>Task</dt>
-              <dd>
-                {kind}
-                {entry.task !== kind ? ` · ${entry.task}` : ""}
-              </dd>
-              <dt>Policy</dt>
-              <dd>{entry.policyVersion ?? "—"}</dd>
-              <dt>Hits</dt>
-              <dd>
-                {entry.hitCount} · last {formatWhen(entry.lastHitAt)}
-              </dd>
-              <dt>Accept / reject</dt>
-              <dd>
-                {entry.acceptCount ?? 0} / {entry.rejectCount ?? 0}
-              </dd>
-              <dt>Created</dt>
-              <dd>{formatWhen(entry.createdAt)}</dd>
-            </dl>
-            <div className="prose-pair">
-              <figure>
-                <figcaption>Original</figcaption>
-                <pre className="prose-block">{original || "—"}</pre>
-              </figure>
-              <figure>
-                <figcaption>Translation</figcaption>
-                <pre className="prose-block">{result || "—"}</pre>
-              </figure>
-              <figure>
-                <figcaption>Context</figcaption>
-                <pre className="prose-block">{stringPayload(entry.payload, "context") || "—"}</pre>
-              </figure>
-              <figure>
-                <figcaption>Notes</figcaption>
-                <pre className="prose-block">{notes.length === 0 ? "—" : formatJson(notes)}</pre>
-              </figure>
-            </div>
+      <dl className="detail-grid wide">
+        <dt>Id</dt>
+        <dd className="mono">{entry.id}</dd>
+        <dt>Cache key</dt>
+        <dd className="mono">{entry.cacheKey ?? "—"}</dd>
+        <dt>Book</dt>
+        <dd>{book || "—"}</dd>
+        <dt>Edition id</dt>
+        <dd className="mono">
+          {entry.editionFingerprint || stringPayload(entry.payload, "editionFingerprint") || "—"}
+        </dd>
+        <dt>Chapter</dt>
+        <dd>{chapter || "—"}</dd>
+        <dt>Languages</dt>
+        <dd>
+          {entry.sourceLanguage} → {entry.targetLanguage}
+        </dd>
+        <dt>Task</dt>
+        <dd>
+          {kind}
+          {entry.task !== kind ? ` · ${entry.task}` : ""}
+        </dd>
+        <dt>Policy</dt>
+        <dd>{entry.policyVersion ?? "—"}</dd>
+        <dt>Hits</dt>
+        <dd>
+          {entry.hitCount} · last {formatWhen(entry.lastHitAt)}
+        </dd>
+        <dt>Accept / reject</dt>
+        <dd>
+          {entry.acceptCount ?? 0} / {entry.rejectCount ?? 0}
+        </dd>
+        <dt>Created</dt>
+        <dd>{formatWhen(entry.createdAt)}</dd>
+      </dl>
+      <div className="prose-pair">
+        <figure>
+          <figcaption>Original</figcaption>
+          <pre className="prose-block">{original || "—"}</pre>
+        </figure>
+        <figure>
+          <figcaption>Translation</figcaption>
+          <pre className="prose-block">{result || "—"}</pre>
+        </figure>
+        <figure>
+          <figcaption>Context</figcaption>
+          <pre className="prose-block">{stringPayload(entry.payload, "context") || "—"}</pre>
+        </figure>
+        <figure>
+          <figcaption>Notes</figcaption>
+          <pre className="prose-block">{notes.length === 0 ? "—" : formatJson(notes)}</pre>
+        </figure>
+      </div>
     </>
   );
 }
@@ -2781,7 +3204,9 @@ function AccessPanel(props: { attempts: BlockedAttempt[] }) {
             sortValue: (attempt) => attempt.requestId ?? "",
             searchValue: (attempt) => attempt.requestId ?? "",
             render: (attempt) => (
-              <span className="mono">{attempt.requestId ? shortId(attempt.requestId, 12) : "—"}</span>
+              <span className="mono">
+                {attempt.requestId ? shortId(attempt.requestId, 12) : "—"}
+              </span>
             ),
           },
         ]}
@@ -2806,10 +3231,14 @@ function UsagePanel(props: {
   events: ProductEvent[];
   name: string;
   accountId: string;
+  requestId: string;
   busy: boolean;
+  nextCursor: string | null;
   onName: (value: string) => void;
   onAccountId: (value: string) => void;
+  onRequestId: (value: string) => void;
   onApply: () => void;
+  onLoadMore: () => void;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
   return (
@@ -2842,6 +3271,15 @@ function UsagePanel(props: {
                 value={props.accountId}
                 onChange={(event) => {
                   props.onAccountId(event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              Request id
+              <input
+                value={props.requestId}
+                onChange={(event) => {
+                  props.onRequestId(event.target.value);
                 }}
               />
             </label>
@@ -2942,6 +3380,13 @@ function UsagePanel(props: {
           </>
         )}
       />
+      {props.nextCursor !== null ? (
+        <div className="actions">
+          <button type="button" className="ghost" disabled={props.busy} onClick={props.onLoadMore}>
+            Load more
+          </button>
+        </div>
+      ) : null}
     </>
   );
 }
@@ -3186,9 +3631,11 @@ function TracePanel(props: {
   events: OperatorEvent[];
   requestId: string;
   kind: string;
+  task: string;
   busy: boolean;
   onRequestId: (value: string) => void;
   onKind: (value: string) => void;
+  onTask: (value: string) => void;
   onApply: () => void;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
@@ -3219,6 +3666,15 @@ function TracePanel(props: {
                 value={props.kind}
                 onChange={(event) => {
                   props.onKind(event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              Task
+              <input
+                value={props.task}
+                onChange={(event) => {
+                  props.onTask(event.target.value);
                 }}
               />
             </label>
@@ -3316,20 +3772,51 @@ function TracePanel(props: {
   );
 }
 
-function FlagRollout(props: {
-  value: number;
+function FlagTargeting(props: {
+  flag: FeatureFlag;
   disabled: boolean;
-  onSave: (rollout: number) => void;
+  onSave: (patch: Partial<FeatureFlag>) => void;
 }) {
-  const [draft, setDraft] = useState(String(props.value));
+  const [rollout, setRollout] = useState(String(props.flag.rolloutPercent ?? 100));
+  const [variant, setVariant] = useState(props.flag.variant ?? "");
+  const [minimum, setMinimum] = useState(props.flag.minAppVersion ?? "");
+  const [platforms, setPlatforms] = useState((props.flag.platforms ?? []).join(", "));
   return (
-    <span className="row-actions">
+    <div className="flag-targeting">
       <input
         inputMode="numeric"
-        value={draft}
+        aria-label={`${props.flag.key} rollout percent`}
+        value={rollout}
         disabled={props.disabled}
         onChange={(event) => {
-          setDraft(event.target.value);
+          setRollout(event.target.value);
+        }}
+      />
+      <input
+        aria-label={`${props.flag.key} variant`}
+        placeholder="variant"
+        value={variant}
+        disabled={props.disabled}
+        onChange={(event) => {
+          setVariant(event.target.value);
+        }}
+      />
+      <input
+        aria-label={`${props.flag.key} minimum app version`}
+        placeholder="min version"
+        value={minimum}
+        disabled={props.disabled}
+        onChange={(event) => {
+          setMinimum(event.target.value);
+        }}
+      />
+      <input
+        aria-label={`${props.flag.key} platforms`}
+        placeholder="macos, ipados"
+        value={platforms}
+        disabled={props.disabled}
+        onChange={(event) => {
+          setPlatforms(event.target.value);
         }}
       />
       <button
@@ -3337,15 +3824,23 @@ function FlagRollout(props: {
         className="ghost"
         disabled={props.disabled}
         onClick={() => {
-          const next = Number(draft);
+          const next = Number(rollout);
           if (Number.isFinite(next) && next >= 0 && next <= 100) {
-            props.onSave(next);
+            props.onSave({
+              rolloutPercent: next,
+              variant: variant.trim() === "" ? null : variant.trim(),
+              minAppVersion: minimum.trim() === "" ? null : minimum.trim(),
+              platforms: platforms
+                .split(",")
+                .map((item) => item.trim())
+                .filter(Boolean),
+            });
           }
         }}
       >
         Save
       </button>
-    </span>
+    </div>
   );
 }
 
@@ -3354,7 +3849,7 @@ function FlagsPanel(props: {
   busy: boolean;
   canMutate: boolean;
   onToggle: (flag: FeatureFlag) => void;
-  onSave: (flag: FeatureFlag, rollout: number) => void;
+  onSave: (flag: FeatureFlag, patch: Partial<FeatureFlag>) => void;
 }) {
   return (
     <>
@@ -3394,15 +3889,14 @@ function FlagsPanel(props: {
           },
           {
             id: "rollout",
-            header: "Rollout",
-            numeric: true,
+            header: "Targeting",
             sortValue: (flag) => flag.rolloutPercent ?? 100,
             render: (flag) => (
-              <FlagRollout
-                value={flag.rolloutPercent ?? 100}
+              <FlagTargeting
+                flag={flag}
                 disabled={!props.canMutate || props.busy}
-                onSave={(rollout) => {
-                  props.onSave(flag, rollout);
+                onSave={(patch) => {
+                  props.onSave(flag, patch);
                 }}
               />
             ),
@@ -3521,17 +4015,45 @@ function QuotasPanel(props: {
 
 function PrivacyPanel(props: {
   requests: PrivacyRequest[];
+  status: string;
   busy: boolean;
   canMutate: boolean;
   armed: string | null;
   onArm: (id: string | null) => void;
   onMutate: (path: string, action: "complete" | "cancel", message: string) => void;
+  nextCursor: string | null;
+  onLoadMore: () => void;
+  onStatus: (value: string) => void;
+  onApply: () => void;
 }) {
   return (
     <>
       <h2>Privacy</h2>
       <p className="lede">Export and deletion requests. Completing a deletion revokes sessions.</p>
       <OperatorTable
+        leading={
+          <>
+            <label>
+              Status
+              <select
+                value={props.status}
+                onChange={(event) => {
+                  props.onStatus(event.target.value);
+                }}
+              >
+                <option value="">Any</option>
+                <option value="queued">queued</option>
+                <option value="running">running</option>
+                <option value="ready">ready</option>
+                <option value="failed">failed</option>
+                <option value="cancelled">cancelled</option>
+              </select>
+            </label>
+            <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
+              Apply
+            </button>
+          </>
+        }
         caption="Privacy requests"
         noun="request"
         rows={props.requests}
@@ -3637,6 +4159,13 @@ function PrivacyPanel(props: {
           },
         ]}
       />
+      {props.nextCursor !== null ? (
+        <div className="actions">
+          <button type="button" className="ghost" disabled={props.busy} onClick={props.onLoadMore}>
+            Load more
+          </button>
+        </div>
+      ) : null}
     </>
   );
 }

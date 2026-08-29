@@ -2006,6 +2006,12 @@ paths:
         in: query
         required: false
         schema: *id009
+      - name: requestId
+        in: query
+        required: false
+        description: Exact request ID used to correlate Activity with Trace and Audit.
+        schema:
+          type: string
       - name: from
         in: query
         required: false

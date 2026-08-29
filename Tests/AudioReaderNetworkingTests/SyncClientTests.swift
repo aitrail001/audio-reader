@@ -5,6 +5,32 @@ import Testing
 
 @Suite("Product sync client")
 struct SyncClientTests {
+    @Test("pulled transcript overlays apply after their immutable base transcript")
+    func transcriptOverlayOrdering() {
+        let overlay = SyncPulledChange(
+            sequence: 1,
+            entityType: OutboxEntityType.transcriptOverlay.rawValue,
+            entityId: "overlay",
+            operation: "upsert",
+            revision: 1,
+            changedAt: "2026-08-29T00:00:00Z",
+            payload: [:]
+        )
+        let transcript = SyncPulledChange(
+            sequence: 2,
+            entityType: OutboxEntityType.transcript.rawValue,
+            entityId: "transcript",
+            operation: "upsert",
+            revision: 1,
+            changedAt: "2026-08-29T00:00:00Z",
+            payload: [:]
+        )
+
+        #expect(SyncPulledChange.applying([overlay, transcript]).map(\.entityType) == [
+            OutboxEntityType.transcript.rawValue,
+            OutboxEntityType.transcriptOverlay.rawValue,
+        ])
+    }
     @Test("push encodes the outbox batch and pull reads the change page")
     func pushAndPullRoundTrip() async throws {
         let http = StubHTTPClient()
@@ -187,6 +213,53 @@ struct AccountSessionSyncTests {
         #expect(pending[0].id != originalID)
         #expect(pending[0].baseRevision.rawValue == 4)
         #expect(String(data: pending[0].payload, encoding: .utf8) == "{\"targetLanguage\":\"zh\"}")
+    }
+
+    @MainActor
+    @Test("overlay conflicts expose the server revision before the retry is queued")
+    func overlayConflictInvokesRetentionHook() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        sync.pushStatus = "conflict"
+        sync.conflictRevision = 9
+        let outbox = InMemorySyncOutboxRepository()
+        let handledType = LockingBox<String?>(nil)
+        let handledRevision = LockingBox<Int64?>(nil)
+        try outbox.enqueue(
+            OutboxMutation(
+                id: MutationID(rawValue: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"),
+                entityType: .transcriptOverlay,
+                entityID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                operation: .upsert,
+                baseRevision: .zero,
+                occurredAt: Date(timeIntervalSince1970: 1_777_000_000),
+                payload: Data("{\"segmentId\":\"segment\"}".utf8)
+            )
+        )
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: outbox,
+                cursor: InMemorySyncCursorStore(),
+                handleConflict: { mutation, revision in
+                    handledType.value = mutation.entityType.rawValue
+                    handledRevision.value = revision
+                }
+            )
+        )
+        await session.requestEmailCode("overlay-conflict@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+        await session.synchronize()
+
+        #expect(handledType.value == OutboxEntityType.transcriptOverlay.rawValue)
+        #expect(handledRevision.value == 9)
+        #expect(try outbox.pendingMutations().first?.baseRevision.rawValue == 9)
     }
 
     @MainActor

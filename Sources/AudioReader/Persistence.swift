@@ -1,9 +1,11 @@
 import Foundation
+import OSLog
 #if canImport(AudioReaderDomain)
 import AudioReaderDomain
 #endif
 
 enum Persistence {
+    private static let overlayLog = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "transcript-overlay")
     static var root: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let dir = base.appendingPathComponent("AudioReader", isDirectory: true)
@@ -126,6 +128,185 @@ enum Persistence {
         try LibraryStore.shared.saveTranscript(transcript)
         let data = try JSONEncoder.iso.encode(transcript)
         try data.write(to: transcriptURL(chapterID: transcript.chapterID), options: .atomic)
+    }
+
+    static func loadTranscriptOverlays(chapterID: String) -> [StoredTranscriptOverlay] {
+        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        return (try? sqlite.loadTranscriptOverlays(chapterID: ChapterID(rawValue: chapterID))) ?? []
+    }
+
+    static func loadAllTranscriptOverlays() -> [StoredTranscriptOverlay] {
+        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        return (try? sqlite.loadAllTranscriptOverlays()) ?? []
+    }
+
+    static func loadTranscriptOverlayState(
+        chapterID: String,
+        segmentID: String
+    ) -> StoredTranscriptOverlayState? {
+        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        return try? sqlite.loadTranscriptOverlayState(
+            chapterID: ChapterID(rawValue: chapterID),
+            segmentID: segmentID
+        )
+    }
+
+    static func resolvedTranscript(
+        _ transcript: Transcript,
+        chapterDuration: TimeInterval? = nil
+    ) -> ResolvedTranscript {
+        TranscriptOverlayResolver.resolve(
+            base: StoredTranscript(transcript),
+            overlays: loadTranscriptOverlays(chapterID: transcript.chapterID),
+            chapterDuration: chapterDuration
+        )
+    }
+
+    /// Local edits validate against the immutable base before persistence and
+    /// enqueue only IDs/timing plus encoded overlay data—never book text in logs.
+    static func saveTranscriptOverlay(
+        _ overlay: StoredTranscriptOverlay,
+        base: Transcript,
+        chapterDuration: TimeInterval? = nil
+    ) throws {
+        let resolution = TranscriptOverlayResolver.resolve(
+            base: StoredTranscript(base),
+            overlays: [overlay],
+            chapterDuration: chapterDuration
+        )
+        guard resolution.statuses[overlay.id] == .applied else {
+            let status = resolution.statuses[overlay.id]
+            overlayLog.warning("message=overlay.save component=transcript-overlay outcome=rejected chapter=\(overlay.chapterID.rawValue, privacy: .public) segment=\(overlay.segmentID, privacy: .public) status=\(String(describing: status), privacy: .public)")
+            switch status {
+            case .staleBase:
+                throw TranscriptOverlaySaveError.staleBase
+            case .invalid(let error):
+                throw TranscriptOverlaySaveError.invalid(error)
+            default:
+                throw TranscriptOverlaySaveError.invalid(.missingSegment)
+            }
+        }
+
+        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        let state = try sqlite.loadTranscriptOverlayState(
+            chapterID: overlay.chapterID,
+            segmentID: overlay.segmentID
+        )
+        let baseRevision = state?.current.revision ?? 0
+        _ = try sqlite.mergeTranscriptOverlay(overlay, revision: baseRevision)
+        try sqlite.enqueue(overlayMutation(
+            overlay,
+            operation: .upsert,
+            baseRevision: baseRevision
+        ))
+
+        if let baseSegment = base.segments.first(where: { $0.id == overlay.segmentID }) {
+            let glosses = GlossEntry.stalingAcceptedSentenceTranslations(
+                loadGlosses(),
+                chapterID: base.chapterID,
+                source: baseSegment.displayText
+            )
+            saveGlosses(glosses)
+        }
+        overlayLog.info("message=overlay.save component=transcript-overlay outcome=success chapter=\(overlay.chapterID.rawValue, privacy: .public) segment=\(overlay.segmentID, privacy: .public)")
+    }
+
+    /// Restore is represented as a sync tombstone before local deletion so a
+    /// crash cannot silently revive the correction on another device.
+    static func restoreOriginalTranscriptSegment(overlayID: String) throws {
+        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        guard let overlay = try sqlite.loadAllTranscriptOverlays().first(where: { $0.id == overlayID }) else {
+            return
+        }
+        let baseRevision = try sqlite.loadTranscriptOverlayState(
+            chapterID: overlay.chapterID,
+            segmentID: overlay.segmentID
+        )?.current.revision ?? 0
+        try sqlite.enqueue(overlayMutation(
+            overlay,
+            operation: .delete,
+            baseRevision: baseRevision
+        ))
+        try sqlite.deleteTranscriptOverlay(id: overlayID)
+        overlayLog.info("message=overlay.restore component=transcript-overlay outcome=success chapter=\(overlay.chapterID.rawValue, privacy: .public) segment=\(overlay.segmentID, privacy: .public)")
+    }
+
+    /// Explicit resolution is the only path that discards competing candidates.
+    /// The chosen payload is re-enqueued against the observed server revision.
+    @discardableResult
+    static func resolveTranscriptOverlay(
+        chapterID: String,
+        segmentID: String,
+        choosing candidateID: String
+    ) throws -> StoredTranscriptOverlay? {
+        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        let domainChapterID = ChapterID(rawValue: chapterID)
+        guard let state = try sqlite.loadTranscriptOverlayState(
+            chapterID: domainChapterID,
+            segmentID: segmentID
+        ) else { return nil }
+        let choices = [state.current] + state.conflicts
+        guard let chosen = choices.first(where: { $0.id == candidateID }) else { return nil }
+        try sqlite.resolveTranscriptOverlay(
+            chapterID: domainChapterID,
+            segmentID: segmentID,
+            choosing: candidateID
+        )
+        try sqlite.enqueue(overlayMutation(
+            chosen.overlay,
+            operation: .upsert,
+            baseRevision: state.current.revision
+        ))
+        overlayLog.info("message=overlay.resolve component=transcript-overlay outcome=success chapter=\(chapterID, privacy: .public) segment=\(segmentID, privacy: .public) candidate=\(candidateID, privacy: .public)")
+        return chosen.overlay
+    }
+
+    static func loadReaderProgress(bookID: String) -> StoredReaderProgressState? {
+        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        return try? sqlite.loadReaderProgress(bookID: BookID(rawValue: bookID))
+    }
+
+    /// Stores chapter-relative fractional seconds without rounding. Sync
+    /// snapshots use the same record so resume remains exact across devices.
+    @discardableResult
+    static func saveReaderProgress(_ progress: StoredReaderProgress) throws -> ReaderProgressMergeOutcome {
+        guard progress.relativeSeconds.isFinite, progress.relativeSeconds >= 0 else {
+            throw ReaderProgressSaveError.invalidSeconds
+        }
+        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        let outcome = try sqlite.mergeReaderProgress(progress)
+        overlayLog.info("message=reader_progress.save component=reader-progress outcome=\(String(describing: outcome), privacy: .public) book=\(progress.bookID.rawValue, privacy: .public) chapter=\(progress.chapterID.rawValue, privacy: .public) device=\(progress.deviceID, privacy: .public)")
+        return outcome
+    }
+
+    static func resolveReaderProgress(bookID: String, choosing candidateID: String) throws {
+        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        try sqlite.resolveReaderProgress(bookID: BookID(rawValue: bookID), choosing: candidateID)
+        overlayLog.info("message=reader_progress.resolve component=reader-progress outcome=success book=\(bookID, privacy: .public) candidate=\(candidateID, privacy: .public)")
+    }
+
+    private static func overlayMutation(
+        _ overlay: StoredTranscriptOverlay,
+        operation: OutboxOperation,
+        baseRevision: Int64
+    ) throws -> OutboxMutation {
+        let overlayJSON = String(data: try JSONEncoder.iso.encode(overlay), encoding: .utf8) ?? "{}"
+        let payload = try JSONEncoder().encode([
+            "chapterId": AccountSyncApplicator.syncEntityID(overlay.chapterID.rawValue, kind: "chapter"),
+            "localChapterId": overlay.chapterID.rawValue,
+            "localOverlayId": overlay.id,
+            "segmentId": overlay.segmentID,
+            "overlayJSON": overlayJSON,
+        ])
+        return OutboxMutation(
+            id: MutationID.generate(),
+            entityType: .transcriptOverlay,
+            entityID: AccountSyncApplicator.syncEntityID(overlay.id, kind: "overlay"),
+            operation: operation,
+            baseRevision: ServerVersion(baseRevision),
+            occurredAt: overlay.updatedAt,
+            payload: payload
+        )
     }
 
     private static func decodeTranscript(at url: URL) -> Transcript? {
@@ -286,6 +467,15 @@ enum Persistence {
     }
 }
 
+enum TranscriptOverlaySaveError: Error, Equatable {
+    case staleBase
+    case invalid(TranscriptOverlayValidationError)
+}
+
+enum ReaderProgressSaveError: Error, Equatable {
+    case invalidSeconds
+}
+
 struct AppSettings: Codable, Equatable {
     var libraryPath: String
     var playbackRate: Double
@@ -359,7 +549,7 @@ struct AppSettings: Codable, Equatable {
             deepReadingMode: false,
             showStudyOverlay: false,
             vocabReviewPrompt: VocabReviewPrompt.recognition.rawValue,
-            appearance: AppAppearance.dark.rawValue,
+            appearance: AppAppearance.system.rawValue,
             preferredDictionary: "牛津英汉汉英词典",
             lookupPanelWidth: 420,
             readerFontScale: 1.0,

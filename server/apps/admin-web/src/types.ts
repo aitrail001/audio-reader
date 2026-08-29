@@ -253,9 +253,13 @@ export type Section =
 export type PolicyDraft = {
   model: string;
   promptVersion: string;
+  schemaVersion: string;
   systemPrompt: string;
   userPrompt: string;
   canaryPercent: string;
+  maxInputTokens: string;
+  maxOutputTokens: string;
+  timeoutMs: string;
 };
 
 export type ProductEvent = {

@@ -316,14 +316,14 @@ describe("passwordless rate limits", () => {
 
   it("fails closed when the durable store cannot count hits", async () => {
     const store: PasswordlessDurableStore = {
-      countHits: async () => null,
-      addHit: async () => true,
-      clearHits: async () => undefined,
-      getCooldownUntilMs: async () => 0,
-      setCooldown: async () => true,
-      clearCooldown: async () => undefined,
-      appendBlocked: async () => undefined,
-      listBlocked: async () => [],
+      countHits: () => Promise.resolve(null),
+      addHit: () => Promise.resolve(true),
+      clearHits: () => Promise.resolve(undefined),
+      getCooldownUntilMs: () => Promise.resolve(0),
+      setCooldown: () => Promise.resolve(true),
+      clearCooldown: () => Promise.resolve(undefined),
+      appendBlocked: () => Promise.resolve(undefined),
+      listBlocked: () => Promise.resolve([]),
     };
     const limiter = createDurablePasswordlessLimiter({ store });
     const denied = await limiter.checkRequest(attempt({ email: EMAIL }));

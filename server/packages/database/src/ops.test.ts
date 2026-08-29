@@ -64,7 +64,14 @@ function filterRows(rows: Row[], query: Record<string, string> | undefined): Row
       if (name === "select" || name === "order" || name === "limit" || name === "on_conflict") {
         continue;
       }
-      if (value.startsWith("eq.") && String(row[name] ?? "") !== value.slice(3)) {
+      const candidate = row[name];
+      const actual =
+        typeof candidate === "string" ||
+        typeof candidate === "number" ||
+        typeof candidate === "boolean"
+          ? String(candidate)
+          : "";
+      if (value.startsWith("eq.") && actual !== value.slice(3)) {
         return false;
       }
     }
@@ -80,6 +87,7 @@ function opsRest(options: {
 }): RestClient {
   return {
     async request(input: RestRequest): Promise<RestResponse> {
+      await Promise.resolve();
       const path = input.path;
       if (
         options.fail !== undefined &&

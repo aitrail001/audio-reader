@@ -202,7 +202,11 @@ export const PREVIEW_CACHE: CacheEntry[] = [
       chapterTitle: "Letter I",
       chapterFingerprint: "ch-letter-1",
       notes: [
-        { source: "The ice closed over the channel.", category: "example", explanation: "冰封住了航道。" },
+        {
+          source: "The ice closed over the channel.",
+          category: "example",
+          explanation: "冰封住了航道。",
+        },
         { source: "The lake froze overnight.", category: "example", explanation: "湖一夜结了冰。" },
       ],
     },

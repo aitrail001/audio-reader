@@ -12,9 +12,7 @@ export type StoredSession = {
 };
 
 export type RefreshResult =
-  | { status: "refreshed"; accessToken: string }
-  | { status: "invalid" }
-  | { status: "unavailable" };
+  { status: "refreshed"; accessToken: string } | { status: "invalid" } | { status: "unavailable" };
 
 export class AdminSessionError extends Error {
   readonly outcome: "invalid" | "unavailable";
@@ -23,6 +21,34 @@ export class AdminSessionError extends Error {
     super(message);
     this.name = "AdminSessionError";
     this.outcome = outcome;
+  }
+}
+
+export type AdminFieldError = { field: string; message: string };
+
+/** Typed operator failure. Keep problem metadata intact so every panel can offer recovery and support. */
+export class AdminApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly traceId: string;
+  readonly retryAfterSeconds: number | null;
+  readonly fieldErrors: AdminFieldError[];
+
+  constructor(input: {
+    status: number;
+    code: string;
+    message: string;
+    traceId?: string;
+    retryAfterSeconds?: number | null;
+    fieldErrors?: AdminFieldError[];
+  }) {
+    super(input.message);
+    this.name = "AdminApiError";
+    this.status = input.status;
+    this.code = input.code;
+    this.traceId = input.traceId ?? "";
+    this.retryAfterSeconds = input.retryAfterSeconds ?? null;
+    this.fieldErrors = input.fieldErrors ?? [];
   }
 }
 
@@ -80,7 +106,9 @@ export function loadStoredSession(): StoredSession | null {
     try {
       const parsed: unknown = JSON.parse(raw);
       if (isRecord(parsed)) {
-        const access = extractAccessToken(String(parsed.accessToken ?? ""));
+        const access = extractAccessToken(
+          typeof parsed.accessToken === "string" ? parsed.accessToken : "",
+        );
         if (access !== "") {
           const refresh = typeof parsed.refreshToken === "string" ? parsed.refreshToken.trim() : "";
           return refresh === ""
@@ -130,19 +158,53 @@ export function adminHeaders(token: string, mutating = false): HeadersInit {
   return headers;
 }
 
-export async function readError(response: Response): Promise<string> {
+export async function readError(response: Response): Promise<AdminApiError> {
+  const responseTraceId = response.headers.get("X-Request-Id") ?? "";
+  const headerRetry = Number.parseInt(response.headers.get("Retry-After") ?? "", 10);
   try {
-    const payload = (await response.json()) as { detail?: string; title?: string };
-    return payload.detail ?? payload.title ?? `Request failed (${String(response.status)}).`;
+    const payload = (await response.json()) as Record<string, unknown>;
+    const fieldErrors = Array.isArray(payload.fieldErrors)
+      ? payload.fieldErrors.flatMap((item): AdminFieldError[] => {
+          if (
+            !isRecord(item) ||
+            typeof item.field !== "string" ||
+            typeof item.message !== "string"
+          ) {
+            return [];
+          }
+          return [{ field: item.field, message: item.message }];
+        })
+      : [];
+    const bodyRetry =
+      typeof payload.retryAfterSeconds === "number" ? payload.retryAfterSeconds : null;
+    return new AdminApiError({
+      status: response.status,
+      code: typeof payload.code === "string" ? payload.code : `http_${String(response.status)}`,
+      message:
+        typeof payload.detail === "string"
+          ? payload.detail
+          : typeof payload.title === "string"
+            ? payload.title
+            : `Request failed (${String(response.status)}).`,
+      traceId: typeof payload.traceId === "string" ? payload.traceId : responseTraceId,
+      retryAfterSeconds: bodyRetry ?? (Number.isFinite(headerRetry) ? headerRetry : null),
+      fieldErrors,
+    });
   } catch {
-    return `Request failed (${String(response.status)}).`;
+    return new AdminApiError({
+      status: response.status,
+      code: `http_${String(response.status)}`,
+      message: `Request failed (${String(response.status)}).`,
+      traceId: responseTraceId,
+      retryAfterSeconds: Number.isFinite(headerRetry) ? headerRetry : null,
+    });
   }
 }
 
 export async function getJson<T>(path: string, token: string): Promise<T> {
   const response = await authorizedFetch(path, token, {});
   if (!response.ok) {
-    throw new Error(await readError(response));
+    throw await readError(response);
   }
   return (await response.json()) as T;
 }
@@ -154,7 +216,10 @@ export async function getJsonOrNull<T>(path: string, token: string): Promise<T |
     if (cause instanceof AdminSessionError) {
       throw cause;
     }
-    return null;
+    if (cause instanceof AdminApiError && cause.status === 404) {
+      return null;
+    }
+    throw cause;
   }
 }
 
@@ -170,7 +235,7 @@ export async function sendJson<T>(
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    throw new Error(await readError(response));
+    throw await readError(response);
   }
   if (response.status === 204) {
     return undefined as T;
@@ -181,7 +246,7 @@ export async function sendJson<T>(
 export async function fetchAuthConfig(): Promise<AuthConfig> {
   const response = await fetch(`${API_BASE}/v1/auth/config`);
   if (!response.ok) {
-    throw new Error(await readError(response));
+    throw await readError(response);
   }
   return (await response.json()) as AuthConfig;
 }
@@ -201,7 +266,7 @@ export async function requestOtp(email: string, turnstileToken: string | undefin
     body: JSON.stringify(payload),
   });
   if (!response.ok) {
-    throw new Error(await readError(response));
+    throw await readError(response);
   }
 }
 
@@ -226,7 +291,7 @@ export async function verifyOtp(
   const requestId = response.headers.get("X-Request-Id") ?? "";
   if (!response.ok) {
     logAuth("admin_session_verify_otp", "failed", requestIdExtra(requestId));
-    throw new Error(await readError(response));
+    throw await readError(response);
   }
   const session = sessionFromTokenResponse(
     await response.json(),

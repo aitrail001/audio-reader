@@ -247,9 +247,7 @@ export async function buildOperatorDiagnostics(input: {
   if (input.ops !== undefined) {
     const cache = await input.ops.listCache();
     const events = await input.ops.listProductEvents({ limit: 20 });
-    notes.push(
-      `Postgres assistant_cache_entries visible to admin: ${String(cache.length)}.`,
-    );
+    notes.push(`Postgres assistant_cache_entries visible to admin: ${String(cache.length)}.`);
     notes.push(
       `Postgres product_events (latest page): ${String(events.length)}. Latest: ${
         events[0]?.name ?? "none"

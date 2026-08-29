@@ -558,6 +558,43 @@ extension Transcript {
     }
 }
 
+extension Transcript {
+    /// Converts a validated presentation result without writing overlay content
+    /// into the base transcript's Codable representation.
+    init(_ resolved: ResolvedTranscript) {
+        let stored = resolved.base
+        self.init(
+            chapterID: stored.chapterID.rawValue,
+            audioPath: stored.localMediaKey,
+            chapterStart: stored.chapterStart,
+            createdAt: stored.createdAt,
+            locale: stored.locale,
+            segments: resolved.segments.map(TranscriptSegment.init),
+            source: stored.source,
+            ebookAligned: stored.ebookAligned,
+            ebookAlignment: stored.ebookAlignment.map(EPUBAlignmentAssessment.init),
+            ebookUseOverride: stored.ebookUseOverride
+        )
+    }
+}
+
+extension TranscriptSegment {
+    init(_ resolved: ResolvedTranscriptSegment) {
+        let base = resolved.base
+        self.init(
+            id: base.id,
+            start: resolved.start,
+            end: resolved.end,
+            words: base.words.map(TranscriptWord.init),
+            ebookText: base.ebookText,
+            alignmentScore: base.alignmentScore,
+            individualEbookMatchTrusted: base.individualEbookMatchTrusted,
+            documentEbookUseAllowed: base.documentEbookUseAllowed,
+            resolvedOverlayText: resolved.appliedOverlayID == nil ? nil : resolved.displayText
+        )
+    }
+}
+
 extension TranscriptSegment {
     init(_ stored: StoredTranscriptSegment) {
         self.init(
@@ -778,6 +815,7 @@ private extension AssistantResultStatus {
         case .pending: self = .pending
         case .accepted: self = .accepted
         case .rejected: self = .rejected
+        case .stale: self = .stale
         }
     }
 }
@@ -788,6 +826,7 @@ private extension GlossStatus {
         case .pending: self = .pending
         case .accepted: self = .accepted
         case .rejected: self = .rejected
+        case .stale: self = .stale
         }
     }
 }

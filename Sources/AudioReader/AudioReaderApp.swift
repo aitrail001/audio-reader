@@ -3,11 +3,18 @@ import Foundation
 
 @main
 struct AudioReaderApp: App {
-    @State private var state = AppState(composition: .live)
+    @State private var state: AppState
 
     init() {
-#if os(macOS)
         let args = CommandLine.arguments
+#if DEBUG
+        _state = State(initialValue: AppState(
+            composition: args.contains("--uitesting") ? .inMemory() : .live
+        ))
+#else
+        _state = State(initialValue: AppState(composition: .live))
+#endif
+#if os(macOS)
         if args.contains("--scan") {
             Cli.scan()
             Foundation.exit(0)
@@ -28,10 +35,22 @@ struct AudioReaderApp: App {
                 .frame(minWidth: 980, minHeight: 640)
                 .background(Palette.bg)
                 .preferredColorScheme(AppAppearance(rawValue: state.settings.appearance)?.colorScheme)
+                .uiTestMotionEnvironment()
         }
         .windowStyle(.automatic)
         .defaultSize(width: 1280, height: 820)
         .commands {
+            CommandMenu("Navigate") {
+                Button("Library") { state.tab = .library }
+                    .keyboardShortcut("1", modifiers: [.command])
+                Button("Now Reading") { state.tab = .player }
+                    .keyboardShortcut("2", modifiers: [.command])
+                Button("Words") { state.tab = .vocab }
+                    .keyboardShortcut("3", modifiers: [.command])
+                Divider()
+                Button("Settings") { state.tab = .settings }
+                    .keyboardShortcut(",", modifiers: [.command])
+            }
             CommandMenu("Playback") {
                 Button(state.player.isPlaying ? "Pause" : "Play") {
                     state.togglePlay()
@@ -101,7 +120,145 @@ struct AudioReaderApp: App {
         WindowGroup {
             IPadRootView(state: state)
                 .preferredColorScheme(AppAppearance(rawValue: state.settings.appearance)?.colorScheme)
+                .uiTestMotionEnvironment()
         }
 #endif
     }
 }
+
+private extension View {
+    @ViewBuilder
+    func uiTestMotionEnvironment() -> some View {
+#if DEBUG
+        environment(
+            \.uiTestReduceMotion,
+            CommandLine.arguments.contains("--uitesting-reduce-motion")
+        )
+#else
+        self
+#endif
+    }
+}
+
+private struct UITestReduceMotionKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var uiTestReduceMotion: Bool {
+        get { self[UITestReduceMotionKey.self] }
+        set { self[UITestReduceMotionKey.self] = newValue }
+    }
+}
+
+#if DEBUG
+/// Launch-only fixtures keep UI automation deterministic without shipping fixture strings or data.
+enum UITestLaunchScenario {
+    static var isRequested: Bool { CommandLine.arguments.contains("--uitesting") }
+
+    @MainActor
+    static func applyIfRequested(to state: AppState) {
+        let arguments = CommandLine.arguments
+        guard arguments.contains("--uitesting") else { return }
+        let scenario = arguments.first { $0.hasPrefix("--uitesting-scenario=") }?
+            .split(separator: "=", maxSplits: 1)
+            .last
+            .map(String.init) ?? "library"
+
+        let audioURL = makeAudioFixture()
+        let chapter = Chapter(
+            id: "ui-chapter-1",
+            index: 0,
+            title: "A Clear Beginning",
+            audioPath: audioURL.path,
+            duration: 90
+        )
+        let book = Book(
+            id: "ui-book-1",
+            title: "The Listening Garden",
+            author: "AudioReader",
+            folderPath: "/private/tmp/audioreader-ui-book",
+            coverPath: nil,
+            ebookPath: nil,
+            chapters: [chapter],
+            source: .files
+        )
+        let firstWord = TranscriptWord(id: "ui-word-1", text: "Listening ", start: 0, end: 0.8, confidence: 1)
+        let secondWord = TranscriptWord(id: "ui-word-2", text: "changes us.", start: 0.8, end: 2.2, confidence: 1)
+
+        state.books = scenario == "empty-library" ? [] : [book]
+        state.selectedBookID = scenario == "empty-library" ? nil : book.id
+        state.selectedChapterID = scenario == "empty-library" ? nil : chapter.id
+        state.transcript = Transcript(
+            chapterID: chapter.id,
+            audioPath: chapter.audioPath,
+            createdAt: Date(timeIntervalSince1970: 1),
+            locale: "en-AU",
+            segments: [
+                TranscriptSegment(
+                    id: "ui-sentence-1",
+                    start: 0,
+                    end: 2.2,
+                    words: [firstWord, secondWord],
+                    ebookText: nil,
+                    alignmentScore: nil
+                )
+            ],
+            source: "ui-test",
+            ebookAligned: false
+        )
+        state.vocab = [
+            VocabEntry(
+                id: "ui-vocab-1",
+                word: "listening",
+                context: "Listening changes us.",
+                bookID: book.id,
+                bookTitle: book.title,
+                chapterID: chapter.id,
+                chapterTitle: chapter.title,
+                segmentID: "ui-sentence-1",
+                wordID: firstWord.id,
+                timestamp: 0,
+                addedAt: Date(timeIntervalSince1970: 1)
+            )
+        ]
+
+        switch scenario {
+        case "reader": state.tab = .player
+        case "words": state.tab = .vocab
+        case "settings": state.tab = .settings
+        default: state.tab = .library
+        }
+    }
+
+    /// A private temporary PCM fixture lets automation exercise real seeking
+    /// without bundling test media or touching the user's library.
+    private static func makeAudioFixture() -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audioreader-ui-fixture.wav")
+        guard !FileManager.default.fileExists(atPath: url.path) else { return url }
+        let sampleRate: UInt32 = 8_000
+        let sampleCount = Int(sampleRate) * 4
+        var data = Data()
+        func append<T: FixedWidthInteger>(_ value: T) {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        }
+        data.append(contentsOf: Array("RIFF".utf8))
+        append(UInt32(36 + sampleCount * 2))
+        data.append(contentsOf: Array("WAVEfmt ".utf8))
+        append(UInt32(16))
+        append(UInt16(1))
+        append(UInt16(1))
+        append(sampleRate)
+        append(sampleRate * 2)
+        append(UInt16(2))
+        append(UInt16(16))
+        data.append(contentsOf: Array("data".utf8))
+        append(UInt32(sampleCount * 2))
+        data.append(Data(count: sampleCount * 2))
+        try? data.write(to: url, options: .atomic)
+        return url
+    }
+}
+#endif

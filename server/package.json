@@ -17,6 +17,7 @@
     "dev:docker": "bash ./scripts/run-local-stack.sh",
     "dev:docker:down": "docker compose down --remove-orphans",
     "test:e2e-local": "bash ./scripts/e2e-local-api.sh",
+    "test:e2e-operator": "playwright test",
     "preflight:deploy": "bash ./scripts/preflight-deploy.sh",
     "deploy:staging": "bash ./scripts/deploy-worker.sh staging",
     "deploy:production": "bash ./scripts/deploy-worker.sh production",
@@ -28,7 +29,9 @@
     "contract:check": "pnpm --filter @audio-reader/contract check"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@eslint/js": "10.0.1",
+    "@playwright/test": "^1.62.1",
     "@types/node": "catalog:",
     "eslint": "10.9.1",
     "eslint-config-prettier": "10.1.8",

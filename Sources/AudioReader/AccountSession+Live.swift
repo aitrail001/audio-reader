@@ -28,7 +28,8 @@ extension AccountSession {
                 cursor: sqlite,
                 versions: sqlite,
                 snapshot: AccountSyncApplicator.snapshot,
-                applyChange: AccountSyncApplicator.apply
+                applyChange: AccountSyncApplicator.apply,
+                handleConflict: AccountSyncApplicator.retainSyncConflict
             )
         )
     }
@@ -48,6 +49,8 @@ enum AccountSyncApplicator {
             lemmas: Persistence.loadKnownLemmas(),
             books: (try? sqlite.loadBooks()) ?? [],
             transcripts: (try? sqlite.loadTranscripts()) ?? [],
+            overlays: (try? sqlite.loadAllTranscriptOverlays()) ?? [],
+            readerProgress: (try? sqlite.loadAllReaderProgress()) ?? [],
             reviews: (try? sqlite.loadReviewEvents()) ?? []
         )
     }
@@ -58,6 +61,8 @@ enum AccountSyncApplicator {
         lemmas: [KnownLemmaRecord],
         books: [StoredBook] = [],
         transcripts: [StoredTranscript] = [],
+        overlays: [StoredTranscriptOverlay] = [],
+        readerProgress: [StoredReaderProgress] = [],
         reviews: [StoredReviewEvent] = []
     ) throws -> [OutboxMutation] {
         var mutations: [OutboxMutation] = [
@@ -163,6 +168,55 @@ enum AccountSyncApplicator {
                 )
             )
         }
+        for overlay in overlays {
+            let entityID = syncEntityID(overlay.id, kind: "overlay")
+            let chapterID = syncEntityID(overlay.chapterID.rawValue, kind: "chapter")
+            let json = String(data: try JSONEncoder.iso.encode(overlay), encoding: .utf8) ?? "{}"
+            mutations.append(
+                OutboxMutation(
+                    id: MutationID.generate(),
+                    entityType: .transcriptOverlay,
+                    entityID: entityID,
+                    operation: .upsert,
+                    baseRevision: .zero,
+                    occurredAt: overlay.updatedAt,
+                    payload: try encodePayload(
+                        PortableTranscriptOverlay(
+                            chapterId: chapterID,
+                            localChapterId: overlay.chapterID.rawValue,
+                            segmentId: overlay.segmentID,
+                            overlayJSON: json
+                        )
+                    )
+                )
+            )
+        }
+        for progress in readerProgress {
+            mutations.append(
+                OutboxMutation(
+                    id: MutationID.generate(),
+                    entityType: .progress,
+                    entityID: syncEntityID(progress.bookID.rawValue, kind: "reader-progress"),
+                    operation: .upsert,
+                    baseRevision: ServerVersion(progress.revision),
+                    occurredAt: progress.updatedAt,
+                    payload: try encodePayload(
+                        PortableReaderProgress(
+                            progressKind: "reader",
+                            localProgressId: progress.id,
+                            bookId: syncEntityID(progress.bookID.rawValue, kind: "book"),
+                            chapterId: syncEntityID(progress.chapterID.rawValue, kind: "chapter"),
+                            localBookId: progress.bookID.rawValue,
+                            localChapterId: progress.chapterID.rawValue,
+                            relativeSeconds: progress.relativeSeconds,
+                            updatedAt: isoString(progress.updatedAt),
+                            deviceId: progress.deviceID,
+                            revision: progress.revision
+                        )
+                    )
+                )
+            )
+        }
         for review in reviews {
             let entityID = syncEntityID(review.id.rawValue, kind: "review")
             let vocabularyID = syncEntityID(review.vocabularyID.rawValue, kind: "vocab")
@@ -232,7 +286,14 @@ enum AccountSyncApplicator {
                             timestampSeconds: entry.timestamp,
                             state: entry.isInLearnList ? "learning" : "unknown",
                             definition: entry.definition,
-                            note: entry.translation
+                            note: entry.translation,
+                            segmentId: entry.segmentID,
+                            wordId: entry.wordID,
+                            spokenText: entry.spokenText,
+                            ebookText: entry.ebookText,
+                            translationLanguage: entry.translationLanguage,
+                            translationModel: entry.translationModel,
+                            sourceLanguage: entry.sourceLanguage
                         )
                     )
                 )
@@ -268,6 +329,8 @@ enum AccountSyncApplicator {
             applyLemma(change)
         case OutboxEntityType.transcript.rawValue:
             applyTranscript(change)
+        case OutboxEntityType.transcriptOverlay.rawValue:
+            applyTranscriptOverlay(change)
         case OutboxEntityType.progress.rawValue:
             applyProgress(change)
         case OutboxEntityType.reviewEvent.rawValue:
@@ -319,11 +382,18 @@ enum AccountSyncApplicator {
             category: VocabCategory(rawValue: change.payload["category"]?.stringValue ?? "word") ?? .word,
             definition: change.payload["definition"]?.stringValue,
             translation: change.payload["note"]?.stringValue,
+            translationLanguage: change.payload["translationLanguage"]?.stringValue,
+            translationModel: change.payload["translationModel"]?.stringValue,
+            sourceLanguage: change.payload["sourceLanguage"]?.stringValue,
             context: change.payload["context"]?.stringValue ?? "",
+            spokenText: change.payload["spokenText"]?.stringValue,
+            ebookText: change.payload["ebookText"]?.stringValue,
             bookID: nonempty(localBook) ?? change.payload["bookId"]?.stringValue ?? "",
             bookTitle: change.payload["bookTitle"]?.stringValue ?? "",
             chapterID: nonempty(localChapter) ?? change.payload["chapterId"]?.stringValue ?? "",
             chapterTitle: change.payload["chapterTitle"]?.stringValue ?? "",
+            segmentID: change.payload["segmentId"]?.stringValue,
+            wordID: change.payload["wordId"]?.stringValue,
             timestamp: change.payload["timestampSeconds"]?.numberValue ?? 0,
             addedAt: isoDate(change.changedAt) ?? Date(),
             isInLearnList: change.payload["state"]?.stringValue == "learning"
@@ -383,7 +453,31 @@ enum AccountSyncApplicator {
         try? Persistence.saveTranscript(transcript)
     }
 
+    /// Pulled overlays bypass the local mutation enqueue path; otherwise every
+    /// remote correction would echo back as a new local mutation.
+    private static func applyTranscriptOverlay(_ change: SyncPulledChange) {
+        let sqlite = LocalSQLiteStore(fileURL: Persistence.root.appendingPathComponent("library.sqlite"))
+        if change.operation == OutboxOperation.delete.rawValue {
+            if let localID = change.payload["localOverlayId"]?.stringValue {
+                try? sqlite.deleteTranscriptOverlay(id: localID)
+            }
+            return
+        }
+        guard let json = change.payload["overlayJSON"]?.stringValue,
+              let data = json.data(using: .utf8),
+              var overlay = try? JSONDecoder.iso.decode(StoredTranscriptOverlay.self, from: data)
+        else { return }
+        if let localChapterID = change.payload["localChapterId"]?.stringValue, !localChapterID.isEmpty {
+            overlay.chapterID = ChapterID(rawValue: localChapterID)
+        }
+        _ = try? sqlite.mergeTranscriptOverlay(overlay, revision: Int64(change.revision))
+    }
+
     private static func applyProgress(_ change: SyncPulledChange) {
+        if change.payload["progressKind"]?.stringValue == "reader" {
+            applyReaderProgress(change)
+            return
+        }
         guard let vocabularyId = change.payload["vocabularyId"]?.stringValue else { return }
         var items = Persistence.loadVocab()
         guard let index = items.firstIndex(where: { $0.id.caseInsensitiveCompare(vocabularyId) == .orderedSame }) else {
@@ -402,6 +496,64 @@ enum AccountSyncApplicator {
             items[index].lastReviewedAt = isoDate(last)
         }
         Persistence.saveVocab(items)
+    }
+
+    private static func applyReaderProgress(_ change: SyncPulledChange) {
+        guard let bookID = change.payload["localBookId"]?.stringValue,
+              let chapterID = change.payload["localChapterId"]?.stringValue,
+              let seconds = change.payload["relativeSeconds"]?.numberValue,
+              let deviceID = change.payload["deviceId"]?.stringValue
+        else { return }
+        let progress = StoredReaderProgress(
+            id: change.payload["localProgressId"]?.stringValue ?? "remote:\(change.entityId):\(change.revision)",
+            bookID: BookID(rawValue: bookID),
+            chapterID: ChapterID(rawValue: chapterID),
+            relativeSeconds: seconds,
+            updatedAt: isoDate(change.payload["updatedAt"]?.stringValue ?? change.changedAt) ?? Date(),
+            deviceID: deviceID,
+            revision: Int64(change.revision)
+        )
+        let sqlite = LocalSQLiteStore(fileURL: Persistence.root.appendingPathComponent("library.sqlite"))
+        _ = try? sqlite.mergeReaderProgress(progress)
+    }
+
+    /// A reader-position push conflict promotes the local candidate to the
+    /// server revision. The next pull then lands as a same-revision peer and is
+    /// retained for explicit user choice instead of silently winning.
+    static func retainReaderProgressConflict(_ mutation: OutboxMutation, serverRevision: Int64) throws {
+        guard mutation.entityType == .progress,
+              let payload = try? JSONDecoder().decode([String: SyncJSONValue].self, from: mutation.payload),
+              payload["progressKind"]?.stringValue == "reader",
+              let bookID = payload["localBookId"]?.stringValue
+        else { return }
+        let sqlite = LocalSQLiteStore(fileURL: Persistence.root.appendingPathComponent("library.sqlite"))
+        guard var current = try sqlite.loadReaderProgress(bookID: BookID(rawValue: bookID))?.current else { return }
+        current.revision = serverRevision
+        _ = try sqlite.mergeReaderProgress(current)
+    }
+
+    /// Conflict promotion makes the local and subsequently pulled remote edit
+    /// peers at one revision, allowing the repository to retain both candidates.
+    static func retainTranscriptOverlayConflict(
+        _ mutation: OutboxMutation,
+        serverRevision: Int64
+    ) throws {
+        guard mutation.entityType == .transcriptOverlay,
+              let payload = try? JSONDecoder().decode([String: SyncJSONValue].self, from: mutation.payload),
+              let chapterID = payload["localChapterId"]?.stringValue,
+              let segmentID = payload["segmentId"]?.stringValue
+        else { return }
+        let sqlite = LocalSQLiteStore(fileURL: Persistence.root.appendingPathComponent("library.sqlite"))
+        guard let current = try sqlite.loadTranscriptOverlayState(
+            chapterID: ChapterID(rawValue: chapterID),
+            segmentID: segmentID
+        )?.current.overlay else { return }
+        _ = try sqlite.mergeTranscriptOverlay(current, revision: serverRevision)
+    }
+
+    static func retainSyncConflict(_ mutation: OutboxMutation, serverRevision: Int64) throws {
+        try retainReaderProgressConflict(mutation, serverRevision: serverRevision)
+        try retainTranscriptOverlayConflict(mutation, serverRevision: serverRevision)
     }
 
     private static func applyReview(_ change: SyncPulledChange) {
@@ -492,6 +644,13 @@ private struct PortableVocabulary: Encodable {
     var state: String
     var definition: String?
     var note: String?
+    var segmentId: String?
+    var wordId: String?
+    var spokenText: String?
+    var ebookText: String?
+    var translationLanguage: String?
+    var translationModel: String?
+    var sourceLanguage: String?
 }
 
 private struct PortableLemma: Encodable {
@@ -526,6 +685,13 @@ private struct PortableTranscript: Encodable {
     var transcriptJSON: String
 }
 
+private struct PortableTranscriptOverlay: Encodable {
+    var chapterId: String
+    var localChapterId: String
+    var segmentId: String
+    var overlayJSON: String
+}
+
 private struct PortableReview: Encodable {
     var vocabularyId: String
     var face: String
@@ -539,6 +705,19 @@ private struct PortableProgress: Encodable {
     var nextReview: String?
     var lastReviewedAt: String?
     var lastReviewQuality: String?
+}
+
+private struct PortableReaderProgress: Encodable {
+    var progressKind: String
+    var localProgressId: String
+    var bookId: String
+    var chapterId: String
+    var localBookId: String
+    var localChapterId: String
+    var relativeSeconds: Double
+    var updatedAt: String
+    var deviceId: String
+    var revision: Int64
 }
 
 extension AccountDeviceEnvironment {

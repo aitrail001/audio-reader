@@ -4492,6 +4492,8 @@ export interface operations {
             query?: {
                 name?: string;
                 accountId?: string;
+                /** @description Exact request ID used to correlate Activity with Trace and Audit. */
+                requestId?: string;
                 from?: string;
                 to?: string;
                 cursor?: string;

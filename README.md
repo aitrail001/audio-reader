@@ -114,6 +114,10 @@ Core reading-assistant prompts and translation results are provider-neutral. Pro
 
 | Shortcut | Action |
 |---|---|
+| Command–1 | Library |
+| Command–2 | Now Reading |
+| Command–3 | Words |
+| Command–, | Settings |
 | Space | Play or pause |
 | Left / Right arrow | Skip backward or forward |
 | Option–Left / Option–Right | Previous or next sentence |
@@ -125,7 +129,40 @@ Core reading-assistant prompts and translation results are provider-neutral. Pro
 | Command–K | Mark the selected word known |
 | Command–T | Transcribe the selected chapter |
 
+### Correct a sentence
+
+Use a sentence's **Edit transcript** action to correct its displayed text or
+sentence start/end time, preview the local audio, and save the correction.
+**Restore original** removes the overlay without changing the imported EPUB or
+speech-recognition result. Corrections must match the source fingerprint, stay
+inside the chapter, last at least 0.25 seconds, and avoid neighboring sentences.
+See [Transcript corrections and Anki export](docs/transcript-corrections-and-anki.md)
+for conflict, translation-staleness, and word-timing limitations.
+
+### Sync and resume
+
+When account sync is enabled, the sidebar and Settings show pending, current,
+failed, or conflicting state. **Sync now** retries immediately. **Continue**
+returns to the exact synchronized chapter and playback offset. Concurrent
+progress or transcript corrections require an explicit choice instead of being
+silently overwritten. Audio and EPUB files stay local; another device may need
+the same local media for playback. See [Sync and account export](docs/sync-and-account-export.md).
+
+### Export to Anki
+
+In **Words**, select entries and choose **Export to Anki**, or use the current
+filtered view, Learning List, or All Vocabulary scope. AudioReader creates a
+ZIP with `notes.tsv`, `manifest.json`, and deduplicated flat M4A clips. Missing
+or protected media produces text-only cards and an omission report instead of
+failing the export. Extract the ZIP before importing the TSV into Anki Desktop;
+the detailed temporary-profile procedure is in
+[Transcript corrections and Anki export](docs/transcript-corrections-and-anki.md#export-vocabulary-for-anki).
+
 ## Limitations
+
+The prioritization and evidence behind the recovery, continuity, study-export,
+and incident-first changes are recorded in
+[Product research: recovery, continuity, and operator trust](docs/product-research-2026-08.md).
 
 - **Protected audiobooks cannot be imported or transcribed.** AudioReader can list some downloaded Apple Books titles, but DRM-protected items remain disabled and must be played in Apple Books. It does not remove or bypass DRM.
 - **Cloud-only Apple Books titles are unavailable.** Download a title first. Even when downloaded, the operating system must expose an unprotected, accessible asset URL before AudioReader can import it.
@@ -138,7 +175,9 @@ Core reading-assistant prompts and translation results are provider-neutral. Pro
 - **Saved API keys use an encrypted local vault.** Provider keys are AES-GCM encrypted and are not stored in Apple Keychain, AudioReader settings, or plaintext app files. A 256-bit wrapping-key file next to the vault protects it. Environment-provided keys remain the responsibility of the environment configuration.
 - **ChatGPT-plan access requires an installed, signed-in Codex on macOS.** AudioReader does not bundle Codex or its OAuth credentials. The standalone Codex installer avoids a Node.js dependency, while AudioReader also supports npm installations by selecting their bundled native binary when available. ChatGPT-plan access is distinct from OpenAI API billing and is unavailable on iPadOS; use an OpenAI API key there. Model access and usage limits depend on the signed-in ChatGPT plan.
 - **Publisher permissions still apply.** Possessing an accessible audio file or RSS URL does not necessarily grant permission to transcribe, translate, summarise, or otherwise process it. Use AudioReader only with content you are authorized to process.
-- **Reading data stays on each installation.** Optional product sign-in registers the device with the account API. This version does not upload books or sync transcripts, vocabulary, or playback position. See [docs/operations.md](docs/operations.md) for the local Docker API and hosted deploy.
+- **Source media stays on each installation.** Optional product sign-in can synchronize small reading records—including progress, vocabulary, transcripts, and transcript overlays—but never uploads audiobook, EPUB, provider credentials, or Anki clip media. See [Sync and account export](docs/sync-and-account-export.md).
+- **Transcript corrections are sentence-level.** They can change resolved sentence text and bounds but do not perform forced word alignment. The immutable imported/ASR base remains the source of the original word timings.
+- **Anki export is TSV plus local media, not `.apkg`.** Anki Desktop does not import AudioReader's transport ZIP directly; extract it, copy the flat clips into the temporary profile's media folder, then import `notes.tsv`.
 - **Chapter summaries and chat history are session-only.** They are kept while the app is running but are not restored after relaunch. Accepted vocabulary translations and chapter-translation checkpoints are persisted.
 - **Background execution is platform-controlled.** Long transcription or chapter-AI work can be interrupted if the operating system suspends or terminates the app; retained progress is best effort.
 - **This is a development build.** It requires current Apple platform tooling and has not been presented as an App Store release.

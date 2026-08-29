@@ -584,9 +584,11 @@ public final class AccountSession {
             }
         case "conflict":
             guard let mutation = lookup[result.mutationId] else { return }
+            let serverRevision = Int64(result.entityRevision ?? Int(mutation.baseRevision.rawValue))
+            try runtime.handleConflict(mutation, serverRevision)
             var retry = mutation
             retry.id = MutationID.generate()
-            retry.baseRevision = ServerVersion(Int64(result.entityRevision ?? Int(mutation.baseRevision.rawValue)))
+            retry.baseRevision = ServerVersion(serverRevision)
             try runtime.outbox.enqueue(retry)
             try runtime.outbox.markAcknowledged(id: mutationID)
             Self.syncLog.info(

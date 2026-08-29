@@ -105,12 +105,10 @@ struct StableDomainIdentifierTests {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/AudioReaderDomain", isDirectory: true)
-        let sources = try FileManager.default.contentsOfDirectory(
-            at: domainRoot,
-            includingPropertiesForKeys: nil
+        let joined = try String(
+            contentsOf: domainRoot.appendingPathComponent("StableDomainIDs.swift"),
+            encoding: .utf8
         )
-        .filter { $0.pathExtension == "swift" }
-        let joined = try sources.map { try String(contentsOf: $0, encoding: .utf8) }.joined(separator: "\n")
 
         #expect(!joined.contains("SHA256"))
         #expect(!joined.contains("folderPath"))

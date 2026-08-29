@@ -7,6 +7,7 @@ const root = dirname(fileURLToPath(import.meta.url));
 const source = ["app.tsx", "api.ts", "operator-table.tsx"]
   .map((name) => readFileSync(join(root, name), "utf8"))
   .join("\n");
+const normalizedSource = source.replace(/\s+/g, " ");
 
 describe("operator console coverage", () => {
   it("calls every admin management route", () => {
@@ -57,18 +58,25 @@ describe("operator console coverage", () => {
       "Last hit",
       "Translation",
       "Account id",
-      "label=\"account id\"",
+      'label="account id"',
       "user.accountId",
       "Find in this page",
       "OperatorTable",
       "Sentence context",
+      "loadingPanels",
+      "Loading this view",
     ];
     for (const route of routes) {
-      expect(source).toContain(route);
+      expect(normalizedSource).toContain(route);
     }
   });
 
   it("does not embed a service role secret", () => {
     expect(source).not.toMatch(/SERVICE_ROLE|service_role/);
+  });
+
+  it("renders change review only for an active mutation context", () => {
+    expect(normalizedSource).toContain('mutationPreview !== "" ? (');
+    expect(normalizedSource).toContain("setMutationPreview(summary)");
   });
 });

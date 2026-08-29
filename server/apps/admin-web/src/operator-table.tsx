@@ -54,7 +54,11 @@ export function OperatorTable<T>(props: {
       return props.rows;
     }
     return props.rows.filter((row) =>
-      props.columns.some((column) => cellSearch(column as OperatorColumn<unknown>, row).toLowerCase().includes(needle)),
+      props.columns.some((column) =>
+        cellSearch(column as OperatorColumn<unknown>, row)
+          .toLowerCase()
+          .includes(needle),
+      ),
     );
   }, [props.columns, props.rows, query]);
 
@@ -63,12 +67,13 @@ export function OperatorTable<T>(props: {
       return filtered;
     }
     const column = props.columns.find((item) => item.id === sortId);
-    if (column?.sortValue === undefined) {
+    const sortValue = column?.sortValue;
+    if (sortValue === undefined) {
       return filtered;
     }
     const copy = [...filtered];
     copy.sort((left, right) => {
-      const result = compareValues(column.sortValue!(left), column.sortValue!(right));
+      const result = compareValues(sortValue(left), sortValue(right));
       return sortDir === "asc" ? result : -result;
     });
     return copy;
@@ -124,7 +129,13 @@ export function OperatorTable<T>(props: {
                 {props.columns.map((column) => {
                   const sortable = column.sortValue !== undefined;
                   const active = sortId === column.id;
-                  const ariaSort = !sortable ? undefined : active ? (sortDir === "asc" ? "ascending" : "descending") : "none";
+                  const ariaSort = !sortable
+                    ? undefined
+                    : active
+                      ? sortDir === "asc"
+                        ? "ascending"
+                        : "descending"
+                      : "none";
                   return (
                     <th
                       key={column.id}
@@ -186,7 +197,11 @@ export function OperatorTable<T>(props: {
                 const open = props.expandedId === id;
                 return (
                   <Fragment key={id}>
-                    <tr className={open ? "selected" : undefined}>
+                    <tr
+                      className={open ? "selected" : undefined}
+                      tabIndex={0}
+                      aria-label={`${props.noun} ${id}`}
+                    >
                       {props.columns.map((column) => (
                         <td key={column.id} className={column.numeric === true ? "num" : undefined}>
                           {column.render(row)}

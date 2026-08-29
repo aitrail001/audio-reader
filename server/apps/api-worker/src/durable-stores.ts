@@ -44,7 +44,7 @@ export function createPostgresPasswordlessStore(rest: RestClient): PasswordlessD
       if (response.status < 200 || response.status >= 300) {
         return null;
       }
-      const row = Array.isArray(response.body) ? response.body[0] : response.body;
+      const row: unknown = Array.isArray(response.body) ? response.body[0] : response.body;
       if (typeof row !== "object" || row === null || !("until_at" in row)) {
         return 0;
       }

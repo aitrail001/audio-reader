@@ -5,6 +5,10 @@ import ZIPFoundation
 
 @Suite("Cross-platform import parity")
 struct ImportParityTests {
+    @Test("new installs follow the system appearance")
+    func defaultAppearanceFollowsSystem() {
+        #expect(AppSettings.default.appearance == AppAppearance.system.rawValue)
+    }
     @Test("EPUB text extraction uses the sandbox-safe ZIP implementation")
     func extractsEPUBText() throws {
         let fixture = try TemporaryFixture()
@@ -1185,12 +1189,12 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.1.0")
-        #expect(plist["CFBundleVersion"] as? String == "85")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.1.0")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "85")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.1.0;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 85;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.2.0")
+        #expect(plist["CFBundleVersion"] as? String == "86")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.2.0")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "86")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.2.0;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 86;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
         #expect(plist["ProductAPIBaseURL"] as? String == ProductAPI.hostedProductionBaseURL.absoluteString)
@@ -1204,6 +1208,40 @@ struct ImportParityTests {
         let iPadATS = try #require(iPadPlist["NSAppTransportSecurity"] as? [String: Any])
         #expect(macATS["NSAllowsLocalNetworking"] as? Bool == true)
         #expect(iPadATS["NSAllowsLocalNetworking"] as? Bool == true)
+    }
+
+    @Test("Xcode exposes Debug-only deterministic UI test targets for both app presentations")
+    func keepsDeterministicUITestTargets() throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let project = try String(
+            contentsOf: repository.appendingPathComponent("AudioReader.xcodeproj/project.pbxproj"),
+            encoding: .utf8
+        )
+        let macTests = try String(
+            contentsOf: repository.appendingPathComponent("UITests/AudioReaderMacOSUITests/AudioReaderMacOSUITests.swift"),
+            encoding: .utf8
+        )
+        let iPadTests = try String(
+            contentsOf: repository.appendingPathComponent("UITests/AudioReaderIOSUITests/AudioReaderIOSUITests.swift"),
+            encoding: .utf8
+        )
+
+        #expect(project.contains("AudioReader-macOSUITests"))
+        #expect(project.contains("AudioReader-iOSUITests"))
+        #expect(project.components(separatedBy: "TEST_TARGET_NAME =").count - 1 == 2)
+        #expect(macTests.contains("--uitesting"))
+        #expect(iPadTests.contains("--uitesting"))
+        #expect(macTests.contains("--uitesting-reduce-motion"))
+        #expect(iPadTests.contains("--uitesting-reduce-motion"))
+        #expect(macTests.contains("library.importPaired"))
+        #expect(iPadTests.contains("library.importPaired"))
+        #expect(macTests.contains("transcript.restore"))
+        #expect(iPadTests.contains("transcript.restore"))
+        #expect(macTests.contains("anki.export"))
+        #expect(iPadTests.contains("anki.export"))
     }
 }
 

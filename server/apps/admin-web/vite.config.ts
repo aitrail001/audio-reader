@@ -5,7 +5,9 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 const adminVersion = (
-  JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8")) as {
+  JSON.parse(
+    readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8"),
+  ) as {
     version: string;
   }
 ).version;

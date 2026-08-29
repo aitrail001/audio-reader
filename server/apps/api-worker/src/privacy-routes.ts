@@ -1,6 +1,6 @@
 import type { Principal } from "@audio-reader/auth";
 import type { components } from "@audio-reader/contract";
-import type { CatalogStore, IdentityStore, OpsStore } from "@audio-reader/database";
+import type { CatalogStore, IdentityStore, OpsStore, SyncStore } from "@audio-reader/database";
 import { sha256Hex } from "@audio-reader/qwen";
 import { buildAccountExportPayload } from "./account-export";
 import { readJsonObject } from "./body";
@@ -31,6 +31,7 @@ export type PrivacyRouteContext = {
   identity?: IdentityStore;
   catalog?: CatalogStore;
   objects?: ObjectStore;
+  sync?: SyncStore;
 };
 
 export function isPrivacyPath(path: string): boolean {
@@ -118,6 +119,7 @@ async function createExport(
         accountId: principal.accountId,
         ...(context.identity === undefined ? {} : { identity: context.identity }),
         ...(context.catalog === undefined ? {} : { catalog: context.catalog }),
+        ...(context.sync === undefined ? {} : { sync: context.sync }),
       });
       const json = JSON.stringify(payload, null, 2);
       const bytes = new TextEncoder().encode(json);

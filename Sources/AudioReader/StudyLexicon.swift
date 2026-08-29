@@ -115,6 +115,12 @@ enum StudyTokenIndex {
     }
 
     static func tokens(in segment: TranscriptSegment) -> [TranscriptWord] {
+        // Corrected sentence text has no forced word alignment. Evenly bounded
+        // presentation tokens keep lookup and vocabulary capture on the same
+        // resolved text without mutating the immutable ASR word timing.
+        if segment.resolvedOverlayText != nil {
+            return syntheticTokens(in: segment, text: segment.spokenText, idComponent: "overlay")
+        }
         if !segment.words.isEmpty { return segment.words }
         let source = segment.trustedEbookText ?? segment.spokenText
         return syntheticTokens(in: segment, text: source, idComponent: "spoken")

@@ -141,15 +141,71 @@ struct TranscriptSegment: Identifiable, Hashable, Codable, Sendable {
     var individualEbookMatchTrusted: Bool? = nil
     /// Separate document-level gate. A strong sentence match is insufficient by itself.
     var documentEbookUseAllowed: Bool? = nil
+    /// Presentation-only overlay text. It is deliberately excluded from Codable
+    /// so saving a resolved view can never rewrite immutable ASR/EPUB source.
+    var resolvedOverlayText: String? = nil
+
+    init(
+        id: String,
+        start: TimeInterval,
+        end: TimeInterval,
+        words: [TranscriptWord],
+        ebookText: String? = nil,
+        alignmentScore: Double? = nil,
+        individualEbookMatchTrusted: Bool? = nil,
+        documentEbookUseAllowed: Bool? = nil,
+        resolvedOverlayText: String? = nil
+    ) {
+        self.id = id
+        self.start = start
+        self.end = end
+        self.words = words
+        self.ebookText = ebookText
+        self.alignmentScore = alignmentScore
+        self.individualEbookMatchTrusted = individualEbookMatchTrusted
+        self.documentEbookUseAllowed = documentEbookUseAllowed
+        self.resolvedOverlayText = resolvedOverlayText
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, start, end, words, ebookText, alignmentScore
+        case individualEbookMatchTrusted, documentEbookUseAllowed
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        start = try container.decode(TimeInterval.self, forKey: .start)
+        end = try container.decode(TimeInterval.self, forKey: .end)
+        words = try container.decode([TranscriptWord].self, forKey: .words)
+        ebookText = try container.decodeIfPresent(String.self, forKey: .ebookText)
+        alignmentScore = try container.decodeIfPresent(Double.self, forKey: .alignmentScore)
+        individualEbookMatchTrusted = try container.decodeIfPresent(Bool.self, forKey: .individualEbookMatchTrusted)
+        documentEbookUseAllowed = try container.decodeIfPresent(Bool.self, forKey: .documentEbookUseAllowed)
+        resolvedOverlayText = nil
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(start, forKey: .start)
+        try container.encode(end, forKey: .end)
+        try container.encode(words, forKey: .words)
+        try container.encodeIfPresent(ebookText, forKey: .ebookText)
+        try container.encodeIfPresent(alignmentScore, forKey: .alignmentScore)
+        try container.encodeIfPresent(individualEbookMatchTrusted, forKey: .individualEbookMatchTrusted)
+        try container.encodeIfPresent(documentEbookUseAllowed, forKey: .documentEbookUseAllowed)
+    }
 
     var spokenText: String {
-        words.map(\.text).joined()
+        if let resolvedOverlayText { return resolvedOverlayText }
+        return words.map(\.text).joined()
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var displayText: String {
-        trustedEbookText ?? spokenText
+        resolvedOverlayText ?? trustedEbookText ?? spokenText
     }
 
     var trustedEbookText: String? {
@@ -583,6 +639,7 @@ enum GlossStatus: String, Codable, Sendable {
     case pending
     case accepted
     case rejected
+    case stale
 }
 
 struct GlossEntry: Identifiable, Hashable, Codable, Sendable {
@@ -613,6 +670,26 @@ struct GlossEntry: Identifiable, Hashable, Codable, Sendable {
         text.lowercased()
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Accepted text derived from a replaced base sentence remains stored for
+    /// provenance, but `stale` keeps it out of normal accepted-result queries.
+    static func stalingAcceptedSentenceTranslations(
+        _ entries: [GlossEntry],
+        chapterID: String,
+        source: String
+    ) -> [GlossEntry] {
+        let normalizedSource = normalize(source)
+        return entries.map { entry in
+            guard entry.kind == .sentence,
+                  entry.status == .accepted,
+                  entry.chapterID == chapterID,
+                  normalize(entry.source) == normalizedSource
+            else { return entry }
+            var stale = entry
+            stale.status = .stale
+            return stale
+        }
     }
 }
 

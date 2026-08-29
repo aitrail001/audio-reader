@@ -387,11 +387,13 @@ export async function handleAdminRoute(context: AdminRouteContext): Promise<Resp
     }
     const name = url.searchParams.get("name") ?? "";
     const accountId = url.searchParams.get("accountId") ?? "";
+    const productRequestId = url.searchParams.get("requestId") ?? "";
     const from = url.searchParams.get("from") ?? "";
     const to = url.searchParams.get("to") ?? "";
     const events = await ops.listProductEvents({
       ...(accountId.trim() === "" ? {} : { accountId: accountId.trim() }),
       ...(name.trim() === "" ? {} : { name: name.trim() }),
+      ...(productRequestId.trim() === "" ? {} : { requestId: productRequestId.trim() }),
       ...(from.trim() === "" ? {} : { from: from.trim() }),
       ...(to.trim() === "" ? {} : { to: to.trim() }),
       limit,
@@ -418,6 +420,8 @@ export async function handleAdminRoute(context: AdminRouteContext): Promise<Resp
         ? { requestId: url.searchParams.get("requestId") ?? "" }
         : {}),
     });
+    const kind = url.searchParams.get("kind")?.trim() ?? "";
+    const task = url.searchParams.get("task")?.trim() ?? "";
     return asHead(
       context.request,
       jsonResponse(
@@ -427,6 +431,8 @@ export async function handleAdminRoute(context: AdminRouteContext): Promise<Resp
               event.action.startsWith("managed_qwen") || event.action.startsWith("operator_"),
           )
           .map(operatorEventFromAudit)
+          .filter((event) => (kind === "" ? true : event.kind === kind))
+          .filter((event) => (task === "" ? true : event.task === task))
           .slice(0, 100),
       ),
     );
@@ -831,6 +837,10 @@ async function patchPolicy(
       if (typeof body.value.reason !== "string" || body.value.reason.trim().length < 5) {
         return fieldError(context.requestId, "reason", "reason must be at least 5 characters.");
       }
+      const policyFieldProblem = validatePolicyPatch(body.value, context.requestId);
+      if (policyFieldProblem !== undefined) {
+        return policyFieldProblem;
+      }
       const before = await ops.getPolicy(policyId);
       let patched: Awaited<ReturnType<OpsStore["patchPolicy"]>>;
       try {
@@ -849,6 +859,16 @@ async function patchPolicy(
           ...(typeof body.value.canaryPercent === "number"
             ? { canaryPercent: body.value.canaryPercent }
             : {}),
+          ...(typeof body.value.schemaVersion === "string"
+            ? { schemaVersion: body.value.schemaVersion }
+            : {}),
+          ...(typeof body.value.maxInputTokens === "number"
+            ? { maxInputTokens: body.value.maxInputTokens }
+            : {}),
+          ...(typeof body.value.maxOutputTokens === "number"
+            ? { maxOutputTokens: body.value.maxOutputTokens }
+            : {}),
+          ...(typeof body.value.timeoutMs === "number" ? { timeoutMs: body.value.timeoutMs } : {}),
         });
       } catch (error: unknown) {
         if (error instanceof RestPersistenceError) {
@@ -901,6 +921,42 @@ async function patchPolicy(
     context.requestId,
     principal,
   );
+}
+
+function validatePolicyPatch(
+  value: Record<string, unknown>,
+  requestId: string,
+): Response | undefined {
+  const requiredStrings = ["model", "promptVersion", "schemaVersion"] as const;
+  for (const field of requiredStrings) {
+    if (field in value && (typeof value[field] !== "string" || value[field].trim() === "")) {
+      return fieldError(requestId, field, `${field} must not be blank.`);
+    }
+  }
+  const bounds: ReadonlyArray<readonly [string, number, number]> = [
+    ["canaryPercent", 0, 100],
+    ["maxInputTokens", 1, 1_000_000],
+    ["maxOutputTokens", 1, 1_000_000],
+    ["timeoutMs", 1_000, 300_000],
+  ];
+  for (const [field, minimum, maximum] of bounds) {
+    if (field in value) {
+      const number = value[field];
+      if (
+        typeof number !== "number" ||
+        !Number.isInteger(number) ||
+        number < minimum ||
+        number > maximum
+      ) {
+        return fieldError(
+          requestId,
+          field,
+          `${field} must be a whole number from ${String(minimum)} to ${String(maximum)}.`,
+        );
+      }
+    }
+  }
+  return undefined;
 }
 
 async function actOnCache(

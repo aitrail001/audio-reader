@@ -318,26 +318,21 @@ struct StudyOverlayChromeContractTests {
         #expect(!wordToken.contains("if studyOverlayEnabled, !dimmed, familiarity != .known"))
     }
 
-    @Test("Chapter words uses a snapshot sheet and a real Mac button outside the Reading menu")
+    @Test("Chapter words uses a snapshot sheet from the native macOS toolbar")
     func chapterWordsUsesSnapshotSheet() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
         let listView = try source("Sources/AudioReader/ChapterStudyListView.swift")
         let macRoot = try source("Sources/AudioReader/RootView.swift")
         let iPadRoot = try source("Sources/AudioReader/IPadRootView.swift")
         let app = try source("Sources/AudioReader/AudioReaderApp.swift")
-        let expandedHeader = try section(
+        let compactHeader = try section(
             in: playerView,
-            from: "    private var desktopExpandedHeaderControls",
-            to: "    private var desktopCompactHeaderControls"
-        )
-        let expandedMenu = try section(
-            in: expandedHeader,
-            from: "            Menu {",
-            to: "            } label: {"
+            from: "    private var desktopCompactHeaderControls",
+            to: "    private var desktopExpandedPlaybackControls"
         )
 
-        #expect(expandedHeader.contains("Button(\"Chapter words\")"))
-        #expect(!expandedMenu.contains("Button(\"Chapter words\")"))
+        #expect(compactHeader.contains("sharedReadingMenu"))
+        #expect(playerView.contains("Button(\"Chapter words\")"))
         #expect(playerView.contains("presentChapterStudyList()"))
         #expect(app.contains("presentChapterStudyList()"))
         #expect(macRoot.contains(".sheet(item: $state.chapterStudyPresentation)"))
@@ -360,7 +355,7 @@ struct StudyOverlayChromeContractTests {
         let body = try section(
             in: playerView,
             from: "    var body: some View {",
-            to: "    private var ebookMissingNotice"
+            to: "    private var readerProgressConflictBanner"
         )
         #expect(!body.contains("player.currentTime"))
         #expect(!body.contains("currentReaderPosition"))

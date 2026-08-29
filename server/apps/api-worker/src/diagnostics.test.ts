@@ -5,7 +5,12 @@ import {
 } from "@audio-reader/database";
 import { createFakeQwenClient } from "@audio-reader/qwen";
 import { describe, expect, it } from "vitest";
-import { buildOperatorDiagnostics, diagnosticNotes, formatQwenProbe, resolveTaskModel } from "./diagnostics";
+import {
+  buildOperatorDiagnostics,
+  diagnosticNotes,
+  formatQwenProbe,
+  resolveTaskModel,
+} from "./diagnostics";
 import type { RuntimeConfigView } from "./runtime-config";
 
 function runtime(overrides: Partial<RuntimeConfigView["qwen"]> = {}): RuntimeConfigView {
@@ -145,9 +150,9 @@ describe("operator diagnostics cache notes", () => {
       requestId: "diag-cache",
       ops: database.ops,
     });
-    expect(
-      diagnostics.notes.some((note) => note.includes("POST /v1/ai/translation-batches")),
-    ).toBe(true);
+    expect(diagnostics.notes.some((note) => note.includes("POST /v1/ai/translation-batches"))).toBe(
+      true,
+    );
     expect(diagnostics.notes.some((note) => note.includes("POST /v1/ai/chat does not write"))).toBe(
       true,
     );

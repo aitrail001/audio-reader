@@ -896,7 +896,8 @@ describe("managed Qwen assistant API", () => {
     const looked = await readJson(lookup);
     expect(isRecord(looked) && looked.cacheHitCount).toBe(1);
     expect(isRecord(looked) && looked.generatedCount).toBe(0);
-    const hit = isRecord(looked) && Array.isArray(looked.results) ? looked.results[0] : undefined;
+    const results = isRecord(looked) ? looked.results : undefined;
+    const hit: unknown = Array.isArray(results) ? results[0] : undefined;
     expect(isRecord(hit) && hit.translation).toBe("第二句。");
     expect(isRecord(hit) && hit.provenance).toBe("cache_shared_exact");
     expect(completions).toBe(1);
@@ -1007,7 +1008,7 @@ describe("managed Qwen assistant API", () => {
       qwen: {
         ping: () => inner.ping(),
         pingDetailed: () => inner.pingDetailed(),
-        complete: async () => ({ ok: true, text: translationText, model: "qwen3.7-plus" }),
+        complete: () => Promise.resolve({ ok: true, text: translationText, model: "qwen3.7-plus" }),
       },
     });
     const headers = {
@@ -1066,7 +1067,7 @@ describe("managed Qwen assistant API", () => {
       qwen: {
         ping: () => inner.ping(),
         pingDetailed: () => inner.pingDetailed(),
-        complete: async () => ({ ok: true, text: summaryText, model: "qwen3.7-plus" }),
+        complete: () => Promise.resolve({ ok: true, text: summaryText, model: "qwen3.7-plus" }),
       },
     });
     const headers = {
@@ -1593,9 +1594,9 @@ describe("managed Qwen assistant API", () => {
       qwen: {
         ping: () => inner.ping(),
         pingDetailed: () => inner.pingDetailed(),
-        complete: async () => {
+        complete: () => {
           completions += 1;
-          return { ok: true, text, model: "qwen3.7-plus" };
+          return Promise.resolve({ ok: true, text, model: "qwen3.7-plus" });
         },
       },
     });
@@ -1758,7 +1759,7 @@ describe("managed Qwen assistant API", () => {
 });
 
 describe("assistant route helpers", () => {
-  it("recognizes assistant paths and rejects the wrong HTTP methods", async () => {
+  it("recognizes assistant paths and rejects the wrong HTTP methods", () => {
     expect(isAssistantPath("/v1/ai/translations")).toBe(true);
     expect(isAssistantPath("/v1/ai/translation-batches")).toBe(true);
     expect(isAssistantPath("/v1/ai/chapter-summaries")).toBe(true);

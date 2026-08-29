@@ -16,13 +16,9 @@
 		<data>
 		IIjf339fKevHha6E2BwE3e7QnSc=
 		</data>
-		<key>AudioReader.debug.dylib</key>
-		<data>
-		GdRaGjQAQkBt8PfV5H2lJ4wcXrw=
-		</data>
 		<key>Info.plist</key>
 		<data>
-		Ndb+DeChqJtx8zpvDji10y17S/E=
+		Kgh8RBYoMQBcyw+q+5IKiuEbLnA=
 		</data>
 		<key>PkgInfo</key>
 		<data>
@@ -39,10 +35,6 @@
 		<key>ZIPFoundation_ZIPFoundation.bundle/PrivacyInfo.xcprivacy</key>
 		<data>
 		EilOcsnHrO9NZ6W656aQq2ncTOA=
-		</data>
-		<key>__preview.dylib</key>
-		<data>
-		lDgW8saeg7443uvoTZ2ZjpWHP6o=
 		</data>
 	</dict>
 	<key>files2</key>
@@ -68,13 +60,6 @@
 			n1AXCXhS9D14v+noKj5qDU0snaH9WQHooGUIMy25wPo=
 			</data>
 		</dict>
-		<key>AudioReader.debug.dylib</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			kC3EqQn9JfeUOqzda5fvCjNt+z6+C2EBBqJXdApq7po=
-			</data>
-		</dict>
 		<key>ReadingAssistantPrompts.json</key>
 		<dict>
 			<key>hash2</key>
@@ -94,13 +79,6 @@
 			<key>hash2</key>
 			<data>
 			mi+TDO241YMJpYG5v5vzZzaF7AKuIZfZ8cVoKLcY3/0=
-			</data>
-		</dict>
-		<key>__preview.dylib</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			3BBUNAZjBlqGjYpXMHmoCArjQFOqDcQc0pepqYb4dCA=
 			</data>
 		</dict>
 	</dict>

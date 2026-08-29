@@ -202,7 +202,7 @@ AudioReader is a bound-book desk, not a media dashboard. Warm paper fills the wi
 
 Settings is a first-class destination beside Library, Player, and Words. It is a grouped Form page with a large title, Account at the top, Save in the trailing toolbar, and version as the last row — not a modal that interrupts the book. The Form hides the OS grouped-list fill and sits on Laid Paper with Hot-Pressed Sheet rows, the same paper stack as Library and the reader. macOS and iPadOS are two presentations of one desk: shared Palette, shared type roles, shared destinations; only column chrome and toolbar placement change.
 
-The operator console (`server/apps/admin-web`) is a third presentation of that desk. A signed-in operator sees live health in the paper top bar, a left rail of destinations with the change-reason field at the foot, and a stage that opens on Desk: a lined service ledger, then a grouped runtime form whose primary action is Save runtime config in terracotta. Users, policies, jobs, cache, access, metrics, and audit are ledger tables on the same paper — not charts, glass, or neon.
+The operator console (`server/apps/admin-web`) is a third presentation of that desk. A signed-in operator sees global health in the paper top bar, grouped destinations in the left rail, and an incident-first Desk that prioritizes degraded dependencies, failed jobs, quota pressure, configuration drift, and recent errors. A contextual mutation bar appears only when an action needs a reason and shows the before/after summary before commit. Operational tables use the same tonal paper and hairlines — not charts, glass, neon, ruled paper, or simulated grain.
 
 The world rejects cramped desktop chrome transplanted onto iPad, decorative AI-dashboard styling, and dense configuration competing with the reading surface. Native Settings stay native SwiftUI; the operator console may use HTML form chrome on paper, but it must not impersonate a metrics cloud.
 
@@ -214,8 +214,8 @@ The world rejects cramped desktop chrome transplanted onto iPad, decorative AI-d
 - System text styles for chrome and Settings; New York (or Georgia / Palatino) for books
 - SF Symbols for status and navigation on native; 44-point control floors on interactive rows
 - Tonal layering and hairline `line` strokes instead of offset drop shadows
-- Operator console tiles `paper-grain.svg` at 180px on laid paper; New York is the wordmark only
-- Operator Desk is health ledger first, then the runtime form; ready/ok is ink-on-gold, not a green chip
+- Operator console uses flat `bg` / `panel` / `panel2` layers and hairlines; New York is the wordmark only
+- Operator Desk is incident-first; ready/ok is ink-on-gold, not a green chip
 
 ## Colors
 
@@ -236,12 +236,12 @@ The world rejects cramped desktop chrome transplanted onto iPad, decorative AI-d
 - **Ledger Red** (`bad`): Operator alerts, danger/confirm-armed buttons, and failed-state pills. Native Sign out stays system `Color.red`, not this token.
 
 ### Neutral
-- **Laid Paper** (`bg`): Window and page ground for Library, Player, Vocabulary, and Settings — including the Settings Form after the OS grouped fill is hidden. Operator `body` and expanded table rows sit on the same sheet.
-- **Hot-Pressed Sheet** (`panel`): Book cards, player chrome tray, every Settings grouped-form row (`listRowBackground(Palette.panel)`), operator ledgers, data tables, fields, and the sign-in gate. Operator top bar is this sheet at 88% over grain.
-- **Deckled Inset** (`panel2`): Cover placeholders, unselected chips, search field fill, unselected chapter chips, operator rail (92% over grain), table headers, idle pills.
+- **Laid Paper** (`bg`): Window and page ground for Library, Player, Vocabulary, and Settings — including the Settings Form after the OS grouped fill is hidden. Operator `body` and expanded table rows sit on the same flat tone.
+- **Hot-Pressed Sheet** (`panel`): Book cards, player chrome tray, every Settings grouped-form row (`listRowBackground(Palette.panel)`), operator ledgers, data tables, fields, the top bar, and the sign-in gate.
+- **Deckled Inset** (`panel2`): Cover placeholders, unselected chips, search field fill, unselected chapter chips, operator rail, table headers, and idle pills.
 - **Walnut Ink** (`ink`): Primary text, Settings row labels, book titles, operator body copy.
 - **Walnut Dim** (`dim`): Secondary copy, authors, connection-not-ready, Settings helpers, failed save feedback, operator ledes, pip labels, field labels. Not system `.secondary` when Palette already owns the row.
-- **Walnut Mute** (`mute`): Tertiary counts, search icon, muted helper (`alignedHelper(muted:)`), unselected playback glyphs, idle health-pip dots.
+- **Walnut Mute** (`mute`): Decorative icons, disabled states, and large nonessential marks only. Small metadata and status copy must use a contrast-compliant secondary text token at 4.5:1 or better.
 - **Hairline** (`line`): 1pt strokes and dividers (`Divider().overlay(Palette.line)`). Selected book cards replace it with a 2pt gold stroke. Operator rules, table lines, and field borders use the same hairline role.
 
 ### Named Rules
@@ -281,7 +281,7 @@ The world rejects cramped desktop chrome transplanted onto iPad, decorative AI-d
 
 macOS and iPad share four destinations: Library, Player, Words, Settings (`AppTab`). Settings is a page, not a sheet.
 
-**macOS.** `NavigationSplitView` with a 200–300 pt (ideal 240) sidebar of sources and books, and a detail that swaps Library / Player / Vocabulary / Settings. A 360 pt segmented `Picker` in the toolbar is the destination switch. When Settings is selected, library-folder, import, and theme toolbar items hide; only destination, Save/Revert (from Settings), and background jobs remain.
+**macOS.** `NavigationSplitView` with a 220–300 pt sidebar. Library, Now Reading, Words, and Settings are the stable primary destinations; sources and books are subordinate Library content. `⌘1`, `⌘2`, `⌘3`, and `⌘,` navigate without moving focus through a segmented toolbar. The reader toolbar keeps only current-task actions. Lookup and assistant content use the native inspector while iPad retains its touch-resizable split.
 
 **iPad.** `NavigationSplitView` `.prominentDetail` for Library/Reader; Settings uses its own split (sidebar + detail). Sidebar 180–300 pt (ideal 220) lists Library sources, Study → Vocabulary, then Settings (`gearshape`) in its own section. Content column 200–560 pt (ideal 260). Settings mode is `.doubleColumn`: Settings occupies the detail, and background-job toolbar ownership moves to detail (`IPadBackgroundJobsToolbarPlacement`). Vocabulary and focused reading collapse to `.detailOnly`. Sidebar rows are 44 pt tall; selected row uses terracotta at 16% opacity.
 
@@ -293,7 +293,7 @@ macOS and iPad share four destinations: Library, Player, Words, Settings (`AppTa
 
 **Rhythm.** Recurring padding is 6 (label-to-control), 8, 10, 12, 16, 24. Interactive rows and Account buttons use a 44 pt minimum height. Reader playback chrome is denser on iPad (16 / 4 / 6) than on Mac (24 / 14 / 14).
 
-**Operator console.** Shell is a top bar plus a 16rem rail and a fluid stage. The top bar holds the wordmark, live health pips, and session actions (Refresh ghost, Sign out). The rail lists Desk, Users, Policies, Jobs, Cache, Access, Metrics, Audit; the change-reason field docks at the foot (`margin-top: auto`). The stage opens on Desk: Service ledger, then Runtime configuration with a two-column Qwen pair and terracotta Save runtime config. Stage padding is 1.6rem / 1.85rem / 3.5rem. At 860px the rail stacks as a two-column destination grid with the reason field spanning both columns; session wraps under the pips. Unsigned operators see a centered 28rem gate on paper instead of the rail. Mutating actions stay disabled until the reason is at least five characters. Row-level confirms arm to a danger button, then commit.
+**Operator console.** Shell is a top bar plus a 16rem grouped rail and a fluid stage. The rail groups Desk; People (Users, Access, Privacy); AI (Policies, Cache); Delivery (Jobs, Flags, Quotas); and Observe (Metrics, Activity, Trace, Audit). Every destination is at least 44 px and persists in the URL with its filters. The Desk opens on incidents, with configuration secondary. Each destination owns independent loading, stale-data, retry, filter, and cursor state. At compact widths the rail becomes a bounded 44 px destination selector so the stage remains primary. A contextual mutation bar is blank by default, requires five characters, summarizes before/after, and clears after success.
 
 ### Named Rules
 **The First-Class Settings Rule.** Settings is a sidebar/tab destination equal to Library and Words. Do not present it as a modal over the reader.
@@ -302,9 +302,9 @@ macOS and iPad share four destinations: Library, Player, Words, Settings (`AppTa
 
 **The One Toolbar Owner Rule.** On iPad, stateful toolbar actions belong to exactly one visible column (content or detail), never both.
 
-**The Desk-First Rule.** The operator stage opens on Desk: lined service ledger, then the grouped runtime form. Do not open on metrics.
+**The Desk-First Rule.** The operator stage opens on actionable incidents and degradation, then configuration. Do not open on metrics or render every concern as an equal card.
 
-**The Change-Reason Dock Rule.** The change-reason field lives at the foot of the operator rail and gates every mutation. Do not hide it inside a modal or a single panel.
+**The Contextual Mutation Rule.** A mutation bar appears with the action it governs, starts blank, requires a specific five-character reason, previews before/after, and clears after success. Destructive or high-impact changes also require explicit confirmation.
 
 ## Elevation & Depth
 
@@ -312,7 +312,7 @@ The desk is flat paper. Depth comes from stacking `bg` / `panel` / `panel2`, fro
 
 Legal and migration warnings, reader notices, and gold-soft banners are tonal veils, not lifted cards. Settings grouped rows are paper `panel` sheets on a `bg` page, not the OS inset-grouped fill.
 
-The operator page tiles `public/paper-grain.svg` (180×180 fractal-noise grain) over laid paper. The top bar and rail are translucent sheets over that grain (`panel` 88%, `panel2` 92%). Live ok pips pulse a concentric gold ring (`pip-live`, 2.4s); that ring is a health signal, not a lift. `prefers-reduced-motion: reduce` kills the pulse and every transition.
+The operator page uses opaque flat `bg`, `panel`, and `panel2` layers. It does not tile `paper-grain.svg`, draw ruled gradients, or create wide shadow halos. Live ok pips may pulse a restrained concentric gold ring as a health signal; `prefers-reduced-motion: reduce` removes that pulse and every nonessential transition.
 
 ### Named Rules
 **The Hairline Rule.** Separators are `Palette.line`. Do not add hard offset shadows. Selection is a gold stroke or a terracotta wash, not a drop shadow.
@@ -360,10 +360,10 @@ Native, restrained, and labeled. Primary actions are terracotta; study/status ac
 - **Disabled:** Save/Revert disabled until dirty; retrieve-model buttons disabled while loading. Operator mutations disabled until the reason dock is ready, at 45% opacity.
 
 ### Navigation
-- **macOS:** Segmented destination picker (Library `books.vertical`, Player `text.alignleft`, Words `bookmark`, Settings `gearshape`). Sidebar `.listStyle(.sidebar)` with 12 pt medium titles and gold `book.closed` fallback thumbs.
+- **macOS:** Stable sidebar destinations (Library `books.vertical`, Now Reading `text.alignleft`, Words `bookmark`, Settings `gearshape`) above subordinate sources and books. The toolbar is reserved for the active task.
 - **iPad:** Sidebar sections Library / Study / Settings. Selected row terracotta wash. Settings uses large title; Vocabulary and Reader stay `.inline`.
 - **Settings toolbar:** Revert leading/cancellation, Save Settings trailing/confirmation.
-- **Operator rail:** 16rem column on `panel2` over grain. Destinations are 44 px, 8 px corners, left-aligned. Current page: `terracotta-wash` + `terracotta-ink` + 600. Hover on unselected: 70% `panel`. Compact: two-column grid, centered labels.
+- **Operator rail:** 16rem `panel2` column grouped by Desk, People, AI, Delivery, and Observe. Destinations are 44 px, 8 px corners, left-aligned, normal case, and keyboard reachable. Current page: `terracotta-wash` + `terracotta-ink` + 600. Compact: one bounded destination selector rather than a 14-item wrapped block.
 
 ### Settings grouped Form (signature)
 A native grouped settings page on paper. Hide the OS scroll background; paint `Palette.bg` behind the Form and `Palette.panel` on every row. Each control sits under a medium-subheadline ink label with 6 pt gap and 44 pt control floor. Helpers are footnote + `Palette.dim` (or `Palette.mute` when muted). Connection status is an SF Symbol `Label`: `checkmark.circle.fill` + gold when ready, `exclamationmark.circle` + dim when not. Unofficial provider logins use a 12 pt gold-soft callout with `exclamationmark.triangle.fill` in gold and a footnote link. Version is the last row; save confirmation is a gold check Label in that same trailing section (dim triangle + dim copy on failure).
@@ -392,10 +392,10 @@ Desk’s second ledger. Two-column Qwen URL/model, then replacement secrets, the
 - **Do** use system text styles in Settings/Account and New York (or the reader’s chosen serif) for books and headwords.
 - **Do** keep 44 pt minimum interactive height on Settings rows, Account buttons, iPad sidebar rows, and operator destinations/fields/primary actions.
 - **Do** ship the same destinations and Palette on macOS and iPadOS; change only split columns and toolbar placement.
-- **Do** open the operator console on Desk: service ledger, then runtime form, Save runtime config in terracotta.
-- **Do** dock change reason at the rail foot and require five characters before mutations.
+- **Do** open the operator console on Desk with incidents, failed jobs, quota pressure, drift, and recent request-linked errors first.
+- **Do** show a contextual blank change reason with before/after summary and require five characters before mutations.
 - **Do** paint operator ok/enabled/set as gold + `ink-on-gold`; keep New York on the operator wordmark only.
-- **Do** tile `paper-grain.svg` at 180px on laid paper for the operator page.
+- **Do** use flat tonal paper layers, hairlines, labelled keyboard-focusable tables, and 44 px targets on the operator page.
 
 ### Don't:
 - **Don't** present Settings as a sheet, popover, or inspector over the reader.
@@ -403,6 +403,7 @@ Desk’s second ledger. Two-column Qwen URL/model, then replacement secrets, the
 - **Don't** restyle native Settings into a web form kit or AI-dashboard cards. The operator console is the Paper Desk ledger, not a substitute Settings page and not a SaaS metrics dashboard.
 - **Don't** make gold the app tint or flood a screen with terracotta.
 - **Don't** add offset drop shadows.
+- **Don't** tile simulated grain, draw ruled-paper gradients, use wide shadow halos, or turn group labels into decorative uppercase micro-copy.
 - **Don't** set Settings labels in a display serif or invent a third type family beyond system UI, the reader serif choice, and monospaced metrics.
 - **Don't** set operator stage titles, gate headings, or rail labels in New York.
 - **Don't** fill ready/ok pills with `ok` green.

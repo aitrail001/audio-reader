@@ -8,9 +8,11 @@ struct PlatformParityContractTests {
     func bothTargetsShareProductionSources() throws {
         let project = try source("AudioReader.xcodeproj/project.pbxproj")
 
-        #expect(project.components(separatedBy: "fileSystemSynchronizedGroups = (").count - 1 == 2)
+        #expect(project.components(separatedBy: "fileSystemSynchronizedGroups = (").count - 1 == 4)
         #expect(project.contains("name = \"AudioReader-macOS\";"))
         #expect(project.contains("name = \"AudioReader-iOS\";"))
+        #expect(project.contains("name = \"AudioReader-macOSUITests\";"))
+        #expect(project.contains("name = \"AudioReader-iOSUITests\";"))
         #expect(project.components(separatedBy: "100000000000000000000020 /* Sources/AudioReader */,").count - 1 == 3)
         #expect(project.components(separatedBy: "100000000000000000000025 /* Sources/AudioReaderDomain */,").count - 1 == 3)
         #expect(project.components(separatedBy: "100000000000000000000026 /* Sources/AudioReaderLocalStore */,").count - 1 == 3)
@@ -59,7 +61,7 @@ struct PlatformParityContractTests {
         #expect(reviewView.contains("reviewCardMinimumHeight"))
         #expect(reviewView.contains("if isRevealed {\n                        back(of: entry)"))
         #expect(reviewView.contains("Next round"))
-        #expect(vocabularyView.contains("Label(\"Choose review\""))
+        #expect(vocabularyView.contains("Label(\"Review due — "))
         #expect(vocabularyView.contains(".navigationTitle(\"Vocabulary\")"))
         #expect(vocabularyView.contains(".navigationBarTitleDisplayMode(.inline)"))
         #expect(vocabularyView.contains("in learn list"))
@@ -89,7 +91,7 @@ struct PlatformParityContractTests {
         #expect(cardHeader.contains("Button(action: onToggleLearnList)"))
         #expect(cardHeader.contains("entry.isInLearnList ? \"In learn list\" : \"Add to learn list\""))
         #expect(vocabularyView.components(separatedBy: "Button(action: onToggleLearnList)").count - 1 == 1)
-        #expect(!cardHeader.contains("#if os("))
+        #expect(cardHeader.contains(".frame(minWidth: 44, minHeight: 44)"))
     }
 
     @Test("Learn lists remain manageable when no cards are due on both platforms")
@@ -360,10 +362,10 @@ struct PlatformParityContractTests {
     @Test("Reader identity uses the native title without consuming reading height")
     func readerIdentityUsesNativeTitle() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
-        let desktopHeader = try section(
+        let playerBody = try section(
             in: playerView,
-            from: "    private var desktopHeader",
-            to: "    private var sentenceLoopBinding"
+            from: "    var body: some View",
+            to: "    private var readerProgressConflictBanner"
         )
 
         #expect(playerView.contains(".navigationTitle(readerNavigationTitle)"))
@@ -371,11 +373,10 @@ struct PlatformParityContractTests {
         #expect(playerView.contains("ReaderWindowTitle.make("))
         #expect(!playerView.contains("chapterCoverageCaption"))
         #expect(!playerView.contains(".navigationSubtitle"))
-        #expect(!desktopHeader.contains("state.selectedBook?.title"))
-        #expect(!desktopHeader.contains("state.selectedChapter?.title"))
-        #expect(desktopHeader.contains("ViewThatFits(in: .horizontal)"))
-        #expect(desktopHeader.contains("desktopExpandedHeaderControls"))
-        #expect(desktopHeader.contains("desktopCompactHeaderControls"))
+        #expect(!playerBody.contains("state.selectedBook?.title"))
+        #expect(!playerBody.contains("state.selectedChapter?.title"))
+        #expect(playerBody.contains(".toolbar"))
+        #expect(playerBody.contains("desktopCompactHeaderControls"))
     }
 
     @Test("Reader option and playback bars have compact single-row fallbacks")
@@ -576,7 +577,7 @@ struct PlatformParityContractTests {
         let body = try section(
             in: playerView,
             from: "    var body: some View",
-            to: "    private var ebookMissingNotice"
+            to: "    private var readerProgressConflictBanner"
         )
         let missingNotice = try section(
             in: playerView,
@@ -591,7 +592,7 @@ struct PlatformParityContractTests {
         let replacement = try section(
             in: playerView,
             from: "    private func addOrReplaceEbook()",
-            to: "    private var header"
+            to: "    private var inspectorPresentationBinding"
         )
 
         #expect(body.contains("if state.currentBookIsMissingEbook"))

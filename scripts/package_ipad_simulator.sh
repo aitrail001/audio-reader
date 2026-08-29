@@ -4,12 +4,13 @@ set -euo pipefail
 PROJECT_ROOT="${0:A:h:h}"
 DERIVED_DATA="${TMPDIR:-/tmp}/AudioReader-iPad-DerivedData"
 APP="$PROJECT_ROOT/AudioReader-iPad.app"
-PRODUCT="$DERIVED_DATA/Build/Products/Debug-iphonesimulator/AudioReader.app"
+PRODUCT="$DERIVED_DATA/Build/Products/Release-iphonesimulator/AudioReader.app"
 
 cd "$PROJECT_ROOT"
 xcodebuild \
   -project AudioReader.xcodeproj \
   -scheme AudioReader-iOS \
+  -configuration Release \
   -destination 'generic/platform=iOS Simulator' \
   -derivedDataPath "$DERIVED_DATA" \
   CODE_SIGNING_ALLOWED=NO \

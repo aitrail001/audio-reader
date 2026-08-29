@@ -74,7 +74,7 @@ struct LocalRepositoryRecordTests {
         #expect(settings.textSource == "Spoken")
         #expect(settings.readerLanguageLevel == "intermediate")
         #expect(settings.targetLanguage == "zh-Hans")
-        #expect(settings.appearance == "dark")
+        #expect(settings.appearance == "system")
         #expect(settings.vocabReviewPrompt == "recognition")
         #expect(settings.showStudyOverlay == false)
         #expect(settings.playOnSelect == true)

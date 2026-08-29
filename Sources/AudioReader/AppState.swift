@@ -17,10 +17,16 @@ final class AppState {
     var transcript: Transcript? {
         didSet {
             transcriptionLanguageMismatch = TranscriptionLanguageMismatchDetector.detect(in: transcript)
+            reloadResolvedTranscriptForCurrentChapter()
             refreshStudyIndex()
         }
     }
     var transcriptionLanguageMismatch: TranscriptionLanguageMismatch?
+    private(set) var presentedTranscript: Transcript?
+    private(set) var transcriptOverlayStatuses: [String: TranscriptOverlayApplicationStatus] = [:]
+    private(set) var retainedTranscriptOverlays: [StoredTranscriptOverlay] = []
+    private(set) var transcriptOverlayConflictStates: [String: StoredTranscriptOverlayState] = [:]
+    private(set) var readerProgressState: StoredReaderProgressState?
     var vocab: [VocabEntry] = [] {
         didSet { refreshStudyIndex() }
     }
@@ -108,6 +114,8 @@ final class AppState {
     @ObservationIgnored private let vocabularyRepository: any VocabularyRepository
     @ObservationIgnored private let knownLemmaRepository: any KnownLemmaRepository
     @ObservationIgnored private let usesLivePersistence: Bool
+    @ObservationIgnored private var lastPersistedReaderSeconds: TimeInterval?
+    @ObservationIgnored private var inMemoryTranscriptOverlays: [StoredTranscriptOverlay] = []
 
     var selectedBook: Book? {
         books.first { $0.id == selectedBookID }
@@ -115,6 +123,136 @@ final class AppState {
 
     var selectedChapter: Chapter? {
         selectedBook?.chapters.first { $0.id == selectedChapterID }
+    }
+
+    /// Keeps immutable transcript source separate from the one resolved view
+    /// consumed by playback, lookup, assistance, vocabulary, and export.
+    func reloadResolvedTranscriptForCurrentChapter(
+        overlays: [StoredTranscriptOverlay]? = nil,
+        chapterDuration: TimeInterval? = nil
+    ) {
+        guard let transcript else {
+            presentedTranscript = nil
+            transcriptOverlayStatuses = [:]
+            retainedTranscriptOverlays = []
+            transcriptOverlayConflictStates = [:]
+            return
+        }
+        let selectedOverlays: [StoredTranscriptOverlay]
+        if let overlays {
+            selectedOverlays = overlays
+        } else if usesLivePersistence {
+            selectedOverlays = Persistence.loadTranscriptOverlays(chapterID: transcript.chapterID)
+        } else {
+            selectedOverlays = inMemoryTranscriptOverlays.filter { $0.chapterID.rawValue == transcript.chapterID }
+        }
+        let resolved = TranscriptOverlayResolver.resolve(
+            base: StoredTranscript(transcript),
+            overlays: selectedOverlays,
+            chapterDuration: chapterDuration ?? selectedChapter?.duration
+        )
+        presentedTranscript = Transcript(resolved)
+        transcriptOverlayStatuses = resolved.statuses
+        retainedTranscriptOverlays = resolved.retainedOverlays
+        if usesLivePersistence {
+            transcriptOverlayConflictStates = Dictionary(uniqueKeysWithValues: selectedOverlays.compactMap { overlay in
+                guard let state = Persistence.loadTranscriptOverlayState(
+                    chapterID: overlay.chapterID.rawValue,
+                    segmentID: overlay.segmentID
+                ), !state.conflicts.isEmpty else { return nil }
+                return (overlay.segmentID, state)
+            })
+        } else {
+            transcriptOverlayConflictStates = [:]
+        }
+    }
+
+    func transcriptOverlay(for segmentID: String) -> StoredTranscriptOverlay? {
+        retainedTranscriptOverlays.first { $0.segmentID == segmentID }
+    }
+
+    func transcriptOverlayChoices(for segmentID: String) -> [StoredTranscriptOverlayCandidate] {
+        guard let state = transcriptOverlayConflictStates[segmentID] else { return [] }
+        return [state.current] + state.conflicts
+    }
+
+    /// Promotes one device's candidate and clears its competing corrections;
+    /// the immutable transcript stays untouched and the choice is resynchronized.
+    func resolveTranscriptOverlayConflict(segmentID: String, choosing candidateID: String) throws {
+        guard let chapterID = transcript?.chapterID ?? selectedChapterID else { return }
+        _ = try Persistence.resolveTranscriptOverlay(
+            chapterID: chapterID,
+            segmentID: segmentID,
+            choosing: candidateID
+        )
+        reloadResolvedTranscriptForCurrentChapter()
+    }
+
+    /// Saves one current correction against the immutable source fingerprint;
+    /// callers must pass complete effective text and sentence bounds.
+    func saveTranscriptCorrection(
+        segmentID: String,
+        text: String,
+        start: TimeInterval,
+        end: TimeInterval
+    ) throws {
+        guard let transcript,
+              let baseSegment = transcript.segments.first(where: { $0.id == segmentID })
+        else { throw TranscriptOverlaySaveError.invalid(.missingSegment) }
+        let chapterID = ChapterID(rawValue: transcript.chapterID)
+        let now = Date()
+        let overlay = StoredTranscriptOverlay(
+            id: StoredTranscriptOverlay.stableID(chapterID: chapterID, segmentID: segmentID),
+            chapterID: chapterID,
+            segmentID: segmentID,
+            baseFingerprint: TranscriptOverlayResolver.baseFingerprint(for: StoredTranscriptSegment(baseSegment)),
+            correctedText: text,
+            correctedStart: start,
+            correctedEnd: end,
+            provenance: .init(
+                deviceID: account.currentDeviceID ?? "local",
+                actorID: account.profile?.id,
+                createdAt: transcriptOverlay(for: segmentID)?.provenance.createdAt ?? now
+            ),
+            updatedAt: now
+        )
+        if usesLivePersistence {
+            try Persistence.saveTranscriptOverlay(
+                overlay,
+                base: transcript,
+                chapterDuration: selectedChapter?.duration
+            )
+            glosses = Persistence.loadGlosses()
+        } else {
+            let resolution = TranscriptOverlayResolver.resolve(
+                base: StoredTranscript(transcript),
+                overlays: [overlay],
+                chapterDuration: selectedChapter?.duration
+            )
+            switch resolution.statuses[overlay.id] {
+            case .applied:
+                inMemoryTranscriptOverlays.removeAll { $0.id == overlay.id }
+                inMemoryTranscriptOverlays.append(overlay)
+            case .staleBase:
+                throw TranscriptOverlaySaveError.staleBase
+            case .invalid(let error):
+                throw TranscriptOverlaySaveError.invalid(error)
+            default:
+                throw TranscriptOverlaySaveError.invalid(.missingSegment)
+            }
+        }
+        reloadResolvedTranscriptForCurrentChapter()
+    }
+
+    func restoreTranscriptCorrection(segmentID: String) throws {
+        let chapterID = ChapterID(rawValue: transcript?.chapterID ?? selectedChapterID ?? "")
+        let overlayID = StoredTranscriptOverlay.stableID(chapterID: chapterID, segmentID: segmentID)
+        if usesLivePersistence {
+            try Persistence.restoreOriginalTranscriptSegment(overlayID: overlayID)
+        } else {
+            inMemoryTranscriptOverlays.removeAll { $0.id == overlayID }
+        }
+        reloadResolvedTranscriptForCurrentChapter()
     }
 
     var backgroundJobs: [BackgroundJob] {
@@ -163,8 +301,8 @@ final class AppState {
     }
 
     var currentReaderPosition: (segment: TranscriptSegment?, word: TranscriptWord?) {
-        guard let transcript else { return (nil, nil) }
-        let cursor = PlaybackCursor.resolve(segments: transcript.segments, time: player.currentTime)
+        guard let presentedTranscript else { return (nil, nil) }
+        let cursor = PlaybackCursor.resolve(segments: presentedTranscript.segments, time: player.currentTime)
         return (cursor.segment, cursor.word)
     }
 
@@ -274,7 +412,7 @@ final class AppState {
 
     func refreshStudyIndex() {
         studyIndex = StudyIndex.build(
-            segments: transcript?.segments ?? [],
+            segments: presentedTranscript?.segments ?? [],
             language: studyLexiconLanguage,
             vocab: vocab,
             knownRecords: knownLemmas
@@ -294,7 +432,7 @@ final class AppState {
 
     func presentShadowing(for segment: TranscriptSegment? = nil) {
         let target = segment
-            ?? transcript?.segments.first(where: { $0.id == focusedSegmentID })
+            ?? presentedTranscript?.segments.first(where: { $0.id == focusedSegmentID })
             ?? currentSegment
         shadowingSegment = target
         if target != nil {
@@ -303,7 +441,7 @@ final class AppState {
     }
 
     func presentChapterQuiz() {
-        guard let transcript, !transcript.segments.isEmpty else { return }
+        guard let transcript = presentedTranscript, !transcript.segments.isEmpty else { return }
         let quiz = ChapterQuizBuilder.build(
             segments: transcript.segments,
             language: studyLexiconLanguage
@@ -847,6 +985,7 @@ final class AppState {
     }
 
     func open(chapter: Chapter, in book: Book, autoplay: Bool) {
+        persistCurrentReaderProgress(force: true)
         selectedBookID = book.id
         selectedChapterID = chapter.id
         tab = .player
@@ -856,6 +995,8 @@ final class AppState {
             properties: ["bookId": book.id, "chapterId": chapter.id]
         )
         player.load(path: chapter.audioPath, startTime: chapter.audioStart, duration: chapter.duration)
+        readerProgressState = usesLivePersistence ? Persistence.loadReaderProgress(bookID: book.id) : nil
+        lastPersistedReaderSeconds = nil
         deepReadingActiveSentenceID = nil
         deepReadingPausedSentenceID = nil
         player.rate = Float(settings.playbackRate)
@@ -887,6 +1028,75 @@ final class AppState {
         }
         ensureCachedChapterSummary()
         ensureAutoTranslation()
+    }
+
+    /// Opens the exact chapter-relative account position when one exists.
+    @discardableResult
+    func continueReading(_ book: Book, autoplay: Bool = false) -> Bool {
+        let stored = usesLivePersistence ? Persistence.loadReaderProgress(bookID: book.id) : nil
+        let chapter = stored.flatMap { progress in
+            book.chapters.first { $0.id == progress.current.chapterID.rawValue }
+        } ?? book.chapters.first(where: { $0.id == selectedChapterID }) ?? book.chapters.first
+        guard let chapter else { return false }
+        open(chapter: chapter, in: book, autoplay: false)
+        readerProgressState = stored
+        if let stored {
+            player.seek(min(stored.current.relativeSeconds, chapter.duration ?? stored.current.relativeSeconds))
+            lastPersistedReaderSeconds = stored.current.relativeSeconds
+        }
+        if autoplay { player.play() }
+        return true
+    }
+
+    var readerProgressChoices: [StoredReaderProgress] {
+        guard let readerProgressState else { return [] }
+        return [readerProgressState.current] + readerProgressState.conflicts
+    }
+
+    func resolveReaderProgress(choosing candidateID: String) throws {
+        guard let bookID = selectedBookID else { return }
+        try Persistence.resolveReaderProgress(bookID: bookID, choosing: candidateID)
+        readerProgressState = Persistence.loadReaderProgress(bookID: bookID)
+        guard let selectedBook,
+              let chosen = readerProgressState?.current,
+              let chapter = selectedBook.chapters.first(where: { $0.id == chosen.chapterID.rawValue })
+        else { return }
+        open(chapter: chapter, in: selectedBook, autoplay: false)
+        player.seek(min(chosen.relativeSeconds, chapter.duration ?? chosen.relativeSeconds))
+    }
+
+    /// Persists chapter-relative fractional seconds. Normal playback writes at
+    /// most once per second; explicit pause/seek/navigation forces the latest value.
+    func persistCurrentReaderProgress(force: Bool = false) {
+        guard usesLivePersistence,
+              let book = selectedBook,
+              let chapter = selectedChapter,
+              player.currentTime.isFinite,
+              player.currentTime >= 0
+        else { return }
+        if !force,
+           let lastPersistedReaderSeconds,
+           abs(lastPersistedReaderSeconds - player.currentTime) < 1 {
+            return
+        }
+        let deviceID = account.currentDeviceID ?? "local"
+        let revision = readerProgressState?.current.revision ?? 0
+        let progress = StoredReaderProgress(
+            id: "\(book.id):\(deviceID)",
+            bookID: BookID(rawValue: book.id),
+            chapterID: ChapterID(rawValue: chapter.id),
+            relativeSeconds: player.currentTime,
+            updatedAt: Date(),
+            deviceID: deviceID,
+            revision: revision
+        )
+        do {
+            _ = try Persistence.saveReaderProgress(progress)
+            readerProgressState = Persistence.loadReaderProgress(bookID: book.id)
+            lastPersistedReaderSeconds = player.currentTime
+        } catch {
+            errorMessage = "Could not save reading position: \(error.localizedDescription)"
+        }
     }
 
     @discardableResult
@@ -1067,6 +1277,7 @@ final class AppState {
         }
         if player.isPlaying {
             player.pause()
+            persistCurrentReaderProgress(force: true)
         } else if settings.deepReadingMode, deepReadingPausedSentenceID != nil {
             continueDeepReading()
         } else {
@@ -1076,7 +1287,7 @@ final class AppState {
     }
 
     func skipSentence(direction: Int) {
-        guard let transcript, let current = currentSegment else {
+        guard let transcript = presentedTranscript, let current = currentSegment else {
             player.skip(seconds: Double(direction) * settings.skipSeconds)
             resetDeepReadingAfterSeek()
             return
@@ -1096,6 +1307,7 @@ final class AppState {
             }
         }
         resetDeepReadingAfterSeek()
+        persistCurrentReaderProgress(force: true)
     }
 
     func replaySentence() {
@@ -1108,7 +1320,7 @@ final class AppState {
 
     var canContinueDeepReading: Bool {
         guard settings.deepReadingMode,
-              let transcript,
+              let transcript = presentedTranscript,
               let sentenceID = deepReadingPausedSentenceID,
               let index = transcript.segments.firstIndex(where: { $0.id == sentenceID })
         else { return false }
@@ -1142,22 +1354,25 @@ final class AppState {
     func seekToSentence(_ sentence: TranscriptSegment, time: TimeInterval, autoplay: Bool) {
         player.seek(time)
         armDeepReadingSentence(sentence)
+        persistCurrentReaderProgress(force: true)
         if autoplay, !player.isPlaying { player.play() }
     }
 
     func seekPlayback(to time: TimeInterval) {
         player.seek(time)
         resetDeepReadingAfterSeek()
+        persistCurrentReaderProgress(force: true)
     }
 
     func skipPlayback(seconds: TimeInterval) {
         player.skip(seconds: seconds)
         resetDeepReadingAfterSeek()
+        persistCurrentReaderProgress(force: true)
     }
 
     func continueDeepReading() {
         guard settings.deepReadingMode,
-              let transcript,
+              let transcript = presentedTranscript,
               let sentenceID = deepReadingPausedSentenceID,
               let index = transcript.segments.firstIndex(where: { $0.id == sentenceID }),
               transcript.segments.indices.contains(index + 1)
@@ -1166,16 +1381,18 @@ final class AppState {
         player.seek(next.start)
         armDeepReadingSentence(next)
         player.play()
+        persistCurrentReaderProgress(force: true)
     }
 
     func tickPlaybackModes() {
+        persistCurrentReaderProgress()
         if loopSentence, let current = currentSegment,
            player.currentTime >= current.end - 0.04 {
             player.seek(current.start)
             player.play()
             return
         }
-        guard settings.deepReadingMode, player.isPlaying, let transcript else { return }
+        guard settings.deepReadingMode, player.isPlaying, let transcript = presentedTranscript else { return }
         if deepReadingActiveSentenceID == nil {
             armDeepReadingSentence()
         }
@@ -1187,6 +1404,7 @@ final class AppState {
         player.seek(max(sentence.start, sentence.end - 0.06))
         deepReadingActiveSentenceID = nil
         deepReadingPausedSentenceID = sentence.id
+        persistCurrentReaderProgress(force: true)
     }
 
     private func armDeepReadingSentence(_ sentence: TranscriptSegment? = nil) {
@@ -1307,7 +1525,9 @@ final class AppState {
             errorMessage = "Could not find “\(entry.bookTitle)” in the library."
             return false
         }
-        let transcript = Persistence.loadTranscript(for: located.chapter)
+        let transcript = Persistence.loadTranscript(for: located.chapter).map {
+            Transcript(Persistence.resolvedTranscript($0, chapterDuration: located.chapter.duration))
+        }
         let bounds = VocabSentencePlayback.bounds(for: entry, transcript: transcript)
         if player.loadedPath != located.chapter.audioPath {
             player.load(
@@ -1852,7 +2072,7 @@ final class AppState {
         generate: Bool,
         lookupOnly: Bool = false
     ) {
-        guard let transcript else { return }
+        guard let transcript = presentedTranscript else { return }
         let language = studyLanguage
         let block = alignedSentenceBlock(around: segment, in: transcript)
         let missing = block.filter { candidate in
@@ -2248,7 +2468,7 @@ final class AppState {
     }
 
     func translateChapter(mode: ChapterTranslationMode = .untranslatedOnly) {
-        guard let transcript, !transcript.segments.isEmpty else {
+        guard let transcript = presentedTranscript, !transcript.segments.isEmpty else {
             chapterAssistantError = "Transcribe this chapter before translating it."
             return
         }
@@ -2658,7 +2878,7 @@ final class AppState {
     }
 
     private func refreshSelectedChapterTranslationStatus() {
-        guard let transcript, !transcript.segments.isEmpty, let chapterID = selectedChapterID else { return }
+        guard let transcript = presentedTranscript, !transcript.segments.isEmpty, let chapterID = selectedChapterID else { return }
         refreshChapterTranslationStatus(chapterID: chapterID, language: settings.targetLanguage, transcript: transcript)
     }
 
@@ -2702,7 +2922,7 @@ final class AppState {
     }
 
     func summarizeChapter(force: Bool = false) {
-        guard let transcript, !transcript.segments.isEmpty else {
+        guard let transcript = presentedTranscript, !transcript.segments.isEmpty else {
             chapterAssistantError = "Transcribe this chapter before summarising it."
             return
         }
@@ -2788,7 +3008,7 @@ final class AppState {
         let question = rawQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else { return }
         account.recordUsage(name: "ai.chat.requested")
-        guard let transcript else {
+        guard let transcript = presentedTranscript else {
             chapterAssistantError = "Transcribe this chapter before chatting about it."
             return
         }
@@ -2839,7 +3059,7 @@ final class AppState {
         guard llmProvider == .managedQwen else { return }
         guard llmConfigurationError(for: .managedQwen) == nil else { return }
         guard chapterSummary == nil else { return }
-        guard let transcript, !transcript.segments.isEmpty else { return }
+        guard let transcript = presentedTranscript, !transcript.segments.isEmpty else { return }
         let origin = selectedOrigin()
         guard let chapterID = origin.chapterID else { return }
         let hydrationKey = "summary|\(chapterID)|\(settings.targetLanguage)"
@@ -3229,7 +3449,7 @@ final class AppState {
     }
 
     private func applyReveal(_ reveal: PendingReveal) {
-        guard let transcript else { return }
+        guard let transcript = presentedTranscript else { return }
         guard let segment = findSegment(in: transcript, reveal: reveal) else { return }
         let word = reveal.kind == .word ? findWord(in: segment, reveal: reveal) : nil
         let time = (word?.start ?? segment.start) + 0.02

@@ -173,6 +173,7 @@ public struct AccountSyncRuntime: Sendable {
     public var versions: (any SyncEntityVersionStoring)?
     public var snapshot: @Sendable () throws -> [OutboxMutation]
     public var applyChange: @Sendable (SyncPulledChange) throws -> Void
+    public var handleConflict: @Sendable (OutboxMutation, Int64) throws -> Void
 
     public init(
         client: any SyncClient,
@@ -180,7 +181,8 @@ public struct AccountSyncRuntime: Sendable {
         cursor: any SyncCursorStoring,
         versions: (any SyncEntityVersionStoring)? = nil,
         snapshot: @escaping @Sendable () throws -> [OutboxMutation] = { [] },
-        applyChange: @escaping @Sendable (SyncPulledChange) throws -> Void = { _ in }
+        applyChange: @escaping @Sendable (SyncPulledChange) throws -> Void = { _ in },
+        handleConflict: @escaping @Sendable (OutboxMutation, Int64) throws -> Void = { _, _ in }
     ) {
         self.client = client
         self.outbox = outbox
@@ -188,6 +190,7 @@ public struct AccountSyncRuntime: Sendable {
         self.versions = versions
         self.snapshot = snapshot
         self.applyChange = applyChange
+        self.handleConflict = handleConflict
     }
 }
 
@@ -223,9 +226,10 @@ extension SyncPulledChange {
             OutboxEntityType.vocabulary.rawValue: 2,
             OutboxEntityType.settings.rawValue: 3,
             OutboxEntityType.transcript.rawValue: 4,
-            OutboxEntityType.lexemeState.rawValue: 5,
-            OutboxEntityType.progress.rawValue: 6,
-            OutboxEntityType.reviewEvent.rawValue: 7
+            OutboxEntityType.transcriptOverlay.rawValue: 5,
+            OutboxEntityType.lexemeState.rawValue: 6,
+            OutboxEntityType.progress.rawValue: 7,
+            OutboxEntityType.reviewEvent.rawValue: 8
         ]
         return changes.sorted { lhs, rhs in
             let left = rank[lhs.entityType] ?? 50

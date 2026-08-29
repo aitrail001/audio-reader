@@ -26,6 +26,9 @@ struct PlayerView: View {
     @State private var lookupWidth: CGFloat = 0
     @State private var lookupDragStart: CGFloat?
     @State private var readerScrollTarget: ReaderScrollTarget?
+    @State private var editingTranscriptSegment: TranscriptSegment?
+    @State private var readerProgressError: String?
+    @State private var correctionPreviewTask: Task<Void, Never>?
 #if os(iOS)
     @State private var showSpeedPicker = false
     @State private var showReplaceEbookImporter = false
@@ -33,10 +36,6 @@ struct PlayerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-#if os(macOS)
-            header
-            Divider().overlay(Palette.line)
-#endif
             if state.isTranscribing {
                 transcribeBanner
             }
@@ -74,6 +73,9 @@ struct PlayerView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Palette.goldSoft)
             }
+            if state.readerProgressChoices.count > 1 {
+                readerProgressConflictBanner
+            }
             lyricPane
             VStack(spacing: playbackChromeSpacing) {
                 PlaybackChrome(state: state)
@@ -93,6 +95,33 @@ struct PlayerView: View {
         }
         .background(Palette.bg)
         .navigationTitle(readerNavigationTitle)
+#if os(macOS)
+        .toolbar {
+            ToolbarItemGroup(placement: .automatic) {
+                desktopCompactHeaderControls
+            }
+        }
+        .inspector(isPresented: inspectorPresentationBinding) {
+            Group {
+                if state.showChapterAssistant {
+                    ChapterAssistantView(state: state)
+                } else {
+                    WordInspector(
+                        state: state,
+                        type: .metrics(
+                            columnWidth: effectiveLookupWidth,
+                            scale: state.settings.readerFontScale,
+                            lineSpacing: state.settings.readerLineSpacing,
+                            wordSpacing: state.settings.readerWordSpacing,
+                            font: state.settings.readerFont,
+                            bold: state.settings.readerBold
+                        )
+                    )
+                }
+            }
+            .inspectorColumnWidth(min: 300, ideal: effectiveLookupWidth, max: 540)
+        }
+#endif
 #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -111,6 +140,113 @@ struct PlayerView: View {
         }
         .sheet(item: $state.chapterQuizSession) { _ in
             ChapterQuizView(state: state)
+        }
+        .sheet(item: $editingTranscriptSegment) { segment in
+            TranscriptCorrectionSheet(
+                segment: segment,
+                hasStoredCorrection: state.transcriptOverlay(for: segment.id) != nil,
+                conflictChoices: state.transcriptOverlayChoices(for: segment.id),
+                onPreview: previewTranscriptCorrection,
+                onSave: { text, start, end in
+                    try state.saveTranscriptCorrection(
+                        segmentID: segment.id,
+                        text: text,
+                        start: start,
+                        end: end
+                    )
+                },
+                onRestore: {
+                    try state.restoreTranscriptCorrection(segmentID: segment.id)
+                },
+                onResolveConflict: { candidateID in
+                    try state.resolveTranscriptOverlayConflict(
+                        segmentID: segment.id,
+                        choosing: candidateID
+                    )
+                }
+            )
+        }
+        .alert("Reader update failed", isPresented: Binding(
+            get: { readerProgressError != nil },
+            set: {
+                if !$0 { readerProgressError = nil }
+            }
+        )) {
+            Button("OK", role: .cancel) {
+                readerProgressError = nil
+            }
+        } message: {
+            Text(readerProgressError ?? "The reader could not be updated.")
+        }
+        .onDisappear {
+            correctionPreviewTask?.cancel()
+        }
+    }
+
+    private var readerProgressConflictBanner: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Choose where to continue", systemImage: "arrow.triangle.branch")
+                .font(.headline)
+            Text("Reading moved on more than one device. Pick the position you want to keep.")
+                .font(.subheadline)
+                .foregroundStyle(Palette.dim)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { readerProgressChoiceButtons }
+                VStack(alignment: .leading, spacing: 8) { readerProgressChoiceButtons }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.goldSoft)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("reader.progressConflict")
+    }
+
+    @ViewBuilder
+    private var readerProgressChoiceButtons: some View {
+        ForEach(state.readerProgressChoices) { choice in
+            Button {
+                resolveReaderProgress(choice.id)
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(readerProgressChapterTitle(choice.chapterID.rawValue))
+                        .font(.subheadline.weight(.semibold))
+                    Text("\(formatClock(choice.relativeSeconds)) · \(choice.deviceID) · \(choice.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption)
+                        .foregroundStyle(Palette.dim)
+                }
+                .frame(minHeight: 44, alignment: .leading)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("reader.progressChoice.\(choice.id)")
+        }
+    }
+
+    private func readerProgressChapterTitle(_ chapterID: String) -> String {
+        state.selectedBook?.chapters.first(where: { $0.id == chapterID })?.title ?? "Saved position"
+    }
+
+    private func resolveReaderProgress(_ candidateID: String) {
+        do {
+            try state.resolveReaderProgress(choosing: candidateID)
+        } catch {
+            readerProgressError = error.localizedDescription
+        }
+    }
+
+    private func previewTranscriptCorrection(start: TimeInterval, end: TimeInterval) {
+        correctionPreviewTask?.cancel()
+        state.seekPlayback(to: start)
+        if !state.player.isPlaying { state.player.play() }
+        correctionPreviewTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(max(0.25, end - start)))
+            } catch {
+                return
+            }
+            if state.player.currentTime >= start, state.player.currentTime <= end + 0.5 {
+                state.player.pause()
+            }
         }
     }
 
@@ -219,87 +355,6 @@ struct PlayerView: View {
     }
 
 #if os(macOS)
-    private var header: some View {
-        desktopHeader
-    }
-
-    private var desktopHeader: some View {
-        ViewThatFits(in: .horizontal) {
-            desktopExpandedHeaderControls
-            desktopCompactHeaderControls
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 8)
-        .background(Palette.panel)
-    }
-
-    private var desktopExpandedHeaderControls: some View {
-        HStack(spacing: 14) {
-            textSourcePicker
-                .labelsHidden()
-                .frame(width: 220)
-            desktopProviderControls
-
-            Toggle("Auto-scroll", isOn: $autoScroll)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .foregroundStyle(Palette.dim)
-
-            Toggle("Play on tap", isOn: $state.settings.playOnSelect)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .foregroundStyle(Palette.dim)
-                .onChange(of: state.settings.playOnSelect) { _, _ in state.persistSettings() }
-                .help("When on, clicking a sentence or word starts playback. When off, it only jumps to that spot.")
-
-            Toggle("Study overlay", isOn: $state.settings.showStudyOverlay)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .foregroundStyle(Palette.dim)
-                .onChange(of: state.settings.showStudyOverlay) { _, _ in state.persistSettings() }
-                .help("Underline unknown and learning words in the chapter.")
-                .accessibilityHint("Underlines unknown and learning words throughout the chapter.")
-
-            Button("Chapter words") {
-                state.presentChapterStudyList()
-            }
-            .disabled(state.transcript == nil)
-
-            Menu {
-                Toggle("Study overlay", isOn: $state.settings.showStudyOverlay)
-                    .onChange(of: state.settings.showStudyOverlay) { _, _ in state.persistSettings() }
-                Button("Shadow this sentence") {
-                    state.presentShadowing()
-                }
-                .disabled(state.transcript == nil)
-                Button("Chapter quiz") {
-                    state.presentChapterQuiz()
-                }
-                .disabled(state.transcript == nil)
-                Divider()
-                readingAppearanceMenuContent
-            } label: {
-                Label("Reading", systemImage: "textformat")
-            }
-
-            Button {
-                state.showChapterAssistant.toggle()
-            } label: {
-                Label("Chapter AI", systemImage: "sparkles")
-            }
-            .foregroundStyle(state.showChapterAssistant ? Palette.gold : Palette.ink)
-            .disabled(state.selectedChapter == nil)
-
-            Button {
-                state.transcribeSelected(force: state.transcript != nil)
-            } label: {
-                Label(state.transcript == nil ? "Transcribe" : "Re-transcribe", systemImage: "waveform")
-            }
-            .disabled(state.selectedChapter == nil || state.isTranscribing)
-        }
-        .fixedSize(horizontal: true, vertical: false)
-    }
-
     private var desktopCompactHeaderControls: some View {
         HStack(spacing: 10) {
             textSourcePicker
@@ -742,8 +797,41 @@ struct PlayerView: View {
         lookupWidth > 0 ? lookupWidth : CGFloat(state.settings.lookupPanelWidth)
     }
 
+#if os(macOS)
+    private var inspectorPresentationBinding: Binding<Bool> {
+        Binding(
+            get: { state.selectedWord != nil || state.showChapterAssistant },
+            set: { presented in
+                guard !presented else { return }
+                state.showChapterAssistant = false
+                state.selectedWord = nil
+                state.definition = nil
+                state.dictionaryHits = []
+            }
+        )
+    }
+#endif
+
     private var lyricPane: some View {
         GeometryReader { geo in
+#if os(macOS)
+            let type = ReaderType.metrics(
+                columnWidth: geo.size.width,
+                scale: state.settings.readerFontScale,
+                lineSpacing: state.settings.readerLineSpacing,
+                wordSpacing: state.settings.readerWordSpacing,
+                font: state.settings.readerFont,
+                bold: state.settings.readerBold
+            )
+            TranscriptTextColumn(
+                state: state,
+                autoScroll: $autoScroll,
+                readerScrollTarget: $readerScrollTarget,
+                proxyWidth: geo.size.width,
+                type: type,
+                onEditSegment: { editingTranscriptSegment = $0 }
+            )
+#else
             let lookupOpen = state.selectedWord != nil || state.showChapterAssistant
             let split = ReaderSplitGeometry(
                 containerWidth: geo.size.width,
@@ -764,7 +852,8 @@ struct PlayerView: View {
                     autoScroll: $autoScroll,
                     readerScrollTarget: $readerScrollTarget,
                     proxyWidth: split.textWidth,
-                    type: type
+                    type: type,
+                    onEditSegment: { editingTranscriptSegment = $0 }
                 )
                     .frame(width: split.textWidth)
                 if lookupOpen {
@@ -787,6 +876,7 @@ struct PlayerView: View {
                     containerWidth: width
                 )
             }
+#endif
         }
         .onAppear {
             if lookupWidth <= 0 {
@@ -1101,7 +1191,7 @@ struct PlayerView: View {
         .buttonStyle(.plain)
         .foregroundStyle(Palette.ink)
         .font(.system(size: 17, weight: .regular))
-        .frame(minHeight: 36)
+        .frame(minHeight: 44)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Playback controls")
     }
@@ -1110,14 +1200,14 @@ struct PlayerView: View {
         HStack(spacing: 2) {
             Button { state.skipPlayback(seconds: -state.settings.skipSeconds) } label: {
                 Image(systemName: "gobackward.5")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .accessibilityLabel("Back \(Int(state.settings.skipSeconds)) seconds")
 
             Button { state.skipSentence(direction: -1) } label: {
                 Image(systemName: "backward.end.fill")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .accessibilityLabel("Previous sentence")
@@ -1126,21 +1216,21 @@ struct PlayerView: View {
                 Image(systemName: state.player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
                     .font(.system(size: 26))
                     .foregroundStyle(Palette.gold)
-                    .frame(width: 36, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .accessibilityLabel(state.player.isPlaying ? "Pause" : "Play")
 
             Button { state.skipSentence(direction: 1) } label: {
                 Image(systemName: "forward.end.fill")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .accessibilityLabel("Next sentence")
 
             Button { state.skipPlayback(seconds: state.settings.skipSeconds) } label: {
                 Image(systemName: "goforward.5")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .accessibilityLabel("Forward \(Int(state.settings.skipSeconds)) seconds")
@@ -1151,14 +1241,14 @@ struct PlayerView: View {
         HStack(spacing: 2) {
             Button { state.replaySentence() } label: {
                 Image(systemName: "repeat.1")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .accessibilityLabel("Replay sentence")
 
             Toggle(isOn: sentenceLoopBinding) {
                 Image(systemName: "repeat")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .toggleStyle(.button)
@@ -1167,7 +1257,7 @@ struct PlayerView: View {
 
             Toggle(isOn: deepReadingBinding) {
                 Image(systemName: "book.closed")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .toggleStyle(.button)
@@ -1177,7 +1267,7 @@ struct PlayerView: View {
 
             Button { state.continueDeepReading() } label: {
                 Image(systemName: "forward.end.circle")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .foregroundStyle(state.isDeepReadingPaused ? Palette.gold : Palette.ink)
@@ -1194,7 +1284,7 @@ struct PlayerView: View {
             Text(String(format: "%.2f×", state.player.rate))
                 .font(.system(size: 13, weight: .semibold, design: .monospaced))
                 .foregroundStyle(Palette.gold)
-                .frame(minHeight: 36)
+                .frame(minHeight: 44)
                 .padding(.horizontal, 4)
                 .contentShape(Rectangle())
         }
@@ -1215,7 +1305,7 @@ struct PlayerView: View {
             HStack(spacing: 0) {
                 Button { state.openPreviousChapter() } label: {
                     Image(systemName: "chevron.left")
-                        .frame(width: 32, height: 36)
+                        .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 .disabled(!state.canOpenPreviousChapter)
@@ -1231,7 +1321,7 @@ struct PlayerView: View {
                     Text(chapterCompactPositionLabel(in: chapters))
                         .font(.system(size: 13, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Palette.ink)
-                        .frame(minHeight: 36)
+                        .frame(minHeight: 44)
                         .padding(.horizontal, 2)
                         .contentShape(Rectangle())
                 }
@@ -1241,7 +1331,7 @@ struct PlayerView: View {
 
                 Button { state.openNextChapter() } label: {
                     Image(systemName: "chevron.right")
-                        .frame(width: 32, height: 36)
+                        .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 .disabled(!state.canOpenNextChapter)
@@ -1403,6 +1493,8 @@ private struct IPadPlaybackSpeedPicker: View {
 
 struct ChapterChatVoiceWaveform: View {
     let levels: [Double]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.uiTestReduceMotion) private var uiTestReduceMotion
 
     var body: some View {
         HStack(alignment: .center, spacing: 2) {
@@ -1413,7 +1505,7 @@ struct ChapterChatVoiceWaveform: View {
             }
         }
         .frame(width: 106, height: 22, alignment: .leading)
-        .animation(.easeOut(duration: 0.12), value: levels)
+        .animation(reduceMotion || uiTestReduceMotion ? nil : .easeOut(duration: 0.12), value: levels)
         .accessibilityHidden(true)
     }
 }
@@ -1435,10 +1527,8 @@ private struct ChapterAssistantView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Chapter AI")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Palette.mute)
-                        .textCase(.uppercase)
-                        .tracking(0.8)
+                        .font(.headline)
+                        .foregroundStyle(Palette.ink)
                     Text(state.selectedLLMModel)
                         .font(.system(size: 11))
                         .foregroundStyle(Palette.gold)
@@ -1872,8 +1962,6 @@ private struct ChapterSummaryView: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(title)
                 .font(.system(size: labelSize, weight: .semibold))
-                .textCase(.uppercase)
-                .tracking(0.5)
             Rectangle()
                 .fill(Palette.line)
                 .frame(height: 1)
@@ -1917,10 +2005,13 @@ private struct TranscriptTextColumn: View {
     @Binding var readerScrollTarget: ReaderScrollTarget?
     let proxyWidth: CGFloat
     let type: ReaderType
+    let onEditSegment: (TranscriptSegment) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.uiTestReduceMotion) private var uiTestReduceMotion
 
     var body: some View {
         let cursor = PlaybackCursor.resolve(
-            segments: state.transcript?.segments ?? [],
+            segments: state.presentedTranscript?.segments ?? [],
             time: state.player.currentTime
         )
         let studyOverlayEnabled = state.settings.showStudyOverlay
@@ -1929,7 +2020,7 @@ private struct TranscriptTextColumn: View {
         let studyKnown = state.studyIndex.known
         ScrollView {
             LazyVStack(alignment: .leading, spacing: type.paragraph) {
-                if let transcript = state.transcript {
+                if let transcript = state.presentedTranscript {
                     ForEach(transcript.segments) { segment in
                         SentenceRow(
                             segment: segment,
@@ -1963,6 +2054,8 @@ private struct TranscriptTextColumn: View {
                             onMarkKnown: { word in
                                 state.markKnown(word, known: !state.isMarkedKnown(word))
                             },
+                            hasStoredCorrection: state.transcriptOverlay(for: segment.id) != nil,
+                            onEdit: { onEditSegment(segment) },
                             onTranslate: { state.translateSentence(segment) },
                             onAccept: { if let g = state.sentenceGloss(for: segment) { state.acceptGloss(g) } },
                             onReject: { if let g = state.sentenceGloss(for: segment) { state.rejectGloss(g) } },
@@ -1993,7 +2086,7 @@ private struct TranscriptTextColumn: View {
                 return
             }
             if ReaderScrollTarget.shouldAnimate(from: oldTarget, to: newTarget) {
-                withAnimation(.easeInOut(duration: 0.25)) {
+                withAnimation(reduceMotion || uiTestReduceMotion ? nil : .easeOut(duration: 0.2)) {
                     readerScrollTarget = newTarget
                 }
             } else {
@@ -2009,7 +2102,7 @@ private struct TranscriptTextColumn: View {
             else { return }
             let target = ReaderScrollTarget(chapterID: chapterID, segmentID: segmentID)
             if ReaderScrollTarget.shouldAnimate(from: readerScrollTarget, to: target) {
-                withAnimation(.easeInOut(duration: 0.3)) {
+                withAnimation(reduceMotion || uiTestReduceMotion ? nil : .easeOut(duration: 0.2)) {
                     readerScrollTarget = target
                 }
             } else {
@@ -2021,7 +2114,7 @@ private struct TranscriptTextColumn: View {
     private var currentReaderScrollTarget: ReaderScrollTarget? {
         guard let chapterID = state.selectedChapterID else { return nil }
         let cursor = PlaybackCursor.resolve(
-            segments: state.transcript?.segments ?? [],
+            segments: state.presentedTranscript?.segments ?? [],
             time: state.player.currentTime
         )
         guard let segmentID = cursor.segmentID else { return nil }
@@ -2086,6 +2179,8 @@ private struct SentenceRow: View {
     let onInspect: (TranscriptWord) -> Void
     let onSave: (TranscriptWord) -> Void
     var onMarkKnown: (TranscriptWord) -> Void = { _ in }
+    let hasStoredCorrection: Bool
+    let onEdit: () -> Void
     let onTranslate: () -> Void
     let onAccept: () -> Void
     let onReject: () -> Void
@@ -2134,13 +2229,29 @@ private struct SentenceRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text(formatClock(segment.start))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(isSelected ? Palette.gold : Palette.mute)
+                Button { onSeek(segment.start) } label: {
+                    Text(formatClock(segment.start))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(isSelected ? Palette.gold : Palette.dim)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Seek to sentence at \(formatClock(segment.start))")
+                .accessibilityIdentifier("reader.sentence.\(segment.id)")
                 if let score = segment.alignmentScore, score >= 0.52 {
                     Text("ebook matched")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Palette.mute)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Palette.dim)
+                }
+                if isSelected {
+                    Button {
+                        onEdit()
+                    } label: {
+                        Label(hasStoredCorrection ? "Edit correction" : "Edit", systemImage: "pencil")
+                    }
+                    .buttonStyle(.borderless)
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("transcript.edit")
+                    .accessibilityHint("Edit this sentence's text and timing.")
                 }
             }
 
@@ -2148,11 +2259,15 @@ private struct SentenceRow: View {
                 if isSelected || studyOverlayEnabled {
                     wordTokens(StudyTokenIndex.tokens(in: segment), dimmed: !isSelected)
                 } else {
-                    Text(segment.spokenText)
-                        .font(type.font.font(size: type.body, bold: type.bold))
-                        .foregroundStyle(Palette.dim)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .lineSpacing(type.line)
+                    Button { onSeek(segment.start) } label: {
+                        Text(segment.spokenText)
+                            .font(type.font.font(size: type.body, bold: type.bold))
+                            .foregroundStyle(Palette.dim)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .lineSpacing(type.line)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
 
@@ -2165,11 +2280,15 @@ private struct SentenceRow: View {
                             dimmed: !isSelected
                         )
                     } else {
-                        Text(original)
-                            .font(type.font.font(size: textSource == .dual ? type.dual : type.body, bold: type.bold))
-                            .foregroundStyle(isSelected ? Palette.ink : Palette.dim)
-                            .italic(textSource == .dual)
-                            .lineSpacing(type.line)
+                        Button { onSeek(segment.start) } label: {
+                            Text(original)
+                                .font(type.font.font(size: textSource == .dual ? type.dual : type.body, bold: type.bold))
+                                .foregroundStyle(isSelected ? Palette.ink : Palette.dim)
+                                .italic(textSource == .dual)
+                                .lineSpacing(type.line)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -2188,8 +2307,9 @@ private struct SentenceRow: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(isFocused && !isCurrent ? Palette.gold.opacity(0.55) : Color.clear, lineWidth: 1.5)
         )
-        .onTapGesture { onSeek(segment.start) }
-        .opacity(isSelected ? 1 : 0.72)
+        .opacity(isSelected ? 1 : 0.88)
+        .accessibilityAction(named: "Play from sentence") { onPlayFrom(segment.start) }
+        .accessibilityAction(named: "Seek to sentence") { onSeek(segment.start) }
     }
 
     @ViewBuilder
@@ -2246,6 +2366,171 @@ private struct SentenceRow: View {
     }
 }
 
+private struct TranscriptCorrectionSheet: View {
+    let segment: TranscriptSegment
+    let hasStoredCorrection: Bool
+    let conflictChoices: [StoredTranscriptOverlayCandidate]
+    let onPreview: (TimeInterval, TimeInterval) -> Void
+    let onSave: (String, TimeInterval, TimeInterval) throws -> Void
+    let onRestore: () throws -> Void
+    let onResolveConflict: (String) throws -> Void
+    @State private var correctedText: String
+    @State private var correctedStart: TimeInterval
+    @State private var correctedEnd: TimeInterval
+    @State private var validationError: String?
+    @Environment(\.dismiss) private var dismiss
+
+    init(
+        segment: TranscriptSegment,
+        hasStoredCorrection: Bool,
+        conflictChoices: [StoredTranscriptOverlayCandidate],
+        onPreview: @escaping (TimeInterval, TimeInterval) -> Void,
+        onSave: @escaping (String, TimeInterval, TimeInterval) throws -> Void,
+        onRestore: @escaping () throws -> Void,
+        onResolveConflict: @escaping (String) throws -> Void
+    ) {
+        self.segment = segment
+        self.hasStoredCorrection = hasStoredCorrection
+        self.conflictChoices = conflictChoices
+        self.onPreview = onPreview
+        self.onSave = onSave
+        self.onRestore = onRestore
+        self.onResolveConflict = onResolveConflict
+        _correctedText = State(initialValue: segment.spokenText)
+        _correctedStart = State(initialValue: segment.start)
+        _correctedEnd = State(initialValue: segment.end)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Corrected sentence") {
+                    TextEditor(text: $correctedText)
+                        .frame(minHeight: 120)
+                        .accessibilityIdentifier("transcript.text")
+                }
+                Section("Timing") {
+                    LabeledContent("Start") {
+                        TextField(
+                            "Start",
+                            value: $correctedStart,
+                            format: .number.precision(.fractionLength(2))
+                        )
+                        .multilineTextAlignment(.trailing)
+#if os(iOS)
+                        .keyboardType(.decimalPad)
+#endif
+                        .accessibilityIdentifier("transcript.start")
+                    }
+                    LabeledContent("End") {
+                        TextField(
+                            "End",
+                            value: $correctedEnd,
+                            format: .number.precision(.fractionLength(2))
+                        )
+                        .multilineTextAlignment(.trailing)
+#if os(iOS)
+                        .keyboardType(.decimalPad)
+#endif
+                        .accessibilityIdentifier("transcript.end")
+                    }
+                    Text("Sentence timing must remain inside the chapter, last at least 0.25 seconds, and not overlap its neighbors.")
+                        .font(.caption)
+                        .foregroundStyle(Palette.dim)
+                }
+                if let validationError {
+                    Section {
+                        Label(validationError, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Palette.terracotta)
+                    }
+                }
+                if conflictChoices.count > 1 {
+                    Section("Choose correction") {
+                        Text("This sentence was corrected on more than one device. Choose the version to keep.")
+                            .font(.caption)
+                            .foregroundStyle(Palette.dim)
+                        ForEach(conflictChoices) { candidate in
+                            Button {
+                                do {
+                                    try onResolveConflict(candidate.id)
+                                    dismiss()
+                                } catch {
+                                    validationError = error.localizedDescription
+                                }
+                            } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(candidate.overlay.correctedText)
+                                        .lineLimit(2)
+                                    Text("\(formatClock(candidate.overlay.correctedStart))–\(formatClock(candidate.overlay.correctedEnd)) · \(candidate.overlay.provenance.deviceID)")
+                                        .font(.caption)
+                                        .foregroundStyle(Palette.dim)
+                                }
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            }
+                            .accessibilityIdentifier("transcript.conflictChoice.\(candidate.id)")
+                        }
+                    }
+                    .accessibilityIdentifier("transcript.conflict")
+                }
+                if hasStoredCorrection {
+                    Section {
+                        Button("Restore Original", role: .destructive) {
+                            do {
+                                try onRestore()
+                                dismiss()
+                            } catch {
+                                validationError = error.localizedDescription
+                            }
+                        }
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("transcript.restore")
+                    }
+                }
+            }
+            .navigationTitle("Edit sentence")
+#if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+#endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItemGroup(placement: .confirmationAction) {
+                    Button {
+                        onPreview(correctedStart, correctedEnd)
+                    } label: {
+                        Label("Preview", systemImage: "play.fill")
+                    }
+                    .disabled(!hasValidDraft)
+                    .accessibilityIdentifier("transcript.preview")
+
+                    Button("Save") {
+                        do {
+                            try onSave(trimmedText, correctedStart, correctedEnd)
+                            dismiss()
+                        } catch {
+                            validationError = error.localizedDescription
+                        }
+                    }
+                    .disabled(!hasValidDraft)
+                    .accessibilityIdentifier("transcript.save")
+                }
+            }
+        }
+#if os(macOS)
+        .frame(minWidth: 520, minHeight: 440)
+#endif
+    }
+
+    private var trimmedText: String {
+        correctedText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var hasValidDraft: Bool {
+        !trimmedText.isEmpty && correctedStart >= 0 && correctedEnd - correctedStart >= 0.25
+    }
+}
+
 extension SentenceRow: Equatable {
     nonisolated static func == (lhs: SentenceRow, rhs: SentenceRow) -> Bool {
         lhs.segment == rhs.segment
@@ -2261,6 +2546,7 @@ extension SentenceRow: Equatable {
             && lhs.studyLanguageKey == rhs.studyLanguageKey
             && lhs.studyLearningLemmas == rhs.studyLearningLemmas
             && lhs.studyKnownLemmas == rhs.studyKnownLemmas
+            && lhs.hasStoredCorrection == rhs.hasStoredCorrection
             && lhs.type.body == rhs.type.body
             && lhs.type.word == rhs.type.word
             && lhs.type.line == rhs.type.line
@@ -2285,32 +2571,46 @@ private struct WordToken: View {
     var onMarkKnown = MainActorAction()
 
     var body: some View {
-        Text(word.text)
-            .font(font.font(size: fontSize, bold: bold || isCurrent))
-            .foregroundStyle(isCurrent ? Palette.inkOnGold : (dimmed ? Palette.dim : Palette.ink))
-            .padding(.horizontal, isCurrent ? 4 : 0)
-            .padding(.vertical, 1)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(isCurrent ? Palette.gold : Color.clear)
-            )
-            .overlay(alignment: .bottom) {
-                if studyOverlayEnabled, familiarity != .known {
-                    Rectangle()
-                        .fill(Palette.terracotta)
-                        .frame(height: familiarity == .learning ? 1 : 1.5)
-                        .padding(.horizontal, isCurrent ? 4 : 0)
-                        .opacity((familiarity == .learning ? 0.7 : 1) * (dimmed ? 0.55 : 1))
+        Button {
+            onSeek()
+            onInspect()
+        } label: {
+            Text(word.text)
+                .font(font.font(size: fontSize, bold: bold || isCurrent))
+                .foregroundStyle(isCurrent ? Palette.inkOnGold : (dimmed ? Palette.dim : Palette.ink))
+                .padding(.horizontal, isCurrent ? 4 : 0)
+                .padding(.vertical, 1)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(isCurrent ? Palette.gold : Color.clear)
+                )
+                .overlay(alignment: .bottom) {
+                    if studyOverlayEnabled, familiarity != .known {
+                        Rectangle()
+                            .fill(Palette.terracotta)
+                            .frame(height: familiarity == .learning ? 1 : 1.5)
+                            .padding(.horizontal, isCurrent ? 4 : 0)
+                            .opacity((familiarity == .learning ? 0.7 : 1) * (dimmed ? 0.7 : 1))
+                    }
                 }
-            }
-            .onTapGesture { onSeek(); onInspect() }
-            .accessibilityValue(overlayAccessibilityValue)
-            .contextMenu {
-                Button("Play from here") { onPlayFrom() }
-                Button("Look up") { onInspect() }
-                Button("Add to vocabulary") { onSave() }
-                Button("Mark known") { onMarkKnown() }
-            }
+        }
+        .buttonStyle(.plain)
+#if os(iOS)
+        .frame(minWidth: 44, minHeight: 44)
+#endif
+        .accessibilityLabel(word.text.trimmingCharacters(in: .whitespacesAndNewlines))
+        .accessibilityValue(overlayAccessibilityValue)
+        .accessibilityIdentifier("reader.word.\(word.id)")
+        .accessibilityAction(named: "Play from here") { onPlayFrom() }
+        .accessibilityAction(named: "Look up") { onInspect() }
+        .accessibilityAction(named: "Add to vocabulary") { onSave() }
+        .accessibilityAction(named: "Mark known") { onMarkKnown() }
+        .contextMenu {
+            Button("Play from here") { onPlayFrom() }
+            Button("Look up") { onInspect() }
+            Button("Add to vocabulary") { onSave() }
+            Button("Mark known") { onMarkKnown() }
+        }
     }
 
     private var overlayAccessibilityValue: String {
@@ -2334,10 +2634,8 @@ private struct WordInspector: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center) {
                 Text("Lookup")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Palette.mute)
-                    .textCase(.uppercase)
-                    .tracking(0.8)
+                    .font(.headline)
+                    .foregroundStyle(Palette.ink)
                 Spacer()
                 Button {
                     state.selectedWord = nil
@@ -2542,7 +2840,7 @@ private struct WordInspector: View {
 
     private var contextSegment: TranscriptSegment? {
         if let id = state.focusedSegmentID {
-            return state.transcript?.segments.first { $0.id == id }
+            return state.presentedTranscript?.segments.first { $0.id == id }
         }
         return state.currentSegment
     }
@@ -2550,10 +2848,8 @@ private struct WordInspector: View {
     private func inspectorCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Palette.mute)
-                .textCase(.uppercase)
-                .tracking(0.6)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Palette.ink)
             content()
         }
         .padding(18)
@@ -2576,8 +2872,6 @@ struct GlossBody: View {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text(section.title)
                                 .font(.system(size: sectionLabelSize, weight: .semibold))
-                                .textCase(.uppercase)
-                                .tracking(0.5)
                             Rectangle()
                                 .fill(Palette.line)
                                 .frame(height: 1)

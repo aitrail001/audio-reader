@@ -42,7 +42,7 @@ public struct StoredSettings: Codable, Equatable, Sendable {
         deepReadingMode: Bool = false,
         showStudyOverlay: Bool = false,
         vocabReviewPrompt: String = "recognition",
-        appearance: String = "dark",
+        appearance: String = "system",
         preferredDictionary: String = "牛津英汉汉英词典",
         lookupPanelWidth: Double = 420,
         readerFontScale: Double = 1.0,
@@ -370,6 +370,53 @@ public struct StoredVocabularyOccurrence: Codable, Equatable, Sendable {
     }
 }
 
+/// Exact reader resume position is chapter-relative so M4B chapter offsets can
+/// change without moving the user's logical place in the chapter.
+public struct StoredReaderProgress: Codable, Equatable, Sendable, Identifiable {
+    public var id: String
+    public var bookID: BookID
+    public var chapterID: ChapterID
+    public var relativeSeconds: TimeInterval
+    public var updatedAt: Date
+    public var deviceID: String
+    public var revision: Int64
+
+    public init(
+        id: String,
+        bookID: BookID,
+        chapterID: ChapterID,
+        relativeSeconds: TimeInterval,
+        updatedAt: Date,
+        deviceID: String,
+        revision: Int64 = 0
+    ) {
+        self.id = id
+        self.bookID = bookID
+        self.chapterID = chapterID
+        self.relativeSeconds = relativeSeconds
+        self.updatedAt = updatedAt
+        self.deviceID = deviceID
+        self.revision = revision
+    }
+}
+
+public struct StoredReaderProgressState: Equatable, Sendable {
+    public var current: StoredReaderProgress
+    public var conflicts: [StoredReaderProgress]
+
+    public init(current: StoredReaderProgress, conflicts: [StoredReaderProgress]) {
+        self.current = current
+        self.conflicts = conflicts
+    }
+}
+
+public enum ReaderProgressMergeOutcome: Equatable, Sendable {
+    case inserted
+    case replacedCurrent
+    case conflictRetained
+    case unchanged
+}
+
 public struct StoredKnownLemma: Codable, Equatable, Sendable {
     public var language: String
     public var form: String
@@ -415,6 +462,7 @@ public enum AssistantResultStatus: String, Codable, Sendable {
     case pending
     case accepted
     case rejected
+    case stale
 }
 
 public struct StoredAssistantResult: Codable, Equatable, Sendable {

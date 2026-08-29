@@ -2,13 +2,8 @@ import type { Principal } from "@audio-reader/auth";
 import type { components } from "@audio-reader/contract";
 import type { OpsProductEvent, OpsStore } from "@audio-reader/database";
 import { readJsonObject } from "./body";
-import { asHead, jsonResponse } from "./http";
-import {
-  fieldError,
-  methodNotAllowed,
-  requireDeviceId,
-  requirePrincipal,
-} from "./route-helpers";
+import { jsonResponse } from "./http";
+import { fieldError, methodNotAllowed, requireDeviceId, requirePrincipal } from "./route-helpers";
 
 type ProductEvent = components["schemas"]["ProductEvent"];
 type ProductEventBatch = components["schemas"]["ProductEventBatch"];
@@ -119,7 +114,11 @@ export async function handleProductEventRoute(
     ? (body.value as ProductEventBatch).events
     : [];
   if (rawEvents.length > MAX_BATCH) {
-    return fieldError(context.requestId, "events", `events must contain at most ${MAX_BATCH} items.`);
+    return fieldError(
+      context.requestId,
+      "events",
+      `events must contain at most ${String(MAX_BATCH)} items.`,
+    );
   }
   let accepted = 0;
   for (const item of rawEvents) {

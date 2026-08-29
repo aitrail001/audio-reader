@@ -22,6 +22,25 @@ public protocol TranscriptRepository: Sendable {
     func loadAllTranscripts() throws -> [StoredTranscript]
 }
 
+public protocol TranscriptOverlayRepository: Sendable {
+    func loadTranscriptOverlays(chapterID: ChapterID) throws -> [StoredTranscriptOverlay]
+    func loadAllTranscriptOverlays() throws -> [StoredTranscriptOverlay]
+    func loadTranscriptOverlayState(chapterID: ChapterID, segmentID: String) throws -> StoredTranscriptOverlayState?
+    func saveTranscriptOverlay(_ overlay: StoredTranscriptOverlay) throws
+    @discardableResult
+    func mergeTranscriptOverlay(_ overlay: StoredTranscriptOverlay, revision: Int64) throws -> TranscriptOverlayMergeOutcome
+    func resolveTranscriptOverlay(chapterID: ChapterID, segmentID: String, choosing candidateID: String) throws
+    func deleteTranscriptOverlay(id: String) throws
+}
+
+public protocol ReaderProgressRepository: Sendable {
+    func loadReaderProgress(bookID: BookID) throws -> StoredReaderProgressState?
+    func loadAllReaderProgress() throws -> [StoredReaderProgress]
+    @discardableResult
+    func mergeReaderProgress(_ progress: StoredReaderProgress) throws -> ReaderProgressMergeOutcome
+    func resolveReaderProgress(bookID: BookID, choosing candidateID: String) throws
+}
+
 public protocol VocabularyRepository: Sendable {
     func loadVocabulary() throws -> [StoredVocabularyOccurrence]
     func saveVocabulary(_ entries: [StoredVocabularyOccurrence]) throws

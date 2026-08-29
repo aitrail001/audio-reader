@@ -204,11 +204,7 @@ async function rpc(
     );
     return undefined;
   }
-  if (
-    typeof response.body === "object" &&
-    response.body !== null &&
-    !Array.isArray(response.body)
-  ) {
+  if (typeof response.body === "object" && !Array.isArray(response.body)) {
     return response.body as Record<string, unknown>;
   }
   return undefined;

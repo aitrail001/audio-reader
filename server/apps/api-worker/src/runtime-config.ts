@@ -571,9 +571,7 @@ function asPublicPayload(value: Record<string, unknown>): OperatorPublicPayload 
   };
 }
 
-export function sentenceContextCountOf(value: {
-  sentenceContextCount?: unknown;
-}): number {
+export function sentenceContextCountOf(value: { sentenceContextCount?: unknown }): number {
   const raw = value.sentenceContextCount;
   if (typeof raw !== "number" || !Number.isFinite(raw)) {
     return 1;

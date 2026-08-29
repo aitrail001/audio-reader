@@ -16,6 +16,85 @@ async function readJson(response: Response): Promise<unknown> {
 }
 
 describe("admin and privacy API", () => {
+  it("filters product events by request id", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
+    await database.identity.grantAdminRole(USER_ID);
+    await database.ops.recordProductEvent({
+      accountId: USER_ID,
+      deviceId: DEVICE_ID,
+      name: "ai.translation.completed",
+      outcome: "ok",
+      requestId: "req-match",
+      properties: {},
+    });
+    await database.ops.recordProductEvent({
+      accountId: USER_ID,
+      deviceId: DEVICE_ID,
+      name: "ai.translation.completed",
+      outcome: "ok",
+      requestId: "req-other",
+      properties: {},
+    });
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+
+    const response = await app.fetch(
+      new Request("http://localhost/v1/admin/product-events?requestId=req-match", {
+        headers: { authorization: "Bearer admin" },
+      }),
+    );
+    const body = await readJson(response);
+    expect(response.status).toBe(200);
+    expect(isRecord(body) && Array.isArray(body.items) ? body.items : []).toHaveLength(1);
+    expect(
+      isRecord(body) && Array.isArray(body.items) && isRecord(body.items[0])
+        ? body.items[0].requestId
+        : null,
+    ).toBe("req-match");
+  });
+
+  it("applies kind and task filters to persisted Trace fallback events", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
+    await database.identity.grantAdminRole(USER_ID);
+    await database.ops.appendAudit({
+      actorId: USER_ID,
+      action: "managed_qwen_complete",
+      resourceType: "llm_policy",
+      resourceId: "translation",
+      reason: "translation completed",
+      traceId: "trace-filter",
+      metadata: { task: "translation", status: "ok" },
+    });
+    await database.ops.appendAudit({
+      actorId: USER_ID,
+      action: "operator_runtime_saved",
+      resourceType: "runtime",
+      resourceId: "default",
+      reason: "runtime saved",
+      traceId: "trace-other",
+      metadata: { task: "runtime", status: "ok" },
+    });
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+    const response = await app.fetch(
+      new Request("http://localhost/v1/admin/events?kind=managed_qwen_complete&task=translation", {
+        headers: { authorization: "Bearer admin" },
+      }),
+    );
+    const body = await readJson(response);
+    expect(response.status).toBe(200);
+    expect(Array.isArray(body) ? body : []).toHaveLength(1);
+    expect(Array.isArray(body) && isRecord(body[0]) ? body[0].kind : null).toBe(
+      "managed_qwen_complete",
+    );
+  });
+
   it("forbids ordinary users from listing admin users", async () => {
     const app = createTestApp();
     const response = await app.fetch(

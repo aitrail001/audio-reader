@@ -384,6 +384,30 @@ struct AccountSessionFlowTests {
                     segments: []
                 )
             ],
+            overlays: [
+                StoredTranscriptOverlay(
+                    id: "overlay-1",
+                    chapterID: ChapterID(rawValue: chapterID),
+                    segmentID: "segment-1",
+                    baseFingerprint: "base",
+                    correctedText: "Corrected",
+                    correctedStart: 1,
+                    correctedEnd: 2,
+                    provenance: .init(deviceID: "mac", createdAt: Date(timeIntervalSince1970: 1_777_000_010)),
+                    updatedAt: Date(timeIntervalSince1970: 1_777_000_010)
+                )
+            ],
+            readerProgress: [
+                StoredReaderProgress(
+                    id: "reader-progress",
+                    bookID: BookID(rawValue: bookID),
+                    chapterID: ChapterID(rawValue: chapterID),
+                    relativeSeconds: 12.875,
+                    updatedAt: Date(timeIntervalSince1970: 1_777_000_020),
+                    deviceID: "mac",
+                    revision: 3
+                )
+            ],
             reviews: [
                 StoredReviewEvent(
                     id: ReviewEventID(rawValue: "dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
@@ -396,8 +420,59 @@ struct AccountSessionFlowTests {
         )
         #expect(mutations.contains(where: { $0.entityType == .book && $0.entityID == bookID }))
         #expect(mutations.contains(where: { $0.entityType == .transcript && $0.entityID == chapterID }))
+        let overlay = try #require(mutations.first(where: { $0.entityType == .transcriptOverlay }))
+        let overlayPayload = try JSONDecoder().decode([String: SyncJSONValue].self, from: overlay.payload)
+        #expect(overlayPayload["localChapterId"]?.stringValue == chapterID)
+        #expect(overlayPayload["overlayJSON"]?.stringValue?.contains("Corrected") == true)
         #expect(mutations.contains(where: { $0.entityType == .reviewEvent }))
         #expect(mutations.contains(where: { $0.entityType == .progress && $0.entityID == vocabID }))
+        let readerProgress = try #require(mutations.first(where: {
+            guard $0.entityType == .progress,
+                  let payload = try? JSONDecoder().decode([String: SyncJSONValue].self, from: $0.payload)
+            else { return false }
+            return payload["progressKind"]?.stringValue == "reader"
+        }))
+        let progressPayload = try JSONDecoder().decode([String: SyncJSONValue].self, from: readerProgress.payload)
+        #expect(progressPayload["relativeSeconds"]?.numberValue == 12.875)
+        #expect(progressPayload["localChapterId"]?.stringValue == chapterID)
+    }
+
+    @Test("Vocabulary sync carries local sentence and translation provenance additively")
+    func vocabularySyncCarriesPortableFields() throws {
+        let item = VocabEntry(
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            word: "ice",
+            definition: "frozen water",
+            translation: "冰",
+            translationLanguage: "zh-Hans",
+            translationModel: "qwen",
+            sourceLanguage: "en-US",
+            context: "The ice closed over.",
+            spokenText: "The ice closed over.",
+            ebookText: "The ice had closed over.",
+            bookID: "book",
+            bookTitle: "Book",
+            chapterID: "chapter",
+            chapterTitle: "Chapter",
+            segmentID: "segment",
+            wordID: "word",
+            timestamp: 3,
+            addedAt: Date(timeIntervalSince1970: 1)
+        )
+        let mutation = try #require(AccountSyncApplicator.snapshot(
+            settings: .default,
+            vocabulary: [item],
+            lemmas: []
+        ).first(where: { $0.entityType == .vocabulary }))
+        let payload = try JSONDecoder().decode([String: SyncJSONValue].self, from: mutation.payload)
+
+        #expect(payload["segmentId"]?.stringValue == "segment")
+        #expect(payload["wordId"]?.stringValue == "word")
+        #expect(payload["spokenText"]?.stringValue == "The ice closed over.")
+        #expect(payload["ebookText"]?.stringValue == "The ice had closed over.")
+        #expect(payload["translationLanguage"]?.stringValue == "zh-Hans")
+        #expect(payload["translationModel"]?.stringValue == "qwen")
+        #expect(payload["sourceLanguage"]?.stringValue == "en-US")
     }
 
     @Test("Sync snapshot hashes non-UUID book and chapter IDs instead of the settings sentinel")

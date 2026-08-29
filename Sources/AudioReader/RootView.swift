@@ -35,52 +35,6 @@ struct RootView: View {
             )
         }
         .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Picker("Section", selection: $state.tab) {
-                    ForEach(AppTab.allCases) { tab in
-                        Label(tab.rawValue, systemImage: tab.symbol).tag(tab)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 360)
-            }
-            if state.tab != .settings {
-            ToolbarItem(placement: .automatic) {
-                Button {
-                    state.chooseLibrary()
-                } label: {
-                    Label("Library folder", systemImage: "folder")
-                }
-            }
-#if os(macOS)
-            ToolbarItem(placement: .automatic) {
-                Menu {
-                    Button(action: importFiles) {
-                        Label("Audiobook Files…", systemImage: "doc.badge.plus")
-                    }
-                    Button(action: importFolder) {
-                        Label("Audiobook Folder…", systemImage: "folder.badge.plus")
-                    }
-                    Divider()
-                    Button {
-                        showMacAppleBooks = true
-                    } label: {
-                        Label("Apple Books…", systemImage: "books.vertical")
-                    }
-                } label: {
-                    Label("Import", systemImage: "square.and.arrow.down")
-                }
-            }
-#endif
-            ToolbarItem(placement: .automatic) {
-                Picker("Theme", selection: $state.settings.appearance) {
-                    ForEach(AppAppearance.allCases) { mode in
-                        Text(mode.menuLabel).tag(mode.rawValue)
-                    }
-                }
-                .onChange(of: state.settings.appearance) { _, _ in state.persistSettings() }
-            }
-            }
             if !state.backgroundJobs.isEmpty {
                 ToolbarItem(placement: .automatic) {
                     BackgroundJobsButton(state: state)
@@ -135,12 +89,29 @@ struct RootView: View {
             Text(macBookDeleteError ?? "Unknown error")
         }
 #endif
-        .task { await state.boot() }
+        .task {
+#if DEBUG
+            if UITestLaunchScenario.isRequested {
+                UITestLaunchScenario.applyIfRequested(to: state)
+            } else {
+                await state.boot()
+            }
+#else
+            await state.boot()
+#endif
+        }
     }
 
     private var sidebar: some View {
         List(selection: sidebarSelection) {
 #if os(macOS)
+            Section {
+                destinationRow(.library, title: "Library", identifier: "sidebar.library")
+                destinationRow(.player, title: "Now Reading", identifier: "sidebar.nowReading")
+                destinationRow(.vocab, title: "Words", identifier: "sidebar.words")
+                destinationRow(.settings, title: "Settings", identifier: "sidebar.settings")
+            }
+
             Section("Sources") {
                 Button {
                     showMacAppleBooks = true
@@ -159,62 +130,66 @@ struct RootView: View {
                 }
                 .buttonStyle(.plain)
             }
-#endif
-            Section("Books") {
-                ForEach(state.books) { book in
-                    HStack(spacing: 12) {
-                        if let path = book.coverPath, let img = CoverImageCache.shared.image(for: path) {
-                            Image(platformImage: img)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: 32, height: 32)
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                        } else {
-                            Image(systemName: "book.closed")
-                                .frame(width: 32, height: 32)
-                                .foregroundStyle(Palette.gold)
-                        }
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(book.title)
-                                .font(.system(size: 12, weight: .medium))
-                                .lineLimit(2)
-                            Text("\(state.transcribedChapterCount(in: book))/\(book.chapters.count) transcribed")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .tag(book.id)
-                    .padding(.vertical, 4)
-#if os(macOS)
-                    .contextMenu {
-                        Button(role: .destructive) {
-                            pendingMacBookDelete = book
-                        } label: {
-                            Label("Delete Book", systemImage: "trash")
-                        }
-                    }
-#endif
-                }
+
+            Section("Cloud") {
+                syncStatus
             }
+#endif
         }
         .listStyle(.sidebar)
     }
 
     private var sidebarSelection: Binding<String?> {
         Binding(
-            get: { state.selectedBookID },
-            set: { id in
-                state.selectedBookID = id
-                guard let id,
-                      let book = state.books.first(where: { $0.id == id })
+            get: { "destination.\(state.tab.rawValue)" },
+            set: { value in
+                guard let raw = value?.replacingOccurrences(of: "destination.", with: ""),
+                      let tab = AppTab(rawValue: raw)
                 else { return }
-                state.selectedChapterID = book.chapters.first?.id
-                state.tab = .library
+                state.tab = tab
             }
         )
     }
 
 #if os(macOS)
+    private func destinationRow(_ tab: AppTab, title: String, identifier: String) -> some View {
+        Label(title, systemImage: tab.symbol)
+            .tag("destination.\(tab.rawValue)")
+            .accessibilityIdentifier(identifier)
+    }
+
+    private var syncStatus: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(syncStatusTitle, systemImage: syncStatusSymbol)
+                .font(.callout)
+                .foregroundStyle(state.account.errorMessage == nil ? Palette.dim : Palette.terracotta)
+                .accessibilityIdentifier("sync.status")
+            Button {
+                Task { await state.account.synchronize() }
+            } label: {
+                Label("Sync now", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .disabled(state.account.isBusy || !state.account.mode.isSyncEnabled)
+            .accessibilityIdentifier("sync.now")
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var syncStatusTitle: String {
+        if state.account.errorMessage != nil { return "Sync needs attention" }
+        if let activity = state.account.activityMessage, !activity.isEmpty { return activity }
+        switch state.account.mode {
+        case .local: return "Local only"
+        case .signedInSyncOff: return "Sync off"
+        case .signedInSyncOn: return "Up to date"
+        }
+    }
+
+    private var syncStatusSymbol: String {
+        if state.account.errorMessage != nil { return "exclamationmark.icloud" }
+        return state.account.mode.isSyncEnabled ? "checkmark.icloud" : "icloud.slash"
+    }
+
     private var libraryRoot: URL {
         URL(fileURLWithPath: state.settings.libraryPath, isDirectory: true)
     }

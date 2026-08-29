@@ -557,6 +557,7 @@ async function handleRequest(
       identity: options.database.identity,
       catalog: options.database.catalog,
       objects: options.storage,
+      sync: options.database.sync,
     });
     if (routed !== undefined) {
       return routed;

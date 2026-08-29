@@ -137,6 +137,10 @@ no real Apple Books catalog; validate that path on hardware.
 
 ## 2. Deploy the remote server
 
+For the gated staging-first Operator/API promotion, request-ID trace, Arc
+profiles, and evidence tuple, follow
+[Operator deployment and end-to-end runbook](operator-deployment-e2e.md).
+
 Production topology (ADR-002): **Supabase Auth + Postgres** as the system of
 record, **Cloudflare Workers** as the only public OpenAPI boundary. Native apps
 never talk to Supabase, R2, or Qwen directly.
@@ -312,9 +316,14 @@ In **Settings → Account**:
    `123456`. Hosted codes come from Supabase email.
 3. After tokens arrive, the app **bootstraps** this device (`POST /v1/auth/bootstrap`
    with `X-Device-Id` and `Idempotency-Key`).
-4. **Sync learning data across devices** is an opt-in flag only in this
-   version. It does not upload books or vocabulary yet.
-5. **Revoke** another device from the list. That device returns to local mode
+4. **Sync learning data across devices** is opt-in. It synchronizes small
+   catalog, exact progress, vocabulary, transcript, and transcript-overlay
+   records through the account API. Audiobook, EPUB, cover, credential, and
+   Anki clip files stay local. Use **Sync now** and verify pending/current/error/
+   conflict presentation before treating the device as converged.
+5. Concurrent progress and transcript-overlay revisions require an explicit
+   resolution; do not assume a later timestamp silently wins.
+6. **Revoke** another device from the list. That device returns to local mode
    on next refresh; its on-disk library is not deleted.
 
 Session tokens live in the AES-GCM encrypted file session store, not in settings
@@ -347,9 +356,10 @@ Objects, KV, or the Cloudflare Rate Limiting API before public issuance.
 ### 3.5 Native vs server versioning
 
 - Apple apps use `x.y.z` (`CFBundleShortVersionString`) plus integer
-  `CFBundleVersion`. Shared native behavior bumps the patch once.
+  `CFBundleVersion`. This release is `1.2.0 (86)` for both macOS and iPadOS.
 - Server packages stay `0.0.0` private workspace versions. Worker
-  `APP_VERSION` is independent (`1.0.3-draft.1` until the public API ships).
+  `APP_VERSION` is independent. The API Worker is `1.3.0`; the unchanged job
+  Worker keeps its existing version. The Operator console is `0.6.0`.
 - Production OTP From is `AudioReader <audio.reader.service@gmail.com>`. Verify
   that address in Resend; `onboarding@resend.dev` only delivers to the Resend account.
 

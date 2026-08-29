@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "operator-table.tsx"), "utf8");
+const source = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "operator-table.tsx"),
+  "utf8",
+);
 
 describe("Paper Desk operator grid", () => {
   it("sorts, finds, and expands without a third-party grid", () => {

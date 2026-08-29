@@ -86,7 +86,7 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
     requestId: string,
   ): Promise<boolean> {
     const probe: IdentityAdminProbe = store;
-    let anyAdmin = true;
+    let anyAdmin: boolean;
     try {
       anyAdmin = probe.hasAnyAdminRole === undefined ? true : await probe.hasAnyAdminRole();
     } catch {

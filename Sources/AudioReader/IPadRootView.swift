@@ -57,6 +57,7 @@ import UIKit
 
 private enum IPadLibrarySource: String, CaseIterable, Identifiable {
     case allBooks
+    case nowReading
     case deviceAudiobooks
     case files
     case folders
@@ -68,6 +69,7 @@ private enum IPadLibrarySource: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .allBooks: "All Books"
+        case .nowReading: "Now Reading"
         case .deviceAudiobooks: "Device Audiobooks"
         case .files: "Files"
         case .folders: "Folders"
@@ -79,6 +81,7 @@ private enum IPadLibrarySource: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .allBooks: "books.vertical"
+        case .nowReading: "text.alignleft"
         case .deviceAudiobooks: "ipad.and.iphone"
         case .files: "doc"
         case .folders: "folder"
@@ -196,12 +199,30 @@ struct IPadRootView: View {
             Text("Delete “\(pendingBookDelete?.title ?? "this book")” and its imported audio, ebook, cover, and chapter metadata from AudioReader? Vocabulary entries will be kept. This cannot be undone.")
         }
         .task {
+#if DEBUG
+            if UITestLaunchScenario.isRequested {
+                UITestLaunchScenario.applyIfRequested(to: state)
+            } else {
+                await state.boot()
+            }
+#else
             await state.boot()
+#endif
             if state.tab == .settings {
                 source = .settings
                 applyColumnMode(
                     isReaderActive: false,
                     isSettingsSelected: true,
+                    showsLibraryAlongsideReader: false
+                )
+            } else if state.tab == .player {
+                source = .nowReading
+                applyColumnMode(isReaderActive: true, showsLibraryAlongsideReader: false)
+            } else if state.tab == .vocab {
+                source = .vocabulary
+                applyColumnMode(
+                    isReaderActive: false,
+                    isVocabularySelected: true,
                     showsLibraryAlongsideReader: false
                 )
             }
@@ -212,15 +233,21 @@ struct IPadRootView: View {
             }
             if selected == .vocabulary {
                 state.tab = .vocab
+            } else if selected == .nowReading {
+                state.tab = .player
             } else if selected == .settings {
                 state.tab = .settings
-            } else if state.tab == .vocab || state.tab == .settings {
+            } else if state.tab != .library {
                 state.tab = .library
             }
         }
         .onChange(of: state.tab) { _, tab in
             if tab == .settings {
                 source = .settings
+            } else if tab == .player {
+                source = .nowReading
+            } else if tab == .vocab {
+                source = .vocabulary
             }
             applyColumnMode(
                 isReaderActive: tab == .player,
@@ -297,17 +324,19 @@ struct IPadRootView: View {
 
     private var sourceSidebar: some View {
         List {
-            Section("Library") {
+            Section {
                 sourceRow(.allBooks)
+                sourceRow(.nowReading)
+                sourceRow(.vocabulary)
+                sourceRow(.settings)
+            }
+            Section("Sources") {
                 sourceRow(.deviceAudiobooks)
                 sourceRow(.files)
                 sourceRow(.folders)
             }
-            Section("Study") {
-                sourceRow(.vocabulary)
-            }
-            Section {
-                sourceRow(.settings)
+            Section("Cloud") {
+                iPadSyncStatus
             }
         }
         .listStyle(.sidebar)
@@ -324,7 +353,53 @@ struct IPadRootView: View {
         .buttonStyle(.plain)
         .listRowBackground(source == item ? Palette.terracotta.opacity(0.16) : Color.clear)
         .accessibilityLabel(item.title)
+        .accessibilityIdentifier(sidebarIdentifier(for: item))
         .accessibilityAddTraits(source == item ? .isSelected : [])
+    }
+
+    private func sidebarIdentifier(for item: IPadLibrarySource) -> String {
+        switch item {
+        case .allBooks: "sidebar.library"
+        case .nowReading: "sidebar.nowReading"
+        case .vocabulary: "sidebar.words"
+        case .settings: "sidebar.settings"
+        case .deviceAudiobooks: "source.deviceAudiobooks"
+        case .files: "source.files"
+        case .folders: "source.folders"
+        }
+    }
+
+    private var iPadSyncStatus: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(iPadSyncTitle, systemImage: iPadSyncSymbol)
+                .font(.callout)
+                .foregroundStyle(Palette.dim)
+                .accessibilityIdentifier("sync.status")
+            Button {
+                Task { await state.account.synchronize() }
+            } label: {
+                Label("Sync now", systemImage: "arrow.triangle.2.circlepath")
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .disabled(state.account.isBusy || !state.account.mode.isSyncEnabled)
+            .accessibilityIdentifier("sync.now")
+        }
+    }
+
+    private var iPadSyncTitle: String {
+        if state.account.errorMessage != nil { return "Sync needs attention" }
+        if let activity = state.account.activityMessage, !activity.isEmpty { return activity }
+        switch state.account.mode {
+        case .local: return "Local only"
+        case .signedInSyncOff: return "Sync off"
+        case .signedInSyncOn: return "Up to date"
+        }
+    }
+
+    private var iPadSyncSymbol: String {
+        if state.account.errorMessage != nil { return "exclamationmark.icloud" }
+        return state.account.mode.isSyncEnabled ? "checkmark.icloud" : "icloud.slash"
     }
 
     @ViewBuilder
@@ -373,11 +448,14 @@ struct IPadRootView: View {
                             Button { importRequest = .files } label: { Label("Files", systemImage: "doc.badge.plus") }
                             Button { importRequest = .folder } label: { Label("Folder", systemImage: "folder.badge.plus") }
                         } label: {
-                            Label("Import", systemImage: "plus")
+                            Label("Import audiobook + EPUB", systemImage: "plus")
                         }
+                        .accessibilityIdentifier("library.importPaired")
                     }
                 }
             }
+        case .nowReading:
+            Color.clear.accessibilityHidden(true)
         }
     }
 
@@ -398,7 +476,7 @@ struct IPadRootView: View {
                     }
                 }
             }
-        } else if state.tab == .player {
+        } else if source == .nowReading || state.tab == .player {
             PlayerView(state: state)
                 .toolbar {
                     ToolbarItem(placement: .navigation) {
@@ -441,6 +519,7 @@ struct IPadRootView: View {
     private var filteredBooks: [Book] {
         switch source ?? .allBooks {
         case .allBooks: state.books
+        case .nowReading: state.books
         case .files: state.books.filter { $0.source == .files }
         case .folders: state.books.filter { $0.source == .localFolder }
         case .deviceAudiobooks: state.books.filter { $0.source == .deviceAudiobooks }
@@ -611,6 +690,16 @@ private struct IPadBookList: View {
     let readyChapterIDs: Set<String>
     let importMessage: String?
     let onDelete: (Book) -> Void
+    @State private var query = ""
+
+    private var filteredBooks: [Book] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return books }
+        return books.filter {
+            $0.title.localizedCaseInsensitiveContains(trimmed)
+                || ($0.author?.localizedCaseInsensitiveContains(trimmed) ?? false)
+        }
+    }
 
     var body: some View {
         List(selection: $selectedBookID) {
@@ -621,7 +710,7 @@ private struct IPadBookList: View {
                 }
             }
             Section {
-                ForEach(books) { book in
+                ForEach(filteredBooks) { book in
                     HStack(spacing: 12) {
                         IPadCover(path: book.coverPath, title: book.title, width: 48, height: 70)
                         VStack(alignment: .leading, spacing: 4) {
@@ -648,9 +737,13 @@ private struct IPadBookList: View {
                 }
             }
         }
+        .searchable(text: $query, prompt: "Search title or author")
+        .accessibilityIdentifier("library.search")
         .overlay {
             if books.isEmpty {
-                ContentUnavailableView("No audiobooks", systemImage: "books.vertical", description: Text("Use Import to add MP3 or M4B books."))
+                ContentUnavailableView("No audiobooks", systemImage: "books.vertical", description: Text("Use Import to add audiobook audio and its matching EPUB."))
+            } else if filteredBooks.isEmpty {
+                ContentUnavailableView.search(text: query)
             }
         }
     }
@@ -721,12 +814,11 @@ private struct IPadBookDetail: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    if let chapter = book.chapters.first(where: { $0.id == state.selectedChapterID }) ?? book.chapters.first {
-                        state.open(chapter: chapter, in: book, autoplay: false)
-                    }
+                    _ = state.continueReading(book)
                 } label: {
                     Label("Open Book", systemImage: "book.pages")
                 }
+                .accessibilityIdentifier("library.continue")
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
@@ -736,6 +828,7 @@ private struct IPadBookDetail: View {
                             systemImage: "book.closed"
                         )
                     }
+                    .accessibilityIdentifier("library.repair")
                     Button(role: .destructive, action: onDelete) {
                         Label("Delete Book", systemImage: "trash")
                     }
@@ -832,7 +925,9 @@ private struct DeviceAudiobooksView: View {
                         } else {
                             Button("Import") { onImport(item) }
                                 .buttonStyle(.bordered)
+                                .frame(minHeight: 44)
                                 .disabled(!item.canImport || importingID != nil)
+                                .accessibilityIdentifier("library.importDevice.\(item.id)")
                         }
                     }
                     .padding(.vertical, 4)
