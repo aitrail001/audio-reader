@@ -561,6 +561,7 @@ public final class FakeProductAIClient: ProductAIClient, @unchecked Sendable {
     public var reply = "Managed Qwen reply"
     public private(set) var translateCalls = 0
     public private(set) var translateBatchCalls = 0
+    public private(set) var summarizeCalls = 0
     public private(set) var chatCalls = 0
     private let lock = NSLock()
     private var messages: [String: ProductChatMessage] = [:]
@@ -627,8 +628,17 @@ public final class FakeProductAIClient: ProductAIClient, @unchecked Sendable {
     ) async throws -> ProductChapterSummary {
         _ = accessToken
         _ = deviceID
-        _ = request
-        return summary
+        if request.lookupOnly {
+            throw AuthClientError.problem(
+                status: 404,
+                code: "not_found",
+                detail: "No cached chapter summary matched this request."
+            )
+        }
+        return withLock {
+            summarizeCalls += 1
+            return summary
+        }
     }
 
     public func chat(

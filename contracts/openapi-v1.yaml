@@ -3746,6 +3746,7 @@ components:
           type: string
         lookupOnly:
           type: boolean
+          description: Return cache hits without calling Qwen. Misses stay in missingIds with HTTP 200.
         refreshIds:
           type: array
           items:

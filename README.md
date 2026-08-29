@@ -12,7 +12,7 @@ AudioReader is designed for focused listening and reading rather than passive au
 - mark words known, see coverage for the current chapter, underline unknown or learning words across the chapter, shadow a sentence, and take a local chapter quiz;
 - review vocabulary as recognition, cloze, or reverse cards, still using the original narration;
 - replay or loop a sentence and return to saved vocabulary in context;
-- translate words, sentences, or chapters and ask questions about the current chapter through an optional LLM provider, including on-device Apple Intelligence.
+- translate words, sentences, or chapters and ask questions about the current chapter through an optional LLM provider, including on-device Apple Intelligence. Managed Qwen (account) checks a shared exact-content cache first, auto-loads sentence translations and chapter summaries when a hit exists, and translates chapter-aligned sentence blocks so neighbors are cached together.
 
 The transcript is the timing source. Audio narration often contains publisher introductions, omitted footnotes, or wording that differs from the ebook, so AudioReader first transcribes what was actually spoken with Apple SpeechAnalyzer. When an EPUB is present, it then matches sufficiently similar sentences and lets you switch between **Spoken**, **Ebook**, and **Both**.
 

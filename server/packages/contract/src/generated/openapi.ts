@@ -1657,6 +1657,7 @@ export interface components {
             bookTitle?: string;
             chapterTitle?: string;
             promptVersion?: string;
+            /** @description Return cache hits without calling Qwen. Misses stay in missingIds with HTTP 200. */
             lookupOnly?: boolean;
             refreshIds?: string[];
         };

@@ -3,8 +3,14 @@ import { createFakeDatabaseClient } from "@audio-reader/database";
 import { createFakeQwenClient } from "@audio-reader/qwen";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
+import { assistantMethodError, isAssistantPath } from "./assistant-routes";
 
 const DEVICE_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+const AUTH_HEADERS = {
+  authorization: "Bearer test",
+  "content-type": "application/json",
+  "X-Device-Id": DEVICE_ID,
+} as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -12,6 +18,68 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 async function readJson(response: Response): Promise<unknown> {
   return JSON.parse(await response.text()) as unknown;
+}
+
+function postAssistant(
+  app: ReturnType<typeof createTestApp>,
+  path: string,
+  body: unknown,
+  idempotencyKey: string,
+): Promise<Response> {
+  return app.fetch(
+    new Request(`http://localhost${path}`, {
+      method: "POST",
+      headers: { ...AUTH_HEADERS, "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
+function sentenceBody(
+  source: string,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    task: "sentence",
+    sourceLanguage: "en",
+    targetLanguage: "zh",
+    learnerLevel: "intermediate",
+    source,
+    editionFingerprint: "ed-1",
+    chapterFingerprint: "ch-1",
+    promptVersion: "v1",
+    ...extra,
+  };
+}
+
+function batchBody(
+  sentences: Array<{ id: string; text: string }>,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    task: "chapter_batch",
+    sourceLanguage: "en",
+    targetLanguage: "zh",
+    learnerLevel: "intermediate",
+    sentences,
+    editionFingerprint: "ed-1",
+    chapterFingerprint: "ch-1",
+    ...extra,
+  };
+}
+
+function summaryBody(
+  segments: string[],
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    chapterId: DEVICE_ID,
+    sourceLanguage: "en",
+    targetLanguage: "zh",
+    learnerLevel: "intermediate",
+    segments,
+    ...extra,
+  };
 }
 
 describe("managed Qwen assistant API", () => {
@@ -1093,5 +1161,1242 @@ describe("managed Qwen assistant API", () => {
     expect(users[0]).toContain("Everyone relaxed.");
     expect(users[0]).toContain("TARGET id=s2:");
     expect(users[0]).not.toMatch(/TARGET id=(?!s2:)/);
+  });
+
+  it("rejects an empty translation batch without calling Qwen", async () => {
+    let completions = 0;
+    const app = createTestApp({
+      qwen: createFakeQwenClient({
+        text: '{"translations":[]}',
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const response = await app.fetch(
+      new Request("http://localhost/v1/ai/translation-batches", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test",
+          "content-type": "application/json",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-key-qwen-batch-empty",
+        },
+        body: JSON.stringify({
+          task: "chapter_batch",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          sentences: [],
+          editionFingerprint: "ed-empty",
+          chapterFingerprint: "ch-empty",
+        }),
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect(completions).toBe(0);
+  });
+
+  it("returns 405 for GET on translation batches", async () => {
+    const response = await createTestApp().fetch(
+      new Request("http://localhost/v1/ai/translation-batches", {
+        method: "GET",
+        headers: { authorization: "Bearer test", "X-Device-Id": DEVICE_ID },
+      }),
+    );
+    expect(response.status).toBe(405);
+    expect(response.headers.get("Allow")).toContain("POST");
+  });
+
+  it("lookupOnly sentence hits skip Qwen after a generated cache row", async () => {
+    let completions = 0;
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: '{"translation":"你好","notes":[]}',
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const headers = {
+      authorization: "Bearer test",
+      "content-type": "application/json",
+      "X-Device-Id": DEVICE_ID,
+    };
+    const payload = {
+      task: "sentence",
+      sourceLanguage: "en",
+      targetLanguage: "zh",
+      learnerLevel: "intermediate",
+      source: "Lookup hit please",
+      editionFingerprint: "ed-lookup-hit",
+      chapterFingerprint: "ch-lookup-hit",
+      promptVersion: "v1",
+    };
+    const generated = await app.fetch(
+      new Request("http://localhost/v1/ai/translations", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-lookup-hit-1" },
+        body: JSON.stringify(payload),
+      }),
+    );
+    expect(generated.status).toBe(200);
+    const lookup = await app.fetch(
+      new Request("http://localhost/v1/ai/translations", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-lookup-hit-2" },
+        body: JSON.stringify({ ...payload, lookupOnly: true }),
+      }),
+    );
+    expect(lookup.status).toBe(200);
+    const body = await readJson(lookup);
+    expect(isRecord(body) && body.provenance).toBe("cache_shared_exact");
+    expect(completions).toBe(1);
+  });
+
+  it("does not consume quota on lookupOnly misses", async () => {
+    const database = createFakeDatabaseClient();
+    await database.ops.patchQuota("qwen_tasks_day", 1);
+    let completions = 0;
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: '{"translation":"你好","notes":[]}',
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const headers = {
+      authorization: "Bearer test",
+      "content-type": "application/json",
+      "X-Device-Id": DEVICE_ID,
+    };
+    const miss = await app.fetch(
+      new Request("http://localhost/v1/ai/translations", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-lookup-quota-1" },
+        body: JSON.stringify({
+          task: "sentence",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          source: "Lookup quota miss",
+          lookupOnly: true,
+          editionFingerprint: "ed-lookup-quota",
+          chapterFingerprint: "ch-lookup-quota",
+          promptVersion: "v1",
+        }),
+      }),
+    );
+    expect(miss.status).toBe(404);
+    expect(completions).toBe(0);
+    const generated = await app.fetch(
+      new Request("http://localhost/v1/ai/translations", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-lookup-quota-2" },
+        body: JSON.stringify({
+          task: "sentence",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          source: "Lookup quota generate",
+          editionFingerprint: "ed-lookup-quota",
+          chapterFingerprint: "ch-lookup-quota",
+          promptVersion: "v1",
+        }),
+      }),
+    );
+    expect(generated.status).toBe(200);
+    expect(completions).toBe(1);
+  });
+
+  it("reuses a sentence cache row even when neighbor context changes", async () => {
+    let completions = 0;
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: '{"translation":"她打破了沉默。","notes":[]}',
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const headers = {
+      authorization: "Bearer test",
+      "content-type": "application/json",
+      "X-Device-Id": DEVICE_ID,
+    };
+    const first = await app.fetch(
+      new Request("http://localhost/v1/ai/translations", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-sentence-ctx-1" },
+        body: JSON.stringify({
+          task: "sentence",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          source: "She broke the ice.",
+          contextPrevious: ["The room fell silent."],
+          contextNext: ["Everyone relaxed."],
+          editionFingerprint: "ed-sentence-ctx",
+          chapterFingerprint: "ch-sentence-ctx",
+          promptVersion: "v1",
+        }),
+      }),
+    );
+    expect(first.status).toBe(200);
+    const lookup = await app.fetch(
+      new Request("http://localhost/v1/ai/translations", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-sentence-ctx-2" },
+        body: JSON.stringify({
+          task: "sentence",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          source: "She broke the ice.",
+          lookupOnly: true,
+          editionFingerprint: "ed-sentence-ctx",
+          chapterFingerprint: "ch-sentence-ctx",
+          promptVersion: "v1",
+        }),
+      }),
+    );
+    expect(lookup.status).toBe(200);
+    const body = await readJson(lookup);
+    expect(isRecord(body) && body.provenance).toBe("cache_shared_exact");
+    expect(completions).toBe(1);
+  });
+
+  it("keeps word cache rows scoped to the containing sentence", async () => {
+    let completions = 0;
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: JSON.stringify({
+          translation: "noun — ice",
+          connection: "",
+          examples: [
+            { source: "The ice closed.", translation: "冰封了。" },
+            { source: "The lake froze.", translation: "湖结冰了。" },
+          ],
+          notes: [],
+        }),
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const headers = {
+      authorization: "Bearer test",
+      "content-type": "application/json",
+      "X-Device-Id": DEVICE_ID,
+    };
+    const first = await app.fetch(
+      new Request("http://localhost/v1/ai/translations", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-word-ctx-1" },
+        body: JSON.stringify({
+          task: "word",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          source: "ice",
+          contextBefore: "The ice closed over the channel.",
+          editionFingerprint: "ed-word-ctx",
+          chapterFingerprint: "ch-word-ctx",
+          promptVersion: "v1",
+        }),
+      }),
+    );
+    expect(first.status).toBe(200);
+    const miss = await app.fetch(
+      new Request("http://localhost/v1/ai/translations", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-word-ctx-2" },
+        body: JSON.stringify({
+          task: "word",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          source: "ice",
+          contextBefore: "She broke the ice.",
+          lookupOnly: true,
+          editionFingerprint: "ed-word-ctx",
+          chapterFingerprint: "ch-word-ctx",
+          promptVersion: "v1",
+        }),
+      }),
+    );
+    expect(miss.status).toBe(404);
+    const hit = await app.fetch(
+      new Request("http://localhost/v1/ai/translations", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-word-ctx-3" },
+        body: JSON.stringify({
+          task: "word",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          source: "ice",
+          contextBefore: "The ice closed over the channel.",
+          lookupOnly: true,
+          editionFingerprint: "ed-word-ctx",
+          chapterFingerprint: "ch-word-ctx",
+          promptVersion: "v1",
+        }),
+      }),
+    );
+    expect(hit.status).toBe(200);
+    expect(completions).toBe(1);
+  });
+
+  it("returns empty batch lookup hits without generating", async () => {
+    let completions = 0;
+    const app = createTestApp({
+      qwen: createFakeQwenClient({
+        text: '{"translations":[]}',
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const response = await app.fetch(
+      new Request("http://localhost/v1/ai/translation-batches", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test",
+          "content-type": "application/json",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-key-qwen-batch-lookup-empty",
+        },
+        body: JSON.stringify({
+          task: "chapter_batch",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          sentences: [
+            { id: "s1", text: "One." },
+            { id: "s2", text: "Two." },
+          ],
+          lookupOnly: true,
+          editionFingerprint: "ed-batch-empty",
+          chapterFingerprint: "ch-batch-empty",
+        }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = await readJson(response);
+    expect(isRecord(body) && Array.isArray(body.results) ? body.results : []).toHaveLength(0);
+    expect(isRecord(body) && body.missingIds).toEqual(["s1", "s2"]);
+    expect(isRecord(body) && body.generatedCount).toBe(0);
+    expect(completions).toBe(0);
+  });
+
+  it("charges one quota for a multi-sentence batch generate", async () => {
+    const database = createFakeDatabaseClient();
+    await database.ops.patchQuota("qwen_tasks_day", 1);
+    let completions = 0;
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: JSON.stringify({
+          translations: [
+            { id: "s1", translation: "一。", notes: [] },
+            { id: "s2", translation: "二。", notes: [] },
+          ],
+        }),
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const headers = {
+      authorization: "Bearer test",
+      "content-type": "application/json",
+      "X-Device-Id": DEVICE_ID,
+    };
+    const batch = await app.fetch(
+      new Request("http://localhost/v1/ai/translation-batches", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-batch-quota-1" },
+        body: JSON.stringify({
+          task: "chapter_batch",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          sentences: [
+            { id: "s1", text: "One." },
+            { id: "s2", text: "Two." },
+          ],
+          editionFingerprint: "ed-batch-quota",
+          chapterFingerprint: "ch-batch-quota",
+        }),
+      }),
+    );
+    expect(batch.status).toBe(200);
+    expect(completions).toBe(1);
+    const cached = await app.fetch(
+      new Request("http://localhost/v1/ai/translation-batches", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-batch-quota-2" },
+        body: JSON.stringify({
+          task: "chapter_batch",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          sentences: [{ id: "s1", text: "One." }],
+          lookupOnly: true,
+          editionFingerprint: "ed-batch-quota",
+          chapterFingerprint: "ch-batch-quota",
+        }),
+      }),
+    );
+    expect(cached.status).toBe(200);
+    const other = await app.fetch(
+      new Request("http://localhost/v1/ai/translations", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-batch-quota-3" },
+        body: JSON.stringify({
+          task: "sentence",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          source: "Three.",
+          editionFingerprint: "ed-batch-quota",
+          chapterFingerprint: "ch-batch-quota",
+          promptVersion: "v1",
+        }),
+      }),
+    );
+    expect(other.status).toBe(429);
+    expect(completions).toBe(1);
+  });
+
+  it("regenerates only refreshIds in a translation batch", async () => {
+    let completions = 0;
+    let text = JSON.stringify({
+      translations: [
+        { id: "s1", translation: "旧一。", notes: [] },
+        { id: "s2", translation: "旧二。", notes: [] },
+      ],
+    });
+    const inner = createFakeQwenClient({ text: '{"translations":[]}' });
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      qwen: {
+        ping: () => inner.ping(),
+        pingDetailed: () => inner.pingDetailed(),
+        complete: async () => {
+          completions += 1;
+          return { ok: true, text, model: "qwen3.7-plus" };
+        },
+      },
+    });
+    const headers = {
+      authorization: "Bearer test",
+      "content-type": "application/json",
+      "X-Device-Id": DEVICE_ID,
+    };
+    const first = await app.fetch(
+      new Request("http://localhost/v1/ai/translation-batches", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-batch-refresh-1" },
+        body: JSON.stringify({
+          task: "chapter_batch",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          sentences: [
+            { id: "s1", text: "One." },
+            { id: "s2", text: "Two." },
+          ],
+          editionFingerprint: "ed-batch-refresh",
+          chapterFingerprint: "ch-batch-refresh",
+        }),
+      }),
+    );
+    expect(first.status).toBe(200);
+    text = JSON.stringify({
+      translations: [{ id: "s2", translation: "新二。", notes: [] }],
+    });
+    const refreshed = await app.fetch(
+      new Request("http://localhost/v1/ai/translation-batches", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-batch-refresh-2" },
+        body: JSON.stringify({
+          task: "chapter_batch",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          sentences: [
+            { id: "s1", text: "One." },
+            { id: "s2", text: "Two." },
+          ],
+          refreshIds: ["s2"],
+          editionFingerprint: "ed-batch-refresh",
+          chapterFingerprint: "ch-batch-refresh",
+        }),
+      }),
+    );
+    expect(refreshed.status).toBe(200);
+    expect(completions).toBe(2);
+    const body = await readJson(refreshed);
+    const results =
+      isRecord(body) && Array.isArray(body.results)
+        ? (body.results as Record<string, unknown>[])
+        : [];
+    const byId = new Map(results.map((item) => [item.targetId, item]));
+    expect(byId.get("s1")?.translation).toBe("旧一。");
+    expect(byId.get("s1")?.provenance).toBe("cache_shared_exact");
+    expect(byId.get("s2")?.translation).toBe("新二。");
+    expect(byId.get("s2")?.provenance).toBe("generated");
+  });
+
+  it("accepts a single-object translation payload for a one-sentence batch", async () => {
+    const app = createTestApp({
+      qwen: createFakeQwenClient({ text: '{"translation":"一句。","notes":[]}' }),
+    });
+    const response = await app.fetch(
+      new Request("http://localhost/v1/ai/translation-batches", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test",
+          "content-type": "application/json",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-key-qwen-batch-single",
+        },
+        body: JSON.stringify({
+          task: "chapter_batch",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          sentences: [{ id: "s1", text: "One sentence." }],
+          editionFingerprint: "ed-batch-single",
+          chapterFingerprint: "ch-batch-single",
+        }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = await readJson(response);
+    const results =
+      isRecord(body) && Array.isArray(body.results)
+        ? (body.results as Record<string, unknown>[])
+        : [];
+    expect(results).toHaveLength(1);
+    expect(results[0]?.translation).toBe("一句。");
+    expect(results[0]?.targetId).toBe("s1");
+  });
+
+  it("does not consume summary quota on a cache hit", async () => {
+    const database = createFakeDatabaseClient();
+    await database.ops.patchQuota("qwen_tasks_day", 1);
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: JSON.stringify({
+          overview: "概述",
+          keyPoints: ["要点"],
+          charactersOrIdeas: [],
+          keyConcepts: [],
+          themes: [],
+        }),
+      }),
+    });
+    const headers = {
+      authorization: "Bearer test",
+      "content-type": "application/json",
+      "X-Device-Id": DEVICE_ID,
+    };
+    const payload = {
+      chapterId: DEVICE_ID,
+      sourceLanguage: "en",
+      targetLanguage: "zh",
+      learnerLevel: "intermediate",
+      segments: ["It was on a dreary night of November."],
+    };
+    const first = await app.fetch(
+      new Request("http://localhost/v1/ai/chapter-summaries", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-sum-quota-1" },
+        body: JSON.stringify(payload),
+      }),
+    );
+    expect(first.status).toBe(200);
+    const cached = await app.fetch(
+      new Request("http://localhost/v1/ai/chapter-summaries", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-sum-quota-2" },
+        body: JSON.stringify({ ...payload, lookupOnly: true }),
+      }),
+    );
+    expect(cached.status).toBe(200);
+    const other = await app.fetch(
+      new Request("http://localhost/v1/ai/translations", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": "idempotency-key-qwen-sum-quota-3" },
+        body: JSON.stringify({
+          task: "sentence",
+          sourceLanguage: "en",
+          targetLanguage: "zh",
+          learnerLevel: "intermediate",
+          source: "After summary quota.",
+          editionFingerprint: "ed-sum-quota",
+          chapterFingerprint: "ch-sum-quota",
+          promptVersion: "v1",
+        }),
+      }),
+    );
+    expect(other.status).toBe(429);
+  });
+});
+
+describe("assistant route helpers", () => {
+  it("recognizes assistant paths and rejects the wrong HTTP methods", async () => {
+    expect(isAssistantPath("/v1/ai/translations")).toBe(true);
+    expect(isAssistantPath("/v1/ai/translation-batches")).toBe(true);
+    expect(isAssistantPath("/v1/ai/chapter-summaries")).toBe(true);
+    expect(isAssistantPath("/v1/ai/chat")).toBe(true);
+    expect(isAssistantPath(`/v1/ai/chat/${DEVICE_ID}/messages/${DEVICE_ID}`)).toBe(true);
+    expect(isAssistantPath("/v1/health")).toBe(false);
+
+    expect(assistantMethodError("/v1/ai/translations", "POST", "rid")).toBeUndefined();
+    expect(
+      assistantMethodError(`/v1/ai/chat/${DEVICE_ID}/messages/${DEVICE_ID}`, "GET", "rid"),
+    ).toBeUndefined();
+
+    const getTranslations = assistantMethodError("/v1/ai/translations", "GET", "rid");
+    expect(getTranslations?.status).toBe(405);
+    expect(getTranslations?.headers.get("Allow")).toBe("POST");
+
+    const postChatMessage = assistantMethodError(
+      `/v1/ai/chat/${DEVICE_ID}/messages/${DEVICE_ID}`,
+      "POST",
+      "rid",
+    );
+    expect(postChatMessage?.status).toBe(405);
+    expect(postChatMessage?.headers.get("Allow")).toBe("GET");
+  });
+});
+
+describe("managed Qwen cache identity and batch edge cases", () => {
+  it("rejects unauthenticated batches and summaries", async () => {
+    const app = createTestApp({ authenticate: () => null });
+    const batch = await postAssistant(
+      app,
+      "/v1/ai/translation-batches",
+      batchBody([{ id: "s1", text: "Hello." }]),
+      "idempotency-key-qwen-unauth-batch",
+    );
+    const summary = await postAssistant(
+      app,
+      "/v1/ai/chapter-summaries",
+      summaryBody(["Hello."]),
+      "idempotency-key-qwen-unauth-summary",
+    );
+    expect(batch.status).toBe(401);
+    expect(summary.status).toBe(401);
+  });
+
+  it("returns 405 for GET on translations and summaries", async () => {
+    const app = createTestApp();
+    const translations = await app.fetch(
+      new Request("http://localhost/v1/ai/translations", {
+        method: "GET",
+        headers: { authorization: "Bearer test", "X-Device-Id": DEVICE_ID },
+      }),
+    );
+    const summaries = await app.fetch(
+      new Request("http://localhost/v1/ai/chapter-summaries", {
+        method: "GET",
+        headers: { authorization: "Bearer test", "X-Device-Id": DEVICE_ID },
+      }),
+    );
+    expect(translations.status).toBe(405);
+    expect(translations.headers.get("Allow")).toContain("POST");
+    expect(summaries.status).toBe(405);
+    expect(summaries.headers.get("Allow")).toContain("POST");
+  });
+
+  it("returns 405 for POST on a chat message URL", async () => {
+    const response = await createTestApp().fetch(
+      new Request(`http://localhost/v1/ai/chat/${DEVICE_ID}/messages/${DEVICE_ID}`, {
+        method: "POST",
+        headers: AUTH_HEADERS,
+        body: JSON.stringify({ text: "nope" }),
+      }),
+    );
+    expect(response.status).toBe(405);
+    expect(response.headers.get("Allow")).toBe("GET");
+  });
+
+  it("rejects invalid JSON and missing translation source language", async () => {
+    const app = createTestApp();
+    const invalid = await app.fetch(
+      new Request("http://localhost/v1/ai/translations", {
+        method: "POST",
+        headers: { ...AUTH_HEADERS, "Idempotency-Key": "idempotency-key-qwen-invalid-json" },
+        body: "{not-json",
+      }),
+    );
+    const missingLanguage = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      {
+        task: "sentence",
+        targetLanguage: "zh",
+        learnerLevel: "intermediate",
+        source: "Hello",
+        editionFingerprint: "ed-1",
+        chapterFingerprint: "ch-1",
+        promptVersion: "v1",
+      },
+      "idempotency-key-qwen-missing-lang",
+    );
+    expect(invalid.status).toBe(400);
+    expect(missingLanguage.status).toBe(400);
+  });
+
+  it("rejects batches whose sentences have no usable id or text", async () => {
+    const app = createTestApp({
+      qwen: createFakeQwenClient({ text: '{"translations":[]}' }),
+    });
+    const response = await postAssistant(
+      app,
+      "/v1/ai/translation-batches",
+      batchBody([
+        { id: "  ", text: "Hello." },
+        { id: "s1", text: "   " },
+      ]),
+      "idempotency-key-qwen-batch-blank",
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it("keeps the first sentence when a batch repeats the same id", async () => {
+    const app = createTestApp({
+      qwen: createFakeQwenClient({
+        text: JSON.stringify({ translations: [{ id: "s1", translation: "你好。", notes: [] }] }),
+      }),
+    });
+    const response = await postAssistant(
+      app,
+      "/v1/ai/translation-batches",
+      batchBody([
+        { id: "s1", text: "Hello." },
+        { id: "s1", text: "Hello again." },
+      ]),
+      "idempotency-key-qwen-batch-dup",
+    );
+    expect(response.status).toBe(200);
+    const body = await readJson(response);
+    const results =
+      isRecord(body) && Array.isArray(body.results)
+        ? (body.results as Record<string, unknown>[])
+        : [];
+    expect(results).toHaveLength(1);
+    expect(results[0]?.targetId).toBe("s1");
+    expect(results[0]?.source).toBe("Hello.");
+  });
+
+  it("caps a translation batch at forty sentences", async () => {
+    const sentences = Array.from({ length: 41 }, (_, index) => ({
+      id: `s${String(index + 1)}`,
+      text: `Sentence ${String(index + 1)}.`,
+    }));
+    const app = createTestApp({
+      qwen: createFakeQwenClient({
+        text: JSON.stringify({
+          translations: sentences.slice(0, 40).map((sentence) => ({
+            id: sentence.id,
+            translation: sentence.text,
+            notes: [],
+          })),
+        }),
+      }),
+    });
+    const response = await postAssistant(
+      app,
+      "/v1/ai/translation-batches",
+      batchBody(sentences, { editionFingerprint: "ed-cap", chapterFingerprint: "ch-cap" }),
+      "idempotency-key-qwen-batch-cap",
+    );
+    expect(response.status).toBe(200);
+    const body = await readJson(response);
+    expect(isRecord(body) && Array.isArray(body.results) ? body.results : []).toHaveLength(40);
+  });
+
+  it("returns mixed lookupOnly hits without generating the misses", async () => {
+    let completions = 0;
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: '{"translation":"第一句。","notes":[]}',
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const generated = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      sentenceBody("One.", { editionFingerprint: "ed-mix", chapterFingerprint: "ch-mix" }),
+      "idempotency-key-qwen-mix-1",
+    );
+    expect(generated.status).toBe(200);
+    const lookup = await postAssistant(
+      app,
+      "/v1/ai/translation-batches",
+      batchBody(
+        [
+          { id: "s1", text: "One." },
+          { id: "s2", text: "Two." },
+        ],
+        { lookupOnly: true, editionFingerprint: "ed-mix", chapterFingerprint: "ch-mix" },
+      ),
+      "idempotency-key-qwen-mix-2",
+    );
+    expect(lookup.status).toBe(200);
+    const body = await readJson(lookup);
+    expect(isRecord(body) && body.cacheHitCount).toBe(1);
+    expect(isRecord(body) && body.generatedCount).toBe(0);
+    expect(isRecord(body) && body.missingIds).toEqual(["s2"]);
+    const results =
+      isRecord(body) && Array.isArray(body.results)
+        ? (body.results as Record<string, unknown>[])
+        : [];
+    expect(results[0]?.translation).toBe("第一句。");
+    expect(completions).toBe(1);
+  });
+
+  it("records missingIds when Qwen omits a sentence from a batch", async () => {
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: JSON.stringify({ translations: [{ id: "s1", translation: "一。", notes: [] }] }),
+      }),
+    });
+    const generated = await postAssistant(
+      app,
+      "/v1/ai/translation-batches",
+      batchBody(
+        [
+          { id: "s1", text: "One." },
+          { id: "s2", text: "Two." },
+        ],
+        { editionFingerprint: "ed-partial", chapterFingerprint: "ch-partial" },
+      ),
+      "idempotency-key-qwen-partial-1",
+    );
+    expect(generated.status).toBe(200);
+    const body = await readJson(generated);
+    expect(isRecord(body) && body.missingIds).toEqual(["s2"]);
+    expect(isRecord(body) && Array.isArray(body.results) ? body.results : []).toHaveLength(1);
+
+    const lookup = await postAssistant(
+      app,
+      "/v1/ai/translation-batches",
+      batchBody(
+        [
+          { id: "s1", text: "One." },
+          { id: "s2", text: "Two." },
+        ],
+        { lookupOnly: true, editionFingerprint: "ed-partial", chapterFingerprint: "ch-partial" },
+      ),
+      "idempotency-key-qwen-partial-2",
+    );
+    const looked = await readJson(lookup);
+    expect(isRecord(looked) && looked.cacheHitCount).toBe(1);
+    expect(isRecord(looked) && looked.missingIds).toEqual(["s2"]);
+  });
+
+  it("parses batch units from results and targetId fields", async () => {
+    const app = createTestApp({
+      qwen: createFakeQwenClient({
+        text: JSON.stringify({
+          results: [
+            { targetId: "s1", translation: "一。", notes: [] },
+            { id: "ignored", translation: "丢弃。", notes: [] },
+          ],
+        }),
+      }),
+    });
+    const response = await postAssistant(
+      app,
+      "/v1/ai/translation-batches",
+      batchBody([{ id: "s1", text: "One." }], {
+        editionFingerprint: "ed-results",
+        chapterFingerprint: "ch-results",
+      }),
+      "idempotency-key-qwen-batch-results",
+    );
+    expect(response.status).toBe(200);
+    const body = await readJson(response);
+    const results =
+      isRecord(body) && Array.isArray(body.results)
+        ? (body.results as Record<string, unknown>[])
+        : [];
+    expect(results).toHaveLength(1);
+    expect(results[0]?.translation).toBe("一。");
+  });
+
+  it("returns 503 when a batch generate cannot reach Qwen", async () => {
+    const response = await postAssistant(
+      createTestApp({ qwen: createFakeQwenClient({ status: "unavailable" }) }),
+      "/v1/ai/translation-batches",
+      batchBody([{ id: "s1", text: "Hello." }], {
+        editionFingerprint: "ed-unavail",
+        chapterFingerprint: "ch-unavail",
+      }),
+      "idempotency-key-qwen-batch-unavail",
+    );
+    expect(response.status).toBe(503);
+  });
+
+  it("returns 429 before calling Qwen when the daily quota is already exhausted", async () => {
+    const database = createFakeDatabaseClient();
+    await database.ops.patchQuota("qwen_tasks_day", 0);
+    let completions = 0;
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: '{"translation":"你好","notes":[]}',
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const translation = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      sentenceBody("Quota zero.", { editionFingerprint: "ed-zero", chapterFingerprint: "ch-zero" }),
+      "idempotency-key-qwen-quota-zero-1",
+    );
+    const batch = await postAssistant(
+      app,
+      "/v1/ai/translation-batches",
+      batchBody([{ id: "s1", text: "Quota zero batch." }], {
+        editionFingerprint: "ed-zero",
+        chapterFingerprint: "ch-zero",
+      }),
+      "idempotency-key-qwen-quota-zero-2",
+    );
+    expect(translation.status).toBe(429);
+    expect(batch.status).toBe(429);
+    expect(completions).toBe(0);
+  });
+
+  it("misses cache when learner level, language, or edition change", async () => {
+    let completions = 0;
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: '{"translation":"你好","notes":[]}',
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const generated = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      sentenceBody("Identity hello.", { editionFingerprint: "ed-id" }),
+      "idempotency-key-qwen-id-1",
+    );
+    expect(generated.status).toBe(200);
+    const beginner = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      sentenceBody("Identity hello.", {
+        learnerLevel: "beginner",
+        lookupOnly: true,
+        editionFingerprint: "ed-id",
+      }),
+      "idempotency-key-qwen-id-2",
+    );
+    const japanese = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      sentenceBody("Identity hello.", {
+        targetLanguage: "ja",
+        lookupOnly: true,
+        editionFingerprint: "ed-id",
+      }),
+      "idempotency-key-qwen-id-3",
+    );
+    const otherEdition = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      sentenceBody("Identity hello.", { lookupOnly: true, editionFingerprint: "ed-other" }),
+      "idempotency-key-qwen-id-4",
+    );
+    const exact = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      sentenceBody("Identity hello.", { lookupOnly: true, editionFingerprint: "ed-id" }),
+      "idempotency-key-qwen-id-5",
+    );
+    expect(beginner.status).toBe(404);
+    expect(japanese.status).toBe(404);
+    expect(otherEdition.status).toBe(404);
+    expect(exact.status).toBe(200);
+    expect(completions).toBe(1);
+  });
+
+  it("lookupOnly plus refresh never generates even when a cache row exists", async () => {
+    let completions = 0;
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: '{"translation":"你好","notes":[]}',
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const generated = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      sentenceBody("Refresh lookup.", { editionFingerprint: "ed-rl" }),
+      "idempotency-key-qwen-rl-1",
+    );
+    expect(generated.status).toBe(200);
+    const lookup = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      sentenceBody("Refresh lookup.", {
+        lookupOnly: true,
+        refresh: true,
+        editionFingerprint: "ed-rl",
+      }),
+      "idempotency-key-qwen-rl-2",
+    );
+    expect(lookup.status).toBe(404);
+    expect(completions).toBe(1);
+  });
+
+  it("lookupOnly plus refreshIds returns missing ids without generating", async () => {
+    let completions = 0;
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: JSON.stringify({ translations: [{ id: "s1", translation: "一。", notes: [] }] }),
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const generated = await postAssistant(
+      app,
+      "/v1/ai/translation-batches",
+      batchBody([{ id: "s1", text: "One." }], {
+        editionFingerprint: "ed-rlb",
+        chapterFingerprint: "ch-rlb",
+      }),
+      "idempotency-key-qwen-rlb-1",
+    );
+    expect(generated.status).toBe(200);
+    const lookup = await postAssistant(
+      app,
+      "/v1/ai/translation-batches",
+      batchBody([{ id: "s1", text: "One." }], {
+        lookupOnly: true,
+        refreshIds: ["s1"],
+        editionFingerprint: "ed-rlb",
+        chapterFingerprint: "ch-rlb",
+      }),
+      "idempotency-key-qwen-rlb-2",
+    );
+    expect(lookup.status).toBe(200);
+    const body = await readJson(lookup);
+    expect(isRecord(body) && body.missingIds).toEqual(["s1"]);
+    expect(isRecord(body) && Array.isArray(body.results) ? body.results : []).toHaveLength(0);
+    expect(completions).toBe(1);
+  });
+
+  it("misses a chapter summary when the joined segments change", async () => {
+    let completions = 0;
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: JSON.stringify({
+          overview: "概述",
+          keyPoints: [],
+          charactersOrIdeas: [],
+          keyConcepts: [],
+          themes: [],
+        }),
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const generated = await postAssistant(
+      app,
+      "/v1/ai/chapter-summaries",
+      summaryBody(["It was on a dreary night of November."]),
+      "idempotency-key-qwen-sum-seg-1",
+    );
+    expect(generated.status).toBe(200);
+    const miss = await postAssistant(
+      app,
+      "/v1/ai/chapter-summaries",
+      summaryBody(["A different chapter."], { lookupOnly: true }),
+      "idempotency-key-qwen-sum-seg-2",
+    );
+    const hit = await postAssistant(
+      app,
+      "/v1/ai/chapter-summaries",
+      summaryBody(["It was on a dreary night of November."], { lookupOnly: true }),
+      "idempotency-key-qwen-sum-seg-3",
+    );
+    expect(miss.status).toBe(404);
+    expect(hit.status).toBe(200);
+    expect(completions).toBe(1);
+  });
+
+  it("lookupOnly plus refresh on a summary is a miss without a second Qwen call", async () => {
+    let completions = 0;
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: JSON.stringify({
+          overview: "概述",
+          keyPoints: [],
+          charactersOrIdeas: [],
+          keyConcepts: [],
+          themes: [],
+        }),
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const generated = await postAssistant(
+      app,
+      "/v1/ai/chapter-summaries",
+      summaryBody(["Refresh summary."]),
+      "idempotency-key-qwen-sum-rl-1",
+    );
+    expect(generated.status).toBe(200);
+    const lookup = await postAssistant(
+      app,
+      "/v1/ai/chapter-summaries",
+      summaryBody(["Refresh summary."], { lookupOnly: true, refresh: true }),
+      "idempotency-key-qwen-sum-rl-2",
+    );
+    expect(lookup.status).toBe(404);
+    expect(completions).toBe(1);
+  });
+
+  it("does not consume quota on a word lookupOnly miss", async () => {
+    const database = createFakeDatabaseClient();
+    await database.ops.patchQuota("qwen_tasks_day", 1);
+    let completions = 0;
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: JSON.stringify({ translation: "ice", notes: [] }),
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const miss = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      sentenceBody("ice", {
+        task: "word",
+        lookupOnly: true,
+        contextBefore: "The ice closed.",
+        editionFingerprint: "ed-word-q",
+      }),
+      "idempotency-key-qwen-word-q-1",
+    );
+    expect(miss.status).toBe(404);
+    const generated = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      sentenceBody("ice", {
+        task: "word",
+        contextBefore: "The ice closed.",
+        editionFingerprint: "ed-word-q",
+      }),
+      "idempotency-key-qwen-word-q-2",
+    );
+    expect(generated.status).toBe(200);
+    expect(completions).toBe(1);
+  });
+
+  it("blocks assistant calls in maintenance mode and when managed Qwen is disabled", async () => {
+    const maintenance = createFakeDatabaseClient();
+    await maintenance.ops.patchFlag("maintenance_mode", { enabled: true });
+    const maintenanceApp = createTestApp({ database: maintenance });
+    const maintained = await postAssistant(
+      maintenanceApp,
+      "/v1/ai/translations",
+      sentenceBody("Hello."),
+      "idempotency-key-qwen-maint",
+    );
+    expect(maintained.status).toBe(503);
+
+    const disabled = createFakeDatabaseClient();
+    await disabled.ops.patchFlag("managed_qwen", { enabled: false });
+    const disabledApp = createTestApp({ database: disabled });
+    const forbidden = await postAssistant(
+      disabledApp,
+      "/v1/ai/translation-batches",
+      batchBody([{ id: "s1", text: "Hello." }]),
+      "idempotency-key-qwen-disabled",
+    );
+    expect(forbidden.status).toBe(403);
+  });
+
+  it("does not write a translation cache row from chat", async () => {
+    let completions = 0;
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: "Chat about ice.",
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const chat = await postAssistant(
+      app,
+      "/v1/ai/chat",
+      {
+        chapterId: DEVICE_ID,
+        question: "What does the ice mean?",
+        sourceLanguage: "en",
+        targetLanguage: "zh",
+        learnerLevel: "intermediate",
+      },
+      "idempotency-key-qwen-chat-cache-1",
+    );
+    expect(chat.status).toBe(202);
+    const lookup = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      sentenceBody("What does the ice mean?", { lookupOnly: true, editionFingerprint: "ed-chat" }),
+      "idempotency-key-qwen-chat-cache-2",
+    );
+    expect(lookup.status).toBe(404);
+    expect(completions).toBe(1);
   });
 });

@@ -142,4 +142,48 @@ describe("@audio-reader/qwen", () => {
     expect(material.startsWith("translation|")).toBe(true);
     expect(material.includes("Hello")).toBe(false);
   });
+
+  it("changes the cache material when neighbor context is part of the key", async () => {
+    const base = {
+      taskType: "translation",
+      sourceLanguage: "en",
+      targetLanguage: "zh",
+      source: "ice",
+      editionFingerprint: "ed-1",
+    };
+    const withoutContext = await sharedCacheMaterial(base);
+    const withContext = await sharedCacheMaterial({
+      ...base,
+      context: "The ice closed over the channel.",
+    });
+    const emptyContext = await sharedCacheMaterial({ ...base, context: "" });
+    expect(withoutContext).toBe(emptyContext);
+    expect(withContext).not.toBe(emptyContext);
+  });
+
+  it("changes the cache material when language, level, or edition change", async () => {
+    const base = {
+      taskType: "translation",
+      sourceLanguage: "en",
+      targetLanguage: "zh",
+      source: "Hello",
+      editionFingerprint: "ed-1",
+      learnerProfileBucket: "intermediate",
+    };
+    const original = await sharedCacheMaterial(base);
+    const otherLanguage = await sharedCacheMaterial({ ...base, targetLanguage: "ja" });
+    const otherLevel = await sharedCacheMaterial({ ...base, learnerProfileBucket: "beginner" });
+    const otherEdition = await sharedCacheMaterial({ ...base, editionFingerprint: "ed-2" });
+    const defaultLevel = await sharedCacheMaterial({
+      taskType: "translation",
+      sourceLanguage: "en",
+      targetLanguage: "zh",
+      source: "Hello",
+      editionFingerprint: "ed-1",
+    });
+    expect(otherLanguage).not.toBe(original);
+    expect(otherLevel).not.toBe(original);
+    expect(otherEdition).not.toBe(original);
+    expect(defaultLevel).toBe(original);
+  });
 });

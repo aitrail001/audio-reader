@@ -11,6 +11,7 @@ import {
   composeAssistantSystemPrompt,
   defaultAssistantPrompt,
   defaultAssistantUserPrompt,
+  clampContextCount,
   formatManagedChapterBatchContext,
   formatManagedSentenceContext,
   isChapterBatchTask,
@@ -18,6 +19,7 @@ import {
   promptLanguageName,
   renderAssistantUserPrompt,
   sentenceTranslationInstructions,
+  stringList,
   wordInSentenceInstructions,
 } from "./assistant-prompts";
 
@@ -149,5 +151,50 @@ describe("assistant prompts", () => {
     expect(DEFAULT_ASSISTANT_PROMPTS.chapter_summary).toContain(
       "Write every field in the target language",
     );
+  });
+
+  it("formats chapter batch context with radius zero and empty neighbor lists", () => {
+    expect(
+      formatManagedChapterBatchContext({
+        sentences: [{ id: "s1", text: "Only target." }],
+        previous: ["Ignored previous."],
+        next: ["Ignored next."],
+        radius: 0,
+        targetIds: ["s1"],
+      }),
+    ).toBe("TARGET id=s1: Only target.");
+    expect(
+      formatManagedSentenceContext({
+        source: "Hello.",
+        previous: [],
+        next: [],
+        radius: 1,
+        fallback: "PREVIOUS: Fallback.\nTARGET: Hello.",
+      }),
+    ).toBe("PREVIOUS: Fallback.\nTARGET: Hello.");
+    expect(
+      formatManagedSentenceContext({
+        source: "Hello.",
+        previous: ["Ignored previous."],
+        next: ["Ignored next."],
+        radius: 0,
+      }),
+    ).toBe("TARGET: Hello.");
+  });
+
+  it("clamps context counts and trims string lists", () => {
+    expect(clampContextCount(Number.NaN, 10)).toBe(1);
+    expect(clampContextCount(-4, 10)).toBe(0);
+    expect(clampContextCount(99, 3)).toBe(3);
+    expect(clampContextCount(2.8, 10)).toBe(2);
+    expect(stringList("nope")).toEqual([]);
+    expect(stringList(["  keep  ", "", "drop-later", "also"], 2)).toEqual([
+      "  keep  ",
+      "drop-later",
+    ]);
+    expect(stringList([3, null, "ok"] as unknown[], 10)).toEqual(["ok"]);
+    expect(promptLanguageName("")).toBe("");
+    expect(promptLanguageName("xx-YY")).toBe("xx-YY");
+    expect(promptLanguageName("zh")).toBe("Simplified Chinese (简体中文)");
   });
 });

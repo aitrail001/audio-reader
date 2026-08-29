@@ -173,7 +173,7 @@ That integrated loop is the product thesis.
 - Synchronized book metadata, assets, transcripts, vocabulary, known state, cards, and review events.
 - Offline outbox/delta synchronization with deterministic conflicts.
 - Server-managed Qwen translation/explanation/summary/chat.
-- Exact shared translation cache with single-flight generation.
+- Exact shared translation cache with single-flight generation, lookup-only reads, per-sentence keys for chapter batches, and quota charged only on a real Qwen call.
 - Local-first transcription and transcript reuse across a user’s devices.
 - User export/deletion.
 - Admin users, quotas, jobs, provider policy, cache operations, storage, feature flags, and audit log.

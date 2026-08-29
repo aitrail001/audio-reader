@@ -28,7 +28,7 @@ Native apps stay local-first. The hosted API runs on Cloudflare Workers with Sup
 
 ## Capabilities and Constraints
 
-Admin API: health, runtime-config, users (suspend, unsuspend, revoke sessions, grant admin), LLM policies, cache actions, jobs (retry/cancel), metrics, audit events, blocked passwordless attempts, feature flags, starter quotas, and privacy export/deletion requests. Native apps bootstrap those flags and quotas, default to the production Worker URL, and keep iPad playback in the background. Microsoft Azure sign-in remains disabled until an Azure app is configured. GCS requires a GCP billing account; without it, object storage uses the existing Supabase Storage bucket.
+Admin API: health, runtime-config, users (suspend, unsuspend, revoke sessions, grant admin), LLM policies, cache actions, jobs (retry/cancel), metrics, audit events, blocked passwordless attempts, feature flags, starter quotas, and privacy export/deletion requests. Native apps bootstrap those flags and quotas, default to the production Worker URL, and keep iPad playback in the background. Managed Qwen translations, sentence batches, and chapter summaries reuse the shared exact-content cache before calling Qwen; cache hits and lookup-only misses do not consume daily quota. Native Managed Qwen auto-loads cached sentence translations and chapter summaries, and translates chapter-aligned sentence blocks so neighbors are cached together. Word lookups stay on-demand and are keyed with the containing sentence. Microsoft Azure sign-in remains disabled until an Azure app is configured. GCS requires a GCP billing account; without it, object storage uses the existing Supabase Storage bucket.
 
 ## Brand Personality
 

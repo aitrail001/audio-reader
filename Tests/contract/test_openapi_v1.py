@@ -41,6 +41,23 @@ class OpenAPIV1ContractTests(unittest.TestCase):
 
         v.assert_admin_routes_require_admin_security(v.load_openapi())
 
+    def test_assistant_cache_routes_declare_lookup_only(self) -> None:
+        import validate_openapi as v
+
+        spec = v.load_openapi()
+        paths = spec["paths"]
+        self.assertIn("/v1/ai/translations", paths)
+        self.assertIn("/v1/ai/translation-batches", paths)
+        self.assertIn("/v1/ai/chapter-summaries", paths)
+        schemas = spec["components"]["schemas"]
+        self.assertIn("lookupOnly", schemas["TranslationRequest"]["properties"])
+        self.assertIn("refresh", schemas["TranslationRequest"]["properties"])
+        self.assertIn("lookupOnly", schemas["TranslationBatchRequest"]["properties"])
+        self.assertIn("refreshIds", schemas["TranslationBatchRequest"]["properties"])
+        self.assertIn("lookupOnly", schemas["ChapterSummaryRequest"]["properties"])
+        self.assertEqual(schemas["TranslationBatchRequest"]["properties"]["sentences"]["maxItems"], 40)
+        self.assertIn("missingIds", schemas["TranslationBatchResult"]["required"])
+
 
 if __name__ == "__main__":
     unittest.main()
