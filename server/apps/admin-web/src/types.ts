@@ -173,6 +173,7 @@ export type OperatorEvent = {
 };
 
 export type OperatorDiagnostics = {
+  requestId: string;
   runtime: RuntimeConfig;
   flags: FeatureFlag[];
   quotas: Quota[];

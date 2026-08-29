@@ -674,6 +674,8 @@ describe("admin and privacy API", () => {
       }),
     );
     expect(probed.status).toBe(200);
+    const probeRequestId = probed.headers.get("X-Request-Id");
+    expect(probeRequestId).not.toBeNull();
     const probedBody = await readJson(probed);
     expect(
       isRecord(probedBody) &&
@@ -681,5 +683,34 @@ describe("admin and privacy API", () => {
         probedBody.qwenComplete.status === "ok" &&
         probedBody.qwenComplete.model === "qwen3.7-flash",
     ).toBe(true);
+    expect(isRecord(probedBody) ? probedBody.requestId : null).toBe(probeRequestId);
+    expect(await database.ops.listProductEvents({ requestId: probeRequestId ?? "" })).toEqual([
+      expect.objectContaining({
+        accountId: USER_ID,
+        name: "operator.qwen_probe",
+        outcome: "ok",
+        requestId: probeRequestId,
+      }),
+    ]);
+    expect(await database.ops.listAudit({ requestId: probeRequestId ?? "" })).toEqual([
+      expect.objectContaining({
+        actorId: USER_ID,
+        action: "operator_qwen_probe",
+        resourceType: "managed_qwen",
+        traceId: probeRequestId,
+      }),
+    ]);
+    const trace = await app.fetch(
+      new Request(`http://localhost/v1/admin/events?requestId=${String(probeRequestId)}`, {
+        headers: { authorization: "Bearer admin" },
+      }),
+    );
+    expect(await readJson(trace)).toEqual([
+      expect.objectContaining({
+        kind: "operator_qwen_probe",
+        requestId: probeRequestId,
+        status: "ok",
+      }),
+    ]);
   });
 });

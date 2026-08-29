@@ -1974,6 +1974,7 @@ export interface components {
             };
         };
         OperatorDiagnostics: {
+            requestId: string;
             recentEvents?: components["schemas"]["OperatorEvent"][];
             runtime: components["schemas"]["RuntimeConfig"];
             flags: components["schemas"]["FeatureFlag"][];

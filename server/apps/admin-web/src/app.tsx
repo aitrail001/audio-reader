@@ -1796,6 +1796,15 @@ function DeskPanel(props: {
                     : `${props.diagnostics.qwenComplete.status}${props.diagnostics.qwenComplete.model !== undefined ? ` · ${props.diagnostics.qwenComplete.model}` : ""}${props.diagnostics.qwenComplete.httpStatus !== undefined ? ` · HTTP ${String(props.diagnostics.qwenComplete.httpStatus)}` : ""}${props.diagnostics.qwenComplete.detail !== undefined && props.diagnostics.qwenComplete.detail !== "" ? ` · ${props.diagnostics.qwenComplete.detail}` : ""}`}
                 </td>
               </tr>
+              {props.diagnostics.qwenComplete !== undefined &&
+              props.diagnostics.qwenComplete.status !== "skipped" ? (
+                <tr>
+                  <td>Probe request id</td>
+                  <td>
+                    <CopyValue value={props.diagnostics.requestId} label="probe request id" />
+                  </td>
+                </tr>
+              ) : null}
               <tr>
                 <td>Secrets decryptable</td>
                 <td>

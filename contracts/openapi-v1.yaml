@@ -4573,6 +4573,7 @@ components:
       type: object
       additionalProperties: false
       required:
+      - requestId
       - runtime
       - flags
       - quotas
@@ -4580,6 +4581,8 @@ components:
       - qwenProbe
       - notes
       properties:
+        requestId:
+          type: string
         recentEvents:
           type: array
           items:

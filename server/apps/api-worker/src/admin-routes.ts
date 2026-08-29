@@ -21,7 +21,7 @@ import {
 } from "./route-helpers";
 import { buildOperatorDiagnostics } from "./diagnostics";
 import { listOperatorEvents, operatorEventFromAudit, recordOperatorEvent } from "./operator-events";
-import { toProductEvent } from "./product-events";
+import { captureProductEvent, toProductEvent } from "./product-events";
 import {
   OperatorWrappingNotConfiguredError,
   type RuntimeConfigPut,
@@ -457,6 +457,38 @@ export async function handleAdminRoute(context: AdminRouteContext): Promise<Resp
       requestId: context.requestId,
       ops,
     });
+    if (probe === "complete") {
+      const status = snapshot.qwenComplete?.status ?? "unavailable";
+      const outcome = status === "ok" ? "ok" : "failed";
+      const model = snapshot.qwenComplete?.model ?? runtimeView.qwen.model;
+      await captureProductEvent(ops, {
+        accountId: principal.accountId,
+        name: "operator.qwen_probe",
+        outcome,
+        requestId: context.requestId,
+        properties: { model, status },
+      });
+      await ops.appendAudit({
+        actorId: principal.accountId,
+        action: "operator_qwen_probe",
+        resourceType: "managed_qwen",
+        resourceId: model || "default",
+        reason: "Operator completion probe",
+        traceId: context.requestId,
+        metadata: { model, status },
+      });
+      recordOperatorEvent({
+        kind: "operator_qwen_probe",
+        requestId: context.requestId,
+        task: "translation",
+        status: outcome,
+        summary:
+          status === "ok"
+            ? `Operator Qwen probe succeeded with ${model || "the configured model"}.`
+            : `Operator Qwen probe returned ${status} with ${model || "the configured model"}.`,
+        metadata: { model, status },
+      });
+    }
     return asHead(context.request, jsonResponse(snapshot));
   }
   if (path === "/v1/admin/feature-flags") {

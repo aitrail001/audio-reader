@@ -280,6 +280,7 @@ export async function buildOperatorDiagnostics(input: {
     }),
   );
   return {
+    requestId: input.requestId,
     runtime: input.runtime,
     flags: input.flags,
     quotas: input.quotas,
