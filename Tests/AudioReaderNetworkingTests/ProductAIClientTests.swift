@@ -30,6 +30,41 @@ struct ProductAIClientTests {
         #expect(http.requests.first?.headers["Authorization"] == "Bearer access")
     }
 
+    @Test("translateBatch posts the chapter block and decodes per-sentence cache results")
+    func translateBatchPostsChapterBlock() async throws {
+        let http = StubHTTPClient()
+        http.enqueue(
+            status: 200,
+            json: """
+            {"results":[{"id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","targetId":"s1","source":"Hello","translation":"你好","notes":[],"provenance":"cache_shared_exact","policyVersion":"qwen-managed-v1","createdAt":"2026-08-28T00:00:00Z"},{"id":"3fa85f64-5717-4562-b3fc-2c963f66afa7","targetId":"s2","source":"World","translation":"世界","notes":[],"provenance":"generated","policyVersion":"qwen-managed-v1","createdAt":"2026-08-28T00:00:00Z"}],"missingIds":[],"generatedCount":1,"cacheHitCount":1}
+            """
+        )
+        let client = LiveProductAIClient(http: http)
+        let result = try await client.translateBatch(
+            accessToken: "access",
+            deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            request: ProductTranslationBatchRequest(
+                sourceLanguage: "en",
+                targetLanguage: "zh",
+                learnerLevel: "intermediate",
+                sentences: [
+                    ProductTranslationSentence(id: "s1", text: "Hello"),
+                    ProductTranslationSentence(id: "s2", text: "World")
+                ],
+                contextBefore: "PREVIOUS: The room fell silent.\nTARGET id=s2: World\nNEXT: Everyone relaxed.",
+                lookupOnly: true
+            )
+        )
+        #expect(result.results.count == 2)
+        #expect(result.cacheHitCount == 1)
+        #expect(http.requests.first?.path == "/v1/ai/translation-batches")
+        let body = try #require(http.requests.first?.body)
+        let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        #expect(json?["task"] as? String == "chapter_batch")
+        #expect(json?["lookupOnly"] as? Bool == true)
+        #expect(json?["contextBefore"] as? String == "PREVIOUS: The room fell silent.\nTARGET id=s2: World\nNEXT: Everyone relaxed.")
+    }
+
     @Test("chat accepts then reads the assistant message")
     func chatThenReadsMessage() async throws {
         let http = StubHTTPClient()

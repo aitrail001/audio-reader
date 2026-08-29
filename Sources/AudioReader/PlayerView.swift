@@ -651,6 +651,10 @@ struct PlayerView: View {
     }
 
     private func didChangeLLMConnection(to connection: LLMConnectionChoice) {
+        state.account.recordUsage(
+            name: "llm.provider_changed",
+            properties: ["provider": connection.rawValue]
+        )
         state.persistSettings()
         if connection == .grokAPIKey {
             Task { await state.refreshGrokModels() }
@@ -1436,7 +1440,7 @@ private struct ChapterAssistantView: View {
                         .textCase(.uppercase)
                         .tracking(0.8)
                     Text(state.selectedLLMModel)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(size: 11))
                         .foregroundStyle(Palette.gold)
                 }
                 Spacer()
@@ -1707,7 +1711,7 @@ private struct ChapterAssistantView: View {
             titleVisibility: .visible
         ) {
             Button("Regenerate", role: .destructive) {
-                state.summarizeChapter()
+                state.summarizeChapter(force: true)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -1959,7 +1963,7 @@ private struct TranscriptTextColumn: View {
                             onMarkKnown: { word in
                                 state.markKnown(word, known: !state.isMarkedKnown(word))
                             },
-                            onTranslate: { state.translateCurrentSentence() },
+                            onTranslate: { state.translateSentence(segment) },
                             onAccept: { if let g = state.sentenceGloss(for: segment) { state.acceptGloss(g) } },
                             onReject: { if let g = state.sentenceGloss(for: segment) { state.rejectGloss(g) } },
                             onRetry: { state.retranslateSentence(segment) },

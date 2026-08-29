@@ -93,6 +93,10 @@ struct ReadingAssistantPromptTests {
         #expect(context.contains("PREVIOUS: The room fell silent."))
         #expect(context.contains("TARGET id=target: She broke the ice."))
         #expect(context.contains("NEXT: Everyone relaxed."))
+
+        let neighbors = ReadingAssistantPrompt.neighbors(around: segments[1], in: transcript)
+        #expect(neighbors.previous == ["The room fell silent."])
+        #expect(neighbors.next == ["Everyone relaxed."])
     }
 
     @Test("Core prompts do not name a provider or model")
@@ -122,8 +126,25 @@ struct ReadingAssistantPromptTests {
 
         #expect(appState.components(separatedBy: "ReadingAssistantPrompt.sentenceTranslation(").count - 1 == 2)
         #expect(appState.components(separatedBy: "completeStructuredJSON(").count - 1 == 2)
+        #expect(appState.contains("translateSentenceBlock("))
+        #expect(appState.contains("alignedBlock("))
+        #expect(appState.contains("ManagedProductLLM.translateBatch"))
+        #expect(!appState.contains("for segment in remaining"))
         #expect(!appState.contains("TranslationPrompt.sentence("))
         #expect(!appState.contains("TranslationPrompt.chapter("))
+    }
+
+    @Test("retryGloss retranslates the matching sentence instead of the current playback sentence")
+    func retryGlossRetranslatesMatchingSentence() throws {
+        let appState = try source("Sources/AudioReader/AppState.swift")
+        let marker = "func retryGloss(_ entry: GlossEntry) {"
+        #expect(appState.contains(marker))
+        let start = try #require(appState.range(of: marker))
+        let remainder = appState[start.lowerBound...]
+        let end = remainder.range(of: "\n    private func selectedOrigin()")
+        let body = String(remainder[..<(end?.lowerBound ?? remainder.endIndex)])
+        #expect(body.contains("retranslateSentence("))
+        #expect(!body.contains("if entry.kind == .sentence {\n            retranslateCurrentSentence()"))
     }
 
     @Test("Structured translation results preserve categorized language and concept notes")
@@ -213,6 +234,46 @@ struct ReadingAssistantPromptTests {
         #expect(examples[0].source == "A forest encompasses many smaller systems.")
         #expect(examples[0].translation == "Un bosque abarca muchos sistemas más pequeños.")
         #expect(examples[1].translation == "El informe abarca todo el año.")
+    }
+
+    @Test("Managed Qwen word results rebuild the in-sentence meaning layout")
+    func wordMeaningTextRebuildsRichLayout() throws {
+        let result = ProductTranslationResult(
+            id: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            translation: "noun — the frozen sea in this chapter\nHere it is the ice that traps the ship.",
+            notes: [
+                ProductLearningNote(
+                    source: "The ice closed over the channel.",
+                    category: "example",
+                    explanation: "冰封住了航道。"
+                ),
+                ProductLearningNote(
+                    source: "The lake froze overnight.",
+                    category: "example",
+                    explanation: "湖一夜结了冰。"
+                ),
+                ProductLearningNote(
+                    source: "closed over",
+                    category: "phrasal_verb",
+                    explanation: "封住、覆盖。"
+                )
+            ],
+            provenance: "generated",
+            policyVersion: "qwen-managed-v1",
+            createdAt: "2026-08-29T00:00:00Z"
+        )
+
+        let text = ManagedProductLLM.wordMeaningText(from: result)
+        #expect(text.contains(GlossTextFormat.sentenceMeaningHeading))
+        #expect(text.contains(GlossTextFormat.examplesHeading))
+        #expect(text.contains(GlossTextFormat.learningNotesHeading))
+
+        let presentation = GlossPresentation.parse(text)
+        #expect(presentation.sections.map(\.kind) == [.sentenceMeaning, .examples, .learningNotes])
+        let examples = try #require(presentation.sections[1].examples)
+        #expect(examples.count == 2)
+        #expect(examples[0].source == "The ice closed over the channel.")
+        #expect(examples[0].translation == "冰封住了航道。")
     }
 
     @Test("Legacy inline gloss labels keep their content out of the heading")

@@ -719,6 +719,12 @@ struct ChapterTranslationResult: Decodable, Equatable, Sendable {
     var translation: String
     var notes: [Note]
 
+    init(id: String, translation: String, notes: [Note] = []) {
+        self.id = id
+        self.translation = translation
+        self.notes = notes
+    }
+
     private enum CodingKeys: String, CodingKey {
         case id
         case translation
@@ -873,6 +879,17 @@ enum ChapterTranslationBatch {
         return stride(from: 0, to: segments.count, by: blockSize).map { start in
             Array(segments[start..<min(start + blockSize, segments.count)])
         }
+    }
+
+    /// Same grouping as `blocks`, so tapping one sentence reuses the chapter-translation chunk.
+    static func alignedBlock(
+        containing target: TranscriptSegment,
+        in segments: [TranscriptSegment],
+        size: Int
+    ) -> [TranscriptSegment] {
+        blocks(segments, size: size).first { block in
+            block.contains { $0.id == target.id }
+        } ?? [target]
     }
 
     static func parse(_ raw: String, expectedIDs: [String]) throws -> [ChapterTranslationResult] {

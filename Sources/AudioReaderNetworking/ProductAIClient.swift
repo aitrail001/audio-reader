@@ -11,7 +11,13 @@ public struct ProductTranslationRequest: Codable, Equatable, Sendable {
     public var chapterFingerprint: String
     public var promptVersion: String
     public var contextBefore: String?
+    public var contextPrevious: [String]
+    public var contextNext: [String]
     public var targetId: String?
+    public var bookTitle: String
+    public var chapterTitle: String
+    public var lookupOnly: Bool
+    public var refresh: Bool
 
     public init(
         task: String,
@@ -23,7 +29,13 @@ public struct ProductTranslationRequest: Codable, Equatable, Sendable {
         chapterFingerprint: String = "",
         promptVersion: String = "qwen-managed-v1",
         contextBefore: String? = nil,
-        targetId: String? = nil
+        contextPrevious: [String] = [],
+        contextNext: [String] = [],
+        targetId: String? = nil,
+        bookTitle: String = "",
+        chapterTitle: String = "",
+        lookupOnly: Bool = false,
+        refresh: Bool = false
     ) {
         self.task = task
         self.sourceLanguage = sourceLanguage
@@ -34,7 +46,74 @@ public struct ProductTranslationRequest: Codable, Equatable, Sendable {
         self.chapterFingerprint = chapterFingerprint
         self.promptVersion = promptVersion
         self.contextBefore = contextBefore
+        self.contextPrevious = contextPrevious
+        self.contextNext = contextNext
         self.targetId = targetId
+        self.bookTitle = bookTitle
+        self.chapterTitle = chapterTitle
+        self.lookupOnly = lookupOnly
+        self.refresh = refresh
+    }
+}
+
+public struct ProductTranslationSentence: Codable, Equatable, Sendable {
+    public var id: String
+    public var text: String
+
+    public init(id: String, text: String) {
+        self.id = id
+        self.text = text
+    }
+}
+
+public struct ProductTranslationBatchRequest: Codable, Equatable, Sendable {
+    public var task: String
+    public var sourceLanguage: String
+    public var targetLanguage: String
+    public var learnerLevel: String
+    public var sentences: [ProductTranslationSentence]
+    public var editionFingerprint: String
+    public var chapterFingerprint: String
+    public var promptVersion: String
+    public var contextBefore: String?
+    public var contextPrevious: [String]
+    public var contextNext: [String]
+    public var bookTitle: String
+    public var chapterTitle: String
+    public var lookupOnly: Bool
+    public var refreshIds: [String]
+
+    public init(
+        sourceLanguage: String,
+        targetLanguage: String,
+        learnerLevel: String,
+        sentences: [ProductTranslationSentence],
+        editionFingerprint: String = "",
+        chapterFingerprint: String = "",
+        promptVersion: String = "qwen-managed-v1",
+        contextBefore: String? = nil,
+        contextPrevious: [String] = [],
+        contextNext: [String] = [],
+        bookTitle: String = "",
+        chapterTitle: String = "",
+        lookupOnly: Bool = false,
+        refreshIds: [String] = []
+    ) {
+        self.task = "chapter_batch"
+        self.sourceLanguage = sourceLanguage
+        self.targetLanguage = targetLanguage
+        self.learnerLevel = learnerLevel
+        self.sentences = sentences
+        self.editionFingerprint = editionFingerprint
+        self.chapterFingerprint = chapterFingerprint
+        self.promptVersion = promptVersion
+        self.contextBefore = contextBefore
+        self.contextPrevious = contextPrevious
+        self.contextNext = contextNext
+        self.bookTitle = bookTitle
+        self.chapterTitle = chapterTitle
+        self.lookupOnly = lookupOnly
+        self.refreshIds = refreshIds
     }
 }
 
@@ -42,15 +121,62 @@ public struct ProductLearningNote: Codable, Equatable, Sendable {
     public var source: String
     public var category: String
     public var explanation: String
+
+    public init(source: String, category: String, explanation: String) {
+        self.source = source
+        self.category = category
+        self.explanation = explanation
+    }
 }
 
 public struct ProductTranslationResult: Codable, Equatable, Sendable {
     public var id: String
+    public var targetId: String?
+    public var source: String?
     public var translation: String
     public var notes: [ProductLearningNote]
     public var provenance: String
     public var policyVersion: String
     public var createdAt: String
+
+    public init(
+        id: String,
+        translation: String,
+        notes: [ProductLearningNote],
+        provenance: String,
+        policyVersion: String,
+        createdAt: String,
+        targetId: String? = nil,
+        source: String? = nil
+    ) {
+        self.id = id
+        self.targetId = targetId
+        self.source = source
+        self.translation = translation
+        self.notes = notes
+        self.provenance = provenance
+        self.policyVersion = policyVersion
+        self.createdAt = createdAt
+    }
+}
+
+public struct ProductTranslationBatchResult: Codable, Equatable, Sendable {
+    public var results: [ProductTranslationResult]
+    public var missingIds: [String]
+    public var generatedCount: Int?
+    public var cacheHitCount: Int?
+
+    public init(
+        results: [ProductTranslationResult],
+        missingIds: [String] = [],
+        generatedCount: Int? = nil,
+        cacheHitCount: Int? = nil
+    ) {
+        self.results = results
+        self.missingIds = missingIds
+        self.generatedCount = generatedCount
+        self.cacheHitCount = cacheHitCount
+    }
 }
 
 public struct ProductChapterSummaryRequest: Codable, Equatable, Sendable {
@@ -60,7 +186,11 @@ public struct ProductChapterSummaryRequest: Codable, Equatable, Sendable {
     public var learnerLevel: String
     public var editionFingerprint: String
     public var chapterFingerprint: String
+    public var bookTitle: String
+    public var chapterTitle: String
     public var segments: [String]
+    public var lookupOnly: Bool
+    public var refresh: Bool
 
     public init(
         chapterId: String,
@@ -69,7 +199,11 @@ public struct ProductChapterSummaryRequest: Codable, Equatable, Sendable {
         learnerLevel: String,
         editionFingerprint: String = "",
         chapterFingerprint: String = "",
-        segments: [String] = []
+        bookTitle: String = "",
+        chapterTitle: String = "",
+        segments: [String] = [],
+        lookupOnly: Bool = false,
+        refresh: Bool = false
     ) {
         self.chapterId = chapterId
         self.sourceLanguage = sourceLanguage
@@ -77,7 +211,11 @@ public struct ProductChapterSummaryRequest: Codable, Equatable, Sendable {
         self.learnerLevel = learnerLevel
         self.editionFingerprint = editionFingerprint
         self.chapterFingerprint = chapterFingerprint
+        self.bookTitle = bookTitle
+        self.chapterTitle = chapterTitle
         self.segments = segments
+        self.lookupOnly = lookupOnly
+        self.refresh = refresh
     }
 }
 
@@ -145,6 +283,12 @@ public protocol ProductAIClient: Sendable {
         request: ProductTranslationRequest
     ) async throws -> ProductTranslationResult
 
+    func translateBatch(
+        accessToken: String,
+        deviceID: String,
+        request: ProductTranslationBatchRequest
+    ) async throws -> ProductTranslationBatchResult
+
     func summarize(
         accessToken: String,
         deviceID: String,
@@ -165,6 +309,8 @@ public protocol ProductAIClient: Sendable {
 }
 
 extension ProductAIClient {
+    /// Chat-only fallback. Translations and summaries must use `translate` / `summarize`
+    /// so the Worker can write `assistant_cache_entries`.
     public func complete(
         accessToken: String,
         deviceID: String,
@@ -271,6 +417,20 @@ public struct LiveProductAIClient: ProductAIClient, Sendable {
         try await send(
             method: "POST",
             path: "/v1/ai/translations",
+            accessToken: accessToken,
+            deviceID: deviceID,
+            body: request
+        )
+    }
+
+    public func translateBatch(
+        accessToken: String,
+        deviceID: String,
+        request: ProductTranslationBatchRequest
+    ) async throws -> ProductTranslationBatchResult {
+        try await send(
+            method: "POST",
+            path: "/v1/ai/translation-batches",
             accessToken: accessToken,
             deviceID: deviceID,
             body: request
@@ -400,6 +560,7 @@ public final class FakeProductAIClient: ProductAIClient, @unchecked Sendable {
     )
     public var reply = "Managed Qwen reply"
     public private(set) var translateCalls = 0
+    public private(set) var translateBatchCalls = 0
     public private(set) var chatCalls = 0
     private let lock = NSLock()
     private var messages: [String: ProductChatMessage] = [:]
@@ -413,10 +574,49 @@ public final class FakeProductAIClient: ProductAIClient, @unchecked Sendable {
     ) async throws -> ProductTranslationResult {
         _ = accessToken
         _ = deviceID
-        _ = request
+        if request.lookupOnly {
+            throw AuthClientError.problem(
+                status: 404,
+                code: "not_found",
+                detail: "No cached translation matched this request."
+            )
+        }
         return withLock {
             translateCalls += 1
             return translation
+        }
+    }
+
+    public func translateBatch(
+        accessToken: String,
+        deviceID: String,
+        request: ProductTranslationBatchRequest
+    ) async throws -> ProductTranslationBatchResult {
+        _ = accessToken
+        _ = deviceID
+        return withLock {
+            translateBatchCalls += 1
+            if request.lookupOnly {
+                return ProductTranslationBatchResult(results: [], missingIds: request.sentences.map(\.id), generatedCount: 0, cacheHitCount: 0)
+            }
+            let results = request.sentences.map { sentence in
+                ProductTranslationResult(
+                    id: translation.id,
+                    translation: translation.translation,
+                    notes: translation.notes,
+                    provenance: translation.provenance,
+                    policyVersion: translation.policyVersion,
+                    createdAt: translation.createdAt,
+                    targetId: sentence.id,
+                    source: sentence.text
+                )
+            }
+            return ProductTranslationBatchResult(
+                results: results,
+                missingIds: [],
+                generatedCount: results.count,
+                cacheHitCount: 0
+            )
         }
     }
 

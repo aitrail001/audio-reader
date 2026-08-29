@@ -193,6 +193,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/me/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record product usage events from a signed-in device */
+        post: operations["recordProductEvents"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/me/devices": {
         parameters: {
             query?: never;
@@ -483,9 +500,29 @@ export interface paths {
         put?: never;
         /**
          * Get a cached or generated contextual translation
-         * @description The server owns Qwen credentials and policy. Shared cache is eligible only for non-personal exact requests.
+         * @description The server owns Qwen credentials and policy. Shared cache is eligible only for non-personal exact requests. Cache hits do not consume quota or call Qwen. lookupOnly returns 404 when the exact cache row is missing.
          */
         post: operations["createTranslation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ai/translation-batches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Translate a sentence block with per-sentence shared cache
+         * @description One Qwen call covers every cache miss in the block. Each sentence is stored under its own exact-content cache key so later lookups skip Qwen. lookupOnly returns hits without generating.
+         */
+        post: operations["createTranslationBatch"];
         delete?: never;
         options?: never;
         head?: never;
@@ -501,7 +538,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Get a cached or generated chapter summary */
+        /**
+         * Get a cached or generated chapter summary
+         * @description Cache hits do not consume quota or call Qwen. lookupOnly returns 404 when the exact cache row is missing.
+         */
         post: operations["createChapterSummary"];
         delete?: never;
         options?: never;
@@ -930,6 +970,23 @@ export interface paths {
         };
         /** Recent operator-visible events for Qwen, config, and probes */
         get: operations["adminListOperatorEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/product-events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List persisted product usage events for analysis */
+        get: operations["adminListProductEvents"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1561,27 +1618,59 @@ export interface components {
         };
         TranslationRequest: {
             /** @enum {string} */
-            task: "word_context" | "sentence" | "chapter_batch";
+            task: "word" | "word_context" | "sentence" | "chapter_batch";
             sourceLanguage: string;
             targetLanguage: string;
             learnerLevel: string;
             source: string;
             contextBefore?: string | null;
             contextAfter?: string | null;
+            contextPrevious?: string[];
+            contextNext?: string[];
             editionFingerprint: string;
             chapterFingerprint: string;
+            bookTitle?: string;
+            chapterTitle?: string;
             targetId?: string | null;
             promptVersion: string;
+            /** @description Return a cache hit without calling Qwen. Misses are 404. */
+            lookupOnly?: boolean;
+            /** @description Skip cache reads and generate a fresh result for this request. */
+            refresh?: boolean;
+        };
+        TranslationSentence: {
+            id: string;
+            text: string;
+        };
+        TranslationBatchRequest: {
+            /** @enum {string} */
+            task: "chapter_batch";
+            sourceLanguage: string;
+            targetLanguage: string;
+            learnerLevel: string;
+            sentences: components["schemas"]["TranslationSentence"][];
+            contextBefore?: string | null;
+            contextPrevious?: string[];
+            contextNext?: string[];
+            editionFingerprint: string;
+            chapterFingerprint: string;
+            bookTitle?: string;
+            chapterTitle?: string;
+            promptVersion?: string;
+            lookupOnly?: boolean;
+            refreshIds?: string[];
         };
         LearningNote: {
             source: string;
             /** @enum {string} */
-            category: "phrasal_verb" | "phrase" | "idiom" | "challenging_word" | "challenging_combination" | "concept" | "grammar";
+            category: "phrasal_verb" | "phrase" | "idiom" | "challenging_word" | "challenging_combination" | "concept" | "grammar" | "example";
             explanation: string;
         };
         TranslationResult: {
             /** Format: uuid */
             id: string;
+            targetId?: string | null;
+            source?: string;
             translation: string;
             notes: components["schemas"]["LearningNote"][];
             /** @enum {string} */
@@ -1592,6 +1681,12 @@ export interface components {
             /** Format: date-time */
             createdAt: string;
         };
+        TranslationBatchResult: {
+            results: components["schemas"]["TranslationResult"][];
+            missingIds: string[];
+            generatedCount?: number;
+            cacheHitCount?: number;
+        };
         ChapterSummaryRequest: {
             /** Format: uuid */
             chapterId: string;
@@ -1600,7 +1695,13 @@ export interface components {
             learnerLevel: string;
             editionFingerprint: string;
             chapterFingerprint: string;
+            bookTitle?: string;
+            chapterTitle?: string;
             segments?: string[];
+            /** @description Return a cache hit without calling Qwen. Misses are 404. */
+            lookupOnly?: boolean;
+            /** @description Skip cache reads and generate a fresh summary for this request. */
+            refresh?: boolean;
         };
         ChapterSummary: {
             /** Format: uuid */
@@ -1759,6 +1860,20 @@ export interface components {
             createdAt: string;
             lastSeenAt: string | null;
             quotas?: components["schemas"]["Quota"][];
+            devices?: {
+                id: string;
+                platform: string;
+                name?: string | null;
+                appVersion?: string;
+                /** Format: date-time */
+                lastSeenAt: string;
+                revoked: boolean;
+            }[];
+            books?: {
+                id: string;
+                title: string;
+                chapterCount?: number;
+            }[];
         };
         AdminAction: {
             reason: string;
@@ -1772,6 +1887,7 @@ export interface components {
             model: string;
             promptVersion: string;
             systemPrompt: string;
+            userPrompt: string;
             schemaVersion: string;
             policyVersion: string;
             enabled: boolean;
@@ -1791,6 +1907,7 @@ export interface components {
             model?: string;
             promptVersion?: string;
             systemPrompt?: string;
+            userPrompt?: string;
             schemaVersion?: string;
             maxInputTokens?: number;
             maxOutputTokens?: number;
@@ -1834,6 +1951,9 @@ export interface components {
                 resendConfigured?: boolean;
                 otpFromConfigured?: boolean;
                 qwenEnvKeyConfigured?: boolean;
+            };
+            assistant: {
+                sentenceContextCount: number;
             };
             /** Format: date-time */
             updatedAt?: string;
@@ -1883,6 +2003,9 @@ export interface components {
             turnstile?: {
                 secretKey?: string | null;
             };
+            assistant?: {
+                sentenceContextCount?: number;
+            };
         };
         CacheEntry: {
             /** Format: uuid */
@@ -1900,6 +2023,10 @@ export interface components {
             /** Format: date-time */
             createdAt: string;
             lastHitAt?: string | null;
+            cacheKey?: string;
+            payload?: {
+                [key: string]: unknown;
+            };
         };
         CacheAction: {
             /** @enum {string} */
@@ -1939,8 +2066,44 @@ export interface components {
             storage: {
                 [key: string]: unknown;
             };
+            usage?: {
+                [key: string]: unknown;
+            };
         } & {
             [key: string]: unknown;
+        };
+        ProductEvent: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            accountId: string;
+            deviceId?: string;
+            name: string;
+            /** @enum {string} */
+            outcome: "ok" | "failed" | "cancelled" | "started";
+            requestId?: string;
+            properties?: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ProductEventCreate: {
+            name: string;
+            /** @enum {string} */
+            outcome?: "ok" | "failed" | "cancelled" | "started";
+            /** Format: date-time */
+            occurredAt?: string;
+            properties?: {
+                [key: string]: unknown;
+            };
+        };
+        ProductEventBatch: {
+            events: components["schemas"]["ProductEventCreate"][];
+        };
+        CursorPageProductEvents: {
+            items: components["schemas"]["ProductEvent"][];
+            nextCursor: string | null;
         };
         CursorPageBooks: {
             items: components["schemas"]["Book"][];
@@ -2481,6 +2644,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UserSettings"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    recordProductEvents: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProductEventBatch"];
+            };
+        };
+        responses: {
+            /** @description Events accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        accepted: number;
+                    };
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -3296,6 +3496,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TranslationResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createTranslationBatch: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TranslationBatchRequest"];
+            };
+        };
+        responses: {
+            /** @description Cached and generated translations for the requested sentence block */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TranslationBatchResult"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -4237,6 +4474,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OperatorEvent"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminListProductEvents: {
+        parameters: {
+            query?: {
+                name?: string;
+                accountId?: string;
+                from?: string;
+                to?: string;
+                cursor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Usage event page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CursorPageProductEvents"];
                 };
             };
             400: components["responses"]["BadRequest"];

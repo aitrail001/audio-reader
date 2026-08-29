@@ -1,5 +1,9 @@
 import type { components } from "@audio-reader/contract";
-import { defaultAssistantPrompt } from "@audio-reader/database";
+import {
+  defaultAssistantPrompt,
+  defaultAssistantUserPrompt,
+  type OpsStore,
+} from "@audio-reader/database";
 import type { QwenClient, QwenPingDetail } from "@audio-reader/qwen";
 import { listOperatorEvents } from "./operator-events";
 import { hostOf, type RuntimeConfigView } from "./runtime-config";
@@ -16,6 +20,7 @@ export type TaskPolicyInput = {
   model: string;
   promptVersion?: string;
   systemPrompt?: string;
+  userPrompt?: string;
   canaryPercent?: number;
 };
 
@@ -25,6 +30,7 @@ export type TaskModelResolution = {
   source: "policy" | "desk";
   promptVersion: string;
   systemPrompt: string;
+  userPrompt: string;
 };
 
 export function canaryBucket(accountId: string, task: string): number {
@@ -47,6 +53,7 @@ export function resolveTaskModel(
   const enabled = matching.find((policy) => policy.enabled);
   const promptVersion = enabled?.promptVersion?.trim() || "qwen-managed-v1";
   const systemPrompt = enabled?.systemPrompt?.trim() || defaultAssistantPrompt(task);
+  const userPrompt = enabled?.userPrompt?.trim() || defaultAssistantUserPrompt(task);
   if (matching.length > 0 && matching.every((policy) => !policy.enabled)) {
     return {
       disabled: true,
@@ -54,6 +61,7 @@ export function resolveTaskModel(
       source: "desk",
       promptVersion,
       systemPrompt: defaultAssistantPrompt(task),
+      userPrompt: defaultAssistantUserPrompt(task),
     };
   }
   const policyModel = enabled?.model.trim() ?? "";
@@ -67,6 +75,7 @@ export function resolveTaskModel(
     source: usePolicy && policyModel !== "" ? "policy" : "desk",
     promptVersion,
     systemPrompt,
+    userPrompt,
   };
 }
 
@@ -214,6 +223,7 @@ export async function buildOperatorDiagnostics(input: {
   qwen: QwenClient;
   probeComplete: boolean;
   requestId: string;
+  ops?: OpsStore;
 }): Promise<OperatorDiagnostics> {
   const ping = await input.qwen.pingDetailed();
   const qwenProbe = formatQwenProbe(ping);
@@ -234,6 +244,23 @@ export async function buildOperatorDiagnostics(input: {
     qwenProbe,
     qwenComplete,
   });
+  if (input.ops !== undefined) {
+    const cache = await input.ops.listCache();
+    const events = await input.ops.listProductEvents({ limit: 20 });
+    notes.push(
+      `Postgres assistant_cache_entries visible to admin: ${String(cache.length)}.`,
+    );
+    notes.push(
+      `Postgres product_events (latest page): ${String(events.length)}. Latest: ${
+        events[0]?.name ?? "none"
+      }.`,
+    );
+    if (cache.length === 0) {
+      notes.push(
+        "Cache stays empty unless the app posts POST /v1/ai/translations, POST /v1/ai/translation-batches, or POST /v1/ai/chapter-summaries. POST /v1/ai/chat does not write cache rows.",
+      );
+    }
+  }
   console.warn(
     JSON.stringify({
       level: "warn",

@@ -4,7 +4,7 @@ compatibility_date = "2026-08-26"
 
 [vars]
 ENVIRONMENT = "local"
-APP_VERSION = "1.0.3-draft.1"
+APP_VERSION = "1.2.0-draft.1"
 CORS_ALLOWED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 MAX_BODY_BYTES = "1048576"
 LOCAL_DEV_OTP = "123456"
@@ -24,7 +24,7 @@ workers_dev = true
 
 [env.staging.vars]
 ENVIRONMENT = "staging"
-APP_VERSION = "1.0.3-draft.1"
+APP_VERSION = "1.2.0-draft.1"
 CORS_ALLOWED_ORIGINS = "https://audio-reader-admin.pages.dev,https://feature-cross-device-multi-u.audio-reader-admin.pages.dev"
 ADMIN_ORIGIN = "https://audio-reader-admin.pages.dev"
 MAX_BODY_BYTES = "1048576"
@@ -32,7 +32,8 @@ LOCAL_DEV_OTP = ""
 QWEN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 QWEN_MODEL = "qwen3.7-plus"
 TURNSTILE_SITE_KEY = "0x4AAAAAAEeadYZs5to1Nu9q"
-OTP_FROM_EMAIL = "AudioReader <audio.reader.service@gmail.com>"
+# Resend rejects unverified From domains (gmail.com 403s and OTP then 503s).
+OTP_FROM_EMAIL = "AudioReader <onboarding@resend.dev>"
 
 [env.production]
 name = "audio-reader-api-worker-production"
@@ -41,7 +42,7 @@ workers_dev = true
 
 [env.production.vars]
 ENVIRONMENT = "production"
-APP_VERSION = "1.0.3-draft.1"
+APP_VERSION = "1.2.0-draft.1"
 CORS_ALLOWED_ORIGINS = "https://audio-reader-admin.pages.dev"
 ADMIN_ORIGIN = "https://audio-reader-admin.pages.dev"
 MAX_BODY_BYTES = "1048576"
@@ -49,4 +50,5 @@ LOCAL_DEV_OTP = ""
 QWEN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 QWEN_MODEL = "qwen3.7-flash"
 TURNSTILE_SITE_KEY = "0x4AAAAAAEeadYZs5to1Nu9q"
-OTP_FROM_EMAIL = "AudioReader <audio.reader.service@gmail.com>"
+# Resend rejects unverified From domains (gmail.com 403s and OTP then 503s).
+OTP_FROM_EMAIL = "AudioReader <onboarding@resend.dev>"

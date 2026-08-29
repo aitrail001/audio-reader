@@ -24,7 +24,15 @@ enum ManagedProductLLM {
         targetLanguage: String,
         learnerLevel: String,
         targetID: String? = nil,
-        context: String? = nil
+        context: String? = nil,
+        contextPrevious: [String] = [],
+        contextNext: [String] = [],
+        editionFingerprint: String = "",
+        chapterFingerprint: String = "",
+        bookTitle: String = "",
+        chapterTitle: String = "",
+        lookupOnly: Bool = false,
+        refresh: Bool = false
     ) async throws -> ProductTranslationResult {
         let credentials = try credentials()
         return try await client.translate(
@@ -36,10 +44,134 @@ enum ManagedProductLLM {
                 targetLanguage: targetLanguage,
                 learnerLevel: learnerLevel,
                 source: source,
+                editionFingerprint: editionFingerprint,
+                chapterFingerprint: chapterFingerprint,
                 contextBefore: context,
-                targetId: targetID
+                contextPrevious: contextPrevious,
+                contextNext: contextNext,
+                targetId: targetID,
+                bookTitle: bookTitle,
+                chapterTitle: chapterTitle,
+                lookupOnly: lookupOnly,
+                refresh: refresh
             )
         )
+    }
+
+    /// One managed Qwen call for a chapter block. Each sentence is cached independently.
+    static func translateBatch(
+        sentences: [ProductTranslationSentence],
+        sourceLanguage: String,
+        targetLanguage: String,
+        learnerLevel: String,
+        contextBefore: String? = nil,
+        contextPrevious: [String] = [],
+        contextNext: [String] = [],
+        editionFingerprint: String = "",
+        chapterFingerprint: String = "",
+        bookTitle: String = "",
+        chapterTitle: String = "",
+        lookupOnly: Bool = false,
+        refreshIds: [String] = []
+    ) async throws -> ProductTranslationBatchResult {
+        let credentials = try credentials()
+        return try await client.translateBatch(
+            accessToken: credentials.accessToken,
+            deviceID: credentials.deviceID,
+            request: ProductTranslationBatchRequest(
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                learnerLevel: learnerLevel,
+                sentences: sentences,
+                editionFingerprint: editionFingerprint,
+                chapterFingerprint: chapterFingerprint,
+                contextBefore: contextBefore,
+                contextPrevious: contextPrevious,
+                contextNext: contextNext,
+                bookTitle: bookTitle,
+                chapterTitle: chapterTitle,
+                lookupOnly: lookupOnly,
+                refreshIds: refreshIds
+            )
+        )
+    }
+
+    static func lookupTranslation(
+        task: String,
+        source: String,
+        sourceLanguage: String,
+        targetLanguage: String,
+        learnerLevel: String,
+        targetID: String? = nil,
+        context: String? = nil,
+        editionFingerprint: String = "",
+        chapterFingerprint: String = "",
+        bookTitle: String = "",
+        chapterTitle: String = ""
+    ) async throws -> ProductTranslationResult? {
+        do {
+            return try await translate(
+                task: task,
+                source: source,
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                learnerLevel: learnerLevel,
+                targetID: targetID,
+                context: context,
+                editionFingerprint: editionFingerprint,
+                chapterFingerprint: chapterFingerprint,
+                bookTitle: bookTitle,
+                chapterTitle: chapterTitle,
+                lookupOnly: true
+            )
+        } catch let error as AuthClientError {
+            if case .problem(status: 404, _, _) = error {
+                return nil
+            }
+            throw error
+        }
+    }
+
+    static func chapterResults(from batch: ProductTranslationBatchResult) -> [ChapterTranslationResult] {
+        batch.results.compactMap { result in
+            let targetID = result.targetId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !targetID.isEmpty else { return nil }
+            let translation = result.translation.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !translation.isEmpty else { return nil }
+            return ChapterTranslationResult(
+                id: targetID,
+                translation: translation,
+                notes: result.notes.map {
+                    ChapterTranslationResult.Note(
+                        source: $0.source,
+                        category: $0.category,
+                        explanation: $0.explanation
+                    )
+                }
+            )
+        }
+    }
+
+    /// Rebuild MEANING IN THIS SENTENCE / EXAMPLES / notes from the cacheable JSON result.
+    static func wordMeaningText(from result: ProductTranslationResult) -> String {
+        let meaning = result.translation.trimmingCharacters(in: .whitespacesAndNewlines)
+        var sections = ["\(GlossTextFormat.sentenceMeaningHeading)\n\(meaning)"]
+        let examples = result.notes.filter { $0.category == "example" }
+        let notes = result.notes.filter { $0.category != "example" }
+        if !examples.isEmpty {
+            let lines = examples.map { note in
+                let explanation = note.explanation.trimmingCharacters(in: .whitespacesAndNewlines)
+                return explanation.isEmpty ? "• \(note.source)" : "• \(note.source)\n  \(explanation)"
+            }.joined(separator: "\n")
+            sections.append("\(GlossTextFormat.examplesHeading)\n\(lines)")
+        }
+        if !notes.isEmpty {
+            let lines = notes.map { note in
+                "• \(note.source) — [\(note.category.replacingOccurrences(of: "_", with: " "))] \(note.explanation)"
+            }.joined(separator: "\n")
+            sections.append("\(GlossTextFormat.learningNotesHeading)\n\(lines)")
+        }
+        return sections.joined(separator: "\n\n")
     }
 
     static func translationEnvelope(
@@ -48,7 +180,13 @@ enum ManagedProductLLM {
         sourceLanguage: String,
         targetLanguage: String,
         learnerLevel: String,
-        context: String? = nil
+        context: String? = nil,
+        contextPrevious: [String] = [],
+        contextNext: [String] = [],
+        editionFingerprint: String = "",
+        chapterFingerprint: String = "",
+        bookTitle: String = "",
+        chapterTitle: String = ""
     ) async throws -> String {
         let result = try await translate(
             task: "sentence",
@@ -57,7 +195,13 @@ enum ManagedProductLLM {
             targetLanguage: targetLanguage,
             learnerLevel: learnerLevel,
             targetID: targetID,
-            context: context
+            context: context,
+            contextPrevious: contextPrevious,
+            contextNext: contextNext,
+            editionFingerprint: editionFingerprint,
+            chapterFingerprint: chapterFingerprint,
+            bookTitle: bookTitle,
+            chapterTitle: chapterTitle
         )
         let notes = result.notes.map {
             [
@@ -84,7 +228,12 @@ enum ManagedProductLLM {
         sourceLanguage: String,
         targetLanguage: String,
         learnerLevel: String,
-        segments: [String]
+        segments: [String],
+        editionFingerprint: String = "",
+        bookTitle: String = "",
+        chapterTitle: String = "",
+        lookupOnly: Bool = false,
+        refresh: Bool = false
     ) async throws -> String {
         let credentials = try credentials()
         let summary = try await client.summarize(
@@ -95,8 +244,13 @@ enum ManagedProductLLM {
                 sourceLanguage: sourceLanguage,
                 targetLanguage: targetLanguage,
                 learnerLevel: learnerLevel,
+                editionFingerprint: editionFingerprint,
                 chapterFingerprint: chapterID,
-                segments: segments
+                bookTitle: bookTitle,
+                chapterTitle: chapterTitle,
+                segments: segments,
+                lookupOnly: lookupOnly,
+                refresh: refresh
             )
         )
         let payload: [String: Any] = [
@@ -110,6 +264,36 @@ enum ManagedProductLLM {
         ]
         let data = try JSONSerialization.data(withJSONObject: payload)
         return String(data: data, encoding: .utf8) ?? summary.overview
+    }
+
+    static func lookupSummary(
+        chapterID: String,
+        sourceLanguage: String,
+        targetLanguage: String,
+        learnerLevel: String,
+        segments: [String],
+        editionFingerprint: String = "",
+        bookTitle: String = "",
+        chapterTitle: String = ""
+    ) async throws -> String? {
+        do {
+            return try await summarize(
+                chapterID: chapterID,
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                learnerLevel: learnerLevel,
+                segments: segments,
+                editionFingerprint: editionFingerprint,
+                bookTitle: bookTitle,
+                chapterTitle: chapterTitle,
+                lookupOnly: true
+            )
+        } catch let error as AuthClientError {
+            if case .problem(status: 404, _, _) = error {
+                return nil
+            }
+            throw error
+        }
     }
 
     private static func credentials() throws -> (accessToken: String, deviceID: String) {

@@ -379,6 +379,41 @@ paths:
       parameters:
       - $ref: '#/components/parameters/DeviceId'
       - $ref: '#/components/parameters/IdempotencyKey'
+  /v1/me/events:
+    post:
+      operationId: recordProductEvents
+      summary: Record product usage events from a signed-in device
+      tags:
+      - Analytics
+      responses:
+        '202':
+          description: Events accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                - accepted
+                properties:
+                  accepted:
+                    type: integer
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductEventBatch'
+      parameters:
+      - $ref: '#/components/parameters/DeviceId'
   /v1/me/devices:
     get:
       operationId: listDevices
@@ -1038,7 +1073,7 @@ paths:
         '422': *id006
         '429': *id007
         '500': *id008
-      description: The server owns Qwen credentials and policy. Shared cache is eligible only for non-personal exact requests.
+      description: The server owns Qwen credentials and policy. Shared cache is eligible only for non-personal exact requests. Cache hits do not consume quota or call Qwen. lookupOnly returns 404 when the exact cache row is missing.
       requestBody:
         required: true
         content:
@@ -1048,10 +1083,42 @@ paths:
       parameters:
       - $ref: '#/components/parameters/DeviceId'
       - $ref: '#/components/parameters/IdempotencyKey'
+  /v1/ai/translation-batches:
+    post:
+      operationId: createTranslationBatch
+      summary: Translate a sentence block with per-sentence shared cache
+      tags:
+      - Assistant
+      responses:
+        '200':
+          description: Cached and generated translations for the requested sentence block
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TranslationBatchResult'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+      description: One Qwen call covers every cache miss in the block. Each sentence is stored under its own exact-content cache key so later lookups skip Qwen. lookupOnly returns hits without generating.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TranslationBatchRequest'
+      parameters:
+      - $ref: '#/components/parameters/DeviceId'
+      - $ref: '#/components/parameters/IdempotencyKey'
   /v1/ai/chapter-summaries:
     post:
       operationId: createChapterSummary
       summary: Get a cached or generated chapter summary
+      description: Cache hits do not consume quota or call Qwen. lookupOnly returns 404 when the exact cache row is missing.
       tags:
       - Assistant
       responses:
@@ -1913,6 +1980,57 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/OperatorEvent'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+  /v1/admin/product-events:
+    get:
+      operationId: adminListProductEvents
+      security:
+      - AdminBearer: []
+      summary: List persisted product usage events for analysis
+      tags:
+      - Admin Operations
+      parameters:
+      - name: name
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: accountId
+        in: query
+        required: false
+        schema: *id009
+      - name: from
+        in: query
+        required: false
+        schema: *id018
+      - name: to
+        in: query
+        required: false
+        schema: *id018
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: Usage event page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CursorPageProductEvents'
         '400': *id001
         '401': *id002
         '403': *id003
@@ -3520,6 +3638,7 @@ components:
         task:
           type: string
           enum:
+          - word
           - word_context
           - sentence
           - chapter_batch
@@ -3535,13 +3654,103 @@ components:
           maxLength: 50000
         contextBefore: *id025
         contextAfter: *id025
+        contextPrevious:
+          type: array
+          items:
+            type: string
+          maxItems: 10
+        contextNext:
+          type: array
+          items:
+            type: string
+          maxItems: 10
         editionFingerprint:
           type: string
         chapterFingerprint:
           type: string
+        bookTitle:
+          type: string
+        chapterTitle:
+          type: string
         targetId: *id025
         promptVersion:
           type: string
+        lookupOnly:
+          type: boolean
+          description: Return a cache hit without calling Qwen. Misses are 404.
+        refresh:
+          type: boolean
+          description: Skip cache reads and generate a fresh result for this request.
+    TranslationSentence:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - text
+      properties:
+        id:
+          type: string
+          minLength: 1
+        text:
+          type: string
+          minLength: 1
+          maxLength: 50000
+    TranslationBatchRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - task
+      - sourceLanguage
+      - targetLanguage
+      - learnerLevel
+      - sentences
+      - editionFingerprint
+      - chapterFingerprint
+      properties:
+        task:
+          type: string
+          enum:
+          - chapter_batch
+        sourceLanguage:
+          type: string
+        targetLanguage:
+          type: string
+        learnerLevel:
+          type: string
+        sentences:
+          type: array
+          minItems: 1
+          maxItems: 40
+          items:
+            $ref: '#/components/schemas/TranslationSentence'
+        contextBefore: *id025
+        contextPrevious:
+          type: array
+          items:
+            type: string
+          maxItems: 10
+        contextNext:
+          type: array
+          items:
+            type: string
+          maxItems: 10
+        editionFingerprint:
+          type: string
+        chapterFingerprint:
+          type: string
+        bookTitle:
+          type: string
+        chapterTitle:
+          type: string
+        promptVersion:
+          type: string
+        lookupOnly:
+          type: boolean
+        refreshIds:
+          type: array
+          items:
+            type: string
+          maxItems: 40
     LearningNote:
       type: object
       additionalProperties: false
@@ -3562,6 +3771,7 @@ components:
           - challenging_combination
           - concept
           - grammar
+          - example
         explanation:
           type: string
     TranslationResult:
@@ -3576,6 +3786,9 @@ components:
       - createdAt
       properties:
         id: *id009
+        targetId: *id025
+        source:
+          type: string
         translation:
           type: string
         notes:
@@ -3596,6 +3809,27 @@ components:
         policyVersion:
           type: string
         createdAt: *id018
+    TranslationBatchResult:
+      type: object
+      additionalProperties: false
+      required:
+      - results
+      - missingIds
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/TranslationResult'
+        missingIds:
+          type: array
+          items:
+            type: string
+        generatedCount:
+          type: integer
+          minimum: 0
+        cacheHitCount:
+          type: integer
+          minimum: 0
     ChapterSummaryRequest:
       type: object
       additionalProperties: false
@@ -3618,11 +3852,21 @@ components:
           type: string
         chapterFingerprint:
           type: string
+        bookTitle:
+          type: string
+        chapterTitle:
+          type: string
         segments:
           type: array
           items:
             type: string
           maxItems: 20000
+        lookupOnly:
+          type: boolean
+          description: Return a cache hit without calling Qwen. Misses are 404.
+        refresh:
+          type: boolean
+          description: Skip cache reads and generate a fresh summary for this request.
     ChapterSummary:
       type: object
       additionalProperties: false
@@ -4029,6 +4273,46 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Quota'
+        devices:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - id
+            - platform
+            - lastSeenAt
+            - revoked
+            properties:
+              id:
+                type: string
+              platform:
+                type: string
+              name:
+                type:
+                - string
+                - 'null'
+              appVersion:
+                type: string
+              lastSeenAt: *id018
+              revoked:
+                type: boolean
+        books:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - id
+            - title
+            properties:
+              id:
+                type: string
+              title:
+                type: string
+              chapterCount:
+                type: integer
+                minimum: 0
     AdminAction:
       type: object
       additionalProperties: false
@@ -4049,6 +4333,7 @@ components:
       - model
       - promptVersion
       - systemPrompt
+      - userPrompt
       - schemaVersion
       - policyVersion
       - enabled
@@ -4065,6 +4350,8 @@ components:
         promptVersion:
           type: string
         systemPrompt:
+          type: string
+        userPrompt:
           type: string
         schemaVersion:
           type: string
@@ -4108,6 +4395,8 @@ components:
           type: string
         systemPrompt:
           type: string
+        userPrompt:
+          type: string
         schemaVersion:
           type: string
         maxInputTokens:
@@ -4127,6 +4416,7 @@ components:
       - storage
       - turnstile
       - bootstrap
+      - assistant
       properties:
         qwen:
           type: object
@@ -4233,6 +4523,16 @@ components:
               type: boolean
             qwenEnvKeyConfigured:
               type: boolean
+        assistant:
+          type: object
+          additionalProperties: false
+          required:
+          - sentenceContextCount
+          properties:
+            sentenceContextCount:
+              type: integer
+              minimum: 0
+              maximum: 10
         updatedAt: *id018
     OperatorEvent:
       type: object
@@ -4359,6 +4659,14 @@ components:
               oneOf:
               - type: string
               - type: 'null'
+        assistant:
+          type: object
+          additionalProperties: false
+          properties:
+            sentenceContextCount:
+              type: integer
+              minimum: 0
+              maximum: 10
     CacheEntry:
       type: object
       additionalProperties: false
@@ -4402,6 +4710,11 @@ components:
           minimum: 0
         createdAt: *id018
         lastHitAt: *id026
+        cacheKey:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
     CacheAction:
       type: object
       additionalProperties: false
@@ -4473,6 +4786,80 @@ components:
         storage:
           type: object
           additionalProperties: true
+        usage:
+          type: object
+          additionalProperties: true
+    ProductEvent:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - accountId
+      - name
+      - outcome
+      - createdAt
+      properties:
+        id: *id009
+        accountId: *id009
+        deviceId:
+          type: string
+        name:
+          type: string
+        outcome:
+          type: string
+          enum:
+          - ok
+          - failed
+          - cancelled
+          - started
+        requestId:
+          type: string
+        properties:
+          type: object
+          additionalProperties: true
+        createdAt: *id018
+    ProductEventCreate:
+      type: object
+      additionalProperties: false
+      required:
+      - name
+      properties:
+        name:
+          type: string
+        outcome:
+          type: string
+          enum:
+          - ok
+          - failed
+          - cancelled
+          - started
+        occurredAt: *id018
+        properties:
+          type: object
+          additionalProperties: true
+    ProductEventBatch:
+      type: object
+      additionalProperties: false
+      required:
+      - events
+      properties:
+        events:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/ProductEventCreate'
+    CursorPageProductEvents:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProductEvent'
+        nextCursor: *id025
     CursorPageBooks:
       type: object
       additionalProperties: false

@@ -76,9 +76,27 @@ export type {
 } from "./catalog";
 export {
   DEFAULT_ASSISTANT_PROMPTS,
+  DEFAULT_ASSISTANT_USER_PROMPTS,
+  CHAPTER_BATCH_TRANSLATION_INSTRUCTIONS,
+  CHAPTER_SUMMARY_INSTRUCTIONS,
+  SENTENCE_TRANSLATION_INSTRUCTIONS,
+  WORD_IN_SENTENCE_INSTRUCTIONS,
+  chapterBatchTranslationInstructions,
+  chapterSummaryInstructions,
+  clampContextCount,
   composeAssistantSystemPrompt,
   defaultAssistantPrompt,
+  defaultAssistantUserPrompt,
+  formatManagedChapterBatchContext,
+  formatManagedSentenceContext,
   isAssistantTask,
+  isChapterBatchTask,
+  isWordTranslationTask,
+  promptLanguageName,
+  renderAssistantUserPrompt,
+  sentenceTranslationInstructions,
+  stringList,
+  wordInSentenceInstructions,
 } from "./assistant-prompts";
 export type { AssistantTask } from "./assistant-prompts";
 export {
@@ -100,6 +118,7 @@ export type {
   OpsJob,
   OpsPolicy,
   OpsPrivacyRequest,
+  OpsProductEvent,
   OpsQuota,
   OpsStore,
 } from "./ops";

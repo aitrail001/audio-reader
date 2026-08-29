@@ -134,7 +134,10 @@ struct AccountSessionFlowTests {
         #expect(view.contains(".accessibilityLabel(\"Email sign-in code\")"))
         #expect(view.contains(".accessibilityLabel(\"Verify email sign-in code\")"))
         #expect(view.contains(".accessibilityLabel(\"Sign out of AudioReader account\")"))
-        #expect(view.contains(".accessibilityLabel(\"Export account data\")"))
+        #expect(view.contains("\"Export account data\""))
+        #expect(view.contains(".fileExporter("))
+        #expect(view.contains("Save export"))
+        #expect(view.contains("AccountExportDocument"))
         #expect(view.contains(".accessibilityLabel(\"Delete AudioReader account\")"))
         #expect(view.contains(".accessibilityLabel(\"Sync learning data across devices\")"))
         #expect(view.contains(".accessibilityLabel(\"Account session recovery\")"))
@@ -158,12 +161,35 @@ struct AccountSessionFlowTests {
 
         #expect(macRoot.contains("SettingsView(state: state)"))
         #expect(iPadRoot.contains("SettingsView(state: state)"))
+        #expect(macRoot.contains("WorkStatusBanner("))
+        #expect(iPadRoot.contains("WorkStatusBanner("))
+        #expect(!iPadRoot.contains("if state.isScanning, let progress = state.libraryScanProgress"))
         #expect(!macRoot.contains(".sheet(isPresented: $state.showSettings)"))
         #expect(!iPadRoot.contains(".sheet(isPresented: $state.showSettings)"))
         #expect(macRoot.contains("case .settings:"))
         #expect(iPadRoot.contains("case .settings:"))
         #expect(settings.contains("accountSection"))
-        #expect(appState.contains("await account.restore()"))
+        #expect(appState.contains("account.restore()"))
+        #expect(appState.contains("async let accountRestore"))
+        #expect(appState.contains("ManagedProductLLM.translateBatch"))
+        #expect(appState.contains("ManagedProductLLM.lookupSummary"))
+        #expect(appState.contains("ManagedProductLLM.summarize"))
+        #expect(appState.contains("ManagedProductLLM.translate"))
+        #expect(appState.contains("lookupOnly: true"))
+        #expect(appState.contains("contextPrevious"))
+        #expect(appState.contains("contextNext"))
+        #expect(appState.contains("contextBefore:"))
+        #expect(!appState.contains("ManagedProductLLM.translationEnvelope"))
+        #expect(appState.contains("wordMeaningText"))
+        #expect(appState.contains("bookTitle: book?.title"))
+        #expect(try source("Sources/AudioReader/ManagedProductLLM.swift").contains("sentenceMeaningHeading"))
+        #expect(try source("Sources/AudioReader/ManagedProductLLM.swift").contains("examplesHeading"))
+        #expect(view.contains("activityMessage"))
+        #expect(view.contains("Account activity"))
+        #expect(settings.contains("Loading installed dictionaries"))
+        #expect(settings.contains("installedNamesOffMain"))
+        #expect(view.contains("refreshDevices"))
+        #expect(view.contains(".dynamicTypeSize(.xSmall ... .accessibility5)\n        .onChange(of: session.pendingExport"))
         #expect(appState.contains("init(composition: AppComposition"))
         #expect(live.contains("ASWebAuthenticationSession"))
         #expect(live.contains("callbackURLScheme"))
@@ -458,8 +484,9 @@ struct AccountSessionFlowTests {
         #expect(merged.nextReview == existing.nextReview)
     }
 
+    @MainActor
     @Test("Managed Qwen is a shared account provider with no local API key")
-    func managedQwenIsSharedAccountProvider() {
+    func managedQwenIsSharedAccountProvider() throws {
         #expect(LLMProvider.managedQwen.menuLabel == "Managed Qwen (account)")
         #expect(LLMProvider.managedQwen.environmentKey.isEmpty)
         #expect(LLMProvider.managedQwen.defaultEndpoint.isEmpty)
@@ -469,6 +496,12 @@ struct AccountSessionFlowTests {
         #expect(settings.llmProvider == LLMProvider.managedQwen.rawValue)
         #expect(LLMConnectionChoice.selected(in: settings) == .managedQwen)
         #expect(LLMError.managedAccountRequired.localizedDescription.contains("Sign in"))
+        let state = AppState(composition: .inMemory())
+        state.settings.llmProvider = LLMProvider.managedQwen.rawValue
+        #expect(state.selectedLLMModel == "Managed Qwen")
+        #expect(!state.selectedLLMModel.localizedCaseInsensitiveContains("qwen3.7"))
+        let player = try source("Sources/AudioReader/PlayerView.swift")
+        #expect(player.contains("Asking \\(state.selectedLLMModel)"))
     }
 
     private func source(_ relativePath: String) throws -> String {

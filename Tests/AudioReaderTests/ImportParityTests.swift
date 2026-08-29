@@ -411,6 +411,10 @@ struct ImportParityTests {
 
         #expect(blocks.map(\.count) == [3, 3, 1])
         #expect(blocks.flatMap { $0 }.map(\.id) == segments.map(\.id))
+
+        let aligned = ChapterTranslationBatch.alignedBlock(containing: segments[4], in: segments, size: 3)
+        #expect(aligned.map(\.id) == ["segment-4", "segment-5", "segment-6"])
+        #expect(ChapterTranslationBatch.alignedBlock(containing: segments[0], in: segments, size: 3).map(\.id) == ["segment-1", "segment-2", "segment-3"])
     }
 
     @Test("Chapter translation parses one reviewable result per sentence")
@@ -1181,12 +1185,12 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.77")
-        #expect(plist["CFBundleVersion"] as? String == "78")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.77")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "78")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.77;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 78;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.1.0")
+        #expect(plist["CFBundleVersion"] as? String == "85")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.1.0")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "85")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.1.0;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 85;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
         #expect(plist["ProductAPIBaseURL"] as? String == ProductAPI.hostedProductionBaseURL.absoluteString)
