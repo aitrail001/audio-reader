@@ -17,6 +17,7 @@ public final class AccountSession {
     public private(set) var isBusy = false
     /// Operator-visible status for restore, sync, and other cloud work. Settings must stay interactive while this is set.
     public private(set) var activityMessage: String?
+    public private(set) var syncStatus: AccountSyncStatus = .idle
     public private(set) var pendingEmail: String?
     public private(set) var featureFlags: [FeatureFlag] = []
     public private(set) var quotas: [Quota] = []
@@ -24,6 +25,7 @@ public final class AccountSession {
     public private(set) var pendingExport: AccountExportFile?
     var pendingOAuth: PendingOAuth?
     var pendingAuthorizationURL: URL?
+    @ObservationIgnored private var syncTask: Task<Void, Never>?
 
     public var persistedRefreshToken: String? {
         try? store.load()?.refreshToken
@@ -334,6 +336,9 @@ public final class AccountSession {
         }
         let previous = mode
         mode = enabled ? .signedInSyncOn : .signedInSyncOff
+        if !enabled {
+            syncStatus = .idle
+        }
         recordUsage(name: enabled ? "account.sync_enabled" : "account.sync_disabled")
         do {
             guard var persisted = try store.load() else {
@@ -351,8 +356,70 @@ public final class AccountSession {
 
     public func synchronize() async {
         guard mode.isSyncEnabled, let runtime = syncRuntime else { return }
-        await run(activity: activityMessage ?? "Syncing learning data…") {
-            try await drainSync(runtime: runtime)
+        if let syncTask {
+            await syncTask.value
+            return
+        }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performSynchronize(runtime: runtime)
+        }
+        syncTask = task
+        await task.value
+        syncTask = nil
+    }
+
+    private func performSynchronize(runtime: AccountSyncRuntime) async {
+        syncStatus = AccountSyncStatus(phase: .preparing)
+        await run {
+            do {
+                try await drainSync(runtime: runtime)
+                errorMessage = nil
+                recordUsage(
+                    name: "sync.completed",
+                    properties: [
+                        "feature": "sync",
+                        "uploadedCount": "\(syncStatus.completedCount)",
+                        "appliedCount": "\(syncStatus.appliedCount)",
+                        "pendingCount": "\(syncStatus.pendingCount)",
+                        "conflictCount": "\(syncStatus.conflictCount)"
+                    ]
+                )
+            } catch {
+                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                let pendingCount = (try? runtime.outbox.pendingMutations().count) ?? syncStatus.pendingCount
+                syncStatus = AccountSyncStatus(
+                    phase: .failed,
+                    completedCount: syncStatus.completedCount,
+                    totalCount: syncStatus.totalCount,
+                    appliedCount: syncStatus.appliedCount,
+                    pendingCount: pendingCount,
+                    conflictCount: syncStatus.conflictCount,
+                    errorMessage: message,
+                    entityProgress: syncStatus.entityProgress
+                )
+                recordUsage(
+                    name: "sync.failed",
+                    outcome: "failed",
+                    properties: [
+                        "feature": "sync",
+                        "pendingCount": "\(pendingCount)",
+                        "conflictCount": "\(syncStatus.conflictCount)"
+                    ]
+                )
+                throw error
+            }
+        }
+    }
+
+    public var syncStatusAccessibilityDescription: String {
+        if syncStatus.phase != .idle {
+            return syncStatus.accessibilityDescription
+        }
+        switch mode {
+        case .local: return "Local only. Account sync is unavailable."
+        case .signedInSyncOff: return "Sync is off."
+        case .signedInSyncOn: return "Up to date."
         }
     }
 
@@ -494,14 +561,30 @@ public final class AccountSession {
     private func drainSync(runtime: AccountSyncRuntime) async throws {
         let jobID = ProductHTTP.makeRequestID()
         let deviceID = try store.deviceID()
+        syncStatus = AccountSyncStatus(phase: .preparing)
         try enqueueDirtySnapshot(runtime: runtime)
         let pending = try runtime.outbox.pendingMutations()
+        let batches = try Self.syncPushBatches(pending)
+        var entityProgress = Self.syncEntityProgress(pending)
+        var uploaded = 0
+        var conflicts = 0
         Self.syncLog.info(
             "sync_push_start message=sync_push_start requestId=\(jobID, privacy: .public) pending=\(pending.count, privacy: .public)"
         )
         if !pending.isEmpty {
             var lookup = Dictionary(uniqueKeysWithValues: pending.map { ($0.id.rawValue, $0) })
-            for batch in try Self.syncPushBatches(pending) {
+            for (batchOffset, batch) in batches.enumerated() {
+                let entityTypes = Set(batch.map(\.entityType.rawValue))
+                syncStatus = .uploading(
+                    entityType: entityTypes.count == 1 ? entityTypes.first : nil,
+                    completedCount: uploaded,
+                    totalCount: pending.count,
+                    batchIndex: batchOffset + 1,
+                    batchCount: batches.count,
+                    pendingCount: pending.count - uploaded,
+                    conflictCount: conflicts,
+                    entityProgress: entityProgress
+                )
                 let request = SyncPushRequest(
                     deviceId: deviceID,
                     batchId: UUID().uuidString.lowercased(),
@@ -514,6 +597,16 @@ public final class AccountSession {
                 try runtime.cursor.saveCursor(pushed.cursor)
                 for result in pushed.results {
                     try applyPushResult(result, lookup: &lookup, runtime: runtime, jobID: jobID)
+                    if result.status == "applied" || result.status == "duplicate" {
+                        uploaded += 1
+                        if let mutation = lookup[result.mutationId],
+                           let index = entityProgress.firstIndex(where: { $0.entityType == mutation.entityType.rawValue })
+                        {
+                            entityProgress[index].completedCount += 1
+                        }
+                    } else if result.status == "conflict" {
+                        conflicts += 1
+                    }
                 }
             }
         }
@@ -524,6 +617,14 @@ public final class AccountSession {
         while hasMore {
             guard pages < Self.syncPullPageCap else { break }
             pages += 1
+            syncStatus = AccountSyncStatus(
+                phase: .downloading,
+                completedCount: applied,
+                batchIndex: pages,
+                pendingCount: (try? runtime.outbox.pendingMutations().count) ?? 0,
+                conflictCount: conflicts,
+                entityProgress: entityProgress
+            )
             let pulled = try await withAccessToken { access in
                 try await runtime.client.pull(
                     accessToken: access,
@@ -532,9 +633,25 @@ public final class AccountSession {
                     limit: Self.syncPullPageLimit
                 )
             }
-            for change in SyncPulledChange.applying(pulled.changes) {
+            let orderedChanges = SyncPulledChange.applying(pulled.changes)
+            var pageApplied = 0
+            syncStatus = AccountSyncStatus(
+                phase: .applying,
+                completedCount: 0,
+                totalCount: orderedChanges.count,
+                appliedCount: applied,
+                batchIndex: pages,
+                pendingCount: (try? runtime.outbox.pendingMutations().count) ?? 0,
+                conflictCount: conflicts,
+                entityProgress: entityProgress
+            )
+            for change in orderedChanges {
+                syncStatus.entityType = change.entityType
                 try runtime.applyChange(change)
                 applied += 1
+                pageApplied += 1
+                syncStatus.completedCount = pageApplied
+                syncStatus.appliedCount = applied
                 try runtime.versions?.saveVersion(
                     SyncEntityVersion(
                         entityType: change.entityType,
@@ -551,11 +668,29 @@ public final class AccountSession {
             )
             if !hasMore { break }
         }
+        if hasMore {
+            throw AccountSyncRunError.pullPageLimitReached
+        }
         Self.syncLog.info(
             "sync_finish message=sync_finish requestId=\(jobID, privacy: .public) applied=\(applied, privacy: .public)"
         )
+        let remaining = try runtime.outbox.pendingMutations().count
+        syncStatus = .completed(
+            uploadedCount: uploaded,
+            appliedCount: applied,
+            pendingCount: remaining,
+            conflictCount: conflicts,
+            entityProgress: entityProgress
+        )
         if applied > 0 {
             onLearningDataApplied?()
+        }
+    }
+
+    private static func syncEntityProgress(_ pending: [OutboxMutation]) -> [AccountSyncEntityProgress] {
+        let totals = Dictionary(grouping: pending, by: { $0.entityType.rawValue }).mapValues(\.count)
+        return totals.keys.sorted().map {
+            AccountSyncEntityProgress(entityType: $0, completedCount: 0, totalCount: totals[$0] ?? 0)
         }
     }
 
@@ -702,6 +837,7 @@ public final class AccountSession {
         pendingOAuth = nil
         pendingAuthorizationURL = nil
         pendingEmail = nil
+        syncStatus = .idle
         errorMessage = nil
         recoveryMessage = recovery
     }
@@ -753,5 +889,16 @@ public final class AccountSession {
     private func present(_ error: Error) {
         guard recoveryMessage == nil else { return }
         errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+}
+
+private enum AccountSyncRunError: LocalizedError {
+    case pullPageLimitReached
+
+    var errorDescription: String? {
+        switch self {
+        case .pullPageLimitReached:
+            "More sync changes remain on the server. Sync again to continue."
+        }
     }
 }

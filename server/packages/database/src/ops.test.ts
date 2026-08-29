@@ -400,6 +400,30 @@ describe("supabase flag, quota, settings, and audit writes", () => {
     expect(await ops.listAudit()).toEqual([]);
   });
 
+  it("requests the bounded product-event analytics window from PostgREST", async () => {
+    let captured: RestRequest | undefined;
+    const ops = createSupabaseOpsStore({
+      async request(input: RestRequest): Promise<RestResponse> {
+        await Promise.resolve();
+        captured = input;
+        return { status: 200, body: [] };
+      },
+    });
+    await ops.listProductEvents({
+      from: "2026-08-01T00:00:00.000Z",
+      to: "2026-09-01T00:00:00.000Z",
+      limit: 5000,
+    });
+    expect(captured).toMatchObject({
+      method: "GET",
+      path: "/product_events",
+      query: {
+        limit: "5000",
+        and: "(created_at.gte.2026-08-01T00:00:00.000Z,created_at.lt.2026-09-01T00:00:00.000Z)",
+      },
+    });
+  });
+
   it("returns an empty flag list when GET fails instead of default seeds", async () => {
     const ops = createSupabaseOpsStore(
       opsRest({

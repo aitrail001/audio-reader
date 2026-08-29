@@ -371,10 +371,7 @@ struct IPadRootView: View {
 
     private var iPadSyncStatus: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(iPadSyncTitle, systemImage: iPadSyncSymbol)
-                .font(.callout)
-                .foregroundStyle(Palette.dim)
-                .accessibilityIdentifier("sync.status")
+            AccountSyncStatusView(session: state.account, compact: true)
             Button {
                 Task { await state.account.synchronize() }
             } label: {
@@ -385,21 +382,6 @@ struct IPadRootView: View {
             .disabled(state.account.isBusy || !state.account.mode.isSyncEnabled)
             .accessibilityIdentifier("sync.now")
         }
-    }
-
-    private var iPadSyncTitle: String {
-        if state.account.errorMessage != nil { return "Sync needs attention" }
-        if let activity = state.account.activityMessage, !activity.isEmpty { return activity }
-        switch state.account.mode {
-        case .local: return "Local only"
-        case .signedInSyncOff: return "Sync off"
-        case .signedInSyncOn: return "Up to date"
-        }
-    }
-
-    private var iPadSyncSymbol: String {
-        if state.account.errorMessage != nil { return "exclamationmark.icloud" }
-        return state.account.mode.isSyncEnabled ? "checkmark.icloud" : "icloud.slash"
     }
 
     @ViewBuilder

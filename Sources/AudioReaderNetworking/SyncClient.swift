@@ -111,6 +111,209 @@ public struct SyncPullResponse: Codable, Equatable, Sendable {
     }
 }
 
+public enum AccountSyncPhase: String, Equatable, Sendable {
+    case idle
+    case preparing
+    case uploading
+    case downloading
+    case applying
+    case completed
+    case failed
+}
+
+public struct AccountSyncEntityProgress: Equatable, Sendable, Identifiable {
+    public var entityType: String
+    public var completedCount: Int
+    public var totalCount: Int
+
+    public var id: String { entityType }
+
+    public init(entityType: String, completedCount: Int, totalCount: Int) {
+        self.entityType = entityType
+        self.completedCount = completedCount
+        self.totalCount = totalCount
+    }
+
+    public var title: String {
+        switch entityType {
+        case OutboxEntityType.settings.rawValue: "Settings"
+        case OutboxEntityType.book.rawValue: "Books"
+        case OutboxEntityType.chapter.rawValue: "Chapters"
+        case OutboxEntityType.progress.rawValue: "Reading progress"
+        case OutboxEntityType.vocabulary.rawValue: "Vocabulary"
+        case OutboxEntityType.lexemeState.rawValue: "Known words"
+        case OutboxEntityType.reviewEvent.rawValue: "Reviews"
+        case OutboxEntityType.transcript.rawValue: "Transcripts"
+        case OutboxEntityType.transcriptOverlay.rawValue: "Transcript corrections"
+        case OutboxEntityType.translationDecision.rawValue: "Translation decisions"
+        case OutboxEntityType.summaryDecision.rawValue: "Summary decisions"
+        case OutboxEntityType.chatMessage.rawValue: "Chat messages"
+        case OutboxEntityType.studyActivity.rawValue: "Study activity"
+        default: entityType.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+}
+
+/// Observable sync progress contains only counts and entity categories; it must never expose
+/// learning content, mutation payloads, credentials, or server response bodies to the UI.
+public struct AccountSyncStatus: Equatable, Sendable {
+    public var phase: AccountSyncPhase
+    public var entityType: String?
+    public var completedCount: Int
+    public var totalCount: Int
+    public var appliedCount: Int
+    public var batchIndex: Int?
+    public var batchCount: Int?
+    public var pendingCount: Int
+    public var conflictCount: Int
+    public var errorMessage: String?
+    public var entityProgress: [AccountSyncEntityProgress]
+
+    public static let idle = AccountSyncStatus(phase: .idle)
+
+    public init(
+        phase: AccountSyncPhase,
+        entityType: String? = nil,
+        completedCount: Int = 0,
+        totalCount: Int = 0,
+        appliedCount: Int = 0,
+        batchIndex: Int? = nil,
+        batchCount: Int? = nil,
+        pendingCount: Int = 0,
+        conflictCount: Int = 0,
+        errorMessage: String? = nil,
+        entityProgress: [AccountSyncEntityProgress] = []
+    ) {
+        self.phase = phase
+        self.entityType = entityType
+        self.completedCount = completedCount
+        self.totalCount = totalCount
+        self.appliedCount = appliedCount
+        self.batchIndex = batchIndex
+        self.batchCount = batchCount
+        self.pendingCount = pendingCount
+        self.conflictCount = conflictCount
+        self.errorMessage = errorMessage
+        self.entityProgress = entityProgress
+    }
+
+    public static func uploading(
+        entityType: String?,
+        completedCount: Int,
+        totalCount: Int,
+        batchIndex: Int,
+        batchCount: Int,
+        pendingCount: Int,
+        conflictCount: Int = 0,
+        entityProgress: [AccountSyncEntityProgress]
+    ) -> AccountSyncStatus {
+        AccountSyncStatus(
+            phase: .uploading,
+            entityType: entityType,
+            completedCount: completedCount,
+            totalCount: totalCount,
+            batchIndex: batchIndex,
+            batchCount: batchCount,
+            pendingCount: pendingCount,
+            conflictCount: conflictCount,
+            entityProgress: entityProgress
+        )
+    }
+
+    public static func completed(
+        uploadedCount: Int,
+        appliedCount: Int,
+        pendingCount: Int,
+        conflictCount: Int,
+        entityProgress: [AccountSyncEntityProgress]
+    ) -> AccountSyncStatus {
+        AccountSyncStatus(
+            phase: .completed,
+            completedCount: uploadedCount,
+            totalCount: uploadedCount + pendingCount,
+            appliedCount: appliedCount,
+            pendingCount: pendingCount,
+            conflictCount: conflictCount,
+            entityProgress: entityProgress
+        )
+    }
+
+    public var isActive: Bool {
+        phase == .preparing || phase == .uploading || phase == .downloading || phase == .applying
+    }
+
+    public var requiresAttention: Bool {
+        phase == .failed || conflictCount > 0
+    }
+
+    public var title: String {
+        switch phase {
+        case .idle: "Up to date"
+        case .preparing: "Preparing sync"
+        case .uploading:
+            if let entityType {
+                "Uploading \(AccountSyncEntityProgress(entityType: entityType, completedCount: 0, totalCount: 0).title.lowercased())"
+            } else {
+                "Uploading learning data"
+            }
+        case .downloading: "Downloading changes"
+        case .applying:
+            if let entityType {
+                "Applying \(AccountSyncEntityProgress(entityType: entityType, completedCount: 0, totalCount: 0).title.lowercased())"
+            } else {
+                "Applying downloaded changes"
+            }
+        case .completed where conflictCount > 0: "Sync conflicts need review"
+        case .completed where pendingCount > 0: "Sync has pending changes"
+        case .completed: "Up to date"
+        case .failed: "Sync needs attention"
+        }
+    }
+
+    public var detail: String {
+        var parts: [String] = []
+        switch phase {
+        case .preparing:
+            parts.append("Checking local changes")
+        case .uploading:
+            parts.append("\(completedCount) of \(totalCount) changes")
+            if let batchIndex, let batchCount {
+                parts.append("batch \(batchIndex) of \(batchCount)")
+            }
+        case .downloading:
+            if let batchIndex {
+                parts.append("page \(batchIndex)")
+            }
+            parts.append("\(completedCount) downloaded")
+        case .applying:
+            parts.append("\(completedCount) of \(totalCount) changes")
+        case .completed:
+            if completedCount > 0 { parts.append("\(completedCount) uploaded") }
+            if appliedCount > 0 { parts.append("\(appliedCount) applied") }
+        case .failed:
+            if let errorMessage, !errorMessage.isEmpty { parts.append(errorMessage) }
+        case .idle:
+            break
+        }
+        if conflictCount > 0 {
+            parts.append("\(conflictCount) conflict\(conflictCount == 1 ? "" : "s")")
+        }
+        if pendingCount > 0 {
+            parts.append("\(pendingCount) pending")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    public var accessibilityDescription: String {
+        let entityDetails = entityProgress
+            .filter { $0.totalCount > 0 }
+            .map { "\($0.title) \($0.completedCount) of \($0.totalCount)" }
+        return ([title, detail] + entityDetails)
+            .filter { !$0.isEmpty }
+            .joined(separator: ". ")
+    }
+}
+
 public enum SyncJSONValue: Codable, Equatable, Sendable {
     case string(String)
     case number(Double)

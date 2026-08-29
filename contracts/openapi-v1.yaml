@@ -1815,6 +1815,82 @@ paths:
         in: query
         required: true
         schema: *id018
+  /v1/admin/product-analytics:
+    get:
+      operationId: adminGetProductAnalytics
+      security:
+      - AdminBearer: []
+      summary: Get privacy-preserving product analytics
+      description: Aggregates pseudonymous product events. Geographic and learning dimensions use minimum-size buckets; raw IP, precise location, and reading text are never returned.
+      tags:
+      - Admin Operations
+      responses:
+        '200':
+          description: Product analytics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductAnalytics'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '409': *id005
+        '422': *id006
+        '429': *id007
+        '500': *id008
+      parameters:
+      - name: from
+        in: query
+        required: true
+        schema: *id018
+      - name: to
+        in: query
+        required: true
+        schema: *id018
+      - name: interval
+        in: query
+        required: false
+        schema:
+          type: string
+          enum: [hour, day, week]
+          default: day
+      - name: country
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: language
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: readerLevel
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: platform
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: contentCategory
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: feature
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: outcome
+        in: query
+        required: false
+        schema:
+          type: string
+          enum: [ok, failed, cancelled, started]
   /v1/admin/audit-events:
     get:
       operationId: adminListAuditEvents
@@ -4799,19 +4875,210 @@ components:
         usage:
           type: object
           additionalProperties: true
+    ProductAnalyticsDistributionItem:
+      type: object
+      additionalProperties: false
+      required: [key, count, share]
+      properties:
+        key:
+          type: string
+        count:
+          type: integer
+          minimum: 0
+        share:
+          type: number
+          minimum: 0
+          maximum: 1
+    ProductAnalyticsPoint:
+      type: object
+      additionalProperties: false
+      required: [start, events, activeUsers, failed]
+      properties:
+        start: *id018
+        events:
+          type: integer
+          minimum: 0
+        activeUsers:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+    ProductAnalyticsAnomaly:
+      type: object
+      additionalProperties: false
+      required: [kind, severity, observed, baseline, message]
+      properties:
+        kind:
+          type: string
+          enum: [failure_rate, volume_spike]
+        severity:
+          type: string
+          enum: [warning, critical]
+        observed:
+          type: number
+        baseline:
+          type: number
+        message:
+          type: string
+    ProductAnalytics:
+      type: object
+      additionalProperties: false
+      required: [from, to, interval, filters, summary, series, distributions, anomalies, privacy, sampled]
+      properties:
+        from: *id018
+        to: *id018
+        interval:
+          type: string
+          enum: [hour, day, week]
+        filters:
+          type: object
+          additionalProperties:
+            type: string
+        summary:
+          type: object
+          additionalProperties: false
+          required: [events, activeUsers, activeDevices, failed, cancelled, started, successRate]
+          properties:
+            events:
+              type: integer
+              minimum: 0
+            activeUsers:
+              type: integer
+              minimum: 0
+            activeDevices:
+              type: integer
+              minimum: 0
+            failed:
+              type: integer
+              minimum: 0
+            cancelled:
+              type: integer
+              minimum: 0
+            started:
+              type: integer
+              minimum: 0
+            successRate:
+              type: number
+              minimum: 0
+              maximum: 1
+        series:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProductAnalyticsPoint'
+        distributions:
+          type: object
+          additionalProperties: false
+          required: [country, region, sourceLanguage, targetLanguage, readerLevel, platform, appVersion, content, contentCategory, feature, outcome]
+          properties:
+            country: &id040
+              type: array
+              items:
+                $ref: '#/components/schemas/ProductAnalyticsDistributionItem'
+            region: *id040
+            sourceLanguage: *id040
+            targetLanguage: *id040
+            readerLevel: *id040
+            platform: *id040
+            appVersion: *id040
+            content: *id040
+            contentCategory: *id040
+            feature: *id040
+            outcome: *id040
+        anomalies:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProductAnalyticsAnomaly'
+        privacy:
+          type: object
+          additionalProperties: false
+          required: [minimumBucketSize, preciseLocationCollected, rawContentReturned, identifiersReturned, durableOwnershipKeysStored, profileDeletionCascadesEvents, completedDeletionRequestPurgesEvents, automaticRetentionDays]
+          properties:
+            minimumBucketSize:
+              type: integer
+              minimum: 1
+            preciseLocationCollected:
+              type: boolean
+              enum: [false]
+            rawContentReturned:
+              type: boolean
+              enum: [false]
+            identifiersReturned:
+              type: string
+              enum: [pseudonymous]
+            durableOwnershipKeysStored:
+              type: boolean
+              enum: [true]
+            profileDeletionCascadesEvents:
+              type: boolean
+              enum: [true]
+            completedDeletionRequestPurgesEvents:
+              type: boolean
+              enum: [false]
+            automaticRetentionDays:
+              oneOf:
+              - type: integer
+                minimum: 1
+              - type: 'null'
+        sampled:
+          type: boolean
+    ProductEventDimensions:
+      type: object
+      description: Privacy-reviewed analytics dimensions. The service derives geography and registered-device fields and rejects raw IP, precise location, titles, authors, and reading text.
+      additionalProperties: true
+      properties:
+        country:
+          type: string
+          pattern: '^[A-Z]{2}$'
+        region:
+          type: string
+        platform:
+          type: string
+          enum: [macos, ios, ipados]
+        appVersion:
+          type: string
+        buildNumber:
+          type: string
+        sourceLanguage:
+          type: string
+        targetLanguage:
+          type: string
+        readerLevel:
+          type: string
+          enum: [beginner, intermediate, advanced]
+        contentId:
+          type: string
+          description: Client content identifier. The Worker replaces it with a deterministic opaque reference before persistence and Operator output; never send a title or reading text.
+        chapterId:
+          type: string
+          description: Client chapter identifier. The Worker replaces it with a deterministic opaque reference before persistence and Operator output; never send a title or reading text.
+        contentCategory:
+          type: string
+        feature:
+          type: string
+        useFlow:
+          type: string
+        syncEntity:
+          type: string
+        syncPhase:
+          type: string
+        reviewRating:
+          type: string
     ProductEvent:
       type: object
       additionalProperties: false
       required:
       - id
-      - accountId
+      - subjectId
       - name
       - outcome
       - createdAt
       properties:
         id: *id009
-        accountId: *id009
-        deviceId:
+        subjectId:
+          type: string
+          description: Stable pseudonymous learner reference for operator correlation.
+        deviceSubjectId:
           type: string
         name:
           type: string
@@ -4825,8 +5092,7 @@ components:
         requestId:
           type: string
         properties:
-          type: object
-          additionalProperties: true
+          $ref: '#/components/schemas/ProductEventDimensions'
         createdAt: *id018
     ProductEventCreate:
       type: object
@@ -4845,8 +5111,7 @@ components:
           - started
         occurredAt: *id018
         properties:
-          type: object
-          additionalProperties: true
+          $ref: '#/components/schemas/ProductEventDimensions'
     ProductEventBatch:
       type: object
       additionalProperties: false

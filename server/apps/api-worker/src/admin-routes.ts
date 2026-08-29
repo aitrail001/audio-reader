@@ -23,6 +23,11 @@ import { buildOperatorDiagnostics } from "./diagnostics";
 import { listOperatorEvents, operatorEventFromAudit, recordOperatorEvent } from "./operator-events";
 import { captureProductEvent, toProductEvent } from "./product-events";
 import {
+  buildProductAnalytics,
+  type AnalyticsFilters,
+  type AnalyticsInterval,
+} from "./product-analytics";
+import {
   OperatorWrappingNotConfiguredError,
   type RuntimeConfigPut,
   type RuntimeConfigService,
@@ -37,6 +42,7 @@ type MetricsSnapshot = components["schemas"]["MetricsSnapshot"];
 type FeatureFlag = components["schemas"]["FeatureFlag"];
 type Quota = components["schemas"]["Quota"];
 type PrivacyRequest = components["schemas"]["PrivacyRequest"];
+type ProductAnalytics = components["schemas"]["ProductAnalytics"];
 
 const USER_ITEM = /^\/v1\/admin\/users\/([^/]+)$/;
 const USER_SUSPEND = /^\/v1\/admin\/users\/([^/]+)\/suspend$/;
@@ -70,6 +76,7 @@ export function isAdminPath(path: string): boolean {
     path === "/v1/admin/cache" ||
     path === "/v1/admin/jobs" ||
     path === "/v1/admin/metrics" ||
+    path === "/v1/admin/product-analytics" ||
     path === "/v1/admin/audit-events" ||
     path === "/v1/admin/runtime-config" ||
     path === "/v1/admin/diagnostics" ||
@@ -106,6 +113,7 @@ export function adminMethodError(
       path === "/v1/admin/cache" ||
       path === "/v1/admin/jobs" ||
       path === "/v1/admin/metrics" ||
+      path === "/v1/admin/product-analytics" ||
       path === "/v1/admin/audit-events" ||
       path === "/v1/admin/feature-flags" ||
       path === "/v1/admin/quotas" ||
@@ -360,6 +368,34 @@ export async function handleAdminRoute(context: AdminRouteContext): Promise<Resp
     };
     return asHead(context.request, jsonResponse(snapshot));
   }
+  if (path === "/v1/admin/product-analytics") {
+    const from = analyticsDate(url.searchParams.get("from"), Date.now() - 7 * 86_400_000);
+    const to = analyticsDate(url.searchParams.get("to"), Date.now());
+    if (from === null || to === null || from.getTime() >= to.getTime()) {
+      return fieldError(
+        context.requestId,
+        "from",
+        "from and to must be valid date-times and from must be before to.",
+      );
+    }
+    const intervalParam = url.searchParams.get("interval") ?? "day";
+    if (intervalParam !== "hour" && intervalParam !== "day" && intervalParam !== "week") {
+      return fieldError(context.requestId, "interval", "interval must be hour, day, or week.");
+    }
+    const filters = analyticsFilters(url);
+    const events = await ops.listProductEvents({
+      from: from.toISOString(),
+      to: to.toISOString(),
+      limit: 5000,
+    });
+    const analytics: ProductAnalytics = buildProductAnalytics(events, {
+      from: from.toISOString(),
+      to: to.toISOString(),
+      interval: intervalParam satisfies AnalyticsInterval,
+      filters,
+    });
+    return asHead(context.request, jsonResponse(analytics));
+  }
   if (path === "/v1/admin/audit-events") {
     const limit = parseLimit(url, context.requestId);
     if (limit instanceof Response) {
@@ -398,9 +434,10 @@ export async function handleAdminRoute(context: AdminRouteContext): Promise<Resp
       ...(to.trim() === "" ? {} : { to: to.trim() }),
       limit,
     });
+    const productEvents = await Promise.all(events.map(toProductEvent));
     return asHead(
       context.request,
-      jsonResponse(pageCursor(events.map(toProductEvent), url.searchParams.get("cursor"), limit)),
+      jsonResponse(pageCursor(productEvents, url.searchParams.get("cursor"), limit)),
     );
   }
   if (path === "/v1/admin/events") {
@@ -1423,4 +1460,36 @@ function toAudit(event: Awaited<ReturnType<OpsStore["listAudit"]>>[number]): Aud
     createdAt: event.createdAt,
     ...(event.traceId === null ? {} : { traceId: event.traceId }),
   };
+}
+
+function analyticsDate(value: string | null, fallback: number): Date | null {
+  if (value === null || value.trim() === "") return new Date(fallback);
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function analyticsFilters(url: URL): AnalyticsFilters {
+  const filters: AnalyticsFilters = {};
+  const values: Array<[keyof AnalyticsFilters, string]> = [
+    ["country", "country"],
+    ["language", "language"],
+    ["readerLevel", "readerLevel"],
+    ["platform", "platform"],
+    ["contentCategory", "contentCategory"],
+    ["feature", "feature"],
+  ];
+  for (const [key, queryKey] of values) {
+    const value = url.searchParams.get(queryKey)?.trim() ?? "";
+    if (value !== "") Object.assign(filters, { [key]: value });
+  }
+  const outcome = url.searchParams.get("outcome")?.trim() ?? "";
+  if (
+    outcome === "ok" ||
+    outcome === "failed" ||
+    outcome === "cancelled" ||
+    outcome === "started"
+  ) {
+    filters.outcome = outcome;
+  }
+  return filters;
 }

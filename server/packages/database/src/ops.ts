@@ -600,14 +600,14 @@ export function createMemoryOpsStore(
       const requestId = filter?.requestId?.trim() ?? "";
       const from = filter?.from?.trim() ?? "";
       const to = filter?.to?.trim() ?? "";
-      const limit = Math.min(Math.max(filter?.limit ?? 100, 1), 500);
+      const limit = Math.min(Math.max(filter?.limit ?? 100, 1), 5000);
       return Promise.resolve(
         productEvents
           .filter((event) => (accountId === "" ? true : event.accountId === accountId))
           .filter((event) => (name === "" ? true : productEventNameMatches(event.name, name)))
           .filter((event) => (requestId === "" ? true : event.requestId === requestId))
           .filter((event) => (from === "" ? true : event.createdAt >= from))
-          .filter((event) => (to === "" ? true : event.createdAt <= to))
+          .filter((event) => (to === "" ? true : event.createdAt < to))
           .slice(0, limit)
           .map((event) => ({ ...event, properties: { ...event.properties } })),
       );
@@ -1230,7 +1230,7 @@ export function createSupabaseOpsStore(
       const query: Record<string, string> = {
         select: "*",
         order: "created_at.desc",
-        limit: String(Math.min(Math.max(filter?.limit ?? 100, 1), 500)),
+        limit: String(Math.min(Math.max(filter?.limit ?? 100, 1), 5000)),
       };
       if ((filter?.accountId?.trim() ?? "") !== "") {
         query.user_id = `eq.${filter?.accountId?.trim() ?? ""}`;
@@ -1241,12 +1241,11 @@ export function createSupabaseOpsStore(
       if ((filter?.requestId?.trim() ?? "") !== "") {
         query.request_id = `eq.${filter?.requestId?.trim() ?? ""}`;
       }
-      if ((filter?.from?.trim() ?? "") !== "") {
-        query.created_at = `gte.${filter?.from?.trim() ?? ""}`;
-      }
-      if ((filter?.to?.trim() ?? "") !== "") {
-        query.created_at = `${query.created_at === undefined ? "" : `${query.created_at},`}lte.${filter?.to?.trim() ?? ""}`;
-      }
+      const from = filter?.from?.trim() ?? "";
+      const to = filter?.to?.trim() ?? "";
+      if (from !== "" && to !== "") query.and = `(created_at.gte.${from},created_at.lt.${to})`;
+      else if (from !== "") query.created_at = `gte.${from}`;
+      else if (to !== "") query.created_at = `lt.${to}`;
       const response = await rest.request({
         method: "GET",
         path: "/product_events",

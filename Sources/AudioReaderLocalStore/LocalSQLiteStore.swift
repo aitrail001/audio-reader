@@ -3,7 +3,7 @@ import Foundation
 import AudioReaderDomain
 #endif
 
-public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, SyncEntityVersionStoring, TranscriptOverlayRepository, ReaderProgressRepository, @unchecked Sendable {
+public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, SyncEntityVersionStoring, TranscriptOverlayRepository, ReaderProgressRepository, ReviewEventRepository, @unchecked Sendable {
     public let url: URL
     #if DEBUG
     var interruptAfterTable: String?
@@ -581,6 +581,23 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         ).map(Self.vocabulary(from:))
     }
 
+    /// Sync writes the vocabulary row and its lightweight relational parents in
+    /// one transaction so dependent progress and review events can be retried safely.
+    public func upsertVocabulary(_ vocabulary: StoredVocabularyOccurrence) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try ensureLearningParents(for: vocabulary, at: vocabulary.addedAt)
+            try insertVocabulary([vocabulary])
+            try connection.exec("COMMIT")
+        } catch {
+            try? connection.exec("ROLLBACK")
+            throw error
+        }
+    }
+
     public func loadKnownLemmas() throws -> [StoredKnownLemma] {
         lock.lock()
         defer { lock.unlock() }
@@ -626,6 +643,58 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
                 rating: try row.required("rating"),
                 reviewedAt: row.date("reviewed_at")
             )
+        }
+    }
+
+    public func containsReviewEvent(id: ReviewEventID) throws -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        return try reviewEventExistsUnlocked(id)
+    }
+
+    public func appendReviewEvent(_ event: StoredReviewEvent) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try insertReviewEvents([event], includeCard: false)
+    }
+
+    /// A review is one local transaction: ensure its lightweight relational
+    /// parents, update the shared card schedule, then append immutable history.
+    public func appendReviewEvent(
+        _ event: StoredReviewEvent,
+        vocabulary: StoredVocabularyOccurrence
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            if try reviewEventExistsUnlocked(event.id) {
+                try connection.exec("COMMIT")
+                return
+            }
+            try ensureLearningParents(for: vocabulary, at: event.reviewedAt)
+            try insertVocabulary([vocabulary])
+            try insertReviewCards([
+                StoredLocalReviewCard(
+                    id: "card:\(vocabulary.id.rawValue):\(event.face)",
+                    vocabularyID: vocabulary.id,
+                    face: event.face,
+                    reviewCount: vocabulary.reviewCount,
+                    nextReview: vocabulary.nextReview,
+                    lastReviewedAt: vocabulary.lastReviewedAt,
+                    lastReviewQuality: vocabulary.lastReviewQuality,
+                    reviewIntervalDays: vocabulary.reviewIntervalDays,
+                    reviewEaseFactor: vocabulary.reviewEaseFactor
+                )
+            ])
+            try insertReviewEvents([event], includeCard: true)
+            try connection.exec("COMMIT")
+        } catch {
+            try? connection.exec("ROLLBACK")
+            throw error
         }
     }
 
@@ -828,6 +897,34 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
               last_reviewed_at, last_review_quality, review_interval_days, review_ease_factor,
               is_in_learn_list, created_at, updated_at, server_version
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+            ON CONFLICT(id) DO UPDATE SET
+              surface=excluded.surface,
+              category=excluded.category,
+              definition=excluded.definition,
+              dictionary_name=excluded.dictionary_name,
+              dictionary_html=excluded.dictionary_html,
+              translation=excluded.translation,
+              translation_language=excluded.translation_language,
+              translation_model=excluded.translation_model,
+              source_language=excluded.source_language,
+              context=excluded.context,
+              spoken_text=excluded.spoken_text,
+              ebook_text=excluded.ebook_text,
+              book_id=excluded.book_id,
+              book_title=excluded.book_title,
+              chapter_id=excluded.chapter_id,
+              chapter_title=excluded.chapter_title,
+              segment_id=excluded.segment_id,
+              word_id=excluded.word_id,
+              timestamp=excluded.timestamp,
+              review_count=excluded.review_count,
+              next_review=excluded.next_review,
+              last_reviewed_at=excluded.last_reviewed_at,
+              last_review_quality=excluded.last_review_quality,
+              review_interval_days=excluded.review_interval_days,
+              review_ease_factor=excluded.review_ease_factor,
+              is_in_learn_list=excluded.is_in_learn_list,
+              updated_at=excluded.updated_at
             """
         for entry in entries {
             try connection.run(sql) { stmt in
@@ -887,6 +984,14 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
               last_review_quality, review_interval_days, review_ease_factor,
               created_at, updated_at, server_version
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,0)
+            ON CONFLICT(id) DO UPDATE SET
+              review_count=excluded.review_count,
+              next_review=excluded.next_review,
+              last_reviewed_at=excluded.last_reviewed_at,
+              last_review_quality=excluded.last_review_quality,
+              review_interval_days=excluded.review_interval_days,
+              review_ease_factor=excluded.review_ease_factor,
+              updated_at=excluded.updated_at
             """
         for card in cards {
             let timestamp = card.lastReviewedAt ?? card.nextReview ?? Date(timeIntervalSince1970: 0)
@@ -906,9 +1011,12 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         }
     }
 
-    private func insertReviewEvents(_ events: [StoredReviewEvent]) throws {
+    private func insertReviewEvents(
+        _ events: [StoredReviewEvent],
+        includeCard: Bool = true
+    ) throws {
         let sql = """
-            INSERT INTO local_review_events(
+            INSERT OR IGNORE INTO local_review_events(
               id, vocabulary_id, card_id, face, rating, reviewed_at, created_at, server_version
             ) VALUES (?,?,?,?,?,?,?,0)
             """
@@ -916,12 +1024,57 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
             try connection.run(sql) { stmt in
                 connection.bind(stmt, 1, event.id.rawValue)
                 connection.bind(stmt, 2, event.vocabularyID.rawValue)
-                connection.bind(stmt, 3, "card:\(event.vocabularyID.rawValue):\(event.face)")
+                connection.bind(stmt, 3, includeCard ? "card:\(event.vocabularyID.rawValue):\(event.face)" : nil)
                 connection.bind(stmt, 4, event.face)
                 connection.bind(stmt, 5, event.rating)
                 connection.bindDate(stmt, 6, event.reviewedAt)
                 connection.bindDate(stmt, 7, event.reviewedAt)
             }
+        }
+    }
+
+    private func reviewEventExistsUnlocked(_ id: ReviewEventID) throws -> Bool {
+        try !connection.query(
+            "SELECT id FROM local_review_events WHERE id = ? LIMIT 1"
+        ) { [connection] stmt in
+            connection.bind(stmt, 1, id.rawValue)
+        }.isEmpty
+    }
+
+    private func ensureLearningParents(
+        for vocabulary: StoredVocabularyOccurrence,
+        at date: Date
+    ) throws {
+        try connection.run(
+            """
+            INSERT INTO local_books(id, title, source, created_at, updated_at, server_version)
+            VALUES (?,?,?,?,?,0)
+            ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated_at=excluded.updated_at
+            """
+        ) { stmt in
+            connection.bind(stmt, 1, vocabulary.bookID.rawValue)
+            connection.bind(stmt, 2, vocabulary.bookTitle)
+            connection.bind(stmt, 3, "local_learning")
+            connection.bindDate(stmt, 4, vocabulary.addedAt)
+            connection.bindDate(stmt, 5, date)
+        }
+        try connection.run(
+            """
+            INSERT INTO local_chapters(
+              id, book_id, position, title, created_at, updated_at, server_version
+            ) VALUES (?,?,?,?,?,?,0)
+            ON CONFLICT(id) DO UPDATE SET
+              book_id=excluded.book_id,
+              title=excluded.title,
+              updated_at=excluded.updated_at
+            """
+        ) { stmt in
+            connection.bind(stmt, 1, vocabulary.chapterID.rawValue)
+            connection.bind(stmt, 2, vocabulary.bookID.rawValue)
+            connection.bind(stmt, 3, 0)
+            connection.bind(stmt, 4, vocabulary.chapterTitle)
+            connection.bindDate(stmt, 5, vocabulary.addedAt)
+            connection.bindDate(stmt, 6, date)
         }
     }
 

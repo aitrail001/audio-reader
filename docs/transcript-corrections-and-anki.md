@@ -59,14 +59,20 @@ directly. This workflow intentionally remains TSV-based rather than `.apkg`:
 1. Extract the ZIP.
 2. With Anki closed, copy its `.m4a` files into the temporary profile's flat
    `collection.media` folder. Do not create a media subfolder.
-3. Open Anki, choose **File → Import**, and select `notes.tsv`.
-4. Confirm tab separation and the field mapping shown by the column headers.
-   Keep **Allow HTML in fields** enabled so sound references are recognized.
-5. Import, open a card, and verify its field values and clip playback. Run
+3. In a fresh profile, create an `AudioReader` note type with these fields in
+   order: **Stable ID**, **Expression**, **Sentence**, **Gloss**, **Book**,
+   **Author**, **Chapter**, **Timestamp**, and **Audio**. The tenth TSV column
+   is imported as Anki tags by the file's `#tags column:10` directive; it is
+   not a separate note field. Add `{{Audio}}` to the card template so the clip
+   is available during review.
+4. Open Anki, choose **File → Import**, and select `notes.tsv`.
+5. Select the `AudioReader` note type. Confirm tab separation and that columns
+   1–9 map to the matching note fields while column 10 maps to **Tags**. Keep
+   **Allow HTML in fields** enabled so sound references are recognized.
+6. Import, open a card, and verify its field values and clip playback. Run
    **Tools → Check Media** before using the deck outside the temporary profile.
 
 These steps follow the official Anki guidance for
 [text imports](https://docs.ankiweb.net/importing/text-files.html) and
 [media storage](https://docs.ankiweb.net/media.html). AudioReader does not
 install an add-on, use AnkiConnect, or modify an existing Anki profile.
-

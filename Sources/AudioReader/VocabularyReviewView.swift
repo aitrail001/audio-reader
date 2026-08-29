@@ -59,7 +59,7 @@ struct VocabularyReviewView: View {
                 HStack {
                     Text("Card \(currentIndex + 1) of \(entryIDs.count)")
                     Spacer()
-                    Text("\(prompt(for: entry).title) · \(entry.category.title)")
+                    Text("\(learningStage(for: entry)) · \(prompt(for: entry).title) · \(entry.category.title)")
                 }
                 .font(.caption.weight(.medium))
                 .foregroundStyle(Palette.dim)
@@ -267,16 +267,26 @@ struct VocabularyReviewView: View {
 
     private var completionDescription: String {
         let count = "You reviewed \(reviewedCount) \(reviewedCount == 1 ? "card" : "cards")."
+        let snapshot = VocabularyLearningAnalytics.snapshot(
+            entries: state.vocab,
+            events: state.vocabReviewEvents,
+            at: Date()
+        )
+        let progress = "Today: \(snapshot.todayReviewCount). Streak: \(snapshot.streakDays) \(snapshot.streakDays == 1 ? "day" : "days")."
         let sessionIDs = Set(entryIDs)
         let sessionEntries = state.vocab.filter { sessionIDs.contains($0.id) }
         guard let next = VocabReviewScheduler.nextReviewDate(in: sessionEntries, after: Date()) else {
-            return count
+            return "\(count) \(progress)"
         }
-        return "\(count) Next round: \(next.formatted(date: .abbreviated, time: .shortened))."
+        return "\(count) \(progress) Next round: \(next.formatted(date: .abbreviated, time: .shortened))."
     }
 
     private func grade(_ entry: VocabEntry, quality: VocabReviewQuality) {
-        state.reviewVocabulary(entry.id, quality: quality)
+        guard state.reviewVocabulary(
+            entry.id,
+            quality: quality,
+            face: prompt(for: entry)
+        ) else { return }
         reviewedCount += 1
         currentIndex += 1
         isRevealed = false
@@ -286,6 +296,14 @@ struct VocabularyReviewView: View {
 
     private func prompt(for entry: VocabEntry) -> VocabReviewPrompt {
         VocabReversePrompt.effectivePrompt(for: entry, requested: state.vocabReviewPrompt)
+    }
+
+    private func learningStage(for entry: VocabEntry) -> String {
+        switch VocabularyLearningStage.resolve(entry) {
+        case .new: "New"
+        case .learning: "Learning"
+        case .review: "Review"
+        }
     }
 
     private func highlightedSentence(_ entry: VocabEntry) -> Text {

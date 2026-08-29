@@ -291,9 +291,15 @@ macOS and iPad share four destinations: Library, Player, Words, Settings (`AppTa
 
 **Reader.** Split keeps ~62% for text and ~38% for lookup, lookup floor 220 pt, preferred text 320 pt, absolute text 200 pt. iPad splitter hit target is 44 pt; macOS splitter is 8 pt visual.
 
+**Words and learning.** The page begins with one opaque `panel` learning ledger, not a dashboard wall. A compact horizontally scrollable summary reports due, new, learning, today, study-day streak, and 30-day retention with hairline separators. The primary terracotta action starts due learning cards, due mature reviews, then at most 20 new cards. Seven-day due forecast and per-book progress use `panel2` insets. Calendar, not flame, represents study continuity; there are no points, leagues, or celebratory motion. Review advancement is visible only after schedule and immutable history persist together.
+
+**Sync status.** Account status names the active phase and entity instead of showing a generic spinner. It may add batch/item progress and pending, applied, or conflict counts, but never cycles rapidly through decorative messages. The same shared status view and VoiceOver summary appear on macOS and iPadOS. Completed and failed states retain the last meaningful entity so the reader knows what converged or needs retrying.
+
 **Rhythm.** Recurring padding is 6 (label-to-control), 8, 10, 12, 16, 24. Interactive rows and Account buttons use a 44 pt minimum height. Reader playback chrome is denser on iPad (16 / 4 / 6) than on Mac (24 / 14 / 14).
 
 **Operator console.** Shell is a top bar plus a 16rem grouped rail and a fluid stage. The rail groups Desk; People (Users, Access, Privacy); AI (Policies, Cache); Delivery (Jobs, Flags, Quotas); and Observe (Metrics, Activity, Trace, Audit). Every destination is at least 44 px and persists in the URL with its filters. The Desk opens on incidents, with configuration secondary. Each destination owns independent loading, stale-data, retry, filter, and cursor state. At compact widths the rail becomes a bounded 44 px destination selector so the stage remains primary. A contextual mutation bar is blank by default, requires five characters, summarizes before/after, and clears after success.
+
+**Operator Metrics.** Metrics is an evidence page, not the default landing page. It uses a single summary ledger, a restrained accessible trend line, an anomaly watch, and tabular distributions for coarse geography, language, reader level, platform/version, opaque content, feature, and outcome. Filters persist in the URL. Charts always have labelled table-equivalent values and never rely on color alone. Copy states that identifiers are pseudonymous, cohorts below the privacy threshold are grouped, and precise location and reading text are not collected.
 
 ### Named Rules
 **The First-Class Settings Rule.** Settings is a sidebar/tab destination equal to Library and Words. Do not present it as a modal over the reader.

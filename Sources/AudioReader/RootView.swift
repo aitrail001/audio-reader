@@ -160,10 +160,7 @@ struct RootView: View {
 
     private var syncStatus: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(syncStatusTitle, systemImage: syncStatusSymbol)
-                .font(.callout)
-                .foregroundStyle(state.account.errorMessage == nil ? Palette.dim : Palette.terracotta)
-                .accessibilityIdentifier("sync.status")
+            AccountSyncStatusView(session: state.account, compact: true)
             Button {
                 Task { await state.account.synchronize() }
             } label: {
@@ -173,21 +170,6 @@ struct RootView: View {
             .accessibilityIdentifier("sync.now")
         }
         .padding(.vertical, 4)
-    }
-
-    private var syncStatusTitle: String {
-        if state.account.errorMessage != nil { return "Sync needs attention" }
-        if let activity = state.account.activityMessage, !activity.isEmpty { return activity }
-        switch state.account.mode {
-        case .local: return "Local only"
-        case .signedInSyncOff: return "Sync off"
-        case .signedInSyncOn: return "Up to date"
-        }
-    }
-
-    private var syncStatusSymbol: String {
-        if state.account.errorMessage != nil { return "exclamationmark.icloud" }
-        return state.account.mode.isSyncEnabled ? "checkmark.icloud" : "icloud.slash"
     }
 
     private var libraryRoot: URL {

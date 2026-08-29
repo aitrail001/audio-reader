@@ -4,7 +4,7 @@ compatibility_date = "2026-08-26"
 
 [vars]
 ENVIRONMENT = "local"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 CORS_ALLOWED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 MAX_BODY_BYTES = "1048576"
 LOCAL_DEV_OTP = "123456"
@@ -24,7 +24,7 @@ workers_dev = true
 
 [env.staging.vars]
 ENVIRONMENT = "staging"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 CORS_ALLOWED_ORIGINS = "https://audio-reader-admin.pages.dev,https://feature-cross-device-multi-u.audio-reader-admin.pages.dev"
 ADMIN_ORIGIN = "https://audio-reader-admin.pages.dev"
 MAX_BODY_BYTES = "1048576"
@@ -42,7 +42,7 @@ workers_dev = true
 
 [env.production.vars]
 ENVIRONMENT = "production"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 CORS_ALLOWED_ORIGINS = "https://audio-reader-admin.pages.dev"
 ADMIN_ORIGIN = "https://audio-reader-admin.pages.dev"
 MAX_BODY_BYTES = "1048576"

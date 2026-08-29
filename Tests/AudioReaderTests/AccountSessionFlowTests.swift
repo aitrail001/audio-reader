@@ -140,6 +140,9 @@ struct AccountSessionFlowTests {
         #expect(view.contains("AccountExportDocument"))
         #expect(view.contains(".accessibilityLabel(\"Delete AudioReader account\")"))
         #expect(view.contains(".accessibilityLabel(\"Sync learning data across devices\")"))
+        #expect(view.contains("AccountSyncStatusView(session: session)"))
+        #expect(view.contains(".accessibilityLabel(\"Sync status\")"))
+        #expect(view.contains(".accessibilityValue(session.syncStatusAccessibilityDescription)"))
         #expect(view.contains(".accessibilityLabel(\"Account session recovery\")"))
         #expect(view.contains(".accessibilityLabel(\"Account connection issue\")"))
         #expect(!view.contains(".foregroundStyle(.red)"))
@@ -161,6 +164,8 @@ struct AccountSessionFlowTests {
 
         #expect(macRoot.contains("SettingsView(state: state)"))
         #expect(iPadRoot.contains("SettingsView(state: state)"))
+        #expect(macRoot.contains("AccountSyncStatusView(session: state.account, compact: true)"))
+        #expect(iPadRoot.contains("AccountSyncStatusView(session: state.account, compact: true)"))
         #expect(macRoot.contains("WorkStatusBanner("))
         #expect(iPadRoot.contains("WorkStatusBanner("))
         #expect(!iPadRoot.contains("if state.isScanning, let progress = state.libraryScanProgress"))
@@ -356,8 +361,11 @@ struct AccountSessionFlowTests {
                     timestamp: 1,
                     addedAt: Date(timeIntervalSince1970: 1_777_000_000),
                     reviewCount: 2,
+                    nextReview: Date(timeIntervalSince1970: 1_777_086_400),
                     lastReviewedAt: Date(timeIntervalSince1970: 1_777_000_100),
                     lastReviewQuality: .remember,
+                    reviewIntervalDays: 12,
+                    reviewEaseFactor: 2.8,
                     isInLearnList: true
                 )
             ],
@@ -425,7 +433,15 @@ struct AccountSessionFlowTests {
         #expect(overlayPayload["localChapterId"]?.stringValue == chapterID)
         #expect(overlayPayload["overlayJSON"]?.stringValue?.contains("Corrected") == true)
         #expect(mutations.contains(where: { $0.entityType == .reviewEvent }))
-        #expect(mutations.contains(where: { $0.entityType == .progress && $0.entityID == vocabID }))
+        let vocabularyProgress = try #require(mutations.first(where: {
+            $0.entityType == .progress && $0.entityID == vocabID
+        }))
+        let vocabularyProgressPayload = try JSONDecoder().decode(
+            [String: SyncJSONValue].self,
+            from: vocabularyProgress.payload
+        )
+        #expect(vocabularyProgressPayload["reviewIntervalDays"]?.numberValue == 12)
+        #expect(vocabularyProgressPayload["reviewEaseFactor"]?.numberValue == 2.8)
         let readerProgress = try #require(mutations.first(where: {
             guard $0.entityType == .progress,
                   let payload = try? JSONDecoder().decode([String: SyncJSONValue].self, from: $0.payload)
@@ -435,6 +451,143 @@ struct AccountSessionFlowTests {
         let progressPayload = try JSONDecoder().decode([String: SyncJSONValue].self, from: readerProgress.payload)
         #expect(progressPayload["relativeSeconds"]?.numberValue == 12.875)
         #expect(progressPayload["localChapterId"]?.stringValue == chapterID)
+    }
+
+    @Test("Pulled vocabulary, SRS progress, and review history share durable parents")
+    func pulledLearningStateRoundTripsThroughLocalStore() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-learning-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LocalSQLiteStore(fileURL: url)
+        let vocabularyID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let vocabulary = SyncPulledChange(
+            sequence: 1,
+            entityType: OutboxEntityType.vocabulary.rawValue,
+            entityId: vocabularyID,
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T02:00:00Z",
+            payload: [
+                "bookId": .string("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+                "chapterId": .string("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+                "bookTitle": .string("Moby-Dick"),
+                "chapterTitle": .string("Loomings"),
+                "surface": .string("ice"),
+                "category": .string("word"),
+                "context": .string("The ice closed over."),
+                "timestampSeconds": .number(3),
+                "state": .string("learning")
+            ]
+        )
+        let progress = SyncPulledChange(
+            sequence: 2,
+            entityType: OutboxEntityType.progress.rawValue,
+            entityId: vocabularyID,
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 2,
+            changedAt: "2026-08-30T02:10:00Z",
+            payload: [
+                "vocabularyId": .string(vocabularyID),
+                "reviewCount": .number(4),
+                "nextReview": .string("2026-09-11T02:10:00Z"),
+                "lastReviewedAt": .string("2026-08-30T02:10:00Z"),
+                "lastReviewQuality": .string(VocabReviewQuality.remember.rawValue),
+                "reviewIntervalDays": .number(12),
+                "reviewEaseFactor": .number(2.8)
+            ]
+        )
+        let review = SyncPulledChange(
+            sequence: 3,
+            entityType: OutboxEntityType.reviewEvent.rawValue,
+            entityId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            operation: OutboxOperation.append.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T02:10:00Z",
+            payload: [
+                "vocabularyId": .string(vocabularyID),
+                "face": .string("recognition"),
+                "rating": .string(VocabReviewQuality.remember.rawValue),
+                "reviewedAt": .string("2026-08-30T02:10:00Z")
+            ]
+        )
+
+        _ = try AccountSyncApplicator.applyLearning(vocabulary, to: store)
+        _ = try AccountSyncApplicator.applyLearning(progress, to: store)
+        _ = try AccountSyncApplicator.applyLearning(review, to: store)
+
+        var stored = try #require(try store.loadVocabulary().first)
+        #expect(stored.reviewCount == 4)
+        #expect(stored.reviewIntervalDays == 12)
+        #expect(stored.reviewEaseFactor == 2.8)
+        #expect(try store.loadReviewEvents().map(\.id.rawValue) == [review.entityId])
+
+        var newerProgress = progress
+        newerProgress.sequence = 4
+        newerProgress.payload["lastReviewedAt"] = .string("2026-08-31T02:10:00Z")
+        _ = try AccountSyncApplicator.applyLearning(newerProgress, to: store)
+        _ = try AccountSyncApplicator.applyLearning(review, to: store)
+
+        stored = try #require(try store.loadVocabulary().first)
+        #expect(stored.lastReviewedAt == ISO8601DateFormatter().date(from: "2026-08-31T02:10:00Z"))
+        #expect(try store.loadReviewEvents().count == 1)
+    }
+
+    @Test("A review without its durable vocabulary parent remains retriable")
+    func pulledReviewRequiresDurableVocabularyParent() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-review-parent-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LocalSQLiteStore(fileURL: url)
+        let review = SyncPulledChange(
+            sequence: 1,
+            entityType: OutboxEntityType.reviewEvent.rawValue,
+            entityId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            operation: OutboxOperation.append.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T02:10:00Z",
+            payload: [
+                "vocabularyId": .string("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                "face": .string("recognition"),
+                "rating": .string(VocabReviewQuality.remember.rawValue),
+                "reviewedAt": .string("2026-08-30T02:10:00Z")
+            ]
+        )
+
+        #expect(throws: (any Error).self) {
+            _ = try AccountSyncApplicator.applyLearning(review, to: store)
+        }
+        #expect(try store.loadReviewEvents().isEmpty)
+    }
+
+    @Test("Pulled review events append immutable history for cross-device learning statistics")
+    func pulledReviewAppendsHistory() throws {
+        let repository = InMemoryReviewEventRepository()
+        let change = SyncPulledChange(
+            sequence: 8,
+            entityType: OutboxEntityType.reviewEvent.rawValue,
+            entityId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            operation: OutboxOperation.append.rawValue,
+            revision: 2,
+            changedAt: "2026-08-30T02:15:00Z",
+            payload: [
+                "vocabularyId": .string("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                "face": .string("recognition"),
+                "rating": .string(VocabReviewQuality.remember.rawValue),
+                "reviewedAt": .string("2026-08-30T02:14:30Z")
+            ]
+        )
+
+        try AccountSyncApplicator.appendReviewHistory(change, to: repository)
+        try AccountSyncApplicator.appendReviewHistory(change, to: repository)
+
+        let events = try repository.loadReviewEvents()
+        let event = try #require(events.first)
+        #expect(events.count == 1)
+        #expect(event.id.rawValue == change.entityId)
+        #expect(event.vocabularyID.rawValue == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        #expect(event.face == "recognition")
+        #expect(event.rating == VocabReviewQuality.remember.rawValue)
+        #expect(event.reviewedAt == ISO8601DateFormatter().date(from: "2026-08-30T02:14:30Z"))
     }
 
     @Test("Vocabulary sync carries local sentence and translation provenance additively")

@@ -10,7 +10,7 @@ AudioReader is designed for focused listening and reading rather than passive au
 - compare the narration with the published text in a companion EPUB;
 - look up unfamiliar words and save them with their original sentence, book, chapter, and timestamp;
 - mark words known, see coverage for the current chapter, underline unknown or learning words across the chapter, shadow a sentence, and take a local chapter quiz;
-- review vocabulary as recognition, cloze, or reverse cards, still using the original narration;
+- study vocabulary in a due-first daily queue as recognition, cloze, or reverse cards, still using the original narration, with a bounded new-card load, review history, retention, due forecast, and per-book progress;
 - replay or loop a sentence and return to saved vocabulary in context;
 - translate words, sentences, or chapters and ask questions about the current chapter through an optional LLM provider, including on-device Apple Intelligence. Managed Qwen (account) checks a shared exact-content cache first, auto-loads sentence translations and chapter summaries when a hit exists, and translates chapter-aligned sentence blocks so neighbors are cached together.
 
@@ -141,16 +141,32 @@ for conflict, translation-staleness, and word-timing limitations.
 
 ### Sync and resume
 
-When account sync is enabled, the sidebar and Settings show pending, current,
-failed, or conflicting state. **Sync now** retries immediately. **Continue**
-returns to the exact synchronized chapter and playback offset. Concurrent
-progress or transcript corrections require an explicit choice instead of being
-silently overwritten. Audio and EPUB files stay local; another device may need
-the same local media for playback. See [Sync and account export](docs/sync-and-account-export.md).
+When account sync is enabled, the sidebar and Settings identify the current
+phase and entity—for example preparing changes, uploading vocabulary, applying
+review history, or resolving progress—along with batch, item, pending, and
+conflict counts where available. Completed and failed states retain enough
+detail to understand what finished or needs retrying. **Sync now** retries
+immediately. **Continue** returns to the exact synchronized chapter and
+playback offset. Concurrent progress or transcript corrections require an
+explicit choice instead of being silently overwritten. Audio and EPUB files
+stay local; another device may need the same local media for playback. See
+[Sync and account export](docs/sync-and-account-export.md).
+
+### Learn in AudioReader
+
+**Words** is a complete local-first learning loop rather than an Anki launcher.
+Its primary action starts due learning cards, then due mature reviews, then up
+to 20 new cards per day. Grades update the card schedule and append immutable
+review history atomically, so a failed save never advances the visible session.
+The learning dashboard reports today's reviews, study-day streak, 30-day
+retention, a seven-day due forecast, and progress by book. Review schedules and
+history synchronize with the rest of learning data when account sync is on;
+the same workflow remains available offline without an account.
 
 ### Export to Anki
 
-In **Words**, select entries and choose **Export to Anki**, or use the current
+Anki is an optional alternative and interoperability path. In **Words**, select
+entries and choose **Export to Anki**, or use the current
 filtered view, Learning List, or All Vocabulary scope. AudioReader creates a
 ZIP with `notes.tsv`, `manifest.json`, and deduplicated flat M4A clips. Missing
 or protected media produces text-only cards and an omission report instead of

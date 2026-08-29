@@ -83,6 +83,28 @@ struct NativeRedesignContractTests {
         #expect(vocabulary.contains("minHeight: 44"))
     }
 
+    @Test("Review sessions advance only after durable grading")
+    func durableReviewAdvancement() throws {
+        let appState = try source("Sources/AudioReader/AppState.swift")
+        let review = try source("Sources/AudioReader/VocabularyReviewView.swift")
+
+        #expect(appState.contains("@discardableResult\n    func reviewVocabulary("))
+        #expect(appState.contains(") -> Bool"))
+        #expect(review.contains("guard state.reviewVocabulary("))
+        #expect(review.contains("else { return }"))
+        #expect(review.contains("reviewedCount += 1"))
+    }
+
+    @Test("Learning dashboard stays on the opaque paper stack and uses a quiet streak symbol")
+    func learningDashboardVisualGrounds() throws {
+        let dashboard = try source("Sources/AudioReader/VocabularyLearningDashboard.swift")
+
+        #expect(dashboard.contains(#"symbol: "calendar""#))
+        #expect(!dashboard.contains(#"symbol: "flame""#))
+        #expect(dashboard.contains(".background(Palette.panel)"))
+        #expect(!dashboard.contains(".background(Palette.panel.opacity"))
+    }
+
     @Test("iPad destinations and import actions meet touch and automation contracts")
     func iPadTouchContracts() throws {
         let root = try source("Sources/AudioReader/IPadRootView.swift")
@@ -94,7 +116,7 @@ struct NativeRedesignContractTests {
         #expect(root.contains("sidebar.settings"))
         #expect(root.contains("library.importPaired"))
         #expect(root.contains("library.importDevice."))
-        #expect(root.contains("iPadSyncSymbol"))
+        #expect(root.contains("AccountSyncStatusView(session: state.account, compact: true)"))
         #expect(root.contains("minHeight: 44"))
         #expect(vocabulary.contains("words.category."))
         #expect(vocabulary.contains("pendingAnkiReport"))

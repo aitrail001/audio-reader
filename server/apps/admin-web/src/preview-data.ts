@@ -10,6 +10,7 @@ import type {
   OperatorEvent,
   Policy,
   PrivacyRequest,
+  ProductAnalytics,
   ProductEvent,
   Quota,
   RuntimeConfig,
@@ -279,6 +280,90 @@ export const PREVIEW_METRICS: MetricsSnapshot = {
   storage: { bytes: 50_389_000 },
 };
 
+export const PREVIEW_ANALYTICS: ProductAnalytics = {
+  from: "2026-08-22T00:00:00.000Z",
+  to: "2026-08-29T00:00:00.000Z",
+  interval: "day",
+  filters: {},
+  summary: {
+    events: 426,
+    activeUsers: 48,
+    activeDevices: 61,
+    failed: 18,
+    cancelled: 0,
+    started: 0,
+    successRate: 0.958,
+  },
+  series: [
+    { start: "2026-08-22T00:00:00.000Z", events: 43, activeUsers: 17, failed: 1 },
+    { start: "2026-08-23T00:00:00.000Z", events: 52, activeUsers: 21, failed: 2 },
+    { start: "2026-08-24T00:00:00.000Z", events: 47, activeUsers: 19, failed: 1 },
+    { start: "2026-08-25T00:00:00.000Z", events: 61, activeUsers: 24, failed: 2 },
+    { start: "2026-08-26T00:00:00.000Z", events: 64, activeUsers: 25, failed: 3 },
+    { start: "2026-08-27T00:00:00.000Z", events: 72, activeUsers: 29, failed: 3 },
+    { start: "2026-08-28T00:00:00.000Z", events: 87, activeUsers: 34, failed: 6 },
+  ],
+  distributions: {
+    country: [
+      { key: "AU", count: 231, share: 0.542 },
+      { key: "NZ", count: 76, share: 0.178 },
+      { key: "US", count: 64, share: 0.15 },
+      { key: "Other", count: 55, share: 0.129 },
+    ],
+    region: [{ key: "Other", count: 426, share: 1 }],
+    sourceLanguage: [{ key: "en-US", count: 426, share: 1 }],
+    targetLanguage: [
+      { key: "zh-Hans", count: 242, share: 0.568 },
+      { key: "ja", count: 112, share: 0.263 },
+      { key: "Other", count: 72, share: 0.169 },
+    ],
+    readerLevel: [
+      { key: "intermediate", count: 246, share: 0.577 },
+      { key: "beginner", count: 118, share: 0.277 },
+      { key: "advanced", count: 62, share: 0.146 },
+    ],
+    platform: [
+      { key: "macos", count: 264, share: 0.62 },
+      { key: "ipados", count: 162, share: 0.38 },
+    ],
+    appVersion: [{ key: "1.3.0", count: 426, share: 1 }],
+    content: [{ key: "Other", count: 426, share: 1 }],
+    contentCategory: [
+      { key: "fiction", count: 287, share: 0.674 },
+      { key: "nonfiction", count: 139, share: 0.326 },
+    ],
+    feature: [
+      { key: "reader", count: 183, share: 0.43 },
+      { key: "review", count: 149, share: 0.35 },
+      { key: "sync", count: 94, share: 0.22 },
+    ],
+    outcome: [
+      { key: "ok", count: 408, share: 0.958 },
+      { key: "failed", count: 18, share: 0.042 },
+    ],
+  },
+  anomalies: [
+    {
+      kind: "volume_spike",
+      severity: "warning",
+      observed: 87,
+      baseline: 56.5,
+      message: "Latest event volume is 87; the earlier-bucket average is 56.5.",
+    },
+  ],
+  privacy: {
+    minimumBucketSize: 3,
+    preciseLocationCollected: false,
+    rawContentReturned: false,
+    identifiersReturned: "pseudonymous",
+    durableOwnershipKeysStored: true,
+    profileDeletionCascadesEvents: true,
+    completedDeletionRequestPurgesEvents: false,
+    automaticRetentionDays: null,
+  },
+  sampled: false,
+};
+
 export const PREVIEW_FLAGS: FeatureFlag[] = [
   { key: "managed_qwen", enabled: true, rolloutPercent: 100 },
   { key: "account_sync", enabled: true, rolloutPercent: 100 },
@@ -342,8 +427,8 @@ export const PREVIEW_EVENTS: OperatorEvent[] = [
 export const PREVIEW_USAGE: ProductEvent[] = [
   {
     id: "00000000-0000-4000-8000-000000000091",
-    accountId: "00000000-0000-4000-8000-000000000002",
-    deviceId: "00000000-0000-4000-8000-000000000021",
+    subjectId: "learner-c482a7e1",
+    deviceSubjectId: "device-4d6f93b2",
     name: "account.signed_in",
     outcome: "ok",
     createdAt: "2026-08-28T12:02:00.000Z",
@@ -351,8 +436,8 @@ export const PREVIEW_USAGE: ProductEvent[] = [
   },
   {
     id: "00000000-0000-4000-8000-000000000092",
-    accountId: "00000000-0000-4000-8000-000000000002",
-    deviceId: "00000000-0000-4000-8000-000000000021",
+    subjectId: "learner-c482a7e1",
+    deviceSubjectId: "device-4d6f93b2",
     name: "ai.translation.succeeded",
     outcome: "ok",
     createdAt: "2026-08-28T12:01:00.000Z",
@@ -360,8 +445,8 @@ export const PREVIEW_USAGE: ProductEvent[] = [
   },
   {
     id: "00000000-0000-4000-8000-000000000093",
-    accountId: "00000000-0000-4000-8000-000000000002",
-    deviceId: "00000000-0000-4000-8000-000000000021",
+    subjectId: "learner-c482a7e1",
+    deviceSubjectId: "device-4d6f93b2",
     name: "ai.translation.cached",
     outcome: "ok",
     createdAt: "2026-08-28T12:01:02.000Z",
@@ -369,8 +454,8 @@ export const PREVIEW_USAGE: ProductEvent[] = [
   },
   {
     id: "00000000-0000-4000-8000-000000000094",
-    accountId: "00000000-0000-4000-8000-000000000002",
-    deviceId: "00000000-0000-4000-8000-000000000021",
+    subjectId: "learner-c482a7e1",
+    deviceSubjectId: "device-4d6f93b2",
     name: "reading.chapter_opened",
     outcome: "ok",
     createdAt: "2026-08-28T12:00:40.000Z",
@@ -378,7 +463,7 @@ export const PREVIEW_USAGE: ProductEvent[] = [
   },
   {
     id: "00000000-0000-4000-8000-000000000095",
-    accountId: "00000000-0000-4000-8000-000000000002",
+    subjectId: "learner-c482a7e1",
     name: "ai.summary.cache_hit",
     outcome: "ok",
     createdAt: "2026-08-28T11:58:00.000Z",
@@ -387,6 +472,7 @@ export const PREVIEW_USAGE: ProductEvent[] = [
 ];
 
 export const PREVIEW_DIAGNOSTICS: OperatorDiagnostics = {
+  requestId: "req-preview-diagnostics",
   runtime: PREVIEW_RUNTIME,
   flags: PREVIEW_FLAGS,
   quotas: PREVIEW_QUOTAS,

@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import SwiftUI
 #if os(macOS)
 import AppKit
@@ -10,6 +11,11 @@ import AudioReaderNetworking
 @MainActor
 @Observable
 final class AppState {
+    private static let reviewLog = Logger(
+        subsystem: "com.johnsonzhang.AudioReader",
+        category: "vocabulary-review"
+    )
+
     var settings: AppSettings
     var books: [Book] = []
     var selectedBookID: String?
@@ -30,6 +36,7 @@ final class AppState {
     var vocab: [VocabEntry] = [] {
         didSet { refreshStudyIndex() }
     }
+    private(set) var vocabReviewEvents: [StoredReviewEvent] = []
     var knownLemmas: [KnownLemmaRecord] = [] {
         didSet { refreshStudyIndex() }
     }
@@ -113,6 +120,7 @@ final class AppState {
     @ObservationIgnored private var credentialMigrationSession = LegacyCredentialMigrationSession()
     @ObservationIgnored private let vocabularyRepository: any VocabularyRepository
     @ObservationIgnored private let knownLemmaRepository: any KnownLemmaRepository
+    @ObservationIgnored private let reviewEventRepository: any ReviewEventRepository
     @ObservationIgnored private let usesLivePersistence: Bool
     @ObservationIgnored private var lastPersistedReaderSeconds: TimeInterval?
     @ObservationIgnored private var inMemoryTranscriptOverlays: [StoredTranscriptOverlay] = []
@@ -816,6 +824,7 @@ final class AppState {
     init(composition: AppComposition = .live, account: AccountSession? = nil) {
         vocabularyRepository = composition.vocabulary
         knownLemmaRepository = composition.knownLemmas
+        reviewEventRepository = composition.reviewEvents
         usesLivePersistence = composition.usesLivePersistence
         if let account {
             self.account = account
@@ -849,6 +858,7 @@ final class AppState {
             return copy
         }
         knownLemmas = ((try? knownLemmaRepository.loadKnownLemmas()) ?? []).map(KnownLemmaRecord.init)
+        vocabReviewEvents = (try? reviewEventRepository.loadReviewEvents()) ?? []
         appleIntelligenceAvailability = AppleIntelligenceAvailability.current()
         if usesLivePersistence {
             studyActivityLog = Persistence.loadStudyActivityLog()
@@ -886,7 +896,16 @@ final class AppState {
         }
         await accountRestore
         if account.mode.isSignedIn {
-            account.recordUsage(name: "app.ready", properties: ["bookCount": "\(books.count)"])
+            account.recordUsage(
+                name: "app.ready",
+                properties: [
+                    "feature": "app",
+                    "bookCount": "\(books.count)",
+                    "readerLevel": settings.readerLanguageLevel,
+                    "sourceLanguage": settings.transcriptionLanguage,
+                    "targetLanguage": settings.targetLanguage
+                ]
+            )
         }
         if llmProvider == .openAI, openAIAuthentication == .chatGPT {
             Task { await self.refreshCodexLoginStatus() }
@@ -1495,14 +1514,59 @@ final class AppState {
         persistVocabularyUpdates([vocab[index]])
     }
 
+    /// Returns true only after the local card schedule and additive history are
+    /// committed together; review UIs must keep the current card on failure.
+    @discardableResult
     func reviewVocabulary(
         _ entryID: String,
         quality: VocabReviewQuality,
+        face: VocabReviewPrompt? = nil,
         at date: Date = Date()
-    ) {
-        guard let index = vocab.firstIndex(where: { $0.id == entryID }) else { return }
-        vocab[index] = VocabReviewScheduler.applying(quality, to: vocab[index], at: date)
-        persistVocabularyUpdates([vocab[index]])
+    ) -> Bool {
+        guard let index = vocab.firstIndex(where: { $0.id == entryID }) else { return false }
+        let reviewed = VocabReviewScheduler.applying(quality, to: vocab[index], at: date)
+        let displayedFace = face ?? vocabReviewPrompt
+        let event = StoredReviewEvent(
+            id: ReviewEventID.generate(),
+            vocabularyID: VocabularyOccurrenceID(rawValue: reviewed.id),
+            face: displayedFace.rawValue,
+            rating: quality.rawValue,
+            reviewedAt: date
+        )
+        Self.reviewLog.info(
+            "review_save_start message=review_save_start requestId=\(event.id.rawValue, privacy: .public) component=vocabulary-review outcome=started resource=\(reviewed.id, privacy: .private(mask: .hash))"
+        )
+        do {
+            try reviewEventRepository.appendReviewEvent(
+                event,
+                vocabulary: StoredVocabularyOccurrence(reviewed)
+            )
+            vocab[index] = reviewed
+            persistVocabularyUpdates([reviewed])
+            vocabReviewEvents.append(event)
+            account.recordUsage(
+                name: "review.completed",
+                properties: [
+                    "feature": "review",
+                    "rating": quality.rawValue,
+                    "face": displayedFace.rawValue,
+                    "readerLevel": settings.readerLanguageLevel,
+                    "sourceLanguage": reviewed.sourceLanguage ?? settings.transcriptionLanguage,
+                    "targetLanguage": settings.targetLanguage,
+                    "contentId": AccountSyncApplicator.syncEntityID(reviewed.bookID, kind: "book")
+                ]
+            )
+            Self.reviewLog.info(
+                "review_save_finish message=review_save_finish requestId=\(event.id.rawValue, privacy: .public) component=vocabulary-review outcome=saved"
+            )
+            return true
+        } catch {
+            Self.reviewLog.error(
+                "review_save_finish message=review_save_finish requestId=\(event.id.rawValue, privacy: .public) component=vocabulary-review outcome=failed error=\(String(describing: error), privacy: .private(mask: .hash))"
+            )
+            errorMessage = "The review could not be saved. This card is still due."
+            return false
+        }
     }
 
     func canPlayVocabSentence(_ entry: VocabEntry) -> Bool {
@@ -1654,6 +1718,7 @@ final class AppState {
             return copy
         }
         knownLemmas = ((try? knownLemmaRepository.loadKnownLemmas()) ?? []).map(KnownLemmaRecord.init)
+        vocabReviewEvents = (try? reviewEventRepository.loadReviewEvents()) ?? []
         selectedDictionaryName = settings.preferredDictionary
         player.rate = Float(settings.playbackRate)
         refreshStudyIndex()

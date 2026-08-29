@@ -118,6 +118,44 @@ struct SyncClientTests {
 
 @Suite("Account session sync")
 struct AccountSessionSyncTests {
+    @Test("sync status describes granular entity, batch, pending, and conflict progress")
+    func syncStatusDescriptions() {
+        let uploading = AccountSyncStatus.uploading(
+            entityType: OutboxEntityType.book.rawValue,
+            completedCount: 2,
+            totalCount: 5,
+            batchIndex: 1,
+            batchCount: 3,
+            pendingCount: 3,
+            entityProgress: [
+                AccountSyncEntityProgress(
+                    entityType: OutboxEntityType.book.rawValue,
+                    completedCount: 2,
+                    totalCount: 5
+                )
+            ]
+        )
+
+        #expect(uploading.phase == .uploading)
+        #expect(uploading.title == "Uploading books")
+        #expect(uploading.detail.contains("2 of 5 changes"))
+        #expect(uploading.detail.contains("batch 1 of 3"))
+        #expect(uploading.detail.contains("3 pending"))
+        #expect(uploading.accessibilityDescription.contains("Uploading books"))
+
+        let conflicted = AccountSyncStatus.completed(
+            uploadedCount: 4,
+            appliedCount: 2,
+            pendingCount: 1,
+            conflictCount: 1,
+            entityProgress: uploading.entityProgress
+        )
+        #expect(conflicted.title == "Sync conflicts need review")
+        #expect(conflicted.detail.contains("1 conflict"))
+        #expect(conflicted.detail.contains("1 pending"))
+        #expect(conflicted.requiresAttention)
+    }
+
     @MainActor
     @Test("push batches stay below the sync request allowance even with large transcripts")
     func pushBatchesRespectEncodedByteLimit() throws {
@@ -202,6 +240,17 @@ struct AccountSessionSyncTests {
         #expect(try outbox.pendingMutations().isEmpty)
         #expect(applied.value.first?.payload["targetLanguage"]?.stringValue == "ja")
         #expect(try cursor.loadCursor() == sync.pullCursor)
+        #expect(session.syncStatus.phase == .completed)
+        #expect(session.syncStatus.completedCount == 1)
+        #expect(session.syncStatus.appliedCount == 1)
+        #expect(session.syncStatus.pendingCount == 0)
+        #expect(session.syncStatus.entityProgress.first?.entityType == OutboxEntityType.settings.rawValue)
+        #expect(session.syncStatus.entityProgress.first?.completedCount == 1)
+        await Task.yield()
+        let usage = client.recordedUsage.last { $0.name == "sync.completed" }
+        #expect(usage?.properties["uploadedCount"] == "1")
+        #expect(usage?.properties["appliedCount"] == "1")
+        #expect(usage?.properties["pendingCount"] == "0")
     }
 
     @MainActor
@@ -242,6 +291,53 @@ struct AccountSessionSyncTests {
         #expect(pending[0].id != originalID)
         #expect(pending[0].baseRevision.rawValue == 4)
         #expect(String(data: pending[0].payload, encoding: .utf8) == "{\"targetLanguage\":\"zh\"}")
+        #expect(session.syncStatus.phase == .completed)
+        #expect(session.syncStatus.conflictCount == 1)
+        #expect(session.syncStatus.pendingCount == 1)
+        #expect(session.syncStatus.requiresAttention)
+    }
+
+    @MainActor
+    @Test("sync failure keeps pending work visible with the error")
+    func synchronizePublishesFailureAndPendingCount() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let outbox = InMemorySyncOutboxRepository()
+        try outbox.enqueue(
+            OutboxMutation(
+                id: MutationID(rawValue: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"),
+                entityType: .vocabulary,
+                entityID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                operation: .upsert,
+                baseRevision: .zero,
+                occurredAt: Date(timeIntervalSince1970: 1_777_000_000),
+                payload: Data("{\"surface\":\"ice\"}".utf8)
+            )
+        )
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: FailingSyncClient(),
+                outbox: outbox,
+                cursor: InMemorySyncCursorStore()
+            )
+        )
+        await session.requestEmailCode("failure@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+        await session.synchronize()
+
+        #expect(session.syncStatus.phase == .failed)
+        #expect(session.syncStatus.pendingCount == 1)
+        #expect(session.syncStatus.errorMessage == "The sync service is unavailable.")
+        await Task.yield()
+        let usage = client.recordedUsage.last { $0.name == "sync.failed" }
+        #expect(usage?.outcome == "failed")
+        #expect(usage?.properties["pendingCount"] == "1")
+        #expect(session.syncStatus.requiresAttention)
     }
 
     @MainActor
@@ -356,6 +452,119 @@ struct AccountSessionSyncTests {
     }
 
     @MainActor
+    @Test("a failed local apply does not advance entity version or pull cursor")
+    func synchronizeDoesNotAcknowledgeFailedApply() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        sync.pullCursor = "1"
+        sync.pullChanges = [
+            SyncPulledChange(
+                sequence: 1,
+                entityType: OutboxEntityType.vocabulary.rawValue,
+                entityId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                operation: OutboxOperation.upsert.rawValue,
+                revision: 1,
+                changedAt: "2026-08-30T00:00:00Z",
+                payload: ["surface": .string("ice")]
+            )
+        ]
+        let cursor = InMemorySyncCursorStore()
+        let versions = InMemorySyncEntityVersionStore()
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: InMemorySyncOutboxRepository(),
+                cursor: cursor,
+                versions: versions,
+                applyChange: { _ in throw TestSyncError.localApplyFailed }
+            )
+        )
+        await session.requestEmailCode("apply-failure@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        #expect(session.syncStatus.phase == .failed)
+        #expect(try cursor.loadCursor() == "0")
+        #expect(try versions.loadVersion(
+            entityType: OutboxEntityType.vocabulary.rawValue,
+            entityID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        ) == nil)
+    }
+
+    @MainActor
+    @Test("pull page cap remains an attention state while the server has more")
+    func synchronizeDoesNotCompleteAtPullPageCap() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        sync.pullPages = (1...64).map { page in
+            SyncPullResponse(changes: [], cursor: "\(page)", hasMore: true)
+        }
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: InMemorySyncOutboxRepository(),
+                cursor: InMemorySyncCursorStore()
+            )
+        )
+        await session.requestEmailCode("page-cap@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        #expect(sync.pulledCursors.count == 64)
+        #expect(session.syncStatus.phase == .failed)
+        #expect(session.syncStatus.requiresAttention)
+        #expect(session.syncStatus.errorMessage?.contains("More sync changes remain") == true)
+    }
+
+    @MainActor
+    @Test("concurrent synchronize callers share one in-flight drain")
+    func synchronizeIsSingleFlight() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = SuspendedSyncClient()
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: InMemorySyncOutboxRepository(),
+                cursor: InMemorySyncCursorStore()
+            )
+        )
+        await session.requestEmailCode("single-flight@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        let first = Task { await session.synchronize() }
+        await sync.waitUntilPullStarts()
+        let second = Task { await session.synchronize() }
+        await Task.yield()
+
+        #expect(await sync.pullCount == 1)
+        await sync.releasePull()
+        await first.value
+        await second.value
+        #expect(await sync.pullCount == 1)
+        #expect(session.syncStatus.phase == .completed)
+    }
+
+    @MainActor
     @Test("unchanged snapshot payloads are not pushed again")
     func synchronizeSkipsUnchangedSnapshotRows() async throws {
         let client = FakeAuthClient()
@@ -398,6 +607,62 @@ struct AccountSessionSyncTests {
         #expect(sync.pushed.count == 1)
         #expect(try outbox.pendingMutations().isEmpty)
         #expect(try versions.loadVersion(entityType: "settings", entityID: "00000000-0000-4000-8000-00000000000a")?.serverVersion == 1)
+    }
+}
+
+private struct FailingSyncClient: SyncClient {
+    func push(accessToken: String, deviceID: String, request: SyncPushRequest) async throws -> SyncPushResponse {
+        throw TestSyncError.unavailable
+    }
+
+    func pull(accessToken: String, deviceID: String, cursor: String, limit: Int) async throws -> SyncPullResponse {
+        throw TestSyncError.unavailable
+    }
+}
+
+private enum TestSyncError: LocalizedError {
+    case unavailable
+    case localApplyFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable: "The sync service is unavailable."
+        case .localApplyFailed: "The local sync change could not be saved."
+        }
+    }
+}
+
+private actor SuspendedSyncClient: SyncClient {
+    private(set) var pullCount = 0
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func push(accessToken: String, deviceID: String, request: SyncPushRequest) async throws -> SyncPushResponse {
+        SyncPushResponse(batchId: request.batchId, results: [], cursor: "0")
+    }
+
+    func pull(accessToken: String, deviceID: String, cursor: String, limit: Int) async throws -> SyncPullResponse {
+        pullCount += 1
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+        return SyncPullResponse(changes: [], cursor: cursor, hasMore: false)
+    }
+
+    func waitUntilPullStarts() async {
+        guard pullCount == 0 else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func releasePull() {
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
     }
 }
 

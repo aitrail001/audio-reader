@@ -64,11 +64,23 @@ struct VocabularyView: View {
         VocabReviewScheduler.dueEntries(in: filtered, at: Date())
     }
 
+    private var learningSnapshot: VocabularyLearningSnapshot {
+        VocabularyLearningAnalytics.snapshot(
+            entries: state.vocab,
+            events: state.vocabReviewEvents,
+            at: Date()
+        )
+    }
+
     var body: some View {
         VStack(spacing: 0) {
 #if os(macOS)
             header
 #endif
+            VocabularyLearningDashboard(
+                snapshot: learningSnapshot,
+                onStartSession: startLearningSession
+            )
             filters
             if filtered.isEmpty {
                 empty
@@ -257,6 +269,12 @@ struct VocabularyView: View {
     private func startDueReview() {
         guard !dueEntries.isEmpty else { return }
         reviewRequest = VocabularyReviewRequest(entryIDs: dueEntries.map(\.id))
+    }
+
+    private func startLearningSession() {
+        let entries = learningSnapshot.queue.session
+        guard !entries.isEmpty else { return }
+        reviewRequest = VocabularyReviewRequest(entryIDs: entries.map(\.id))
     }
 
     private var ankiExportMenu: some View {

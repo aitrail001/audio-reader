@@ -116,6 +116,56 @@ export type MetricsSnapshot = {
   usage?: { events?: number; failed?: number; [key: string]: unknown };
 };
 
+export type AnalyticsDistributionItem = { key: string; count: number; share: number };
+
+export type ProductAnalytics = {
+  from: string;
+  to: string;
+  interval: "hour" | "day" | "week";
+  filters: Record<string, string>;
+  summary: {
+    events: number;
+    activeUsers: number;
+    activeDevices: number;
+    failed: number;
+    cancelled: number;
+    started: number;
+    successRate: number;
+  };
+  series: Array<{ start: string; events: number; activeUsers: number; failed: number }>;
+  distributions: {
+    country: AnalyticsDistributionItem[];
+    region: AnalyticsDistributionItem[];
+    sourceLanguage: AnalyticsDistributionItem[];
+    targetLanguage: AnalyticsDistributionItem[];
+    readerLevel: AnalyticsDistributionItem[];
+    platform: AnalyticsDistributionItem[];
+    appVersion: AnalyticsDistributionItem[];
+    content: AnalyticsDistributionItem[];
+    contentCategory: AnalyticsDistributionItem[];
+    feature: AnalyticsDistributionItem[];
+    outcome: AnalyticsDistributionItem[];
+  };
+  anomalies: Array<{
+    kind: "failure_rate" | "volume_spike";
+    severity: "warning" | "critical";
+    observed: number;
+    baseline: number;
+    message: string;
+  }>;
+  privacy: {
+    minimumBucketSize: number;
+    preciseLocationCollected: false;
+    rawContentReturned: false;
+    identifiersReturned: "pseudonymous";
+    durableOwnershipKeysStored: true;
+    profileDeletionCascadesEvents: true;
+    completedDeletionRequestPurgesEvents: false;
+    automaticRetentionDays: null;
+  };
+  sampled: boolean;
+};
+
 export type RuntimeConfig = {
   qwen: {
     apiKeyConfigured: boolean;
@@ -265,8 +315,8 @@ export type PolicyDraft = {
 
 export type ProductEvent = {
   id: string;
-  accountId: string;
-  deviceId?: string;
+  subjectId: string;
+  deviceSubjectId?: string;
   name: string;
   outcome: string;
   requestId?: string;

@@ -39,6 +39,7 @@ import {
 import { OperatorTable } from "./operator-table";
 import {
   PREVIEW_AUDIT,
+  PREVIEW_ANALYTICS,
   PREVIEW_BLOCKED,
   PREVIEW_CACHE,
   PREVIEW_DIAGNOSTICS,
@@ -64,6 +65,7 @@ import type {
   HealthPayload,
   Job,
   MetricsSnapshot,
+  ProductAnalytics,
   OperatorDiagnostics,
   OperatorEvent,
   Policy,
@@ -248,6 +250,7 @@ export function App() {
     initialLocation.current.filters.cacheFingerprint ?? "",
   );
   const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null);
+  const [analytics, setAnalytics] = useState<ProductAnalytics | null>(null);
   const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [auditActor, setAuditActor] = useState(initialLocation.current.filters.auditActor ?? "");
   const [auditAction, setAuditAction] = useState(initialLocation.current.filters.auditAction ?? "");
@@ -299,10 +302,34 @@ export function App() {
     usage: string | null;
     privacy: string | null;
   }>({ users: null, jobs: null, cache: null, audit: null, usage: null, privacy: null });
-  const [metricsFrom, setMetricsFrom] = useState(() =>
-    new Date(Date.now() - 86_400_000).toISOString().slice(0, 16),
+  const [metricsFrom, setMetricsFrom] = useState(
+    () =>
+      initialLocation.current.filters.metricsFrom ??
+      (preview ? "2026-08-22T10:00" : new Date(Date.now() - 86_400_000).toISOString().slice(0, 16)),
   );
-  const [metricsTo, setMetricsTo] = useState(() => new Date().toISOString().slice(0, 16));
+  const [metricsTo, setMetricsTo] = useState(
+    () =>
+      initialLocation.current.filters.metricsTo ??
+      (preview ? "2026-08-29T10:00" : new Date().toISOString().slice(0, 16)),
+  );
+  const [metricsCountry, setMetricsCountry] = useState(
+    initialLocation.current.filters.metricsCountry ?? "",
+  );
+  const [metricsLanguage, setMetricsLanguage] = useState(
+    initialLocation.current.filters.metricsLanguage ?? "",
+  );
+  const [metricsReaderLevel, setMetricsReaderLevel] = useState(
+    initialLocation.current.filters.metricsReaderLevel ?? "",
+  );
+  const [metricsPlatform, setMetricsPlatform] = useState(
+    initialLocation.current.filters.metricsPlatform ?? "",
+  );
+  const [metricsFeature, setMetricsFeature] = useState(
+    initialLocation.current.filters.metricsFeature ?? "",
+  );
+  const [metricsContentCategory, setMetricsContentCategory] = useState(
+    initialLocation.current.filters.metricsContentCategory ?? "",
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -346,6 +373,14 @@ export function App() {
       usageAccountId,
       usageRequestId,
       privacyStatus,
+      metricsCountry,
+      metricsFrom,
+      metricsTo,
+      metricsLanguage,
+      metricsReaderLevel,
+      metricsPlatform,
+      metricsFeature,
+      metricsContentCategory,
     };
     const query = destinationQuery(section, filters).toString();
     window.history.replaceState({}, document.title, `${window.location.pathname}?${query}`);
@@ -360,6 +395,14 @@ export function App() {
     eventRequestId,
     eventTask,
     jobStatus,
+    metricsContentCategory,
+    metricsCountry,
+    metricsFrom,
+    metricsTo,
+    metricsFeature,
+    metricsLanguage,
+    metricsPlatform,
+    metricsReaderLevel,
     section,
     usageAccountId,
     usageName,
@@ -427,6 +470,7 @@ export function App() {
         setCache(PREVIEW_CACHE);
         applyRuntime(PREVIEW_RUNTIME);
         setMetrics(PREVIEW_METRICS);
+        setAnalytics(PREVIEW_ANALYTICS);
         setAudit(PREVIEW_AUDIT);
         setBlocked(PREVIEW_BLOCKED);
         setFlags(PREVIEW_FLAGS);
@@ -500,6 +544,18 @@ export function App() {
         }
         const privacyQuery = new URLSearchParams();
         if (privacyStatus !== "") privacyQuery.set("status", privacyStatus);
+        const analyticsQuery = new URLSearchParams({ from, to, interval: "day" });
+        const analyticsFilters: Array<[string, string]> = [
+          ["country", metricsCountry],
+          ["language", metricsLanguage],
+          ["readerLevel", metricsReaderLevel],
+          ["platform", metricsPlatform],
+          ["feature", metricsFeature],
+          ["contentCategory", metricsContentCategory],
+        ];
+        for (const [key, value] of analyticsFilters) {
+          if (value.trim() !== "") analyticsQuery.set(key, value.trim());
+        }
         setPanelErrors({});
         const independent = async <T,>(
           panel: Section,
@@ -529,6 +585,7 @@ export function App() {
           cachePayload,
           runtimePayload,
           metricsPayload,
+          analyticsPayload,
           auditPayload,
           blockedPayload,
           flagsPayload,
@@ -569,6 +626,14 @@ export function App() {
               access,
             ),
             metrics,
+          ),
+          independent(
+            "metrics",
+            getJson<ProductAnalytics>(
+              `/v1/admin/product-analytics?${analyticsQuery.toString()}`,
+              access,
+            ),
+            analytics,
           ),
           independent(
             "audit",
@@ -616,6 +681,7 @@ export function App() {
         setCache(pageItems<CacheEntry>(cachePayload));
         if (runtimePayload !== null) applyRuntime(runtimePayload);
         setMetrics(metricsPayload);
+        setAnalytics(analyticsPayload);
         setAudit(pageItems<AuditEvent>(auditPayload));
         setBlocked(pageItems<BlockedAttempt>(blockedPayload));
         const nextFlags = Array.isArray(flagsPayload) ? flagsPayload : [];
@@ -656,6 +722,7 @@ export function App() {
       }
     },
     [
+      analytics,
       auditAction,
       auditActor,
       auditRequestId,
@@ -670,7 +737,14 @@ export function App() {
       usageName,
       usageRequestId,
       metricsFrom,
+      metrics,
       metricsTo,
+      metricsContentCategory,
+      metricsCountry,
+      metricsFeature,
+      metricsLanguage,
+      metricsPlatform,
+      metricsReaderLevel,
       preview,
       privacyStatus,
       token,
@@ -1388,11 +1462,24 @@ export function App() {
           {section === "metrics" ? (
             <MetricsPanel
               metrics={metrics}
+              analytics={analytics}
               from={metricsFrom}
               to={metricsTo}
               busy={busy}
+              country={metricsCountry}
+              language={metricsLanguage}
+              readerLevel={metricsReaderLevel}
+              platform={metricsPlatform}
+              feature={metricsFeature}
+              contentCategory={metricsContentCategory}
               onFrom={setMetricsFrom}
               onTo={setMetricsTo}
+              onCountry={setMetricsCountry}
+              onLanguage={setMetricsLanguage}
+              onReaderLevel={setMetricsReaderLevel}
+              onPlatform={setMetricsPlatform}
+              onFeature={setMetricsFeature}
+              onContentCategory={setMetricsContentCategory}
               onApply={() => {
                 void loadAdmin();
               }}
@@ -3340,24 +3427,16 @@ function UsagePanel(props: {
           },
           {
             id: "account",
-            header: "Account",
-            sortValue: (event) => event.accountId,
-            searchValue: (event) => event.accountId,
-            render: (event) => (
-              <span className="mono" title={event.accountId}>
-                {shortId(event.accountId)}
-              </span>
-            ),
+            header: "Subject",
+            sortValue: (event) => event.subjectId,
+            searchValue: (event) => event.subjectId,
+            render: (event) => <span className="mono">{event.subjectId}</span>,
           },
           {
             id: "device",
             header: "Device",
-            sortValue: (event) => event.deviceId ?? "",
-            render: (event) => (
-              <span className="mono" title={event.deviceId}>
-                {event.deviceId ? shortId(event.deviceId) : "—"}
-              </span>
-            ),
+            sortValue: (event) => event.deviceSubjectId ?? "",
+            render: (event) => <span className="mono">{event.deviceSubjectId ?? "—"}</span>,
           },
           {
             id: "detail",
@@ -3377,10 +3456,10 @@ function UsagePanel(props: {
               <dd className="mono">{event.id}</dd>
               <dt>Request id</dt>
               <dd className="mono">{event.requestId ?? "—"}</dd>
-              <dt>Account</dt>
-              <dd className="mono">{event.accountId}</dd>
+              <dt>Subject</dt>
+              <dd className="mono">{event.subjectId}</dd>
               <dt>Device</dt>
-              <dd className="mono">{event.deviceId ?? "—"}</dd>
+              <dd className="mono">{event.deviceSubjectId ?? "—"}</dd>
             </dl>
             <figure className="prose-field">
               <figcaption>Properties</figcaption>
@@ -3402,11 +3481,24 @@ function UsagePanel(props: {
 
 function MetricsPanel(props: {
   metrics: MetricsSnapshot | null;
+  analytics: ProductAnalytics | null;
   from: string;
   to: string;
   busy: boolean;
+  country: string;
+  language: string;
+  readerLevel: string;
+  platform: string;
+  feature: string;
+  contentCategory: string;
   onFrom: (value: string) => void;
   onTo: (value: string) => void;
+  onCountry: (value: string) => void;
+  onLanguage: (value: string) => void;
+  onReaderLevel: (value: string) => void;
+  onPlatform: (value: string) => void;
+  onFeature: (value: string) => void;
+  onContentCategory: (value: string) => void;
   onApply: () => void;
 }) {
   const rows =
@@ -3430,10 +3522,11 @@ function MetricsPanel(props: {
     <>
       <h2>Metrics</h2>
       <p className="lede">
-        Live totals plus Qwen success/fail counts from this Worker isolate for the selected window.
-        Search Trace by request id for the matching rows.
+        Product behavior, learning patterns, and service health for the selected window. Counts use
+        pseudonymous users and devices. New events reject precise location and reading text;
+        ownership keys remain until an explicit purge or physical profile deletion.
       </p>
-      <div className="toolbar">
+      <div className="toolbar analytics-filters" aria-label="Analytics filters">
         <label>
           From
           <input
@@ -3454,18 +3547,186 @@ function MetricsPanel(props: {
             }}
           />
         </label>
+        <label>
+          Country
+          <input
+            value={props.country}
+            placeholder="AU"
+            inputMode="text"
+            onChange={(event) => {
+              props.onCountry(event.target.value);
+            }}
+          />
+        </label>
+        <label>
+          Language
+          <input
+            value={props.language}
+            placeholder="en-US or zh-Hans"
+            onChange={(event) => {
+              props.onLanguage(event.target.value);
+            }}
+          />
+        </label>
+        <label>
+          Reader level
+          <select
+            value={props.readerLevel}
+            onChange={(event) => {
+              props.onReaderLevel(event.target.value);
+            }}
+          >
+            <option value="">All levels</option>
+            <option value="beginner">Beginner</option>
+            <option value="intermediate">Intermediate</option>
+            <option value="advanced">Advanced</option>
+          </select>
+        </label>
+        <label>
+          Platform
+          <select
+            value={props.platform}
+            onChange={(event) => {
+              props.onPlatform(event.target.value);
+            }}
+          >
+            <option value="">All platforms</option>
+            <option value="macos">macOS</option>
+            <option value="ipados">iPadOS</option>
+            <option value="ios">iOS</option>
+          </select>
+        </label>
+        <label>
+          Feature
+          <input
+            value={props.feature}
+            placeholder="reader, review, sync"
+            onChange={(event) => {
+              props.onFeature(event.target.value);
+            }}
+          />
+        </label>
+        <label>
+          Content category
+          <input
+            value={props.contentCategory}
+            placeholder="fiction"
+            onChange={(event) => {
+              props.onContentCategory(event.target.value);
+            }}
+          />
+        </label>
         <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
           Apply
         </button>
       </div>
-      {props.metrics === null ? (
-        <p className="empty">No snapshot yet.</p>
+      {props.analytics === null ? (
+        <p className="empty">
+          No product analytics yet. Activity appears after opted-in signed-in clients send events.
+        </p>
       ) : (
-        <section className="ledger">
-          <h3>
-            {formatWhen(props.metrics.from)} – {formatWhen(props.metrics.to)}
-          </h3>
+        <>
+          <section className="analytics-summary" aria-label="Analytics summary">
+            <div>
+              <span>Events</span>
+              <strong>{props.analytics.summary.events}</strong>
+            </div>
+            <div>
+              <span>Active learners</span>
+              <strong>{props.analytics.summary.activeUsers}</strong>
+            </div>
+            <div>
+              <span>Active devices</span>
+              <strong>{props.analytics.summary.activeDevices}</strong>
+            </div>
+            <div>
+              <span>Successful outcomes</span>
+              <strong>{Math.round(props.analytics.summary.successRate * 100)}%</strong>
+            </div>
+          </section>
+          <section className="trend-panel" aria-labelledby="learning-trends-title">
+            <div className="section-heading">
+              <div>
+                <h3 id="learning-trends-title">Learning and reading trends</h3>
+                <p>
+                  {formatWhen(props.analytics.from)} – {formatWhen(props.analytics.to)} ·{" "}
+                  {props.analytics.interval} buckets
+                </p>
+              </div>
+              {props.analytics.sampled ? <span className="pill warn">Sampled</span> : null}
+            </div>
+            <AnalyticsTrend analytics={props.analytics} />
+          </section>
+          <section className="anomaly-watch" aria-label="Anomaly watch">
+            <h3>Anomaly watch</h3>
+            {props.analytics.anomalies.length === 0 ? (
+              <p className="empty">
+                No simple volume or failure-rate anomaly crossed its threshold.
+              </p>
+            ) : (
+              <ul>
+                {props.analytics.anomalies.map((item) => (
+                  <li key={item.kind}>
+                    <span className={`pill ${item.severity === "critical" ? "bad" : "warn"}`}>
+                      {item.severity}
+                    </span>
+                    <span>{item.message}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+          <div className="distribution-grid">
+            <DistributionTable
+              title="Country distribution"
+              items={props.analytics.distributions.country}
+              unit="Learners"
+            />
+            <DistributionTable
+              title="Target language distribution"
+              items={props.analytics.distributions.targetLanguage}
+              unit="Learners"
+            />
+            <DistributionTable
+              title="Reader level distribution"
+              items={props.analytics.distributions.readerLevel}
+              unit="Learners"
+            />
+            <DistributionTable
+              title="Platform distribution"
+              items={props.analytics.distributions.platform}
+              unit="Devices"
+            />
+            <DistributionTable
+              title="Feature distribution"
+              items={props.analytics.distributions.feature}
+              unit="Events"
+            />
+            <DistributionTable
+              title="Content category distribution"
+              items={props.analytics.distributions.contentCategory}
+              unit="Learners"
+            />
+            <DistributionTable
+              title="Top content distribution"
+              items={props.analytics.distributions.content}
+              unit="Learners"
+            />
+          </div>
+          <p className="privacy-note">
+            Small geographic and learning cohorts are grouped into Other at fewer than{" "}
+            {props.analytics.privacy.minimumBucketSize} learners. Content is shown only as
+            categories or pseudonymous identifiers.
+          </p>
+        </>
+      )}
+      {props.metrics !== null ? (
+        <details className="ledger operational-ledger">
+          <summary>Operational totals</summary>
           <table className="service-table">
+            <caption>
+              {formatWhen(props.metrics.from)} – {formatWhen(props.metrics.to)}
+            </caption>
             <thead>
               <tr>
                 <th>Measure</th>
@@ -3481,9 +3742,74 @@ function MetricsPanel(props: {
               ))}
             </tbody>
           </table>
-        </section>
-      )}
+        </details>
+      ) : null}
     </>
+  );
+}
+
+function AnalyticsTrend({ analytics }: { analytics: ProductAnalytics }) {
+  const width = 760;
+  const height = 180;
+  const inset = 24;
+  const max = Math.max(1, ...analytics.series.map((point) => point.events));
+  const step =
+    analytics.series.length <= 1 ? 0 : (width - inset * 2) / (analytics.series.length - 1);
+  const points = analytics.series.map((point, index) => ({
+    ...point,
+    x: inset + index * step,
+    y: height - inset - (point.events / max) * (height - inset * 2),
+  }));
+  return (
+    <svg
+      className="analytics-chart"
+      viewBox={`0 0 ${String(width)} ${String(height)}`}
+      role="img"
+      aria-label={`Event trend with ${String(analytics.summary.events)} events across ${String(analytics.series.length)} ${analytics.interval} buckets`}
+      tabIndex={0}
+    >
+      <line x1={inset} y1={height - inset} x2={width - inset} y2={height - inset} />
+      <polyline points={points.map((point) => `${String(point.x)},${String(point.y)}`).join(" ")} />
+      {points.map((point) => (
+        <circle key={point.start} cx={point.x} cy={point.y} r="4">
+          <title>{`${formatWhen(point.start)}: ${String(point.events)} events, ${String(point.activeUsers)} active learners, ${String(point.failed)} failed`}</title>
+        </circle>
+      ))}
+    </svg>
+  );
+}
+
+function DistributionTable(props: {
+  title: string;
+  items: ProductAnalytics["distributions"]["country"];
+  unit: "Learners" | "Devices" | "Events";
+}) {
+  return (
+    <section className="distribution-panel">
+      <h3>{props.title}</h3>
+      {props.items.length === 0 ? (
+        <p className="empty">No data for this filter.</p>
+      ) : (
+        <table className="distribution-table" aria-label={props.title}>
+          <thead>
+            <tr>
+              <th>Group</th>
+              <th>{props.unit}</th>
+              <th>Share</th>
+            </tr>
+          </thead>
+          <tbody>
+            {props.items.slice(0, 8).map((item) => (
+              <tr key={item.key}>
+                <td>{item.key}</td>
+                <td>{item.count}</td>
+                <td>{Math.round(item.share * 100)}%</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
   );
 }
 

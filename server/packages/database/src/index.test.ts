@@ -61,6 +61,32 @@ describe("@audio-reader/database", () => {
     );
   });
 
+  it("treats the product-event window end as exclusive", async () => {
+    const client = createFakeDatabaseClient();
+    const base = {
+      accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      deviceId: null,
+      name: "reading.session.completed",
+      outcome: "ok" as const,
+      requestId: null,
+      properties: {},
+    };
+    await client.ops.recordProductEvent({
+      ...base,
+      createdAt: "2026-08-30T23:59:59.999Z",
+    });
+    await client.ops.recordProductEvent({
+      ...base,
+      createdAt: "2026-08-31T00:00:00.000Z",
+    });
+
+    const events = await client.ops.listProductEvents({
+      from: "2026-08-30T00:00:00.000Z",
+      to: "2026-08-31T00:00:00.000Z",
+    });
+    expect(events.map((event) => event.createdAt)).toEqual(["2026-08-30T23:59:59.999Z"]);
+  });
+
   it("seeds feature flags and starter quotas for bootstrap", async () => {
     const client = createFakeDatabaseClient();
     const profile = await client.identity.ensureProfile({

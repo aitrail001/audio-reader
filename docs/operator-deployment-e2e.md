@@ -61,9 +61,9 @@ Stop on the first failed gate. Do not promote a different unrecorded build.
 3. Publish the same verified Operator build to the Pages production branch and
    record its deployment ID.
 4. Verify the production version tuple and health responses.
-5. In Arc profile **Audio Reader**, sign in to Operator, visit every destination
+5. In the built-in browser signed in as **Audio Reader**, visit every destination
    and request-ID deep link, and run only the selected Qwen probe.
-6. In Arc profile **personal**, validate packaged macOS Google login,
+6. In the built-in browser and packaged app's existing personal session, validate packaged macOS Google login,
    account/bootstrap, visible sync status, and existing synchronized data. Do
    not edit study content.
 7. Exercise parity on iPad Simulator and, when available, physical iPad. Record
@@ -82,6 +82,12 @@ Stop on the first failed gate. Do not promote a different unrecorded build.
   large quota reductions require explicit confirmation.
 - Desktop, tablet, and 390 px layouts pass keyboard-only, 200% zoom, light/dark,
   reduced-motion, and WCAG AA checks.
+- Metrics filters persist in the URL; trends, anomaly indicators, coarse
+  geography, language, level, platform/version, opaque content, and feature
+  distributions load without exposing direct identifiers or reading text.
+- Activity exposes pseudonymous learner/device references only. Cohorts smaller
+  than three learners are grouped, and precise location, raw IP, email, titles,
+  authors, sentences, vocabulary, and arbitrary properties are absent.
 
 ## Rollback
 
@@ -89,4 +95,3 @@ Keep the immediately previous Worker deployment ID and Pages deployment ID in
 the evidence record. If smoke validation fails, roll back the affected component
 only, verify its health/version again, and leave the other component unchanged
 unless contract incompatibility is demonstrated.
-

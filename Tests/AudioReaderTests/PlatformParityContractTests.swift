@@ -33,6 +33,7 @@ struct PlatformParityContractTests {
     @Test("Vocabulary review cards use one shared workflow on macOS and iPadOS")
     func vocabularyReviewIsShared() throws {
         let vocabularyView = try source("Sources/AudioReader/VocabularyView.swift")
+        let learningDashboard = try source("Sources/AudioReader/VocabularyLearningDashboard.swift")
         let reviewSetupView = try source("Sources/AudioReader/VocabularyReviewSetupView.swift")
         let reviewView = try source("Sources/AudioReader/VocabularyReviewView.swift")
         let appState = try source("Sources/AudioReader/AppState.swift")
@@ -44,6 +45,9 @@ struct PlatformParityContractTests {
         #expect(vocabularyView.contains(".sheet(item: $reviewRequest)"))
         #expect(vocabularyView.contains("VocabularyReviewSetupView("))
         #expect(vocabularyView.contains("VocabularyReviewView(state: state, entryIDs: request.entryIDs)"))
+        #expect(vocabularyView.contains("VocabularyLearningDashboard("))
+        #expect(learningDashboard.contains("words.learningDashboard"))
+        #expect(learningDashboard.contains("Study "))
         #expect(vocabularyView.contains("state.setVocabularyLearnList("))
         #expect(reviewSetupView.contains("VocabReviewScope.book("))
         #expect(reviewSetupView.contains("VocabReviewScope.bookCategory("))
@@ -72,10 +76,12 @@ struct PlatformParityContractTests {
         #expect(appState.contains("func playVocabSentence("))
         #expect(appState.contains("playingVocabEntryID"))
         #expect(appState.contains("func reviewVocabulary("))
+        #expect(appState.contains("reviewEventRepository.appendReviewEvent("))
         #expect(appState.contains("func setVocabularyLearnList("))
         #expect(appState.contains("quality: VocabReviewQuality"))
         #expect(!reviewSetupView.contains("#if os("))
         #expect(!reviewView.contains("#if os("))
+        #expect(!learningDashboard.contains("#if os("))
     }
 
     @Test("Learn-list action shares the vocabulary header with Open in text")

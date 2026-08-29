@@ -909,6 +909,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/product-analytics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get privacy-preserving product analytics
+         * @description Aggregates pseudonymous product events. Geographic and learning dimensions use minimum-size buckets; raw IP, precise location, and reading text are never returned.
+         */
+        get: operations["adminGetProductAnalytics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/audit-events": {
         parameters: {
             query?: never;
@@ -2074,19 +2094,115 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        ProductAnalyticsDistributionItem: {
+            key: string;
+            count: number;
+            share: number;
+        };
+        ProductAnalyticsPoint: {
+            /** Format: date-time */
+            start: string;
+            events: number;
+            activeUsers: number;
+            failed: number;
+        };
+        ProductAnalyticsAnomaly: {
+            /** @enum {string} */
+            kind: "failure_rate" | "volume_spike";
+            /** @enum {string} */
+            severity: "warning" | "critical";
+            observed: number;
+            baseline: number;
+            message: string;
+        };
+        ProductAnalytics: {
+            /** Format: date-time */
+            from: string;
+            /** Format: date-time */
+            to: string;
+            /** @enum {string} */
+            interval: "hour" | "day" | "week";
+            filters: {
+                [key: string]: string;
+            };
+            summary: {
+                events: number;
+                activeUsers: number;
+                activeDevices: number;
+                failed: number;
+                cancelled: number;
+                started: number;
+                successRate: number;
+            };
+            series: components["schemas"]["ProductAnalyticsPoint"][];
+            distributions: {
+                country: components["schemas"]["ProductAnalyticsDistributionItem"][];
+                region: components["schemas"]["ProductAnalyticsDistributionItem"][];
+                sourceLanguage: components["schemas"]["ProductAnalyticsDistributionItem"][];
+                targetLanguage: components["schemas"]["ProductAnalyticsDistributionItem"][];
+                readerLevel: components["schemas"]["ProductAnalyticsDistributionItem"][];
+                platform: components["schemas"]["ProductAnalyticsDistributionItem"][];
+                appVersion: components["schemas"]["ProductAnalyticsDistributionItem"][];
+                content: components["schemas"]["ProductAnalyticsDistributionItem"][];
+                contentCategory: components["schemas"]["ProductAnalyticsDistributionItem"][];
+                feature: components["schemas"]["ProductAnalyticsDistributionItem"][];
+                outcome: components["schemas"]["ProductAnalyticsDistributionItem"][];
+            };
+            anomalies: components["schemas"]["ProductAnalyticsAnomaly"][];
+            privacy: {
+                minimumBucketSize: number;
+                /** @enum {boolean} */
+                preciseLocationCollected: false;
+                /** @enum {boolean} */
+                rawContentReturned: false;
+                /** @enum {string} */
+                identifiersReturned: "pseudonymous";
+                /** @enum {boolean} */
+                durableOwnershipKeysStored: true;
+                /** @enum {boolean} */
+                profileDeletionCascadesEvents: true;
+                /** @enum {boolean} */
+                completedDeletionRequestPurgesEvents: false;
+                automaticRetentionDays: number | null;
+            };
+            sampled: boolean;
+        };
+        /** @description Privacy-reviewed analytics dimensions. The service derives geography and registered-device fields and rejects raw IP, precise location, titles, authors, and reading text. */
+        ProductEventDimensions: {
+            country?: string;
+            region?: string;
+            /** @enum {string} */
+            platform?: "macos" | "ios" | "ipados";
+            appVersion?: string;
+            buildNumber?: string;
+            sourceLanguage?: string;
+            targetLanguage?: string;
+            /** @enum {string} */
+            readerLevel?: "beginner" | "intermediate" | "advanced";
+            /** @description Client content identifier. The Worker replaces it with a deterministic opaque reference before persistence and Operator output; never send a title or reading text. */
+            contentId?: string;
+            /** @description Client chapter identifier. The Worker replaces it with a deterministic opaque reference before persistence and Operator output; never send a title or reading text. */
+            chapterId?: string;
+            contentCategory?: string;
+            feature?: string;
+            useFlow?: string;
+            syncEntity?: string;
+            syncPhase?: string;
+            reviewRating?: string;
+        } & {
+            [key: string]: unknown;
+        };
         ProductEvent: {
             /** Format: uuid */
             id: string;
-            /** Format: uuid */
-            accountId: string;
-            deviceId?: string;
+            /** @description Stable pseudonymous learner reference for operator correlation. */
+            subjectId: string;
+            deviceSubjectId?: string;
             name: string;
             /** @enum {string} */
             outcome: "ok" | "failed" | "cancelled" | "started";
             requestId?: string;
-            properties?: {
-                [key: string]: unknown;
-            };
+            properties?: components["schemas"]["ProductEventDimensions"];
             /** Format: date-time */
             createdAt: string;
         };
@@ -2096,9 +2212,7 @@ export interface components {
             outcome?: "ok" | "failed" | "cancelled" | "started";
             /** Format: date-time */
             occurredAt?: string;
-            properties?: {
-                [key: string]: unknown;
-            };
+            properties?: components["schemas"]["ProductEventDimensions"];
         };
         ProductEventBatch: {
             events: components["schemas"]["ProductEventCreate"][];
@@ -4313,6 +4427,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MetricsSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminGetProductAnalytics: {
+        parameters: {
+            query: {
+                from: string;
+                to: string;
+                interval?: "hour" | "day" | "week";
+                country?: string;
+                language?: string;
+                readerLevel?: string;
+                platform?: string;
+                contentCategory?: string;
+                feature?: string;
+                outcome?: "ok" | "failed" | "cancelled" | "started";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Product analytics */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProductAnalytics"];
                 };
             };
             400: components["responses"]["BadRequest"];

@@ -28,7 +28,9 @@ extension AccountSession {
                 cursor: sqlite,
                 versions: sqlite,
                 snapshot: AccountSyncApplicator.snapshot,
-                applyChange: AccountSyncApplicator.apply,
+                applyChange: { change in
+                    try AccountSyncApplicator.apply(change, to: sqlite)
+                },
                 handleConflict: AccountSyncApplicator.retainSyncConflict
             )
         )
@@ -255,7 +257,9 @@ enum AccountSyncApplicator {
                             reviewCount: entry.reviewCount,
                             nextReview: entry.nextReview.map(isoString),
                             lastReviewedAt: entry.lastReviewedAt.map(isoString),
-                            lastReviewQuality: entry.lastReviewQuality?.rawValue
+                            lastReviewQuality: entry.lastReviewQuality?.rawValue,
+                            reviewIntervalDays: entry.reviewIntervalDays,
+                            reviewEaseFactor: entry.reviewEaseFactor
                         )
                     )
                 )
@@ -320,21 +324,37 @@ enum AccountSyncApplicator {
     /// Apply one pulled change. Caller must feed books/vocabulary before
     /// progress/reviews (`SyncPulledChange.applying`).
     static func apply(_ change: SyncPulledChange) throws {
+        let sqlite = LocalSQLiteStore(fileURL: Persistence.root.appendingPathComponent("library.sqlite"))
+        try apply(change, to: sqlite)
+    }
+
+    /// The supplied store is the durable parent/history boundary for every
+    /// learning change. The legacy vocabulary table remains a verified UI mirror.
+    static func apply(_ change: SyncPulledChange, to sqlite: LocalSQLiteStore) throws {
         switch change.entityType {
         case OutboxEntityType.settings.rawValue:
-            applySettings(change)
+            try applySettings(change)
         case OutboxEntityType.vocabulary.rawValue:
-            applyVocabulary(change)
+            let updated = try applyLearning(change, to: sqlite)
+            try persistVocabularyMirror(updated: updated, deleting: change.operation == OutboxOperation.delete.rawValue ? change.entityId : nil)
         case OutboxEntityType.lexemeState.rawValue:
-            applyLemma(change)
+            try applyLemma(change)
         case OutboxEntityType.transcript.rawValue:
-            applyTranscript(change)
+            try applyTranscript(change)
         case OutboxEntityType.transcriptOverlay.rawValue:
-            applyTranscriptOverlay(change)
+            try applyTranscriptOverlay(change, to: sqlite)
         case OutboxEntityType.progress.rawValue:
-            applyProgress(change)
+            if change.payload["progressKind"]?.stringValue == "reader" {
+                try applyReaderProgress(change, to: sqlite)
+            } else {
+                try seedDurableVocabularyParentIfNeeded(change, in: sqlite)
+                let updated = try applyLearning(change, to: sqlite)
+                try persistVocabularyMirror(updated: updated)
+            }
         case OutboxEntityType.reviewEvent.rawValue:
-            applyReview(change)
+            try seedDurableVocabularyParentIfNeeded(change, in: sqlite)
+            let updated = try applyLearning(change, to: sqlite)
+            try persistVocabularyMirror(updated: updated)
         case OutboxEntityType.book.rawValue:
             // Media stays on-device. Hashed book IDs plus localId/title travel
             // on vocabulary rows so learning data does not use the settings UUID.
@@ -344,7 +364,7 @@ enum AccountSyncApplicator {
         }
     }
 
-    private static func applySettings(_ change: SyncPulledChange) {
+    private static func applySettings(_ change: SyncPulledChange) throws {
         var settings = Persistence.loadSettings()
         if let target = change.payload["targetLanguage"]?.stringValue, !target.isEmpty {
             settings.targetLanguage = target
@@ -364,21 +384,80 @@ enum AccountSyncApplicator {
         if let appearance = change.payload["appearance"]?.stringValue, !appearance.isEmpty {
             settings.appearance = appearance
         }
-        Persistence.saveSettings(settings)
+        guard Persistence.saveSettings(settings) else {
+            throw AccountSyncApplyError.persistenceFailed("settings")
+        }
     }
 
-    private static func applyVocabulary(_ change: SyncPulledChange) {
-        var items = Persistence.loadVocab()
-        if change.operation == OutboxOperation.delete.rawValue {
-            items.removeAll { $0.id.caseInsensitiveCompare(change.entityId) == .orderedSame }
-            Persistence.saveVocab(items)
-            return
+    /// Applies vocabulary, SRS progress, and review history against the same
+    /// SQLite parent graph. Missing parents throw so the page cursor is not advanced.
+    static func applyLearning(
+        _ change: SyncPulledChange,
+        to store: LocalSQLiteStore
+    ) throws -> VocabEntry? {
+        switch change.entityType {
+        case OutboxEntityType.vocabulary.rawValue:
+            guard change.operation != OutboxOperation.delete.rawValue else { return nil }
+            let incoming = try vocabulary(from: change)
+            let existing = try store.loadVocabulary().first {
+                $0.id.rawValue.caseInsensitiveCompare(change.entityId) == .orderedSame
+            }.map(VocabEntry.init)
+            let resolved = existing.map { mergingVocabulary(existing: $0, incoming: incoming) } ?? incoming
+            try store.upsertVocabulary(StoredVocabularyOccurrence(resolved))
+            return resolved
+        case OutboxEntityType.progress.rawValue:
+            let vocabularyID = try requiredString("vocabularyId", in: change)
+            guard let stored = try store.loadVocabulary().first(where: {
+                $0.id.rawValue.caseInsensitiveCompare(vocabularyID) == .orderedSame
+            }) else {
+                throw AccountSyncApplyError.missingVocabularyParent(vocabularyID)
+            }
+            var entry = VocabEntry(stored)
+            try applySRSProgress(change, to: &entry)
+            try store.upsertVocabulary(StoredVocabularyOccurrence(entry))
+            return entry
+        case OutboxEntityType.reviewEvent.rawValue:
+            let event = try reviewEvent(from: change)
+            guard let stored = try store.loadVocabulary().first(where: {
+                $0.id == event.vocabularyID
+            }) else {
+                throw AccountSyncApplyError.missingVocabularyParent(event.vocabularyID.rawValue)
+            }
+            if try store.containsReviewEvent(id: event.id) {
+                return VocabEntry(stored)
+            }
+            var entry = VocabEntry(stored)
+            entry.lastReviewedAt = event.reviewedAt
+            entry.lastReviewQuality = VocabReviewQuality(rawValue: event.rating)
+            try store.appendReviewEvent(event, vocabulary: StoredVocabularyOccurrence(entry))
+            return entry
+        default:
+            throw AccountSyncApplyError.unsupportedLearningEntity(change.entityType)
         }
+    }
+
+    private static func vocabulary(from change: SyncPulledChange) throws -> VocabEntry {
         let localBook = change.payload["localBookId"]?.stringValue
         let localChapter = change.payload["localChapterId"]?.stringValue
-        let incoming = VocabEntry(
+        let word = try requiredString("surface", fallback: "lemma", in: change)
+        let bookID: String
+        if let localBook = nonempty(localBook) {
+            bookID = localBook
+        } else {
+            bookID = try requiredString("bookId", in: change)
+        }
+        let chapterID: String
+        if let localChapter = nonempty(localChapter) {
+            chapterID = localChapter
+        } else {
+            chapterID = try requiredString("chapterId", in: change)
+        }
+        guard let changedAt = isoDate(change.changedAt) else {
+            throw AccountSyncApplyError.invalidDate("changedAt")
+        }
+        return VocabEntry(
             id: change.entityId,
-            word: change.payload["surface"]?.stringValue ?? change.payload["lemma"]?.stringValue ?? "",
+            word: word,
             category: VocabCategory(rawValue: change.payload["category"]?.stringValue ?? "word") ?? .word,
             definition: change.payload["definition"]?.stringValue,
             translation: change.payload["note"]?.stringValue,
@@ -388,24 +467,16 @@ enum AccountSyncApplicator {
             context: change.payload["context"]?.stringValue ?? "",
             spokenText: change.payload["spokenText"]?.stringValue,
             ebookText: change.payload["ebookText"]?.stringValue,
-            bookID: nonempty(localBook) ?? change.payload["bookId"]?.stringValue ?? "",
+            bookID: bookID,
             bookTitle: change.payload["bookTitle"]?.stringValue ?? "",
-            chapterID: nonempty(localChapter) ?? change.payload["chapterId"]?.stringValue ?? "",
+            chapterID: chapterID,
             chapterTitle: change.payload["chapterTitle"]?.stringValue ?? "",
             segmentID: change.payload["segmentId"]?.stringValue,
             wordID: change.payload["wordId"]?.stringValue,
             timestamp: change.payload["timestampSeconds"]?.numberValue ?? 0,
-            addedAt: isoDate(change.changedAt) ?? Date(),
+            addedAt: changedAt,
             isInLearnList: change.payload["state"]?.stringValue == "learning"
         )
-        if let index = items.firstIndex(where: {
-            $0.id.caseInsensitiveCompare(change.entityId) == .orderedSame
-        }) {
-            items[index] = mergingVocabulary(existing: items[index], incoming: incoming)
-        } else {
-            items.append(incoming)
-        }
-        Persistence.saveVocab(items)
     }
 
     static func mergingVocabulary(existing: VocabEntry, incoming: VocabEntry) -> VocabEntry {
@@ -423,10 +494,10 @@ enum AccountSyncApplicator {
         return merged
     }
 
-    private static func applyLemma(_ change: SyncPulledChange) {
+    private static func applyLemma(_ change: SyncPulledChange) throws {
         guard let language = change.payload["language"]?.stringValue,
               let form = change.payload["lemma"]?.stringValue ?? change.payload["form"]?.stringValue
-        else { return }
+        else { throw AccountSyncApplyError.invalidPayload(change.entityType) }
         var lemmas = Persistence.loadKnownLemmas()
         let record = KnownLemmaRecord(language: language, form: form, updatedAt: Date())
         if let index = lemmas.firstIndex(where: { $0.language == language && $0.form == form }) {
@@ -434,7 +505,9 @@ enum AccountSyncApplicator {
         } else {
             lemmas.append(record)
         }
-        Persistence.saveKnownLemmas(lemmas)
+        guard Persistence.saveKnownLemmas(lemmas) else {
+            throw AccountSyncApplyError.persistenceFailed("known lemmas")
+        }
     }
 
     static func isUUID(_ value: String) -> Bool {
@@ -442,79 +515,83 @@ enum AccountSyncApplicator {
         return value.wholeMatch(of: pattern) != nil
     }
 
-    private static func applyTranscript(_ change: SyncPulledChange) {
+    private static func applyTranscript(_ change: SyncPulledChange) throws {
         guard let json = change.payload["transcriptJSON"]?.stringValue,
               let data = json.data(using: .utf8),
               var transcript = try? JSONDecoder.iso.decode(Transcript.self, from: data)
-        else { return }
+        else { throw AccountSyncApplyError.invalidPayload(change.entityType) }
         if let localID = change.payload["localChapterId"]?.stringValue, !localID.isEmpty {
             transcript.chapterID = localID
         }
-        try? Persistence.saveTranscript(transcript)
+        try Persistence.saveTranscript(transcript)
     }
 
     /// Pulled overlays bypass the local mutation enqueue path; otherwise every
     /// remote correction would echo back as a new local mutation.
-    private static func applyTranscriptOverlay(_ change: SyncPulledChange) {
-        let sqlite = LocalSQLiteStore(fileURL: Persistence.root.appendingPathComponent("library.sqlite"))
+    private static func applyTranscriptOverlay(
+        _ change: SyncPulledChange,
+        to sqlite: LocalSQLiteStore
+    ) throws {
         if change.operation == OutboxOperation.delete.rawValue {
-            if let localID = change.payload["localOverlayId"]?.stringValue {
-                try? sqlite.deleteTranscriptOverlay(id: localID)
-            }
+            let localID = try requiredString("localOverlayId", in: change)
+            try sqlite.deleteTranscriptOverlay(id: localID)
             return
         }
         guard let json = change.payload["overlayJSON"]?.stringValue,
               let data = json.data(using: .utf8),
               var overlay = try? JSONDecoder.iso.decode(StoredTranscriptOverlay.self, from: data)
-        else { return }
+        else { throw AccountSyncApplyError.invalidPayload(change.entityType) }
         if let localChapterID = change.payload["localChapterId"]?.stringValue, !localChapterID.isEmpty {
             overlay.chapterID = ChapterID(rawValue: localChapterID)
         }
-        _ = try? sqlite.mergeTranscriptOverlay(overlay, revision: Int64(change.revision))
+        _ = try sqlite.mergeTranscriptOverlay(overlay, revision: Int64(change.revision))
     }
 
-    private static func applyProgress(_ change: SyncPulledChange) {
-        if change.payload["progressKind"]?.stringValue == "reader" {
-            applyReaderProgress(change)
-            return
-        }
-        guard let vocabularyId = change.payload["vocabularyId"]?.stringValue else { return }
-        var items = Persistence.loadVocab()
-        guard let index = items.firstIndex(where: { $0.id.caseInsensitiveCompare(vocabularyId) == .orderedSame }) else {
-            return
-        }
+    private static func applySRSProgress(_ change: SyncPulledChange, to entry: inout VocabEntry) throws {
         if let count = change.payload["reviewCount"]?.numberValue {
-            items[index].reviewCount = Int(count)
+            entry.reviewCount = Int(count)
         }
         if let quality = change.payload["lastReviewQuality"]?.stringValue {
-            items[index].lastReviewQuality = VocabReviewQuality(rawValue: quality)
+            entry.lastReviewQuality = VocabReviewQuality(rawValue: quality)
         }
         if let next = change.payload["nextReview"]?.stringValue {
-            items[index].nextReview = isoDate(next)
+            guard let date = isoDate(next) else { throw AccountSyncApplyError.invalidDate("nextReview") }
+            entry.nextReview = date
         }
         if let last = change.payload["lastReviewedAt"]?.stringValue {
-            items[index].lastReviewedAt = isoDate(last)
+            guard let date = isoDate(last) else { throw AccountSyncApplyError.invalidDate("lastReviewedAt") }
+            entry.lastReviewedAt = date
         }
-        Persistence.saveVocab(items)
+        if let interval = change.payload["reviewIntervalDays"]?.numberValue {
+            entry.reviewIntervalDays = interval
+        }
+        if let ease = change.payload["reviewEaseFactor"]?.numberValue {
+            entry.reviewEaseFactor = ease
+        }
     }
 
-    private static func applyReaderProgress(_ change: SyncPulledChange) {
+    private static func applyReaderProgress(
+        _ change: SyncPulledChange,
+        to sqlite: LocalSQLiteStore
+    ) throws {
         guard let bookID = change.payload["localBookId"]?.stringValue,
               let chapterID = change.payload["localChapterId"]?.stringValue,
               let seconds = change.payload["relativeSeconds"]?.numberValue,
               let deviceID = change.payload["deviceId"]?.stringValue
-        else { return }
+        else { throw AccountSyncApplyError.invalidPayload(change.entityType) }
+        guard let updatedAt = isoDate(change.payload["updatedAt"]?.stringValue ?? change.changedAt) else {
+            throw AccountSyncApplyError.invalidDate("updatedAt")
+        }
         let progress = StoredReaderProgress(
             id: change.payload["localProgressId"]?.stringValue ?? "remote:\(change.entityId):\(change.revision)",
             bookID: BookID(rawValue: bookID),
             chapterID: ChapterID(rawValue: chapterID),
             relativeSeconds: seconds,
-            updatedAt: isoDate(change.payload["updatedAt"]?.stringValue ?? change.changedAt) ?? Date(),
+            updatedAt: updatedAt,
             deviceID: deviceID,
             revision: Int64(change.revision)
         )
-        let sqlite = LocalSQLiteStore(fileURL: Persistence.root.appendingPathComponent("library.sqlite"))
-        _ = try? sqlite.mergeReaderProgress(progress)
+        _ = try sqlite.mergeReaderProgress(progress)
     }
 
     /// A reader-position push conflict promotes the local candidate to the
@@ -556,19 +633,70 @@ enum AccountSyncApplicator {
         try retainTranscriptOverlayConflict(mutation, serverRevision: serverRevision)
     }
 
-    private static func applyReview(_ change: SyncPulledChange) {
-        guard let vocabularyId = change.payload["vocabularyId"]?.stringValue else { return }
-        var items = Persistence.loadVocab()
-        guard let index = items.firstIndex(where: { $0.id.caseInsensitiveCompare(vocabularyId) == .orderedSame }) else {
+    private static func seedDurableVocabularyParentIfNeeded(
+        _ change: SyncPulledChange,
+        in store: LocalSQLiteStore
+    ) throws {
+        let vocabularyID = try requiredString("vocabularyId", in: change)
+        if try store.loadVocabulary().contains(where: {
+            $0.id.rawValue.caseInsensitiveCompare(vocabularyID) == .orderedSame
+        }) {
             return
         }
-        if let reviewed = isoDate(change.payload["reviewedAt"]?.stringValue ?? change.changedAt) {
-            items[index].lastReviewedAt = reviewed
+        guard let legacy = Persistence.loadVocab().first(where: {
+            $0.id.caseInsensitiveCompare(vocabularyID) == .orderedSame
+        }) else {
+            throw AccountSyncApplyError.missingVocabularyParent(vocabularyID)
         }
-        if let rating = change.payload["rating"]?.stringValue {
-            items[index].lastReviewQuality = VocabReviewQuality(rawValue: rating)
+        try store.upsertVocabulary(StoredVocabularyOccurrence(legacy))
+    }
+
+    private static func persistVocabularyMirror(
+        updated: VocabEntry?,
+        deleting deletedID: String? = nil
+    ) throws {
+        var items = Persistence.loadVocab()
+        if let deletedID {
+            items.removeAll { $0.id.caseInsensitiveCompare(deletedID) == .orderedSame }
+        } else if let updated,
+                  let index = items.firstIndex(where: {
+                      $0.id.caseInsensitiveCompare(updated.id) == .orderedSame
+                  }) {
+            items[index] = updated
+        } else if let updated {
+            items.append(updated)
         }
         Persistence.saveVocab(items)
+        guard Set(Persistence.loadVocab()) == Set(items) else {
+            throw AccountSyncApplyError.persistenceFailed("vocabulary mirror")
+        }
+    }
+
+    private static func reviewEvent(from change: SyncPulledChange) throws -> StoredReviewEvent {
+        guard change.entityType == OutboxEntityType.reviewEvent.rawValue,
+              change.operation == OutboxOperation.append.rawValue
+        else { throw AccountSyncApplyError.invalidPayload(change.entityType) }
+        let vocabularyID = try requiredString("vocabularyId", in: change)
+        let rating = try requiredString("rating", in: change)
+        let rawReviewedAt = change.payload["reviewedAt"]?.stringValue ?? change.changedAt
+        guard let reviewedAt = isoDate(rawReviewedAt) else {
+            throw AccountSyncApplyError.invalidDate("reviewedAt")
+        }
+        return StoredReviewEvent(
+            id: ReviewEventID(rawValue: change.entityId),
+            vocabularyID: VocabularyOccurrenceID(rawValue: vocabularyID),
+            face: change.payload["face"]?.stringValue ?? "recognition",
+            rating: rating,
+            reviewedAt: reviewedAt
+        )
+    }
+
+    /// Pulled reviews stay append-only locally so learning statistics have the same history on every device.
+    static func appendReviewHistory(
+        _ change: SyncPulledChange,
+        to repository: any ReviewEventRepository
+    ) throws {
+        try repository.appendReviewEvent(try reviewEvent(from: change))
     }
 
     static func uuidForLemma(language: String, form: String) -> String {
@@ -577,6 +705,22 @@ enum AccountSyncApplicator {
 
     static func syncEntityID(_ localID: String, kind: String) -> String {
         isUUID(localID) ? localID.lowercased() : uuidForStableKey("\(kind):\(localID)")
+    }
+
+    private static func requiredString(
+        _ key: String,
+        fallback: String? = nil,
+        in change: SyncPulledChange
+    ) throws -> String {
+        if let value = change.payload[key]?.stringValue, !value.isEmpty {
+            return value
+        }
+        if let fallback,
+           let value = change.payload[fallback]?.stringValue,
+           !value.isEmpty {
+            return value
+        }
+        throw AccountSyncApplyError.missingField(key, entityType: change.entityType)
     }
 
     private static func encodePayload<Value: Encodable>(_ value: Value) throws -> Data {
@@ -617,6 +761,32 @@ enum AccountSyncApplicator {
             return String(hex[from..<to])
         }
         return "\(slice(0, 8))-\(slice(8, 4))-\(slice(12, 4))-\(slice(16, 4))-\(slice(20, 12))"
+    }
+}
+
+private enum AccountSyncApplyError: LocalizedError {
+    case invalidDate(String)
+    case invalidPayload(String)
+    case missingField(String, entityType: String)
+    case missingVocabularyParent(String)
+    case persistenceFailed(String)
+    case unsupportedLearningEntity(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidDate(let field):
+            "The sync change contains an invalid \(field) date."
+        case .invalidPayload(let entityType):
+            "The \(entityType) sync change is incomplete."
+        case .missingField(let field, let entityType):
+            "The \(entityType) sync change is missing \(field)."
+        case .missingVocabularyParent:
+            "A vocabulary item required by this sync change has not arrived yet."
+        case .persistenceFailed(let resource):
+            "The synced \(resource) could not be saved on this device."
+        case .unsupportedLearningEntity(let entityType):
+            "The \(entityType) change is not a learning-data change."
+        }
     }
 }
 
@@ -705,6 +875,8 @@ private struct PortableProgress: Encodable {
     var nextReview: String?
     var lastReviewedAt: String?
     var lastReviewQuality: String?
+    var reviewIntervalDays: Double
+    var reviewEaseFactor: Double
 }
 
 private struct PortableReaderProgress: Encodable {
@@ -806,10 +978,16 @@ private final class WebAuthPresenter: NSObject, ASWebAuthenticationPresentationC
 #if os(macOS)
         NSApp.keyWindow ?? NSApp.windows.first ?? ASPresentationAnchor()
 #else
-        let windows = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap(\.windows)
-        return windows.first(where: \.isKeyWindow) ?? windows.first ?? ASPresentationAnchor()
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let windows = scenes.flatMap(\.windows)
+        if let window = windows.first(where: \.isKeyWindow) ?? windows.first {
+            return window
+        }
+        guard let scene = scenes.first else {
+            // Authentication can only be presented while the app owns an active scene.
+            preconditionFailure("Web authentication requested without a window scene")
+        }
+        return ASPresentationAnchor(windowScene: scene)
 #endif
     }
 }

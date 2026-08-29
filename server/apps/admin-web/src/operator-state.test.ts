@@ -26,6 +26,32 @@ describe("operator URL state", () => {
       }).toString(),
     ).toBe("section=usage&usageName=ai.translation.*&usageRequestId=req-7");
   });
+
+  it("round trips privacy-safe analytics filters", () => {
+    const search = destinationQuery("metrics", {
+      metricsFrom: "2026-08-01T00:00",
+      metricsTo: "2026-08-31T00:00",
+      metricsCountry: "AU",
+      metricsLanguage: "zh-Hans",
+      metricsReaderLevel: "intermediate",
+      metricsPlatform: "macos",
+      metricsFeature: "review",
+      metricsContentCategory: "fiction",
+    }).toString();
+    expect(initialOperatorLocation(`?${search}`)).toMatchObject({
+      section: "metrics",
+      filters: {
+        metricsFrom: "2026-08-01T00:00",
+        metricsTo: "2026-08-31T00:00",
+        metricsCountry: "AU",
+        metricsLanguage: "zh-Hans",
+        metricsReaderLevel: "intermediate",
+        metricsPlatform: "macos",
+        metricsFeature: "review",
+        metricsContentCategory: "fiction",
+      },
+    });
+  });
 });
 
 describe("safe mutations", () => {

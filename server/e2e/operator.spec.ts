@@ -35,6 +35,26 @@ test("layout remains operable at 200 percent zoom", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Users" })).toBeVisible();
 });
 
+test("analytics trends remain accessible and responsive", async ({ page }, testInfo) => {
+  await page.goto("/?preview=1&section=metrics&metricsCountry=AU");
+  await expect(page.getByRole("heading", { name: "Learning and reading trends" })).toBeVisible();
+  await expect(page.getByRole("img", { name: /Event trend/ })).toBeVisible();
+  await expect(page.getByRole("table", { name: "Country distribution" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Anomaly watch" })).toBeVisible();
+  const accessibility = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
+    .analyze();
+  expect(accessibility.violations).toEqual([]);
+  expect(
+    await page.evaluate(
+      "document.documentElement.scrollWidth <= document.documentElement.clientWidth",
+    ),
+  ).toBe(true);
+  await expect(page).toHaveScreenshot(`analytics-${testInfo.project.name}.png`, {
+    fullPage: true,
+  });
+});
+
 test("change review appears only after a mutation is initiated", async ({ page }) => {
   await page.goto("/?preview=1");
   const review = page.getByRole("region", { name: "Change review" });

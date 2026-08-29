@@ -54,7 +54,7 @@ struct AccountSessionView: View {
                     .accessibilityLabel("Hosted service is in maintenance mode")
             }
 
-            if session.isBusy || session.activityMessage != nil {
+            if (session.isBusy || session.activityMessage != nil), !session.syncStatus.isActive {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
@@ -257,6 +257,8 @@ struct AccountSessionView: View {
                 .foregroundStyle(Palette.dim)
                 .fixedSize(horizontal: false, vertical: true)
 
+            AccountSyncStatusView(session: session)
+
             if !session.devices.isEmpty {
                 Text("Devices")
                     .font(.body.weight(.semibold))
@@ -361,6 +363,73 @@ struct AccountSessionView: View {
             .disabled(session.isBusy)
         }
         .accessibilityElement(children: .contain)
+    }
+}
+
+/// Shared across Settings and both platform sidebars so sync progress and VoiceOver semantics cannot drift.
+struct AccountSyncStatusView: View {
+    let session: AccountSession
+    var compact = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Label(title, systemImage: symbol)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(session.syncStatus.requiresAttention ? Palette.terracotta : Palette.dim)
+                if session.syncStatus.isActive {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityHidden(true)
+                }
+            }
+
+            if !detail.isEmpty {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(Palette.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !compact, !session.syncStatus.entityProgress.isEmpty {
+                ForEach(session.syncStatus.entityProgress) { item in
+                    HStack(spacing: 8) {
+                        Text(item.title)
+                        Spacer(minLength: 8)
+                        Text("\(item.completedCount) / \(item.totalCount)")
+                            .monospacedDigit()
+                    }
+                    .font(.caption)
+                    .foregroundStyle(Palette.dim)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Sync status")
+        .accessibilityValue(session.syncStatusAccessibilityDescription)
+        .accessibilityIdentifier("sync.status")
+    }
+
+    private var title: String {
+        if session.syncStatus.phase != .idle {
+            return session.syncStatus.title
+        }
+        switch session.mode {
+        case .local: return "Local only"
+        case .signedInSyncOff: return "Sync off"
+        case .signedInSyncOn: return "Up to date"
+        }
+    }
+
+    private var detail: String {
+        session.syncStatus.phase == .idle ? "" : session.syncStatus.detail
+    }
+
+    private var symbol: String {
+        if session.syncStatus.requiresAttention { return "exclamationmark.icloud" }
+        if session.syncStatus.isActive { return "arrow.triangle.2.circlepath" }
+        return session.mode.isSyncEnabled ? "checkmark.icloud" : "icloud.slash"
     }
 }
 

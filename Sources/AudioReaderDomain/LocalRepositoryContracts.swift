@@ -56,6 +56,22 @@ public protocol KnownLemmaRepository: Sendable {
 public protocol ReviewEventRepository: Sendable {
     func loadReviewEvents() throws -> [StoredReviewEvent]
     func appendReviewEvent(_ event: StoredReviewEvent) throws
+    func appendReviewEvent(
+        _ event: StoredReviewEvent,
+        vocabulary: StoredVocabularyOccurrence
+    ) throws
+}
+
+public extension ReviewEventRepository {
+    /// Repositories that do not enforce relational vocabulary ownership can
+    /// store the additive event directly; SQLite overrides this to upsert the
+    /// reviewed card and its local parent rows in the same transaction.
+    func appendReviewEvent(
+        _ event: StoredReviewEvent,
+        vocabulary: StoredVocabularyOccurrence
+    ) throws {
+        try appendReviewEvent(event)
+    }
 }
 
 public protocol AssistantResultRepository: Sendable {

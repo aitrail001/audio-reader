@@ -32,6 +32,14 @@ export const FILTER_KEYS = [
   "usageAccountId",
   "usageRequestId",
   "privacyStatus",
+  "metricsCountry",
+  "metricsFrom",
+  "metricsTo",
+  "metricsLanguage",
+  "metricsReaderLevel",
+  "metricsPlatform",
+  "metricsFeature",
+  "metricsContentCategory",
 ] as const;
 
 export type OperatorFilters = Partial<Record<(typeof FILTER_KEYS)[number], string>>;

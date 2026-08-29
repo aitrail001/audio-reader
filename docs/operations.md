@@ -317,10 +317,10 @@ In **Settings → Account**:
 3. After tokens arrive, the app **bootstraps** this device (`POST /v1/auth/bootstrap`
    with `X-Device-Id` and `Idempotency-Key`).
 4. **Sync learning data across devices** is opt-in. It synchronizes small
-   catalog, exact progress, vocabulary, transcript, and transcript-overlay
+   catalog, exact progress, vocabulary schedules and review history, transcript, and transcript-overlay
    records through the account API. Audiobook, EPUB, cover, credential, and
-   Anki clip files stay local. Use **Sync now** and verify pending/current/error/
-   conflict presentation before treating the device as converged.
+   Anki clip files stay local. Use **Sync now** and verify phase/entity/batch/item,
+   pending/current/error/conflict presentation before treating the device as converged.
 5. Concurrent progress and transcript-overlay revisions require an explicit
    resolution; do not assume a later timestamp silently wins.
 6. **Revoke** another device from the list. That device returns to local mode
@@ -356,10 +356,10 @@ Objects, KV, or the Cloudflare Rate Limiting API before public issuance.
 ### 3.5 Native vs server versioning
 
 - Apple apps use `x.y.z` (`CFBundleShortVersionString`) plus integer
-  `CFBundleVersion`. This release is `1.2.0 (86)` for both macOS and iPadOS.
+  `CFBundleVersion`. This release is `1.3.0 (87)` for both macOS and iPadOS.
 - Server packages stay `0.0.0` private workspace versions. Worker
-  `APP_VERSION` is independent. The API Worker is `1.3.0`; the unchanged job
-  Worker keeps its existing version. The Operator console is `0.6.0`.
+  `APP_VERSION` is independent. The API Worker is `1.4.0`; the unchanged job
+  Worker keeps its existing version. The Operator console is `0.7.0`.
 - Production OTP From is `AudioReader <audio.reader.service@gmail.com>`. Verify
   that address in Resend; `onboarding@resend.dev` only delivers to the Resend account.
 

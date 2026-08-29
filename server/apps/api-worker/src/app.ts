@@ -574,6 +574,7 @@ async function handleRequest(
       requestId,
       authenticate,
       ops: options.database.ops,
+      identity: options.database.identity,
     });
     if (routed !== undefined) {
       return routed;

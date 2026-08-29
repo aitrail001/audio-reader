@@ -89,6 +89,45 @@ struct LocalSchemaV3MigrationTests {
         #expect(state.conflicts.isEmpty)
     }
 
+    @Test("a first review persists its vocabulary, card schedule, and additive event together")
+    func firstReviewPersistsLearningHistory() throws {
+        let store = LocalSQLiteStore(fileURL: temporaryDatabaseURL())
+        let reviewedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let vocabulary = StoredVocabularyOccurrence(
+            id: VocabularyOccurrenceID(rawValue: "vocab-1"),
+            surface: "whale",
+            category: "word",
+            sourceLanguage: "en",
+            context: "Call me Ishmael.",
+            bookID: BookID(rawValue: "book-1"),
+            bookTitle: "Moby-Dick",
+            chapterID: ChapterID(rawValue: "chapter-1"),
+            chapterTitle: "Loomings",
+            timestamp: 12,
+            addedAt: reviewedAt.addingTimeInterval(-60),
+            reviewCount: 1,
+            nextReview: reviewedAt.addingTimeInterval(3 * 86_400),
+            lastReviewedAt: reviewedAt,
+            lastReviewQuality: "vague",
+            reviewIntervalDays: 3,
+            reviewEaseFactor: 2.5,
+            isInLearnList: true
+        )
+        let event = StoredReviewEvent(
+            id: ReviewEventID(rawValue: "review-1"),
+            vocabularyID: vocabulary.id,
+            face: "cloze",
+            rating: "vague",
+            reviewedAt: reviewedAt
+        )
+
+        try store.appendReviewEvent(event, vocabulary: vocabulary)
+        try store.appendReviewEvent(event, vocabulary: vocabulary)
+
+        #expect(try store.loadVocabulary() == [vocabulary])
+        #expect(try store.loadReviewEvents() == [event])
+    }
+
     @Test("same-revision progress from another device is retained for explicit resolution")
     func readerProgressConflictRetention() throws {
         let store = LocalSQLiteStore(fileURL: temporaryDatabaseURL())

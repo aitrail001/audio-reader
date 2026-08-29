@@ -30,6 +30,7 @@ describe("operator console coverage", () => {
       "/v1/admin/cache",
       "/actions",
       "/v1/admin/metrics",
+      "/v1/admin/product-analytics",
       "/v1/admin/audit-events",
       "/v1/admin/auth/blocked-attempts",
       "/v1/admin/feature-flags",
@@ -65,6 +66,11 @@ describe("operator console coverage", () => {
       "Sentence context",
       "loadingPanels",
       "Loading this view",
+      "Learning and reading trends",
+      "Country distribution",
+      "Top content distribution",
+      "Anomaly watch",
+      "Small geographic and learning cohorts are grouped into Other",
     ];
     for (const route of routes) {
       expect(normalizedSource).toContain(route);

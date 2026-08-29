@@ -16,6 +16,46 @@ async function readJson(response: Response): Promise<unknown> {
 }
 
 describe("admin and privacy API", () => {
+  it("returns privacy-preserving product analytics with granular filters", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
+    await database.identity.grantAdminRole(USER_ID);
+    for (const [index, platform] of ["macos", "macos", "ipados"].entries()) {
+      await database.ops.recordProductEvent({
+        accountId: `${USER_ID.slice(0, -1)}${String(index)}`,
+        deviceId: `${DEVICE_ID.slice(0, -1)}${String(index)}`,
+        name: "review.completed",
+        outcome: "ok",
+        requestId: `analytics-${String(index)}`,
+        properties: {
+          country: "AU",
+          platform,
+          readerLevel: "intermediate",
+          sourceLanguage: "en",
+          targetLanguage: "zh-Hans",
+          contentId: `content-${String(index)}`,
+          feature: "review",
+        },
+        createdAt: `2026-08-30T0${String(index + 1)}:00:00.000Z`,
+      });
+    }
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+    const response = await app.fetch(
+      new Request(
+        "http://localhost/v1/admin/product-analytics?from=2026-08-30T00%3A00%3A00.000Z&to=2026-08-31T00%3A00%3A00.000Z&platform=macos&interval=hour",
+        { headers: { authorization: "Bearer admin" } },
+      ),
+    );
+    const body = await readJson(response);
+    expect(response.status).toBe(200);
+    expect(isRecord(body) && isRecord(body.summary) ? body.summary.events : null).toBe(2);
+    expect(JSON.stringify(body)).not.toContain(USER_ID);
+    expect(JSON.stringify(body)).not.toContain("content-0");
+  });
+
   it("filters product events by request id", async () => {
     const database = createFakeDatabaseClient();
     await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
@@ -54,6 +94,12 @@ describe("admin and privacy API", () => {
         ? body.items[0].requestId
         : null,
     ).toBe("req-match");
+    expect(JSON.stringify(body)).not.toContain(USER_ID);
+    expect(
+      isRecord(body) && Array.isArray(body.items) && isRecord(body.items[0])
+        ? String(body.items[0].subjectId).startsWith("learner-")
+        : false,
+    ).toBe(true);
   });
 
   it("applies kind and task filters to persisted Trace fallback events", async () => {
@@ -590,6 +636,49 @@ describe("admin and privacy API", () => {
       }),
     );
     expect(cancelled.status).toBe(200);
+  });
+
+  it("reports the current deletion workflow accurately by retaining events after completion", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
+    await database.identity.grantAdminRole(USER_ID);
+    await database.ops.recordProductEvent({
+      accountId: USER_ID,
+      deviceId: DEVICE_ID,
+      name: "reading.session.completed",
+      outcome: "ok",
+      requestId: "before-deletion",
+      properties: {},
+    });
+    const request = await database.ops.createPrivacyRequest({
+      accountId: USER_ID,
+      kind: "deletion",
+      status: "queued",
+      reason: "user asked support",
+    });
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+
+    const completed = await app.fetch(
+      new Request(`http://localhost/v1/admin/privacy-requests/${request.id}/actions`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer admin",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-key-privacy-complete-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ action: "complete", reason: "request processing complete" }),
+      }),
+    );
+
+    expect(completed.status).toBe(200);
+    await expect(database.identity.getProfileByUserId(USER_ID)).resolves.toMatchObject({
+      status: "deleted",
+    });
+    await expect(database.ops.listProductEvents({ accountId: USER_ID })).resolves.toHaveLength(1);
   });
 
   it("returns operator diagnostics without secrets and can probe completions", async () => {
