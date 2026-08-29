@@ -1,6 +1,7 @@
 import { problemResponse } from "./http";
 
 export const DEFAULT_MAX_BODY_BYTES = 1_048_576;
+export const SYNC_PUSH_MAX_BODY_BYTES = 8_388_608;
 
 const WRITE_METHODS = new Set(["POST", "PUT", "PATCH"]);
 

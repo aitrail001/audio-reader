@@ -24,7 +24,7 @@ import {
 import { logSecurityEvent, logUnhandledError, resolveRequestId } from "@audio-reader/observability";
 import { createFakeQwenClient, type QwenClient } from "@audio-reader/qwen";
 import { authMethodError, handleAuthRoute, isAuthPath } from "./auth-routes";
-import { DEFAULT_MAX_BODY_BYTES, validateRequestBody } from "./body";
+import { DEFAULT_MAX_BODY_BYTES, SYNC_PUSH_MAX_BODY_BYTES, validateRequestBody } from "./body";
 import { applyCorsHeaders, resolveCorsAllowlist } from "./cors";
 import {
   parseEnvironment,
@@ -462,7 +462,11 @@ async function handleRequest(
   }
 
   if (!isBinaryAssetPath(path)) {
-    const bodyError = await validateRequestBody(request, maxBodyBytes, requestId);
+    // Base transcripts can exceed the generic JSON limit; only sync push gets the larger,
+    // still-bounded allowance used by the native byte-aware batcher.
+    const bodyLimit =
+      path === "/v1/sync/push" ? Math.max(maxBodyBytes, SYNC_PUSH_MAX_BODY_BYTES) : maxBodyBytes;
+    const bodyError = await validateRequestBody(request, bodyLimit, requestId);
     if (bodyError !== undefined) {
       return bodyError;
     }

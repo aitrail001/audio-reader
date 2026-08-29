@@ -253,6 +253,28 @@ describe("api-worker HTTP contract", () => {
     expect(payload.status).toBe(413);
   });
 
+  it("allows larger bodies only for sync pushes", async () => {
+    const app = createTestApp({ maxBodyBytes: 32 });
+    const syncBody = JSON.stringify({ mutations: [{ payload: { text: "x".repeat(64) } }] });
+    const syncResponse = await app.fetch(
+      new Request("http://localhost/v1/sync/push", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: syncBody,
+      }),
+    );
+    const ordinaryResponse = await app.fetch(
+      new Request("http://localhost/v1/auth/bootstrap", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: syncBody,
+      }),
+    );
+
+    expect(syncResponse.status).not.toBe(413);
+    expect(ordinaryResponse.status).toBe(413);
+  });
+
   it("uses the default JSON body limit", () => {
     expect(DEFAULT_MAX_BODY_BYTES).toBe(1_048_576);
   });

@@ -119,6 +119,35 @@ struct SyncClientTests {
 @Suite("Account session sync")
 struct AccountSessionSyncTests {
     @MainActor
+    @Test("push batches stay below the sync request allowance even with large transcripts")
+    func pushBatchesRespectEncodedByteLimit() throws {
+        let payload = Data("{\"text\":\"\(String(repeating: "a", count: 2_400_000))\"}".utf8)
+        let pending = (0..<3).map { index in
+            OutboxMutation(
+                id: MutationID(rawValue: "00000000-0000-4000-8000-\(String(format: "%012d", index + 1))"),
+                entityType: .transcript,
+                entityID: "10000000-0000-4000-8000-\(String(format: "%012d", index + 1))",
+                operation: .upsert,
+                baseRevision: .zero,
+                occurredAt: Date(timeIntervalSince1970: 1_777_000_000 + Double(index)),
+                payload: payload
+            )
+        }
+
+        let batches = try AccountSession.syncPushBatches(pending)
+
+        #expect(batches.map(\.count) == [2, 1])
+        for batch in batches {
+            let request = SyncPushRequest(
+                deviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                batchId: "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+                mutations: try batch.map { try $0.productMutation() }
+            )
+            #expect(try JSONEncoder().encode(request).count < 8 * 1_024 * 1_024)
+        }
+    }
+
+    @MainActor
     @Test("synchronize pushes pending outbox rows and applies pulled settings")
     func synchronizeDrainsOutboxAndAppliesPull() async throws {
         let client = FakeAuthClient()

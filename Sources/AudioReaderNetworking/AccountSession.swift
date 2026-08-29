@@ -39,6 +39,8 @@ public final class AccountSession {
     private static let syncLog = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "account-sync")
     private static let usageLog = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "product-usage")
     private static let syncPushBatchSize = 500
+    private static let syncPushBatchBytes = 6 * 1_024 * 1_024
+    private static let syncPushEnvelopeReserve = 16 * 1_024
     private static let syncPullPageLimit = 100
     private static let syncPullPageCap = 64
 
@@ -499,11 +501,7 @@ public final class AccountSession {
         )
         if !pending.isEmpty {
             var lookup = Dictionary(uniqueKeysWithValues: pending.map { ($0.id.rawValue, $0) })
-            var index = 0
-            while index < pending.count {
-                let end = min(index + Self.syncPushBatchSize, pending.count)
-                let batch = Array(pending[index..<end])
-                index = end
+            for batch in try Self.syncPushBatches(pending) {
                 let request = SyncPushRequest(
                     deviceId: deviceID,
                     batchId: UUID().uuidString.lowercased(),
@@ -559,6 +557,32 @@ public final class AccountSession {
         if applied > 0 {
             onLearningDataApplied?()
         }
+    }
+
+    /// Keeps sync pushes below the Worker's sync-only body allowance. Count-only batching is
+    /// insufficient because one transcript can be several megabytes while most rows are tiny.
+    static func syncPushBatches(_ pending: [OutboxMutation]) throws -> [[OutboxMutation]] {
+        var batches: [[OutboxMutation]] = []
+        var batch: [OutboxMutation] = []
+        var encodedBytes = syncPushEnvelopeReserve
+        let encoder = JSONEncoder()
+
+        for mutation in pending {
+            let mutationBytes = try encoder.encode(mutation.productMutation()).count + 1
+            if !batch.isEmpty,
+               batch.count >= syncPushBatchSize || encodedBytes + mutationBytes > syncPushBatchBytes
+            {
+                batches.append(batch)
+                batch = []
+                encodedBytes = syncPushEnvelopeReserve
+            }
+            batch.append(mutation)
+            encodedBytes += mutationBytes
+        }
+        if !batch.isEmpty {
+            batches.append(batch)
+        }
+        return batches
     }
 
     private func applyPushResult(
