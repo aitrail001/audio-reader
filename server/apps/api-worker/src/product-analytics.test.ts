@@ -130,6 +130,27 @@ describe("product analytics", () => {
     expect(analytics.distributions.platform.every((item) => item.share <= 1)).toBe(true);
   });
 
+  it("deduplicates learners when several small content cohorts collapse into Other", () => {
+    const events = Array.from({ length: 8 }, (_, index) =>
+      event(
+        String(index),
+        `2026-08-30T10:${String(index).padStart(2, "0")}:00.000Z`,
+        { contentId: `book-${String(index)}` },
+        "ok",
+        "same-account",
+      ),
+    );
+    const analytics = buildProductAnalytics(events, {
+      from: "2026-08-30T10:00:00.000Z",
+      to: "2026-08-30T11:00:00.000Z",
+      interval: "hour",
+      filters: {},
+    });
+
+    expect(analytics.summary.activeUsers).toBe(1);
+    expect(analytics.distributions.content).toEqual([{ key: "Other", count: 1, share: 1 }]);
+  });
+
   it("flags an unusual failure rate without exposing event payloads", () => {
     const events = Array.from({ length: 12 }, (_, index) =>
       event(

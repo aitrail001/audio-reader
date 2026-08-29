@@ -257,13 +257,27 @@ function uniqueDistribution(
     subjects.add(subjectId);
     subjectsByValue.set(value, subjects);
   }
-  return distribution(
-    [...subjectsByValue.entries()].flatMap(([value, subjects]) =>
-      Array.from({ length: subjects.size }, () => value),
-    ),
-    total,
-    suppressSmall,
-  );
+  if (suppressSmall) {
+    // Merge subject identities, not bucket counts: one learner may touch several suppressed books.
+    const otherSubjects = new Set(subjectsByValue.get("Other") ?? []);
+    for (const [value, subjects] of subjectsByValue) {
+      if (value !== "Unknown" && value !== "Other" && subjects.size < MINIMUM_PRIVATE_BUCKET) {
+        subjectsByValue.delete(value);
+        for (const subjectId of subjects) otherSubjects.add(subjectId);
+      }
+    }
+    if (otherSubjects.size > 0) subjectsByValue.set("Other", otherSubjects);
+  }
+  return [...subjectsByValue.entries()]
+    .sort(
+      ([leftKey, left], [rightKey, right]) =>
+        right.size - left.size || leftKey.localeCompare(rightKey),
+    )
+    .map(([key, subjects]) => ({
+      key,
+      count: subjects.size,
+      share: total === 0 ? 0 : subjects.size / total,
+    }));
 }
 
 function buildSeries(
