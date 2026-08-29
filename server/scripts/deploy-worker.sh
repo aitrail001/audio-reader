@@ -11,7 +11,7 @@ cd "$SERVER_ROOT/apps/api-worker"
 echo "Deploying @audio-reader/api-worker --env ${ENV}"
 pnpm exec wrangler deploy --env "$ENV"
 
-cat <<EOF
+cat <<'EOF'
 
 Smoke the hosted API:
 
