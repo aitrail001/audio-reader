@@ -25,6 +25,7 @@ workers_dev = true
 [env.staging.vars]
 ENVIRONMENT = "staging"
 APP_VERSION = "1.5.0"
+SUPABASE_STORAGE_BUCKET = "audio-reader-assets"
 CORS_ALLOWED_ORIGINS = "https://audio-reader-admin.pages.dev,https://feature-cross-device-multi-u.audio-reader-admin.pages.dev,https://feature-cross-device-multi-u-5hc5.audio-reader-admin.pages.dev,https://feature-cross-device-multi-u-v8ks.audio-reader-admin.pages.dev"
 ADMIN_ORIGIN = "https://audio-reader-admin.pages.dev"
 MAX_BODY_BYTES = "1048576"
@@ -43,6 +44,7 @@ workers_dev = true
 [env.production.vars]
 ENVIRONMENT = "production"
 APP_VERSION = "1.5.0"
+SUPABASE_STORAGE_BUCKET = "audio-reader-assets"
 CORS_ALLOWED_ORIGINS = "https://audio-reader-admin.pages.dev"
 ADMIN_ORIGIN = "https://audio-reader-admin.pages.dev"
 MAX_BODY_BYTES = "1048576"

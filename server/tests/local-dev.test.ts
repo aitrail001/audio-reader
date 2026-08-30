@@ -59,6 +59,18 @@ describe("local development workspace", () => {
     expect(wrangler).toContain("audio-reader-api-worker-production");
   });
 
+  it("uses the same explicit Supabase Storage bucket in both hosted Workers", () => {
+    const apiWrangler = read(join(serverRoot, "apps", "api-worker", "wrangler.toml"));
+    const jobWrangler = read(join(serverRoot, "apps", "job-worker", "wrangler.toml"));
+    for (const environment of ["staging", "production"]) {
+      const sectionPattern = new RegExp(
+        `\\[env\\.${environment}\\.vars\\][^[]*SUPABASE_STORAGE_BUCKET = "audio-reader-assets"`,
+      );
+      expect(apiWrangler).toMatch(sectionPattern);
+      expect(jobWrangler).toMatch(sectionPattern);
+    }
+  });
+
   it("provides named-environment deploy scripts that refuse local vars", () => {
     const preflight = read(join(serverRoot, "scripts", "preflight-deploy.sh"));
     const deploy = read(join(serverRoot, "scripts", "deploy-worker.sh"));

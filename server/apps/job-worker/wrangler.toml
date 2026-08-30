@@ -26,6 +26,7 @@ max_batch_timeout = 5
 
 [env.staging.vars]
 APP_VERSION = "1.0.0"
+SUPABASE_STORAGE_BUCKET = "audio-reader-assets"
 QWEN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 QWEN_MODEL = "qwen3.7-plus"
 
@@ -42,5 +43,6 @@ max_batch_timeout = 5
 
 [env.production.vars]
 APP_VERSION = "1.0.0"
+SUPABASE_STORAGE_BUCKET = "audio-reader-assets"
 QWEN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 QWEN_MODEL = "qwen3.7-plus"
