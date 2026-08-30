@@ -80,6 +80,138 @@ struct ImportParityTests {
         #expect(EPUBParser.document(from: records[0].path.path) != nil)
     }
 
+    @Test("Apple Books listing keeps ebooks when an audiobook file is unreadable")
+    func appleBooksListingKeepsEbooksWhenAudiobookFails() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let booksRoot = fixture.root.appendingPathComponent("Books", isDirectory: true)
+        let audiobooks = booksRoot.appendingPathComponent("Audiobooks", isDirectory: true)
+        try FileManager.default.createDirectory(at: audiobooks, withIntermediateDirectories: true)
+        let package = try fixture.makeExplodedEPUB(
+            named: "Quiet.epub",
+            in: booksRoot,
+            title: "Quiet Book",
+            author: "Catalog Author",
+            paragraph: "Listing must still show exploded Apple Books ebooks when an audiobook asset cannot be read."
+        )
+        let extra = try fixture.makeExplodedEPUB(
+            named: "Extra.epub",
+            in: booksRoot,
+            title: "Filesystem Extra",
+            author: "Disk Author",
+            paragraph: "Filesystem EPUB packages that are not in Books.plist still belong in the Apple Books list."
+        )
+        let readableAudioDir = audiobooks.appendingPathComponent("sha1-readable", isDirectory: true)
+        let brokenAudioDir = audiobooks.appendingPathComponent("sha1-broken", isDirectory: true)
+        try FileManager.default.createDirectory(at: readableAudioDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: brokenAudioDir, withIntermediateDirectories: true)
+        let readableAudio = readableAudioDir.appendingPathComponent("Meditations.m4b")
+        try Data("importable audiobook bytes".utf8).write(to: readableAudio)
+        try Data("not an audio asset".utf8).write(to: brokenAudioDir.appendingPathComponent("Track 1.m4b"))
+        let missingEbook = booksRoot.appendingPathComponent("MissingCloud.epub")
+        let plist: [String: Any] = [
+            "Books": [
+                [
+                    "BKBookType": "epub",
+                    "itemName": "Quiet Book",
+                    "artistName": "Catalog Author",
+                    "path": package.path,
+                    "BKGeneratedItemId": "quiet-1"
+                ],
+                [
+                    "BKBookType": "epub",
+                    "itemName": "Cloud Only",
+                    "artistName": "Remote Author",
+                    "path": missingEbook.path,
+                    "BKGeneratedItemId": "cloud-1"
+                ],
+                [
+                    "BKBookType": "audiobook",
+                    "itemName": "Meditations",
+                    "artistName": "Rene Descartes",
+                    "path": readableAudioDir.path,
+                    "BKGeneratedItemId": "audio-ok"
+                ],
+                [
+                    "BKBookType": "audiobook",
+                    "itemName": "Pride and Prejudice",
+                    "artistName": "Jane Austen",
+                    "path": brokenAudioDir.path,
+                    "BKGeneratedItemId": "audio-bad"
+                ]
+            ]
+        ]
+        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+            .write(to: booksRoot.appendingPathComponent("Books.plist"))
+
+        let listed = AppleBooksLocalLibrary.list(booksRoot: booksRoot)
+
+        let ebooks = listed.filter { $0.kind == .ebook }
+        let audio = listed.filter { $0.kind == .audiobook }
+        #expect(ebooks.map(\.title).sorted() == ["Cloud Only", "Extra", "Quiet Book"])
+        #expect(audio.map(\.title).sorted() == ["Meditations", "Pride and Prejudice"])
+        #expect(listed.first { $0.title == "Quiet Book" }?.isMissing == false)
+        #expect(listed.first { $0.title == "Cloud Only" }?.isMissing == true)
+        #expect(listed.contains {
+            $0.kind == .ebook && $0.path.standardizedFileURL.path == extra.standardizedFileURL.path
+        })
+        #expect(
+            listed.first { $0.title == "Meditations" }?.path.standardizedFileURL.path
+                == readableAudio.standardizedFileURL.path
+        )
+        #expect(listed.contains { $0.title == "Pride and Prejudice" && $0.kind == .audiobook })
+    }
+
+    @Test("A mixed library keeps audiobooks, ebooks, and Apple Books imports together")
+    func mixedLibraryKeepsAudioAndEbookBooks() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        let audioOnly = library.appendingPathComponent("Audio Only", isDirectory: true)
+        let ebookOnly = library.appendingPathComponent("Ebook Only", isDirectory: true)
+        let mixed = library.appendingPathComponent("Mixed", isDirectory: true)
+        let appleBooks = library.appendingPathComponent("54C9E2BDAPPLEBOOK", isDirectory: true)
+        try FileManager.default.createDirectory(at: audioOnly, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: ebookOnly, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: mixed, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: appleBooks, withIntermediateDirectories: true)
+        try Data("audio only bytes".utf8).write(to: audioOnly.appendingPathComponent("Narration.m4b"))
+        _ = try fixture.makeEPUB(
+            named: "Quiet.epub",
+            in: ebookOnly,
+            paragraph: "An EPUB-only book must stay visible next to audiobooks in the same library folder."
+        )
+        try Data("mixed audio bytes".utf8).write(to: mixed.appendingPathComponent("Narration.m4b"))
+        _ = try fixture.makeEPUB(
+            named: "Companion.epub",
+            in: mixed,
+            paragraph: "A mixed book keeps its audio chapters and still exposes the companion EPUB."
+        )
+        _ = try fixture.makeEPUB(
+            named: "54C9E2BDAPPLEBOOK.epub",
+            in: appleBooks,
+            paragraph: "An imported Apple Books ebook must not hide the rest of the AudioReader library."
+        )
+        try Data("deviceAudiobooks".utf8).write(to: appleBooks.appendingPathComponent(".audioreader-source"))
+        try Data("The Path of Least Resistance".utf8).write(to: appleBooks.appendingPathComponent(".audioreader-title"))
+
+        let books = LibraryScanner.scan(root: library)
+
+        #expect(books.count == 4)
+        #expect(books.contains { $0.hasAudio && !$0.hasEbook })
+        let ebookBook = try #require(books.first { $0.folderPath.hasSuffix("Ebook Only") })
+        let mixedBook = try #require(books.first { $0.folderPath.hasSuffix("Mixed") })
+        let imported = try #require(books.first { $0.folderPath.hasSuffix("54C9E2BDAPPLEBOOK") })
+        #expect(ebookBook.hasEbook)
+        #expect(!ebookBook.hasAudio)
+        #expect(mixedBook.hasAudio)
+        #expect(mixedBook.hasEbook)
+        #expect(imported.hasEbook)
+        #expect(!imported.hasAudio)
+        #expect(imported.source == .deviceAudiobooks)
+        #expect(imported.title == "The Path of Least Resistance")
+    }
+
     @Test("Importing an exploded Apple Books package stores a zipped EPUB")
     func importsExplodedAppleBooksPackage() throws {
         let fixture = try TemporaryFixture()
@@ -1687,12 +1819,12 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.61")
-        #expect(plist["CFBundleVersion"] as? String == "62")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.61")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "62")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.61;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 62;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.62")
+        #expect(plist["CFBundleVersion"] as? String == "63")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.62")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "63")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.62;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 63;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
     }

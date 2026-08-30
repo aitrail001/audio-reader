@@ -32,7 +32,11 @@ enum LibraryScanner {
         let epubs = files.filter { $0.pathExtension.lowercased() == "epub" }
         guard !audio.isEmpty || !epubs.isEmpty else { return nil }
 
-        let structure = epubs.first.flatMap { EPUBParser.structure(from: $0.path) }
+        let structure = audio.isEmpty
+            ? epubs.first.flatMap { EPUBParser.structure(from: $0.path) }
+            : nil
+        let metadata = structure.map { EPUBBookMetadata(title: $0.title ?? "", author: $0.author) }
+            ?? epubs.first.flatMap { EPUBParser.metadata(from: $0.path) }
         let chapters: [Chapter]
         if audio.isEmpty {
             if let structure, !structure.chapters.isEmpty {
@@ -92,7 +96,10 @@ enum LibraryScanner {
         let m4bs = audio.filter { $0.pathExtension.lowercased() == "m4b" }
         let folderName = folder.lastPathComponent
         let title = prettyBookTitle(folderName: folderName, m4b: m4bs.first, epub: epubs.first)
-        let author = guessAuthor(from: m4bs.first) ?? guessAuthor(from: epubs.first) ?? structure?.author
+        let author = guessAuthor(from: m4bs.first)
+            ?? guessAuthor(from: epubs.first)
+            ?? structure?.author
+            ?? metadata?.author
         let source = sourceMarker(in: folder)
         let markedTitle = textMarker(named: ".audioreader-title", in: folder)
         let markedAuthor = textMarker(named: ".audioreader-author", in: folder)
@@ -103,7 +110,7 @@ enum LibraryScanner {
 
         return Book(
             id: stableID(folder.path),
-            title: markedTitle ?? structure?.title ?? title,
+            title: markedTitle ?? structure?.title ?? metadataTitle(metadata) ?? title,
             author: markedAuthor ?? author,
             folderPath: folder.path,
             coverPath: coverPath,
@@ -172,8 +179,18 @@ enum LibraryScanner {
         var out: [URL] = []
         for case let url as URL in enumerator {
             out.append(url)
+            if url.pathExtension.lowercased() == "epub", EPUBParser.isPackage(at: url) {
+                enumerator.skipDescendants()
+            }
         }
         return out
+    }
+
+    private static func metadataTitle(_ metadata: EPUBBookMetadata?) -> String? {
+        guard let title = metadata?.title.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
+            return nil
+        }
+        return title
     }
 
     private static func prettyBookTitle(folderName: String, m4b: URL?, epub: URL?) -> String {

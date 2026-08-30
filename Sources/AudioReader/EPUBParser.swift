@@ -68,6 +68,17 @@ enum EPUBParser {
         withPackageRoot(epubPath) { coverImage(in: $0) }
     }
 
+    static func metadata(from epubPath: String) -> EPUBBookMetadata? {
+        withPackageRoot(epubPath) { root in
+            let parsed = packageMetadata(in: root)
+            let fallback = URL(fileURLWithPath: epubPath).deletingPathExtension().lastPathComponent
+            let title = parsed.title ?? fallback
+            let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            return EPUBBookMetadata(title: trimmed, author: parsed.author)
+        }
+    }
+
     static func packageFile(from source: URL, to destination: URL) throws {
         if isPackage(at: source) {
             if FileManager.default.fileExists(atPath: destination.path) {
@@ -169,25 +180,22 @@ enum EPUBParser {
     private static func contentDocuments(in root: URL) -> [URL] {
         let skipBits = ["toc", "nav", "ncx", "cover", "cvi", "cop", "copyright", "ded", "ack", "next-reads", "landmarks"]
         let fm = FileManager.default
-        let spine = spineHrefs(in: root)
-        if !spine.isEmpty {
-            return spine.compactMap { href -> URL? in
+        let package = parsePackage(in: root)
+        if !package.spineHrefs.isEmpty {
+            return package.spineHrefs.compactMap { href -> URL? in
                 let name = href.lowercased()
                 if skipBits.contains(where: { name.contains($0) }) { return nil }
-                let url = resolve(href: href, in: root)
+                let url = resolve(href: href, in: root, package: package)
                 return url.flatMap { fm.fileExists(atPath: $0.path) ? $0 : nil }
             }
         }
-        guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: nil) else { return [] }
-        var files: [URL] = []
-        for case let url as URL in enumerator {
+        return package.files.urls.filter { url in
             let ext = url.pathExtension.lowercased()
-            guard ext == "xhtml" || ext == "html" || ext == "htm" else { continue }
+            guard ext == "xhtml" || ext == "html" || ext == "htm" else { return false }
             let name = url.lastPathComponent.lowercased()
-            if skipBits.contains(where: { name.contains($0) }) { continue }
-            files.append(url)
+            return !skipBits.contains(where: { name.contains($0) })
         }
-        return files.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
 
     private static func spineHrefs(in root: URL) -> [String] {
@@ -214,17 +222,16 @@ enum EPUBParser {
         return value.isEmpty ? nil : value
     }
 
-    private static func resolve(href: String, in root: URL) -> URL? {
-        let fm = FileManager.default
+    private static func resolve(href: String, in _: URL, package: PackageIndex) -> URL? {
         let decoded = href.removingPercentEncoding ?? href
-        if let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: nil) {
-            let needle = decoded.split(separator: "/").last.map(String.init)?.lowercased()
-            for case let url as URL in enumerator {
-                if url.lastPathComponent.lowercased() == needle { return url }
-                if url.path.lowercased().hasSuffix(decoded.lowercased()) { return url }
-            }
+        let path = decoded.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)
+            .first
+            .map(String.init) ?? decoded
+        if let url = package.files.byFileName[(path as NSString).lastPathComponent.lowercased()] {
+            return url
         }
-        return nil
+        let lower = path.lowercased()
+        return package.files.urls.first { $0.path.lowercased().hasSuffix(lower) }
     }
 
     private static func stripHTML(_ html: String) -> String {
@@ -263,11 +270,17 @@ enum EPUBParser {
         return false
     }
 
+    private struct FileIndex {
+        var urls: [URL] = []
+        var byFileName: [String: URL] = [:]
+    }
+
     private struct PackageIndex {
         var opfXML: String?
         var itemsByID: [String: ManifestItem] = [:]
         var spineHrefs: [String] = []
         var coverID: String?
+        var files: FileIndex = FileIndex()
     }
 
     private struct ManifestItem {
@@ -285,11 +298,28 @@ enum EPUBParser {
         var fileKey: String
     }
 
+    private static func indexFiles(in root: URL) -> FileIndex {
+        var index = FileIndex()
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return index }
+        for case let url as URL in enumerator {
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
+            if values?.isDirectory == true { continue }
+            index.urls.append(url)
+            index.byFileName[url.lastPathComponent.lowercased()] = url
+        }
+        return index
+    }
+
     private static func parsePackage(in root: URL) -> PackageIndex {
-        guard let opf = firstFile(in: root, extension: "opf"),
+        let files = indexFiles(in: root)
+        guard let opf = files.urls.first(where: { $0.pathExtension.lowercased() == "opf" }),
               let xml = (try? String(contentsOf: opf, encoding: .utf8))
                 ?? (try? String(contentsOf: opf, encoding: .isoLatin1))
-        else { return PackageIndex() }
+        else { return PackageIndex(files: files) }
 
         var itemsByID: [String: ManifestItem] = [:]
         let itemRegex = try? NSRegularExpression(pattern: #"<item\b([^>]+)/?>"#, options: [.caseInsensitive])
@@ -329,7 +359,7 @@ enum EPUBParser {
             coverID = itemsByID.values.first { $0.properties.lowercased().split(separator: " ").contains("cover-image") }?.id
         }
 
-        return PackageIndex(opfXML: xml, itemsByID: itemsByID, spineHrefs: spineHrefs, coverID: coverID)
+        return PackageIndex(opfXML: xml, itemsByID: itemsByID, spineHrefs: spineHrefs, coverID: coverID, files: files)
     }
 
     private static func xmlAttributes(_ raw: String) -> [String: String] {
@@ -369,7 +399,7 @@ enum EPUBParser {
             }?.href
         }
         let url: URL?
-        if let href, let resolved = resolve(href: href, in: root) {
+        if let href, let resolved = resolve(href: href, in: root, package: package) {
             url = resolved
         } else {
             url = firstFile(in: root, named: ["cover.jpg", "cover.jpeg", "cover.png", "cover.webp"])
@@ -400,7 +430,7 @@ enum EPUBParser {
             let name = fileKey(href)
             if skip.contains(where: { name.contains($0) }) { return nil }
             if name.contains("cover") { return nil }
-            guard let url = resolve(href: href, in: root) else { return nil }
+            guard let url = resolve(href: href, in: root, package: package) else { return nil }
             let html = (try? String(contentsOf: url, encoding: .utf8))
                 ?? (try? String(contentsOf: url, encoding: .isoLatin1))
                 ?? ""
@@ -446,7 +476,7 @@ enum EPUBParser {
         if let item = package.itemsByID.values.first(where: {
             $0.properties.lowercased().split(separator: " ").contains("nav")
         }) {
-            return resolve(href: item.href, in: root)
+            return resolve(href: item.href, in: root, package: package)
         }
         return firstFile(in: root, named: ["nav.xhtml", "nav.html", "toc.xhtml"])
     }
@@ -455,7 +485,7 @@ enum EPUBParser {
         if let item = package.itemsByID.values.first(where: {
             $0.mediaType.lowercased().contains("ncx") || $0.href.lowercased().hasSuffix(".ncx")
         }) {
-            return resolve(href: item.href, in: root)
+            return resolve(href: item.href, in: root, package: package)
         }
         return firstFile(in: root, extension: "ncx")
     }
@@ -559,7 +589,7 @@ enum EPUBParser {
             if let cached = htmlCache.object(forKey: key) {
                 return cached as String
             }
-            guard let url = resolve(href: href, in: root) else { return "" }
+            guard let url = resolve(href: href, in: root, package: package) else { return "" }
             let raw = (try? String(contentsOf: url, encoding: .utf8))
                 ?? (try? String(contentsOf: url, encoding: .isoLatin1))
                 ?? ""
