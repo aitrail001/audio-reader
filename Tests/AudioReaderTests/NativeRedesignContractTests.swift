@@ -118,6 +118,14 @@ struct NativeRedesignContractTests {
         #expect(!dashboard.contains(".background(Palette.panel.opacity"))
     }
 
+    @Test("macOS Words header keeps its actions concise at ordinary split-view widths")
+    func vocabularyHeaderUsesCompactActions() throws {
+        let vocabulary = try source("Sources/AudioReader/VocabularyView.swift")
+
+        #expect(vocabulary.contains(#"Label("Review due — \(projection.due.count)""#))
+        #expect(vocabulary.contains(#"Label("Choose review""#))
+    }
+
     @Test("iPad destinations and import actions meet touch and automation contracts")
     func iPadTouchContracts() throws {
         let root = try source("Sources/AudioReader/IPadRootView.swift")

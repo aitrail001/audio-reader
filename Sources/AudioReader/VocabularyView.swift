@@ -318,7 +318,7 @@ struct VocabularyView: View {
                 Button {
                     startDueReview()
                 } label: {
-                    Label("Review \(projection.due.count) due in this view", systemImage: "rectangle.stack.fill")
+                    Label("Review due — \(projection.due.count)", systemImage: "rectangle.stack.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Palette.terracotta)
@@ -326,7 +326,11 @@ struct VocabularyView: View {
                 .disabled(projection.due.isEmpty || isFiltering)
                 .accessibilityIdentifier("words.reviewDue")
                 .accessibilityHint("Starts a due-first review using the current Words filters.")
-                Button("Review by list or book") { showReviewSetup = true }
+                Button {
+                    showReviewSetup = true
+                } label: {
+                    Label("Choose review", systemImage: "slider.horizontal.3")
+                }
                     .buttonStyle(.borderless)
                     .disabled(state.vocab.isEmpty)
                 ankiExportMenu
