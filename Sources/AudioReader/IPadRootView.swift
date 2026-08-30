@@ -83,12 +83,14 @@ private enum IPadImportRequest: Identifiable {
     case files
     case folder
     case ebook(bookID: String)
+    case audio(bookID: String)
 
     var id: String {
         switch self {
         case .files: "files"
         case .folder: "folder"
         case .ebook(let bookID): "ebook-\(bookID)"
+        case .audio(let bookID): "audio-\(bookID)"
         }
     }
 
@@ -97,18 +99,19 @@ private enum IPadImportRequest: Identifiable {
         case .files: [.mp3, .mpeg4Audio, .epub, .image, .audio]
         case .folder: [.folder]
         case .ebook: [.epub]
+        case .audio: [.audio, .mp3, .mpeg4Audio]
         }
     }
 
     var allowsMultipleSelection: Bool {
         switch self {
-        case .files: true
+        case .files, .audio: true
         case .folder, .ebook: false
         }
     }
     var importsAsCopy: Bool {
         switch self {
-        case .files, .ebook: true
+        case .files, .ebook, .audio: true
         case .folder: false
         }
     }
@@ -188,6 +191,7 @@ struct IPadRootView: View {
                 case .files: importFiles(result)
                 case .folder: importFolder(result)
                 case .ebook(let bookID): importEbook(result, bookID: bookID)
+                case .audio(let bookID): importAudio(result, bookID: bookID)
                 }
                 importRequest = nil
             }
@@ -395,10 +399,11 @@ struct IPadRootView: View {
                 state: state,
                 book: book,
                 onAddEbook: { importRequest = .ebook(bookID: book.id) },
+                onAddAudio: { importRequest = .audio(bookID: book.id) },
                 onDelete: { pendingBookDelete = book }
             )
         } else {
-            ContentUnavailableView("Choose an audiobook", systemImage: "books.vertical", description: Text("Select a book, or import one from Files, a folder, Apple Books, or the device audiobook library."))
+            ContentUnavailableView("Choose a book", systemImage: "books.vertical", description: Text("Select a book, or import audio and/or EPUB files from Files, a folder, Apple Books, or the device audiobook library."))
         }
     }
 
@@ -446,6 +451,26 @@ struct IPadRootView: View {
                 importMessage = "This exact audiobook is already imported."
             }
             Task { await state.rescan() }
+        } catch {
+            importError = error.localizedDescription
+        }
+    }
+
+    private func importAudio(_ result: Result<[URL], any Error>, bookID: String) {
+        do {
+            guard let book = state.books.first(where: { $0.id == bookID }) else { return }
+            let urls = try result.get()
+            let added = try AudiobookImportService.addMediaFiles(
+                urls,
+                to: URL(fileURLWithPath: book.folderPath, isDirectory: true)
+            )
+            importMessage = added.isEmpty
+                ? "That audio is already attached to \(book.title)."
+                : "Added \(added.joined(separator: ", ")) to \(book.title)."
+            Task {
+                await state.rescan()
+                state.selectedBookID = bookID
+            }
         } catch {
             importError = error.localizedDescription
         }
@@ -613,7 +638,7 @@ private struct IPadBookList: View {
         }
         .overlay {
             if books.isEmpty {
-                ContentUnavailableView("No audiobooks", systemImage: "books.vertical", description: Text("Use Import to add MP3 or M4B books."))
+                ContentUnavailableView("No books", systemImage: "books.vertical", description: Text("Use Import to add audio and/or EPUB files."))
             }
         }
     }
@@ -623,6 +648,7 @@ private struct IPadBookDetail: View {
     @Bindable var state: AppState
     let book: Book
     let onAddEbook: () -> Void
+    let onAddAudio: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
@@ -636,7 +662,10 @@ private struct IPadBookDetail: View {
                         Text(book.author ?? "Unknown author")
                             .font(.title3)
                             .foregroundStyle(.secondary)
-                        Label("\(state.transcribedChapterCount(in: book)) of \(book.chapters.count) chapters transcribed", systemImage: "waveform.badge.checkmark")
+                        Label(book.hasAudio
+                              ? "\(state.transcribedChapterCount(in: book)) of \(book.chapters.count) chapters transcribed"
+                              : "EPUB only · \(state.transcribedChapterCount(in: book)) of \(book.chapters.count) chapters ready",
+                              systemImage: book.hasAudio ? "waveform.badge.checkmark" : "book.pages")
                             .foregroundStyle(.secondary)
                         AudiobookLanguagePicker(state: state, book: book)
                     }
@@ -693,6 +722,11 @@ private struct IPadBookDetail: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
+                    if !book.hasAudio {
+                        Button(action: onAddAudio) {
+                            Label("Add Audio", systemImage: "waveform")
+                        }
+                    }
                     Button(action: onAddEbook) {
                         Label(
                             book.ebookPath == nil ? "Add EPUB" : "Add Another EPUB",

@@ -106,6 +106,9 @@ enum Persistence {
     }
 
     private static func matchesPersistentMedia(_ transcript: Transcript, chapter: Chapter) -> Bool {
+        if !chapter.hasAudio || transcript.audioPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return transcript.chapterID == chapter.id
+        }
         guard LibraryScanner.persistentPathIdentity(transcript.audioPath)
                 == LibraryScanner.persistentPathIdentity(chapter.audioPath)
         else { return false }

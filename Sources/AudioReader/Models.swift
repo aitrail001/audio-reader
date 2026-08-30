@@ -28,6 +28,9 @@ struct Book: Identifiable, Hashable, Codable, Sendable {
     var ebookPath: String?
     var chapters: [Chapter]
     var source: BookSource = .localFolder
+
+    var hasEbook: Bool { ebookPath != nil }
+    var hasAudio: Bool { chapters.contains(where: \.hasAudio) }
 }
 
 struct Chapter: Identifiable, Hashable, Codable, Sendable {
@@ -39,6 +42,12 @@ struct Chapter: Identifiable, Hashable, Codable, Sendable {
     var startTime: TimeInterval?
 
     var audioStart: TimeInterval { startTime ?? 0 }
+    var hasAudio: Bool { !audioPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+}
+
+enum TranscriptSource {
+    static let speechAnalyzer = "SpeechAnalyzer"
+    static let ebook = "ebook"
 }
 
 struct TranscriptWord: Identifiable, Hashable, Codable, Sendable {
@@ -254,6 +263,61 @@ struct Transcript: Codable, Sendable {
         guard let expectedStart = chapter.startTime else { return true }
         guard let chapterStart else { return false }
         return abs(chapterStart - expectedStart) < 0.01
+    }
+
+    static func makeFromEbook(chapter: Chapter, book: Book, document: EPUBDocument) -> Transcript? {
+        let sentences = EPUBParser.sentences(from: document.text)
+        guard !sentences.isEmpty else { return nil }
+        let segments = sentences.enumerated().map { index, sentence in
+            let start = TimeInterval(index)
+            let end = start + 0.9
+            return TranscriptSegment(
+                id: "ebook-\(index)",
+                start: start,
+                end: end,
+                words: [
+                    TranscriptWord(
+                        id: "ebook-\(index)-text",
+                        text: sentence,
+                        start: start,
+                        end: end,
+                        confidence: 1
+                    )
+                ],
+                ebookText: sentence,
+                alignmentScore: 1,
+                individualEbookMatchTrusted: true,
+                documentEbookUseAllowed: true
+            )
+        }
+        return Transcript(
+            chapterID: chapter.id,
+            audioPath: chapter.audioPath,
+            createdAt: Date(),
+            locale: "und",
+            segments: segments,
+            source: TranscriptSource.ebook,
+            ebookAligned: true,
+            ebookAlignment: EPUBAlignmentAssessment(
+                status: .trusted,
+                reason: "This chapter is the EPUB text.",
+                metrics: EPUBAlignmentMetrics(
+                    extractedWordCount: document.wordCount,
+                    extractedSentenceCount: document.sentenceCount,
+                    sampledAnchorCount: segments.count,
+                    matchedAnchorCount: segments.count,
+                    matchedCoverage: 1,
+                    medianScore: 1,
+                    lowerPercentileScore: 1,
+                    backwardJumps: 0,
+                    longestUnmatchedPassage: 0,
+                    titleSimilarity: 1,
+                    authorSimilarity: book.author == nil ? nil : 1,
+                    candidateComparisons: 0,
+                    detailedAlignmentPerformed: false
+                )
+            )
+        )
     }
 }
 

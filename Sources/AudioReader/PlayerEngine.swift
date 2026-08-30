@@ -38,6 +38,10 @@ final class PlayerEngine {
     private var chapterDuration: TimeInterval?
 
     func load(path: String, startTime: TimeInterval = 0, duration: TimeInterval? = nil) {
+        guard !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            tearDown()
+            return
+        }
         if loadedPath == path, player != nil, abs(mediaStart - startTime) < 0.001 {
             chapterDuration = duration
             seek(0)

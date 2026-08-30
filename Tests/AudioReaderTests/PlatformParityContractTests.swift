@@ -573,6 +573,34 @@ struct PlatformParityContractTests {
         #expect(!summaryPrompt.localizedCaseInsensitiveContains("idioms"))
     }
 
+    @Test("Both platforms can import EPUB-only books and attach audio later")
+    func sharesEbookOnlyImportAndAddAudio() throws {
+        let importer = try source("Sources/AudioReader/AudiobookImportService.swift")
+        let scanner = try source("Sources/AudioReader/LibraryScanner.swift")
+        let playerView = try source("Sources/AudioReader/PlayerView.swift")
+        let libraryView = try source("Sources/AudioReader/LibraryView.swift")
+        let iPadRoot = try source("Sources/AudioReader/IPadRootView.swift")
+        let macImporter = try source("Sources/AudioReader/MacAudiobookImporter.swift")
+        let appleBooks = try source("Sources/AudioReader/MacAppleBooksLibrary.swift")
+
+        #expect(importer.contains("noImportableMedia"))
+        #expect(importer.contains("ebookFingerprintMarker"))
+        #expect(importer.contains("static func addMediaFiles("))
+        #expect(scanner.contains("containsImportableBook"))
+        #expect(scanner.contains("folder.path) + \"#ebook\""))
+        #expect(playerView.contains("Audiobook missing"))
+        #expect(playerView.contains("Button(\"Add Audio\") { addAudio() }"))
+        #expect(libraryView.contains("Label(\"Add Audio\", systemImage: \"waveform\")"))
+        #expect(iPadRoot.contains("case audio(bookID: String)"))
+        #expect(iPadRoot.contains("Label(\"Add Audio\", systemImage: \"waveform\")"))
+        #expect(macImporter.contains("Choose audiobook audio and/or EPUB files"))
+        #expect(appleBooks.contains("readDownloadedEbooks"))
+        #expect(appleBooks.contains("kind: .ebook"))
+        #expect(!scanner.contains("#if os("))
+        #expect(importer.contains("static func importFiles("))
+        #expect(importer.contains("static func importFolder("))
+    }
+
     @Test("Both platforms share EPUB status and the same recovery actions")
     func sharesEbookAlignmentRecovery() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")

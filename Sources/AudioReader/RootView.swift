@@ -47,10 +47,10 @@ struct RootView: View {
             ToolbarItem(placement: .automatic) {
                 Menu {
                     Button(action: importFiles) {
-                        Label("Audiobook Files…", systemImage: "doc.badge.plus")
+                        Label("Files…", systemImage: "doc.badge.plus")
                     }
                     Button(action: importFolder) {
-                        Label("Audiobook Folder…", systemImage: "folder.badge.plus")
+                        Label("Folder…", systemImage: "folder.badge.plus")
                     }
                     Divider()
                     Button {

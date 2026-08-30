@@ -479,8 +479,13 @@ final class AppState {
         selectedBook != nil && selectedBook?.ebookPath == nil
     }
 
+    var currentBookIsMissingAudio: Bool {
+        selectedBook?.hasAudio == false
+    }
+
     var currentEbookAlignment: EPUBAlignmentAssessment? {
         guard selectedBook?.ebookPath != nil else { return nil }
+        if transcript?.source == TranscriptSource.ebook { return nil }
         if let assessment = transcript?.ebookAlignment { return assessment }
         if transcript == nil {
             return EPUBAlignmentAssessment(
@@ -803,11 +808,16 @@ final class AppState {
         selectedBookID = book.id
         selectedChapterID = chapter.id
         tab = .player
-        player.load(path: chapter.audioPath, startTime: chapter.audioStart, duration: chapter.duration)
+        if chapter.hasAudio {
+            player.load(path: chapter.audioPath, startTime: chapter.audioStart, duration: chapter.duration)
+        } else {
+            player.tearDown()
+        }
         deepReadingActiveSentenceID = nil
         deepReadingPausedSentenceID = nil
         player.rate = Float(settings.playbackRate)
         transcript = Persistence.loadTranscript(for: chapter)
+            ?? ebookTranscriptIfNeeded(for: chapter, in: book)
         chapterTranslation = nil
         chapterSummary = chapterSummaries.first {
             $0.id == ChapterSummaryRecord.makeID(
@@ -828,11 +838,21 @@ final class AppState {
             focusedWordID = nil
             scrollSegmentID = nil
         }
-        if autoplay { player.play() }
+        if autoplay, chapter.hasAudio { player.play() }
         if let pending = pendingReveal, transcript != nil {
             applyReveal(pending)
             pendingReveal = nil
         }
+    }
+
+    private func ebookTranscriptIfNeeded(for chapter: Chapter, in book: Book) -> Transcript? {
+        guard !chapter.hasAudio, let ebookPath = book.ebookPath,
+              let document = EPUBParser.document(from: ebookPath),
+              let transcript = Transcript.makeFromEbook(chapter: chapter, book: book, document: document)
+        else { return nil }
+        try? Persistence.saveTranscript(transcript)
+        readyChapterIDs = Persistence.readyChapterIDs(in: books, transcripts: Persistence.loadAllTranscripts())
+        return transcript
     }
 
     @discardableResult
@@ -904,6 +924,10 @@ final class AppState {
 
     func transcribeSelected(force: Bool = false) {
         guard let book = selectedBook, let chapter = selectedChapter else { return }
+        guard chapter.hasAudio else {
+            errorMessage = "Add an audiobook to transcribe this chapter."
+            return
+        }
         if !force, let existing = Persistence.loadTranscript(for: chapter) {
             transcript = existing
             return
@@ -1087,7 +1111,7 @@ final class AppState {
     func seekToSentence(_ sentence: TranscriptSegment, time: TimeInterval, autoplay: Bool) {
         player.seek(time)
         armDeepReadingSentence(sentence)
-        if autoplay, !player.isPlaying { player.play() }
+        if autoplay, selectedChapter?.hasAudio == true, !player.isPlaying { player.play() }
     }
 
     func seekPlayback(to time: TimeInterval) {
@@ -1253,6 +1277,10 @@ final class AppState {
         }
         let transcript = Persistence.loadTranscript(for: located.chapter)
         let bounds = VocabSentencePlayback.bounds(for: entry, transcript: transcript)
+        guard located.chapter.hasAudio else {
+            errorMessage = "Add an audiobook to play the original narration."
+            return false
+        }
         if player.loadedPath != located.chapter.audioPath {
             player.load(
                 path: located.chapter.audioPath,

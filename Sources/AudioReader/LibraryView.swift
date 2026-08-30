@@ -49,6 +49,7 @@ struct LibraryView: View {
                     state: state,
                     book: book,
                     onAddEbook: { addCompanionFiles(to: book) },
+                    onAddAudio: { addAudioFiles(to: book) },
                     onDelete: { pendingBookDelete = book }
                 )
             }
@@ -141,6 +142,27 @@ struct LibraryView: View {
         }
 #endif
     }
+
+    private func addAudioFiles(to book: Book) {
+#if os(macOS)
+        do {
+            guard let urls = try MacAudiobookImporter.chooseAudio(for: book) else { return }
+            let added = try AudiobookImportService.addMediaFiles(
+                urls,
+                to: URL(fileURLWithPath: book.folderPath, isDirectory: true)
+            )
+            bookUpdateResult = added.isEmpty
+                ? "That audio is already attached to \(book.title)."
+                : "Added \(added.joined(separator: ", ")) to \(book.title)."
+            Task {
+                await state.rescan()
+                state.selectedBookID = state.books.first(where: { $0.title == book.title })?.id
+            }
+        } catch {
+            bookUpdateResult = error.localizedDescription
+        }
+#endif
+    }
 }
 
 private struct BookCard: View {
@@ -204,7 +226,18 @@ private struct ChapterStrip: View {
     @Bindable var state: AppState
     let book: Book
     let onAddEbook: () -> Void
+    let onAddAudio: () -> Void
     let onDelete: () -> Void
+
+    private func libraryStatus(for book: Book) -> String {
+        let ready = "\(book.chapters.count) chapters · \(state.transcribedChapterCount(in: book)) ready"
+        switch (book.hasAudio, book.hasEbook) {
+        case (true, true): return ready + " · audio and ebook"
+        case (true, false): return ready + " · audio only"
+        case (false, true): return ready + " · ebook only"
+        case (false, false): return ready
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -213,7 +246,7 @@ private struct ChapterStrip: View {
                     Text(book.title)
                         .font(.system(size: 15, weight: .semibold, design: .serif))
                         .foregroundStyle(Palette.ink)
-                    Text("\(book.chapters.count) chapters · \(state.transcribedChapterCount(in: book)) transcribed" + (book.ebookPath == nil ? " · audio only" : " · ebook found"))
+                    Text(libraryStatus(for: book))
                         .font(.system(size: 11))
                         .foregroundStyle(Palette.dim)
                     AudiobookLanguagePicker(state: state, book: book)
@@ -226,6 +259,12 @@ private struct ChapterStrip: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Palette.terracotta)
+                if !book.hasAudio {
+                    Button(action: onAddAudio) {
+                        Label("Add Audio", systemImage: "waveform")
+                    }
+                    .buttonStyle(.bordered)
+                }
                 Button(action: onAddEbook) {
                     Label(book.ebookPath == nil ? "Add EPUB" : "Add Another EPUB", systemImage: "book.pages")
                 }

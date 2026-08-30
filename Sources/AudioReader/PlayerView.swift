@@ -29,6 +29,7 @@ struct PlayerView: View {
 #if os(iOS)
     @State private var showSpeedPicker = false
     @State private var showReplaceEbookImporter = false
+    @State private var showAddAudioImporter = false
 #endif
 
     var body: some View {
@@ -42,6 +43,9 @@ struct PlayerView: View {
             }
             if let mismatch = state.transcriptionLanguageMismatch {
                 transcriptionLanguageNotice(mismatch)
+            }
+            if state.currentBookIsMissingAudio {
+                audioMissingNotice
             }
             if state.currentBookIsMissingEbook {
                 ebookMissingNotice
@@ -105,6 +109,13 @@ struct PlayerView: View {
                 state.errorMessage = error.localizedDescription
             }
         }
+        .fileImporter(
+            isPresented: $showAddAudioImporter,
+            allowedContentTypes: [.audio, .mp3, .mpeg4Audio],
+            allowsMultipleSelection: true
+        ) { result in
+            attachAudio(from: result)
+        }
 #endif
         .sheet(item: $state.shadowingSegment) { segment in
             ShadowingPracticeView(state: state, segment: segment)
@@ -112,6 +123,29 @@ struct PlayerView: View {
         .sheet(item: $state.chapterQuizSession) { _ in
             ChapterQuizView(state: state)
         }
+    }
+
+    private var audioMissingNotice: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "speaker.slash")
+                .foregroundStyle(Palette.terracotta)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Audiobook missing")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("This book is the EPUB text. Add audio later to play narration and transcribe spoken words.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.dim)
+            }
+            Spacer()
+            Button("Add Audio") { addAudio() }
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.terracotta)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Palette.goldSoft)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Audiobook missing. Add Audio")
     }
 
     private var ebookMissingNotice: some View {
@@ -218,6 +252,49 @@ struct PlayerView: View {
 #endif
     }
 
+    private func addAudio() {
+#if os(macOS)
+        guard let book = state.selectedBook else { return }
+        do {
+            guard let urls = try MacAudiobookImporter.chooseAudio(for: book) else { return }
+            attachAudio(urls: urls, bookID: book.id)
+        } catch {
+            state.errorMessage = error.localizedDescription
+        }
+#else
+        showAddAudioImporter = true
+#endif
+    }
+
+#if os(iOS)
+    private func attachAudio(from result: Result<[URL], any Error>) {
+        do {
+            attachAudio(urls: try result.get(), bookID: state.selectedBookID)
+        } catch {
+            state.errorMessage = error.localizedDescription
+        }
+    }
+#endif
+
+    private func attachAudio(urls: [URL], bookID: String?) {
+        guard let bookID, let book = state.books.first(where: { $0.id == bookID }) else { return }
+        do {
+            _ = try AudiobookImportService.addMediaFiles(
+                urls,
+                to: URL(fileURLWithPath: book.folderPath, isDirectory: true)
+            )
+            Task {
+                await state.rescan()
+                if let updated = state.books.first(where: { $0.id == bookID }),
+                   let chapter = updated.chapters.first {
+                    state.open(chapter: chapter, in: updated, autoplay: false)
+                }
+            }
+        } catch {
+            state.errorMessage = error.localizedDescription
+        }
+    }
+
 #if os(macOS)
     private var header: some View {
         desktopHeader
@@ -295,7 +372,7 @@ struct PlayerView: View {
             } label: {
                 Label(state.transcript == nil ? "Transcribe" : "Re-transcribe", systemImage: "waveform")
             }
-            .disabled(state.selectedChapter == nil || state.isTranscribing)
+            .disabled(state.selectedChapter == nil || state.isTranscribing || state.currentBookIsMissingAudio)
         }
         .fixedSize(horizontal: true, vertical: false)
     }
@@ -323,7 +400,7 @@ struct PlayerView: View {
             } label: {
                 Image(systemName: "waveform")
             }
-            .disabled(state.selectedChapter == nil || state.isTranscribing)
+            .disabled(state.selectedChapter == nil || state.isTranscribing || state.currentBookIsMissingAudio)
             .accessibilityLabel(state.transcript == nil ? "Transcribe" : "Re-transcribe")
             .help(state.transcript == nil ? "Transcribe chapter" : "Re-transcribe chapter")
         }
@@ -478,7 +555,7 @@ struct PlayerView: View {
             } label: {
                 Image(systemName: "waveform")
             }
-            .disabled(state.selectedChapter == nil || state.isTranscribing)
+            .disabled(state.selectedChapter == nil || state.isTranscribing || state.currentBookIsMissingAudio)
             .accessibilityLabel(state.transcript == nil ? "Transcribe" : "Re-transcribe")
             .help(state.transcript == nil ? "Transcribe chapter" : "Re-transcribe chapter")
         }
@@ -755,7 +832,8 @@ struct PlayerView: View {
                     autoScroll: $autoScroll,
                     readerScrollTarget: $readerScrollTarget,
                     proxyWidth: split.textWidth,
-                    type: type
+                    type: type,
+                    onAddAudio: addAudio
                 )
                     .frame(width: split.textWidth)
                 if lookupOpen {
@@ -1908,6 +1986,7 @@ private struct TranscriptTextColumn: View {
     @Binding var readerScrollTarget: ReaderScrollTarget?
     let proxyWidth: CGFloat
     let type: ReaderType
+    var onAddAudio: () -> Void = {}
 
     var body: some View {
         let cursor = PlaybackCursor.resolve(
@@ -2039,20 +2118,34 @@ private struct TranscriptTextColumn: View {
             Text("Prepare this chapter")
                 .font(.system(size: 28, weight: .regular, design: .serif))
                 .foregroundStyle(Palette.ink)
-            Text("This app transcribes the audio on this device so every spoken word can be highlighted. Ebooks rarely match audiobooks exactly — publisher intros, number wording, and abridgements all drift — so speech-to-text is the source of timing, then we align the ebook when it helps.")
-                .foregroundStyle(Palette.dim)
-                .font(.system(size: 14))
-                .frame(maxWidth: 560, alignment: .leading)
-            Button {
-                state.transcribeSelected()
-            } label: {
-                Label("Transcribe chapter", systemImage: "waveform.badge.mic")
-                    .padding(.horizontal, 8)
+            if state.currentBookIsMissingAudio {
+                Text("This book is the EPUB text. You can read, look up words, translate, and review without narration. Add an audiobook when you want playback and spoken-word highlighting.")
+                    .foregroundStyle(Palette.dim)
+                    .font(.system(size: 14))
+                    .frame(maxWidth: 560, alignment: .leading)
+                Button(action: onAddAudio) {
+                    Label("Add Audio", systemImage: "waveform")
+                        .padding(.horizontal, 8)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.terracotta)
+                .controlSize(.large)
+            } else {
+                Text("This app transcribes the audio on this device so every spoken word can be highlighted. Ebooks rarely match audiobooks exactly — publisher intros, number wording, and abridgements all drift — so speech-to-text is the source of timing, then we align the ebook when it helps.")
+                    .foregroundStyle(Palette.dim)
+                    .font(.system(size: 14))
+                    .frame(maxWidth: 560, alignment: .leading)
+                Button {
+                    state.transcribeSelected()
+                } label: {
+                    Label("Transcribe chapter", systemImage: "waveform.badge.mic")
+                        .padding(.horizontal, 8)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.terracotta)
+                .controlSize(.large)
+                .disabled(state.isTranscribing)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Palette.terracotta)
-            .controlSize(.large)
-            .disabled(state.isTranscribing)
         }
         .padding(.top, 40)
     }

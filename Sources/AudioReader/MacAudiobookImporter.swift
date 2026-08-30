@@ -11,7 +11,7 @@ enum MacAudiobookImporter {
         panel.allowsMultipleSelection = true
         panel.allowedContentTypes = [.audio, .epub, .image]
         panel.prompt = "Import"
-        panel.message = "Choose audiobook audio, and optionally its EPUB and cover image."
+        panel.message = "Choose audiobook audio and/or EPUB files, and optionally a cover image."
         guard panel.runModal() == .OK else { return nil }
         try AudiobookImportService.importFiles(panel.urls, into: libraryRoot)
         return panel.urls.count
@@ -23,7 +23,7 @@ enum MacAudiobookImporter {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.prompt = "Import Folder"
-        panel.message = "Choose one audiobook folder, or a folder containing multiple audiobook folders."
+        panel.message = "Choose one book folder, or a folder containing audiobook and/or EPUB folders."
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
         try AudiobookImportService.importFolder(url, into: libraryRoot)
         return url.lastPathComponent
@@ -34,9 +34,9 @@ enum MacAudiobookImporter {
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = [.epub, .image]
+        panel.allowedContentTypes = [.audio, .epub, .image]
         panel.prompt = "Add to Book"
-        panel.message = "Choose an EPUB and, optionally, cover artwork for \(book.title)."
+        panel.message = "Choose audio, an EPUB, and/or cover artwork for \(book.title)."
         guard panel.runModal() == .OK else { return nil }
         return try AudiobookImportService.addCompanionFiles(
             panel.urls,
@@ -56,6 +56,18 @@ enum MacAudiobookImporter {
             : "Choose a companion EPUB for \(book.title)."
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
         return url
+    }
+
+    static func chooseAudio(for book: Book) throws -> [URL]? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.audio]
+        panel.prompt = "Add Audio"
+        panel.message = "Choose audiobook audio for \(book.title)."
+        guard panel.runModal() == .OK else { return nil }
+        return panel.urls
     }
 }
 #endif

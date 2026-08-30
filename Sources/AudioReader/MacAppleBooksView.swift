@@ -14,7 +14,7 @@ struct MacAppleBooksView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Apple Books")
                         .font(.system(size: 22, weight: .semibold))
-                    Text("Downloaded MP3, M4A, and M4B audiobooks stored by Apple Books")
+                    Text("Downloaded audiobooks and EPUB books stored by Apple Books")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -34,50 +34,17 @@ struct MacAppleBooksView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Section("Audiobooks") {
-                    ForEach(library.items) { item in
-                        HStack(spacing: 14) {
-                            cover(item)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(item.title)
-                                    .font(.headline)
-                                Text(item.author)
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                                if item.isProtected {
-                                    Label("Protected — unavailable for transcription", systemImage: "lock.fill")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                } else {
-                                    Text(formatClock(item.duration))
-                                        .font(.caption.monospacedDigit())
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            Spacer()
-                            Button("Open") { library.openInBooks(item) }
-                                .buttonStyle(.bordered)
-                            if importingID == item.id {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Button("Import") { onImport(item) }
-                                    .buttonStyle(.borderedProminent)
-                                    .tint(Palette.terracotta)
-                                    .disabled(!item.canImport || importingID != nil)
-                            }
-                        }
-                        .padding(.vertical, 5)
-                    }
-                }
+                appleBooksSection("Audiobooks", items: library.items.filter { $0.kind == .audiobook })
+                appleBooksSection("EPUBs", items: library.items.filter { $0.kind == .ebook })
             }
             .overlay {
                 if library.isLoading {
                     ProgressView("Reading Apple Books…")
                 } else if library.items.isEmpty {
                     ContentUnavailableView(
-                        "No audiobooks found",
+                        "No Apple Books titles found",
                         systemImage: "books.vertical",
-                        description: Text("Download an audiobook in Apple Books, then refresh. Cloud-only titles are not stored on this Mac and cannot be listed here.")
+                        description: Text("Download an audiobook or EPUB in Apple Books, then refresh. Cloud-only and DRM-protected titles cannot be imported.")
                     )
                 }
             }
@@ -95,6 +62,51 @@ struct MacAppleBooksView: View {
         .frame(minWidth: 760, minHeight: 560)
         .task {
             if library.items.isEmpty { await library.reload() }
+        }
+    }
+
+    @ViewBuilder
+    private func appleBooksSection(_ title: String, items: [MacAppleBookItem]) -> some View {
+        if !items.isEmpty {
+            Section(title) {
+                ForEach(items) { item in
+                    HStack(spacing: 14) {
+                        cover(item)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.title)
+                                .font(.headline)
+                            Text(item.author)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            if item.isProtected {
+                                Label("Protected — unavailable for import", systemImage: "lock.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else if item.kind == .ebook {
+                                Text("EPUB")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text(formatClock(item.duration))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        Button("Open") { library.openInBooks(item) }
+                            .buttonStyle(.bordered)
+                        if importingID == item.id {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Button("Import") { onImport(item) }
+                                .buttonStyle(.borderedProminent)
+                                .tint(Palette.terracotta)
+                                .disabled(!item.canImport || importingID != nil)
+                        }
+                    }
+                    .padding(.vertical, 5)
+                }
+            }
         }
     }
 

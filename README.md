@@ -1,6 +1,6 @@
 # AudioReader
 
-AudioReader is a macOS and iPadOS audiobook study app for language learners. It combines audiobook playback, multilingual on-device transcription, word-level highlighting, optional EPUB alignment, dictionary lookup, vocabulary capture, a local known/learning map with cloze and reverse review, and contextual assistance from Apple Intelligence, Grok, QwenCloud, or OpenAI.
+AudioReader is a macOS and iPadOS study app for language learners. It combines audiobook playback, EPUB reading, multilingual on-device transcription, word-level highlighting, optional EPUB alignment, dictionary lookup, vocabulary capture, a local known/learning map with cloze and reverse review, and contextual assistance from Apple Intelligence, Grok, QwenCloud, or OpenAI.
 
 ## What this is for
 
@@ -14,7 +14,7 @@ AudioReader is designed for focused listening and reading rather than passive au
 - replay or loop a sentence and return to saved vocabulary in context;
 - translate words, sentences, or chapters and ask questions about the current chapter through an optional LLM provider, including on-device Apple Intelligence.
 
-The transcript is the timing source. Audio narration often contains publisher introductions, omitted footnotes, or wording that differs from the ebook, so AudioReader first transcribes what was actually spoken with Apple SpeechAnalyzer. When an EPUB is present, it then matches sufficiently similar sentences and lets you switch between **Spoken**, **Ebook**, and **Both**.
+When a book has audio, the transcript is the timing source. Audio narration often contains publisher introductions, omitted footnotes, or wording that differs from the ebook, so AudioReader first transcribes what was actually spoken with Apple SpeechAnalyzer. When an EPUB is present, it then matches sufficiently similar sentences and lets you switch between **Spoken**, **Ebook**, and **Both**. EPUB-only books skip transcription and use the published sentences for reading, lookup, translation, and review until you add audio.
 
 Supported local resources:
 
@@ -60,9 +60,11 @@ xcrun simctl launch booted com.johnsonzhang.AudioReader
 
 ### Import a book
 
-On macOS, use **Import** to select audiobook files, an audiobook folder, or an accessible downloaded title from Apple Books. You can also choose a library folder containing one subfolder per book.
+On macOS, use **Import** to select audio files, EPUB files, a book folder, or an accessible downloaded title from Apple Books. You can also choose a library folder containing one subfolder per book.
 
-On iPad, use **Import Files** or **Import Folder** to choose resources from Files or iCloud Drive. The **Apple Books & Device** source lists audiobooks exposed through the device media library.
+On iPad, use **Import Files** or **Import Folder** to choose audio and/or EPUB resources from Files or iCloud Drive. The **Apple Books & Device** source lists audiobooks exposed through the device media library; EPUBs on iPad are imported through Files.
+
+You can import audio and EPUB together, audio only, or EPUB only. Re-importing the same audio or EPUB does not create a duplicate; it can attach the missing counterpart. From a book you can still **Add EPUB** or **Add Audio** later.
 
 For the best result, keep each book in its own folder:
 
@@ -74,13 +76,14 @@ Book Title/
 └── cover.jpg
 ```
 
-AudioReader copies explicitly imported resources into its own imported-books library. Re-importing the same audio does not create a duplicate; it can add a missing EPUB or cover to the existing book.
+AudioReader copies explicitly imported resources into its own imported-books library. Re-importing the same audio or EPUB does not create a duplicate; it can add a missing EPUB, audio file, or cover to the existing book.
 
 ### Transcribe and read
 
 1. In **Settings → Languages**, choose the audiobook's spoken language independently from **Translate into**.
-2. Select a book and chapter, then select **Transcribe**. The first run may download the selected language's speech assets.
+2. Select a book and chapter. For audiobooks, select **Transcribe**. The first run may download the selected language's speech assets. EPUB-only books open the published text immediately.
    If the book has no companion ebook, the reader displays **EPUB ebook missing** at the top. Select **Add EPUB** and choose the matching `.epub` file.
+   If the book has no audio, the reader displays **Audiobook missing**. Select **Add Audio** when you want narration.
 3. Wait for transcription and optional EPUB validation/alignment to finish. AudioReader checks extraction quality, book metadata, sampled content, match coverage and scores, reading order, and unmatched passages before EPUB wording can replace speech.
 4. Play the chapter and use the highlighted transcript to follow, seek, replay, or loop sentences.
 5. Choose **Spoken**, **Ebook**, or **Both** when the EPUB and individual sentence matches are trusted. Unreadable, likely-wrong, different-edition, and uncertain EPUBs show the same warning and recovery actions on macOS and iPadOS. **Recheck EPUB** validates an existing transcript again without retranscribing audio; **Replace EPUB** installs another file; and **Use This EPUB Anyway** remains an explicit option after assessment and still permits only strong individual matches.

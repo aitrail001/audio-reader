@@ -37,6 +37,7 @@ actor Transcriber {
         progress: @Sendable @escaping (TranscriptionProgress) -> Void,
         checkpoint: @Sendable @escaping (String, [TranscriptSegment]) async -> Void
     ) async throws -> Transcript {
+        guard chapter.hasAudio else { throw TranscriptionError.noAudio }
         guard SpeechTranscriber.isAvailable else { throw TranscriptionError.unavailable }
 
         progress(.init(fraction: 0.02, message: "Preparing speech model…"))

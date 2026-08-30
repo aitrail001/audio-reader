@@ -3,6 +3,11 @@ import AppKit
 import AVFoundation
 import Foundation
 
+enum MacAppleBookKind: String, Hashable, Sendable {
+    case audiobook
+    case ebook
+}
+
 struct MacAppleBookItem: Identifiable, Hashable, Sendable {
     var id: String
     var title: String
@@ -12,6 +17,7 @@ struct MacAppleBookItem: Identifiable, Hashable, Sendable {
     var artworkData: Data?
     var isProtected: Bool
     var isCloud: Bool
+    var kind: MacAppleBookKind = .audiobook
 
     var canImport: Bool {
         !isProtected && !isCloud && location.map { FileManager.default.fileExists(atPath: $0.path) } == true
@@ -31,16 +37,23 @@ final class MacAppleBooksLibrary {
         defer { isLoading = false }
         do {
             items = try await Task.detached(priority: .userInitiated) {
-                try await Self.readDownloadedAudiobooks()
+                let audio = try await Self.readDownloadedAudiobooks()
+                let ebooks = Self.readDownloadedEbooks()
+                return audio + ebooks
             }.value
-            let available = items.filter(\.canImport).count
-            let unavailable = items.count - available
-            message = unavailable > 0
-                ? "Found \(available) importable and \(unavailable) protected audiobooks downloaded by Apple Books."
-                : "Found \(available) downloaded audiobooks in Apple Books."
+            let audiobooks = items.filter { $0.kind == .audiobook }
+            let ebooks = items.filter { $0.kind == .ebook }
+            let availableAudio = audiobooks.filter(\.canImport).count
+            let availableEbooks = ebooks.filter(\.canImport).count
+            let unavailable = items.count - availableAudio - availableEbooks
+            if unavailable > 0 {
+                message = "Found \(availableAudio) importable audiobooks, \(availableEbooks) importable EPUBs, and \(unavailable) protected or unreadable titles."
+            } else {
+                message = "Found \(availableAudio) downloaded audiobooks and \(availableEbooks) EPUBs in Apple Books."
+            }
         } catch {
             items = []
-            message = "Downloaded Apple Books audiobooks could not be read: \(error.localizedDescription)"
+            message = "Downloaded Apple Books titles could not be read: \(error.localizedDescription)"
         }
     }
 
@@ -100,6 +113,38 @@ final class MacAppleBooksLibrary {
     ) async throws -> String? {
         let item = AVMetadataItem.metadataItems(from: metadata, filteredByIdentifier: identifier).first
         return try await item?.load(.stringValue)
+    }
+
+    nonisolated private static func readDownloadedEbooks() -> [MacAppleBookItem] {
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Containers/com.apple.BKAgentService/Data/Documents/iBooks/Books")
+        guard FileManager.default.fileExists(atPath: root.path) else { return [] }
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        var found: [MacAppleBookItem] = []
+        for case let url as URL in enumerator {
+            if url.path.contains("/Audiobooks/") { continue }
+            guard url.pathExtension.lowercased() == "epub" else { continue }
+            let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+            guard isFile else { continue }
+            guard let document = EPUBParser.document(from: url.path) else { continue }
+            found.append(MacAppleBookItem(
+                id: url.path,
+                title: document.title ?? url.deletingPathExtension().lastPathComponent,
+                author: document.author ?? "Unknown author",
+                duration: 0,
+                location: url,
+                artworkData: nil,
+                isProtected: false,
+                isCloud: false,
+                kind: .ebook
+            ))
+        }
+        return found.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
     }
 
     func importAudiobook(_ item: MacAppleBookItem, into libraryRoot: URL) throws {
