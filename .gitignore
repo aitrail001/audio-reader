@@ -1,5 +1,7 @@
 .build/
 .swiftpm/
+node_modules/
+.pnpm-store/
 AudioReader.app/
 *.xcodeproj/xcuserdata/
 **/*.xcworkspace/xcuserdata/
@@ -9,3 +11,4 @@ AudioReader.app/
 .grok/
 .cursor/
 .worktree/
+.wrangler/
