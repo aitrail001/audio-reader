@@ -1999,7 +1999,9 @@ private struct TranscriptTextColumn: View {
         let studyKnown = state.studyIndex.known
         ScrollView {
             LazyVStack(alignment: .leading, spacing: type.paragraph) {
-                if let transcript = state.transcript {
+                if state.selectedChapter?.isCover == true, let book = state.selectedBook {
+                    EbookCoverPage(book: book)
+                } else if let transcript = state.transcript {
                     ForEach(transcript.segments) { segment in
                         SentenceRow(
                             segment: segment,
@@ -2148,6 +2150,46 @@ private struct TranscriptTextColumn: View {
             }
         }
         .padding(.top, 40)
+    }
+}
+
+private struct EbookCoverPage: View {
+    let book: Book
+
+    var body: some View {
+        VStack(spacing: 20) {
+            if let path = book.coverPath, let image = CoverImageCache.shared.image(for: path) {
+                Image(platformImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 420, maxHeight: 620)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
+            } else {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Palette.panel2)
+                    .frame(width: 280, height: 420)
+                    .overlay {
+                        Image(systemName: "book.closed")
+                            .font(.system(size: 44, weight: .light))
+                            .foregroundStyle(Palette.gold)
+                    }
+            }
+            Text(book.title)
+                .font(.system(size: 28, weight: .regular, design: .serif))
+                .foregroundStyle(Palette.ink)
+                .multilineTextAlignment(.center)
+            if let author = book.author, !author.isEmpty {
+                Text(author)
+                    .font(.system(size: 16))
+                    .foregroundStyle(Palette.dim)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 24)
+        .padding(.bottom, 48)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Cover of \(book.title)")
     }
 }
 

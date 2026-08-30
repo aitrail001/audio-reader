@@ -284,7 +284,7 @@ private struct ChapterStrip: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(ch.title)
                                     .font(.system(size: 12, weight: .medium))
-                                Text(ch.duration.map(formatClock) ?? "—")
+                                Text(chapterCaption(ch))
                                     .font(.system(size: 10, design: .monospaced))
                                     .foregroundStyle(Palette.dim)
                             }
@@ -305,6 +305,12 @@ private struct ChapterStrip: View {
         }
         .padding(16)
         .background(.ultraThinMaterial)
+    }
+
+    private func chapterCaption(_ chapter: Chapter) -> String {
+        if chapter.isCover { return "Cover" }
+        if !chapter.hasAudio { return "Text" }
+        return chapter.duration.map(formatClock) ?? "—"
     }
 }
 

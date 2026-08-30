@@ -40,9 +40,11 @@ struct Chapter: Identifiable, Hashable, Codable, Sendable {
     var audioPath: String
     var duration: TimeInterval?
     var startTime: TimeInterval?
+    var ebookLocator: String? = nil
 
     var audioStart: TimeInterval { startTime ?? 0 }
     var hasAudio: Bool { !audioPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    var isCover: Bool { ebookLocator == EPUBParser.coverLocator }
 }
 
 enum TranscriptSource {
@@ -266,7 +268,18 @@ struct Transcript: Codable, Sendable {
     }
 
     static func makeFromEbook(chapter: Chapter, book: Book, document: EPUBDocument) -> Transcript? {
-        let sentences = EPUBParser.sentences(from: document.text)
+        makeFromEbook(chapter: chapter, book: book, text: document.text)
+    }
+
+    static func makeFromEbook(chapter: Chapter, book: Book, text: String) -> Transcript? {
+        guard !chapter.isCover else { return nil }
+        var sentences = EPUBParser.sentences(from: text)
+        if sentences.isEmpty {
+            let trimmed = text
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { sentences = [trimmed] }
+        }
         guard !sentences.isEmpty else { return nil }
         let segments = sentences.enumerated().map { index, sentence in
             let start = TimeInterval(index)
@@ -290,6 +303,7 @@ struct Transcript: Codable, Sendable {
                 documentEbookUseAllowed: true
             )
         }
+        let wordCount = Aligner.tokenize(text).count
         return Transcript(
             chapterID: chapter.id,
             audioPath: chapter.audioPath,
@@ -302,8 +316,8 @@ struct Transcript: Codable, Sendable {
                 status: .trusted,
                 reason: "This chapter is the EPUB text.",
                 metrics: EPUBAlignmentMetrics(
-                    extractedWordCount: document.wordCount,
-                    extractedSentenceCount: document.sentenceCount,
+                    extractedWordCount: wordCount,
+                    extractedSentenceCount: sentences.count,
                     sampledAnchorCount: segments.count,
                     matchedAnchorCount: segments.count,
                     matchedCoverage: 1,

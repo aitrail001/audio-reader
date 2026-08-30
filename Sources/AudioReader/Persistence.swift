@@ -98,6 +98,7 @@ enum Persistence {
     static func readyChapterIDs(in books: [Book], transcripts: [Transcript]) -> Set<String> {
         let byChapter = Dictionary(transcripts.map { ($0.chapterID, $0) }, uniquingKeysWith: { _, newest in newest })
         return Set(books.flatMap(\.chapters).compactMap { chapter in
+            if chapter.isCover { return chapter.id }
             if let transcript = byChapter[chapter.id], transcript.belongs(to: chapter) {
                 return chapter.id
             }

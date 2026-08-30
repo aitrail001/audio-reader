@@ -846,10 +846,18 @@ final class AppState {
     }
 
     private func ebookTranscriptIfNeeded(for chapter: Chapter, in book: Book) -> Transcript? {
-        guard !chapter.hasAudio, let ebookPath = book.ebookPath,
-              let document = EPUBParser.document(from: ebookPath),
-              let transcript = Transcript.makeFromEbook(chapter: chapter, book: book, document: document)
-        else { return nil }
+        guard !chapter.hasAudio, !chapter.isCover, let ebookPath = book.ebookPath else { return nil }
+        let structure = EPUBParser.structure(from: ebookPath)
+        let text: String
+        if let locator = chapter.ebookLocator,
+           let part = structure?.chapters.first(where: { $0.locator == locator && !$0.isCover }) {
+            text = part.text
+        } else if let structure, structure.chapters.filter({ !$0.isCover }).count == 1 {
+            text = structure.bodyText
+        } else {
+            text = structure?.bodyText ?? EPUBParser.document(from: ebookPath)?.text ?? ""
+        }
+        guard let transcript = Transcript.makeFromEbook(chapter: chapter, book: book, text: text) else { return nil }
         try? Persistence.saveTranscript(transcript)
         readyChapterIDs = Persistence.readyChapterIDs(in: books, transcripts: Persistence.loadAllTranscripts())
         return transcript

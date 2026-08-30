@@ -685,7 +685,7 @@ private struct IPadBookDetail: View {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(chapter.title)
                                         .font(.headline)
-                                    Text(chapter.duration.map(formatClock) ?? "Duration unavailable")
+                                    Text(chapterCaption(chapter))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -742,6 +742,12 @@ private struct IPadBookDetail: View {
                 .accessibilityLabel("Book actions")
             }
         }
+    }
+
+    private func chapterCaption(_ chapter: Chapter) -> String {
+        if chapter.isCover { return "Cover" }
+        if !chapter.hasAudio { return "Text" }
+        return chapter.duration.map(formatClock) ?? "Duration unavailable"
     }
 }
 

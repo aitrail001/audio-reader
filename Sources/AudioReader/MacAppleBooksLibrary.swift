@@ -171,15 +171,15 @@ final class MacAppleBooksLibrary {
         author: String?
     ) -> MacAppleBookItem {
         let exists = FileManager.default.fileExists(atPath: url.path)
-        let document = exists ? EPUBParser.document(from: url.path) : nil
+        let structure = exists ? EPUBParser.structure(from: url.path) : nil
         return MacAppleBookItem(
             id: id,
-            title: title ?? document?.title ?? url.deletingPathExtension().lastPathComponent,
-            author: author ?? document?.author ?? "Unknown author",
+            title: title ?? structure?.title ?? url.deletingPathExtension().lastPathComponent,
+            author: author ?? structure?.author ?? "Unknown author",
             duration: 0,
             location: url,
-            artworkData: nil,
-            isProtected: exists && document == nil,
+            artworkData: structure?.cover?.data,
+            isProtected: exists && structure == nil,
             isCloud: !exists,
             kind: .ebook
         )

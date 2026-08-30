@@ -32,17 +32,31 @@ enum LibraryScanner {
         let epubs = files.filter { $0.pathExtension.lowercased() == "epub" }
         guard !audio.isEmpty || !epubs.isEmpty else { return nil }
 
+        let structure = epubs.first.flatMap { EPUBParser.structure(from: $0.path) }
         let chapters: [Chapter]
         if audio.isEmpty {
-            chapters = [
-                Chapter(
-                    id: stableID(persistentPathIdentity(folder.path) + "#ebook"),
-                    index: 0,
-                    title: "Text",
-                    audioPath: "",
-                    duration: nil
-                )
-            ]
+            if let structure, !structure.chapters.isEmpty {
+                chapters = structure.chapters.enumerated().map { idx, part in
+                    Chapter(
+                        id: stableID(persistentPathIdentity(folder.path) + "#ebook#" + part.locator),
+                        index: idx,
+                        title: part.title,
+                        audioPath: "",
+                        duration: nil,
+                        ebookLocator: part.locator
+                    )
+                }
+            } else {
+                chapters = [
+                    Chapter(
+                        id: stableID(persistentPathIdentity(folder.path) + "#ebook"),
+                        index: 0,
+                        title: "Text",
+                        audioPath: "",
+                        duration: nil
+                    )
+                ]
+            }
         } else {
             let chapterMP3s = audio
                 .filter { $0.pathExtension.lowercased() == "mp3" }
@@ -78,17 +92,21 @@ enum LibraryScanner {
         let m4bs = audio.filter { $0.pathExtension.lowercased() == "m4b" }
         let folderName = folder.lastPathComponent
         let title = prettyBookTitle(folderName: folderName, m4b: m4bs.first, epub: epubs.first)
-        let author = guessAuthor(from: m4bs.first) ?? guessAuthor(from: epubs.first)
+        let author = guessAuthor(from: m4bs.first) ?? guessAuthor(from: epubs.first) ?? structure?.author
         let source = sourceMarker(in: folder)
         let markedTitle = textMarker(named: ".audioreader-title", in: folder)
         let markedAuthor = textMarker(named: ".audioreader-author", in: folder)
+        var coverPath = covers.first?.path
+        if coverPath == nil, let image = structure?.cover ?? epubs.first.flatMap({ EPUBParser.coverImage(from: $0.path) }) {
+            coverPath = try? EmbeddedArtwork.store(image.data, in: folder).path
+        }
 
         return Book(
             id: stableID(folder.path),
-            title: markedTitle ?? title,
+            title: markedTitle ?? structure?.title ?? title,
             author: markedAuthor ?? author,
             folderPath: folder.path,
-            coverPath: covers.first?.path,
+            coverPath: coverPath,
             ebookPath: epubs.first?.path,
             chapters: chapters,
             source: source
