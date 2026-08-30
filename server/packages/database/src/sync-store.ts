@@ -177,140 +177,55 @@ export function createMemorySyncStore(options: { identity?: IdentityStore } = {}
   };
 }
 
-export function createSupabaseSyncStore(
-  rest: RestClient,
-  options: { identity?: IdentityStore } = {},
-): SyncStore {
-  const identity = options.identity;
-
-  async function loadChanges(userId: string): Promise<SyncChange[]> {
+export function createSupabaseSyncStore(rest: RestClient): SyncStore {
+  async function loadChanges(input: SyncPullInput): Promise<SyncChange[]> {
+    const after = parseCursor(input.cursor);
+    const pageLimit = Math.min(500, Math.max(1, Math.floor(input.limit)));
     const response = await rest.request({
       method: "GET",
       path: "/sync_changes",
       query: {
-        user_id: `eq.${userId}`,
-        select: "*",
+        user_id: `eq.${input.userId}`,
+        sequence: `gt.${String(after)}`,
+        select: "sequence,entity_type,entity_id,operation,revision,changed_at,payload",
         order: "sequence.asc",
+        limit: String(pageLimit + 1),
       },
     });
     if (response.status >= 400 || response.status === 0) {
-      return [];
+      throw new Error("sync pull failed");
     }
     return restRows(response.body).map(changeFromRow);
   }
 
-  async function findMutation(userId: string, mutationId: string): Promise<SyncChange | undefined> {
-    const response = await rest.request({
-      method: "GET",
-      path: "/sync_changes",
-      query: {
-        user_id: `eq.${userId}`,
-        mutation_id: `eq.${mutationId}`,
-        select: "*",
-        limit: "1",
-      },
-    });
-    const row = restRows(response.body)[0];
-    return row === undefined ? undefined : changeFromRow(row);
-  }
-
-  async function currentRevision(
-    userId: string,
-    entityType: string,
-    entityId: string,
-  ): Promise<number> {
-    const response = await rest.request({
-      method: "GET",
-      path: "/sync_changes",
-      query: {
-        user_id: `eq.${userId}`,
-        entity_type: `eq.${entityType}`,
-        entity_id: `eq.${entityId}`,
-        select: "revision",
-        order: "sequence.desc",
-        limit: "1",
-      },
-    });
-    const row = restRows(response.body)[0];
-    if (row === undefined) {
-      return 0;
-    }
-    return numericValue(row.revision, 0);
-  }
-
   return {
     async push(input) {
-      const results: SyncMutationResult[] = [];
-      let cursor = await this.latestCursor(input.userId);
-      for (const mutation of input.mutations) {
-        const existing = await findMutation(input.userId, mutation.mutationId);
-        if (existing !== undefined) {
-          results.push({
-            mutationId: mutation.mutationId,
-            status: "duplicate",
-            entityRevision: existing.revision,
-            problem: null,
-          });
-          continue;
-        }
-        const result = await applyMutation({
-          mutation,
-          currentRevision: await currentRevision(
-            input.userId,
-            mutation.entityType,
-            mutation.entityId,
-          ),
-          userId: input.userId,
-          ...(identity === undefined ? {} : { identity }),
-        });
-        if (result.status === "applied") {
-          const revision = result.entityRevision ?? 1;
-          const nextSequence = Number(cursor) + 1;
-          const insert = await rest.request({
-            method: "POST",
-            path: "/sync_changes",
-            prefer: "return=representation",
-            body: {
-              user_id: input.userId,
-              sequence: nextSequence,
-              entity_type: mutation.entityType,
-              entity_id: mutation.entityId,
-              operation: mutation.operation,
-              revision,
-              mutation_id: mutation.mutationId,
-              payload: mutation.payload,
-              changed_at: mutation.occurredAt,
-            },
-          });
-          if (insert.status >= 400 || insert.status === 0) {
-            const rejected: SyncMutationResult = {
-              mutationId: mutation.mutationId,
-              status: "rejected",
-              entityRevision: null,
-              problem: {
-                title: "Sync write failed",
-                detail: "The change could not be recorded.",
-              },
-            };
-            results.push(rejected);
-            continue;
-          }
-          cursor = String(nextSequence);
-        }
-        results.push(result);
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/push_sync_batch",
+        body: {
+          p_user_id: input.userId,
+          p_device_id: input.deviceId,
+          p_batch_id: input.batchId,
+          p_mutations: input.mutations,
+        },
+      });
+      const pushed = syncPushResultFromRpc(response.body, input);
+      if (response.status < 200 || response.status >= 300 || pushed === undefined) {
+        throw new Error("sync batch write failed");
       }
-      return { batchId: input.batchId, results, cursor };
+      return pushed;
     },
 
     async pull(input) {
-      const log = await loadChanges(input.userId);
-      const after = parseCursor(input.cursor);
-      const sliced = log.filter((change) => change.sequence > after).slice(0, input.limit);
-      const last = sliced.at(-1)?.sequence ?? after;
+      const pageLimit = Math.min(500, Math.max(1, Math.floor(input.limit)));
+      const rows = await loadChanges(input);
+      const sliced = rows.slice(0, pageLimit);
+      const last = sliced.at(-1)?.sequence ?? parseCursor(input.cursor);
       return {
         changes: sliced,
         cursor: String(last),
-        hasMore: log.some((change) => change.sequence > last),
+        hasMore: rows.length > pageLimit,
       };
     },
 
@@ -325,6 +240,9 @@ export function createSupabaseSyncStore(
           limit: "1",
         },
       });
+      if (response.status >= 400 || response.status === 0) {
+        throw new Error("sync cursor lookup failed");
+      }
       const row = restRows(response.body)[0];
       if (row === undefined) {
         return "0";
@@ -332,6 +250,63 @@ export function createSupabaseSyncStore(
       return String(numericValue(row.sequence, 0));
     },
   };
+}
+
+function syncPushResultFromRpc(value: unknown, input: SyncPushInput): SyncPushResult | undefined {
+  if (!isRecord(value) || value.batchId !== input.batchId) {
+    return undefined;
+  }
+  const cursor = value.cursor;
+  if ((typeof cursor !== "string" && typeof cursor !== "number") || !Array.isArray(value.results)) {
+    return undefined;
+  }
+  const cursorNumber = Number(cursor);
+  if (
+    !Number.isSafeInteger(cursorNumber) ||
+    cursorNumber < 0 ||
+    value.results.length !== input.mutations.length
+  ) {
+    return undefined;
+  }
+  const expectedMutationIDs = new Set(input.mutations.map((mutation) => mutation.mutationId));
+  const returnedMutationIDs = new Set<string>();
+  const results: SyncMutationResult[] = [];
+  for (const item of value.results) {
+    if (
+      !isRecord(item) ||
+      typeof item.mutationId !== "string" ||
+      !expectedMutationIDs.has(item.mutationId) ||
+      returnedMutationIDs.has(item.mutationId)
+    ) {
+      return undefined;
+    }
+    returnedMutationIDs.add(item.mutationId);
+    const status = item.status;
+    if (
+      status !== "applied" &&
+      status !== "duplicate" &&
+      status !== "conflict" &&
+      status !== "rejected"
+    ) {
+      return undefined;
+    }
+    const entityRevision = typeof item.entityRevision === "number" ? item.entityRevision : null;
+    if (entityRevision !== null && (!Number.isSafeInteger(entityRevision) || entityRevision < 0)) {
+      return undefined;
+    }
+    const problem = isRecord(item.problem)
+      ? {
+          title:
+            typeof item.problem.title === "string" ? item.problem.title : "Sync mutation failed",
+          detail:
+            typeof item.problem.detail === "string"
+              ? item.problem.detail
+              : "The change was not applied.",
+        }
+      : null;
+    results.push({ mutationId: item.mutationId, status, entityRevision, problem });
+  }
+  return { batchId: input.batchId, cursor: String(cursorNumber), results };
 }
 
 export function createUnavailableSyncStore(): SyncStore {
@@ -431,7 +406,10 @@ function settingsFromPayload(
       typeof payload.playbackRate === "number" ? payload.playbackRate : fallback.playbackRate,
     skipSeconds:
       typeof payload.skipSeconds === "number" ? payload.skipSeconds : fallback.skipSeconds,
-    appearance: appearance === "light" || appearance === "dark" ? appearance : fallback.appearance,
+    appearance:
+      appearance === "system" || appearance === "light" || appearance === "dark"
+        ? appearance
+        : fallback.appearance,
     updatedAt: fallback.updatedAt,
   };
 }

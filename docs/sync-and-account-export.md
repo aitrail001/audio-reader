@@ -32,6 +32,15 @@ history, rejects persistence failures instead of acknowledging them, and keeps
 the review visible if its local transaction fails. This preserves the same due
 queue, interval, ease, retention statistics, and review history across devices.
 
+The service applies each upload batch in one account-scoped Postgres
+transaction. Mutation IDs remain replay-safe, entity revisions are checked in
+order, and account sequence allocation is serialized. Downloads use an
+exclusive cursor and request only one bounded page plus a has-more sentinel;
+the Worker never loads an account's complete sync history to produce a page.
+The service-role-only batch RPC accepts at most 500 mutations, validates the
+active device, and keeps settings updates in the same transaction as their
+sync-log entry.
+
 ## Account export
 
 An account export includes the server-held account, device, settings, catalog,

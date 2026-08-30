@@ -10,6 +10,8 @@ const migrationsDir = join(serverRoot, "supabase", "migrations");
 
 const USER_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const USER_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const DEVICE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+const DEVICE_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1";
 const KEY_A = "idempotency-key-aaaa";
 const KEY_B = "idempotency-key-bbbb";
 
@@ -78,6 +80,14 @@ insert into public.books (user_id, title, edition_fingerprint, fingerprint_versi
 values
   (${sqlString(USER_A)}::uuid, 'Book A', 'fp-a', 1, 'files'),
   (${sqlString(USER_B)}::uuid, 'Book B', 'fp-b', 1, 'files');
+
+insert into public.devices (id, user_id, platform, name, app_version)
+values
+  (${sqlString(DEVICE_A)}::uuid, ${sqlString(USER_A)}::uuid, 'macos', 'Mac A', '1.3.0'),
+  (${sqlString(DEVICE_B)}::uuid, ${sqlString(USER_B)}::uuid, 'ipados', 'iPad B', '1.3.0');
+
+insert into public.user_settings (user_id)
+values (${sqlString(USER_A)}::uuid), (${sqlString(USER_B)}::uuid);
 `;
 
 describe("idempotency, cache claims, and audit transactions (postgres)", () => {
@@ -248,6 +258,113 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
         `select (deleted_at is not null)::text from books where id = ${sqlString(bookA)}`,
       ),
     ).toBe("true");
+  });
+
+  it("applies a sync batch atomically with replay, revisions, and settings CAS", () => {
+    const session = requireDb(db);
+    execOk(
+      session,
+      `update public.user_settings
+       set server_version = 3, appearance = 'dark'
+       where user_id = ${sqlString(USER_A)}::uuid`,
+    );
+    const batchId = "44444444-4444-4444-8444-444444444444";
+    const mutations = [
+      {
+        mutationId: "55555555-5555-4555-8555-555555555551",
+        entityType: "progress",
+        entityId: "chapter-one",
+        operation: "upsert",
+        baseRevision: 0,
+        occurredAt: "2026-08-30T09:45:00Z",
+        payload: { positionSeconds: 10 },
+      },
+      {
+        mutationId: "55555555-5555-4555-8555-555555555552",
+        entityType: "progress",
+        entityId: "chapter-one",
+        operation: "upsert",
+        baseRevision: 1,
+        occurredAt: "2026-08-30T09:45:01Z",
+        payload: { positionSeconds: 20 },
+      },
+      {
+        mutationId: "55555555-5555-4555-8555-555555555553",
+        entityType: "settings",
+        entityId: USER_A,
+        operation: "upsert",
+        baseRevision: 3,
+        occurredAt: "2026-08-30T09:45:02Z",
+        payload: { targetLanguage: "ja", appearance: "system" },
+      },
+    ];
+    const first = callJson(
+      session,
+      `select public.push_sync_batch(
+        ${sqlString(USER_A)}::uuid,
+        ${sqlString(DEVICE_A)}::uuid,
+        ${sqlString(batchId)}::uuid,
+        ${sqlJson(mutations)}::jsonb
+      )`,
+    );
+    expect(first.batchId).toBe(batchId);
+    expect(first.results).toEqual([
+      expect.objectContaining({ status: "applied", entityRevision: 1 }),
+      expect.objectContaining({ status: "applied", entityRevision: 2 }),
+      expect.objectContaining({ status: "applied", entityRevision: 4 }),
+    ]);
+    expect(
+      scalar(
+        session,
+        `select target_language || ':' || appearance || ':' || server_version::text
+         from user_settings where user_id = ${sqlString(USER_A)}::uuid`,
+      ),
+    ).toBe("ja:system:4");
+
+    const replay = callJson(
+      session,
+      `select public.push_sync_batch(
+        ${sqlString(USER_A)}::uuid,
+        ${sqlString(DEVICE_A)}::uuid,
+        ${sqlString(batchId)}::uuid,
+        ${sqlJson(mutations)}::jsonb
+      )`,
+    );
+    expect(replay.cursor).toBe(first.cursor);
+    expect(replay.results).toEqual([
+      expect.objectContaining({ status: "duplicate", entityRevision: 1 }),
+      expect.objectContaining({ status: "duplicate", entityRevision: 2 }),
+      expect.objectContaining({ status: "duplicate", entityRevision: 4 }),
+    ]);
+
+    const rejectedDelete = callJson(
+      session,
+      `select public.push_sync_batch(
+        ${sqlString(USER_A)}::uuid,
+        ${sqlString(DEVICE_A)}::uuid,
+        '66666666-6666-4666-8666-666666666666'::uuid,
+        ${sqlJson([
+          {
+            mutationId: "77777777-7777-4777-8777-777777777777",
+            entityType: "settings",
+            entityId: USER_A,
+            operation: "delete",
+            baseRevision: 4,
+            occurredAt: "2026-08-30T09:45:03Z",
+            payload: {},
+          },
+        ])}::jsonb
+      )`,
+    );
+    expect(rejectedDelete.results).toEqual([
+      expect.objectContaining({ status: "rejected", entityRevision: null }),
+    ]);
+    expect(
+      scalar(
+        session,
+        `select server_version::text from user_settings where user_id = ${sqlString(USER_A)}::uuid`,
+      ),
+    ).toBe("4");
   });
 
   it("claims one assistant generation per cache key and attaches another user", () => {

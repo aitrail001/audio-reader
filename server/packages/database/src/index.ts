@@ -205,7 +205,7 @@ export function createSupabaseDatabaseClient(options: SupabaseRestOptions): Data
       return response.status >= 200 && response.status < 300 ? "ok" : "unavailable";
     },
     identity,
-    sync: createSupabaseSyncStore(rest, { identity }),
+    sync: createSupabaseSyncStore(rest),
     catalog,
     ops: createSupabaseOpsStore(rest, { identity, catalog }),
   };

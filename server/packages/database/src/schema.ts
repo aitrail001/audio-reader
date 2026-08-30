@@ -121,6 +121,7 @@ export const TRANSACTION_FUNCTIONS = [
   "claim_idempotency_record",
   "record_idempotency_response",
   "abort_idempotency_record",
+  "push_sync_batch",
   "append_sync_change",
   "claim_assistant_generation",
   "attach_user_assistant_result",

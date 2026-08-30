@@ -93,37 +93,39 @@ describe("memory sync store", () => {
           operation: "upsert",
           baseRevision: 0,
           occurredAt: "2026-08-26T09:12:04.000Z",
-          payload: { targetLanguage: "ja", sourceLanguage: "en" },
+          payload: { targetLanguage: "ja", sourceLanguage: "en", appearance: "system" },
         },
       ],
     });
     expect(pushed.results[0]?.status).toBe("applied");
     expect((await identity.getSettings(USER_A)).targetLanguage).toBe("ja");
+    expect((await identity.getSettings(USER_A)).appearance).toBe("system");
   });
 });
 
 describe("supabase sync store", () => {
-  it("inserts changelog rows with the service role", async () => {
-    const rows: Record<string, unknown>[] = [];
+  it("pushes the complete mutation batch through one database RPC", async () => {
+    const requests: Array<{ url: string; method: string; body: unknown }> = [];
     const fetchImpl: RestFetch = (input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       const method = init?.method ?? "GET";
-      if (method === "GET" && url.includes("mutation_id=")) {
-        return Promise.resolve(jsonResponse(200, []));
-      }
-      if (method === "GET" && url.includes("order=sequence.desc")) {
-        const latest = rows.at(-1);
-        return Promise.resolve(jsonResponse(200, latest === undefined ? [] : [latest]));
-      }
-      if (method === "GET") {
-        return Promise.resolve(jsonResponse(200, rows));
-      }
-      if (method === "POST") {
-        const body =
-          typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
-        const inserted = { ...body, id: crypto.randomUUID() };
-        rows.push(inserted);
-        return Promise.resolve(jsonResponse(201, [inserted]));
+      const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : null;
+      requests.push({ url, method, body });
+      if (method === "POST" && url.endsWith("/rest/v1/rpc/push_sync_batch")) {
+        return Promise.resolve(
+          jsonResponse(200, {
+            batchId: BATCH,
+            cursor: "1",
+            results: [
+              {
+                mutationId: MUTATION_A,
+                status: "applied",
+                entityRevision: 1,
+                problem: null,
+              },
+            ],
+          }),
+        );
       }
       return Promise.resolve(jsonResponse(500, null));
     };
@@ -142,11 +144,108 @@ describe("supabase sync store", () => {
     });
     expect(pushed.results[0]?.status).toBe("applied");
     expect(pushed.cursor).toBe("1");
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.entity_type).toBe("progress");
-    expect(rows[0]?.user_id).toBe(USER_A);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.body).toMatchObject({
+      p_user_id: USER_A,
+      p_device_id: DEVICE_A,
+      p_batch_id: BATCH,
+      p_mutations: [progressMutation()],
+    });
+  });
+
+  it("pulls only one bounded page plus a has-more sentinel", async () => {
+    const urls: string[] = [];
+    const fetchImpl: RestFetch = (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      urls.push(url);
+      return Promise.resolve(jsonResponse(200, [changeRow(11), changeRow(12), changeRow(13)]));
+    };
+    const store = createSupabaseSyncStore(
+      createSupabaseRestClient({
+        url: "https://example.supabase.co",
+        serviceRoleKey: "service-role-key",
+        fetch: fetchImpl,
+      }),
+    );
+
+    const pulled = await store.pull({ userId: USER_A, cursor: "10", limit: 2 });
+
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toContain("sequence=gt.10");
+    expect(urls[0]).toContain(
+      "select=sequence%2Centity_type%2Centity_id%2Coperation%2Crevision%2Cchanged_at%2Cpayload",
+    );
+    expect(urls[0]).toContain("order=sequence.asc");
+    expect(urls[0]).toContain("limit=3");
+    expect(pulled.changes.map((change) => change.sequence)).toEqual([11, 12]);
+    expect(pulled.cursor).toBe("12");
+    expect(pulled.hasMore).toBe(true);
+  });
+
+  it("fails a pull when Postgres is unavailable instead of reporting a false empty page", async () => {
+    const store = createSupabaseSyncStore(
+      createSupabaseRestClient({
+        url: "https://example.supabase.co",
+        serviceRoleKey: "service-role-key",
+        fetch: () => Promise.resolve(jsonResponse(503, { code: "unavailable", message: "down" })),
+      }),
+    );
+
+    await expect(store.pull({ userId: USER_A, cursor: "10", limit: 100 })).rejects.toThrow(
+      "sync pull failed",
+    );
+  });
+
+  it("rejects an RPC response that does not acknowledge the requested batch", async () => {
+    const store = createSupabaseSyncStore(
+      createSupabaseRestClient({
+        url: "https://example.supabase.co",
+        serviceRoleKey: "service-role-key",
+        fetch: () =>
+          Promise.resolve(
+            jsonResponse(200, {
+              batchId: crypto.randomUUID(),
+              cursor: "1",
+              results: [],
+            }),
+          ),
+      }),
+    );
+
+    await expect(
+      store.push({
+        userId: USER_A,
+        deviceId: DEVICE_A,
+        batchId: BATCH,
+        mutations: [progressMutation()],
+      }),
+    ).rejects.toThrow("sync batch write failed");
+  });
+
+  it("fails latest-cursor lookup when Postgres is unavailable", async () => {
+    const store = createSupabaseSyncStore(
+      createSupabaseRestClient({
+        url: "https://example.supabase.co",
+        serviceRoleKey: "service-role-key",
+        fetch: () => Promise.resolve(jsonResponse(503, { code: "unavailable", message: "down" })),
+      }),
+    );
+
+    await expect(store.latestCursor(USER_A)).rejects.toThrow("sync cursor lookup failed");
   });
 });
+
+function changeRow(sequence: number): Record<string, unknown> {
+  return {
+    sequence,
+    entity_type: "progress",
+    entity_id: ENTITY,
+    operation: "upsert",
+    revision: sequence,
+    changed_at: "2026-08-26T09:12:04.000Z",
+    payload: { positionSeconds: sequence },
+  };
+}
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(body === null ? null : JSON.stringify(body), {
