@@ -135,7 +135,7 @@ struct NativeRedesignContractTests {
         #expect(root.contains("sidebar.nowReading"))
         #expect(root.contains("sidebar.words"))
         #expect(root.contains("sidebar.settings"))
-        #expect(root.contains("library.importPaired"))
+        #expect(root.contains("library.importMedia"))
         #expect(root.contains("library.importDevice."))
         #expect(root.contains("AccountSyncStatusView(session: state.account, compact: true)"))
         #expect(root.contains("minHeight: 44"))

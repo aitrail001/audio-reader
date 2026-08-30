@@ -27,6 +27,13 @@ enum BookSource: String, Codable, Sendable {
     case localFolder
     case files
     case deviceAudiobooks
+    case appleBooks
+}
+
+enum BookMediaAvailability: String, Codable, Hashable, Sendable {
+    case audioOnly
+    case ebookOnly
+    case audioAndEbook
 }
 
 struct Book: Identifiable, Hashable, Codable, Sendable {
@@ -38,6 +45,12 @@ struct Book: Identifiable, Hashable, Codable, Sendable {
     var ebookPath: String?
     var chapters: [Chapter]
     var source: BookSource = .localFolder
+
+    var mediaAvailability: BookMediaAvailability {
+        let hasAudio = chapters.contains(where: \.hasAudio)
+        if hasAudio { return ebookPath == nil ? .audioOnly : .audioAndEbook }
+        return .ebookOnly
+    }
 
     var bookID: BookID {
         get { BookID(rawValue: id) }
@@ -52,8 +65,10 @@ struct Chapter: Identifiable, Hashable, Codable, Sendable {
     var audioPath: String
     var duration: TimeInterval?
     var startTime: TimeInterval?
+    var ebookSectionIndex: Int? = nil
 
     var audioStart: TimeInterval { startTime ?? 0 }
+    var hasAudio: Bool { ebookSectionIndex == nil && !audioPath.isEmpty }
 
     var chapterID: ChapterID {
         get { ChapterID(rawValue: id) }

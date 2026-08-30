@@ -13,11 +13,13 @@ import { requireBoundDevice } from "./route-helpers";
 
 type SyncPushResponse = components["schemas"]["SyncPushResponse"];
 type SyncPullResponse = components["schemas"]["SyncPullResponse"];
+type SyncBootstrapResponse = components["schemas"]["SyncBootstrapResponse"];
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 const SYNC_METHODS: Record<string, readonly string[]> = {
   "/v1/sync/push": ["POST"],
+  "/v1/sync/bootstrap": ["GET", "HEAD"],
   "/v1/sync/pull": ["GET", "HEAD"],
 };
 
@@ -67,7 +69,56 @@ export async function handleSyncRoute(context: SyncRouteContext): Promise<Respon
   if (path === "/v1/sync/push") {
     return pushSync(context);
   }
+  if (path === "/v1/sync/bootstrap") {
+    return bootstrapSync(context, url);
+  }
   return pullSync(context, url);
+}
+
+async function bootstrapSync(context: SyncRouteContext, url: URL): Promise<Response> {
+  const principal = await requirePrincipal(context);
+  if (principal instanceof Response) return principal;
+  const sync = requireSync(context);
+  if (sync instanceof Response) return sync;
+  const deviceId = await requireBoundSyncDevice(context, principal);
+  if (deviceId instanceof Response) return deviceId;
+  void deviceId;
+  const cursor = url.searchParams.get("cursor");
+  const offset = boundedInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+  if (offset instanceof Error) {
+    return fieldError(context.requestId, "offset", offset.message);
+  }
+  const limit = boundedInteger(url.searchParams.get("limit"), 100, 1, 500);
+  if (limit instanceof Error) {
+    return fieldError(context.requestId, "limit", limit.message);
+  }
+  logSync("sync_bootstrap_start", context.requestId, { offset, limit });
+  const bootstrapped = await sync.bootstrap({
+    userId: principal.accountId,
+    cursor,
+    offset,
+    limit,
+  });
+  logSync("sync_bootstrap_finish", context.requestId, {
+    cursor: bootstrapped.cursor,
+    entities: bootstrapped.entities.length,
+    hasMore: bootstrapped.hasMore,
+  });
+  const payload: SyncBootstrapResponse = bootstrapped;
+  return asHead(context.request, jsonResponse(payload));
+}
+
+function boundedInteger(
+  raw: string | null,
+  defaultValue: number,
+  minimum: number,
+  maximum: number,
+): number | Error {
+  const value = raw === null || raw.trim() === "" ? defaultValue : Number(raw);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    return new Error(`must be an integer between ${String(minimum)} and ${String(maximum)}.`);
+  }
+  return value;
 }
 
 async function pushSync(context: SyncRouteContext): Promise<Response> {

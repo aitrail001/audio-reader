@@ -3,6 +3,44 @@ import Foundation
 import AudioReaderDomain
 #endif
 
+public struct SyncMirrorRepairRecord: Codable, Equatable, Sendable {
+    public var sequence: Int
+    public var entityType: String
+    public var entityID: String
+    public var operation: String
+    public var revision: Int
+    public var changedAt: String
+    public var payload: Data
+
+    public init(
+        sequence: Int,
+        entityType: String,
+        entityID: String,
+        operation: String,
+        revision: Int,
+        changedAt: String,
+        payload: Data
+    ) {
+        self.sequence = sequence
+        self.entityType = entityType
+        self.entityID = entityID
+        self.operation = operation
+        self.revision = revision
+        self.changedAt = changedAt
+        self.payload = payload
+    }
+}
+
+public struct SyncMirrorRepair: Codable, Equatable, Sendable {
+    public var changes: [SyncMirrorRepairRecord]
+    public var refreshVocabulary: Bool
+
+    public init(changes: [SyncMirrorRepairRecord], refreshVocabulary: Bool) {
+        self.changes = changes
+        self.refreshVocabulary = refreshVocabulary
+    }
+}
+
 public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, SyncEntityVersionStoring, TranscriptOverlayRepository, ReaderProgressRepository, ReviewEventRepository, @unchecked Sendable {
     public let url: URL
     #if DEBUG
@@ -12,6 +50,7 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
     private let lock = NSRecursiveLock()
     private let connection: SQLiteConnection
     private var schemaIsReady = false
+    private var syncPageTransactionDepth = 0
     private(set) var schemaApplicationCount = 0
 
     public init(fileURL: URL) {
@@ -20,6 +59,29 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         lock.lock()
         defer { lock.unlock() }
         try? applySchemaUnlocked()
+    }
+
+    /// Canonical sync rows, entity versions, and the acknowledgement cursor commit together.
+    /// Recursive repository calls share this transaction rather than starting autocommits.
+    public func performSyncPageTransaction(_ body: () throws -> Void) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        if syncPageTransactionDepth > 0 {
+            try body()
+            return
+        }
+        try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+        syncPageTransactionDepth += 1
+        do {
+            try body()
+            try connection.exec("COMMIT")
+            syncPageTransactionDepth -= 1
+        } catch {
+            syncPageTransactionDepth -= 1
+            try? connection.exec("ROLLBACK")
+            throw error
+        }
     }
 
     public func migrateLegacyData(from sources: LegacyLocalDataSources) throws -> LocalMigrationReceipt {
@@ -277,6 +339,50 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         }
     }
 
+    public func loadSyncMirrorRepair() throws -> SyncMirrorRepair? {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let rows = try connection.query(
+            "SELECT changes_json, refresh_vocabulary FROM sync_mirror_repairs WHERE id = 'local' LIMIT 1"
+        )
+        guard let row = rows.first,
+              let changesJSON = row["changes_json"]
+        else { return nil }
+        return SyncMirrorRepair(
+            changes: try LocalJSON.decoder.decode([SyncMirrorRepairRecord].self, from: Data(changesJSON.utf8)),
+            refreshVocabulary: row.int("refresh_vocabulary") != 0
+        )
+    }
+
+    public func saveSyncMirrorRepair(_ repair: SyncMirrorRepair) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let changesJSON = try LocalJSON.encode(repair.changes)
+        try connection.run(
+            """
+            INSERT INTO sync_mirror_repairs(id, changes_json, refresh_vocabulary, updated_at)
+            VALUES ('local', ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              changes_json = excluded.changes_json,
+              refresh_vocabulary = excluded.refresh_vocabulary,
+              updated_at = excluded.updated_at
+            """
+        ) { [connection] stmt in
+            connection.bind(stmt, 1, changesJSON)
+            connection.bind(stmt, 2, repair.refreshVocabulary ? 1 : 0)
+            connection.bindDate(stmt, 3, Date())
+        }
+    }
+
+    public func clearSyncMirrorRepair() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try connection.exec("DELETE FROM sync_mirror_repairs WHERE id = 'local'")
+    }
+
     public func loadBooks() throws -> [StoredBook] {
         lock.lock()
         defer { lock.unlock() }
@@ -425,7 +531,8 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         }
         if overlay.provenance.deviceID == state.current.overlay.provenance.deviceID
             || revision > state.current.revision {
-            try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+            let ownsTransaction = syncPageTransactionDepth == 0
+            if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
             do {
                 try upsertCurrentTranscriptOverlay(overlay, revision: revision)
                 if revision > state.current.revision {
@@ -434,10 +541,10 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
                         segmentID: overlay.segmentID
                     )
                 }
-                try connection.exec("COMMIT")
+                if ownsTransaction { try connection.exec("COMMIT") }
                 return .replacedCurrent
             } catch {
-                try? connection.exec("ROLLBACK")
+                if ownsTransaction { try? connection.exec("ROLLBACK") }
                 throw error
             }
         }
@@ -552,7 +659,8 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
             return .unchanged
         }
         if progress.deviceID == existing.current.deviceID || progress.revision > existing.current.revision {
-            try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+            let ownsTransaction = syncPageTransactionDepth == 0
+            if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
             do {
                 if progress.revision > existing.current.revision {
                     try connection.run("DELETE FROM local_reader_progress WHERE book_id = ?") { [connection] stmt in
@@ -564,10 +672,10 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
                     }
                 }
                 try insertReaderProgress(progress, isCurrent: true)
-                try connection.exec("COMMIT")
+                if ownsTransaction { try connection.exec("COMMIT") }
                 return .replacedCurrent
             } catch {
-                try? connection.exec("ROLLBACK")
+                if ownsTransaction { try? connection.exec("ROLLBACK") }
                 throw error
             }
         }
@@ -617,13 +725,32 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         lock.lock()
         defer { lock.unlock() }
         try applySchemaUnlocked()
-        try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+        let ownsTransaction = syncPageTransactionDepth == 0
+        if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
         do {
             try ensureLearningParents(for: vocabulary, at: vocabulary.addedAt)
             try insertVocabulary([vocabulary])
-            try connection.exec("COMMIT")
+            if ownsTransaction { try connection.exec("COMMIT") }
         } catch {
-            try? connection.exec("ROLLBACK")
+            if ownsTransaction { try? connection.exec("ROLLBACK") }
+            throw error
+        }
+    }
+
+    /// Initial sync writes a page of vocabulary with one parent pass and no per-row transaction.
+    public func upsertVocabulary(_ vocabulary: [StoredVocabularyOccurrence]) throws {
+        guard !vocabulary.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let ownsTransaction = syncPageTransactionDepth == 0
+        if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
+        do {
+            for entry in vocabulary { try ensureLearningParents(for: entry, at: entry.addedAt) }
+            try insertVocabulary(vocabulary)
+            if ownsTransaction { try connection.exec("COMMIT") }
+        } catch {
+            if ownsTransaction { try? connection.exec("ROLLBACK") }
             throw error
         }
     }
@@ -697,7 +824,8 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
             }
         ).first?.int("revision") ?? 0
 
-        try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+        let ownsTransaction = syncPageTransactionDepth == 0
+        if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
         do {
             try connection.run("DELETE FROM local_review_events WHERE vocabulary_id = ?") { [connection] stmt in
                 connection.bind(stmt, 1, localID.rawValue)
@@ -740,9 +868,9 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
                     connection.bind(stmt, 8, OutboxMutationStatus.pending.rawValue)
                 }
             }
-            try connection.exec("COMMIT")
+            if ownsTransaction { try connection.exec("COMMIT") }
         } catch {
-            try? connection.exec("ROLLBACK")
+            if ownsTransaction { try? connection.exec("ROLLBACK") }
             throw error
         }
     }
@@ -824,10 +952,11 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         lock.lock()
         defer { lock.unlock() }
         try applySchemaUnlocked()
-        try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+        let ownsTransaction = syncPageTransactionDepth == 0
+        if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
         do {
             if try reviewEventExistsUnlocked(event.id) {
-                try connection.exec("COMMIT")
+                if ownsTransaction { try connection.exec("COMMIT") }
                 return
             }
             try ensureLearningParents(for: vocabulary, at: event.reviewedAt)
@@ -846,9 +975,9 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
                 )
             ])
             try insertReviewEvents([event], includeCard: true)
-            try connection.exec("COMMIT")
+            if ownsTransaction { try connection.exec("COMMIT") }
         } catch {
-            try? connection.exec("ROLLBACK")
+            if ownsTransaction { try? connection.exec("ROLLBACK") }
             throw error
         }
     }
@@ -893,10 +1022,10 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
 
     private func applySchemaUnlocked() throws {
         guard !schemaIsReady else { return }
-        for sql in LocalSchemaV3.createStatements {
+        for sql in LocalSchemaV4.createStatements {
             try connection.exec(sql)
         }
-        try connection.exec("PRAGMA user_version = \(LocalSchemaV3.version)")
+        try connection.exec("PRAGMA user_version = \(LocalSchemaV4.version)")
         schemaIsReady = true
         schemaApplicationCount += 1
     }

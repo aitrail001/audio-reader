@@ -28,8 +28,13 @@ extension AccountSession {
                 cursor: sqlite,
                 versions: sqlite,
                 snapshot: AccountSyncApplicator.snapshot,
-                applyChange: { change in
-                    try AccountSyncApplicator.apply(change, to: sqlite)
+                applyPage: { changes, versions, cursor in
+                    try AccountSyncApplicator.applyPage(
+                        changes,
+                        versions: versions,
+                        cursor: cursor,
+                        to: sqlite
+                    )
                 },
                 handleConflict: AccountSyncApplicator.retainSyncConflict
             )
@@ -331,12 +336,22 @@ enum AccountSyncApplicator {
     /// The supplied store is the durable parent/history boundary for every
     /// learning change. The legacy vocabulary table remains a verified UI mirror.
     static func apply(_ change: SyncPulledChange, to sqlite: LocalSQLiteStore) throws {
+        try apply(change, to: sqlite, updateVocabularyMirror: true)
+    }
+
+    private static func apply(
+        _ change: SyncPulledChange,
+        to sqlite: LocalSQLiteStore,
+        updateVocabularyMirror: Bool
+    ) throws {
         switch change.entityType {
         case OutboxEntityType.settings.rawValue:
             try applySettings(change)
         case OutboxEntityType.vocabulary.rawValue:
             let updated = try applyLearning(change, to: sqlite)
-            try persistVocabularyMirror(updated: updated, deleting: change.operation == OutboxOperation.delete.rawValue ? change.entityId : nil)
+            if updateVocabularyMirror {
+                try persistVocabularyMirror(updated: updated, deleting: change.operation == OutboxOperation.delete.rawValue ? change.entityId : nil)
+            }
         case OutboxEntityType.lexemeState.rawValue:
             try applyLemma(change)
         case OutboxEntityType.transcript.rawValue:
@@ -349,18 +364,164 @@ enum AccountSyncApplicator {
             } else {
                 try seedDurableVocabularyParentIfNeeded(change, in: sqlite)
                 let updated = try applyLearning(change, to: sqlite)
-                try persistVocabularyMirror(updated: updated)
+                if updateVocabularyMirror { try persistVocabularyMirror(updated: updated) }
             }
         case OutboxEntityType.reviewEvent.rawValue:
             try seedDurableVocabularyParentIfNeeded(change, in: sqlite)
             let updated = try applyLearning(change, to: sqlite)
-            try persistVocabularyMirror(updated: updated)
+            if updateVocabularyMirror { try persistVocabularyMirror(updated: updated) }
         case OutboxEntityType.book.rawValue:
             // Media stays on-device. Hashed book IDs plus localId/title travel
             // on vocabulary rows so learning data does not use the settings UUID.
             break
         default:
             break
+        }
+    }
+
+    /// Applies one downloaded page to the canonical store in a single transaction. The JSON
+    /// vocabulary file is derived only after commit and is refreshed at most once per page.
+    static func applyPage(
+        _ changes: [SyncPulledChange],
+        versions: [SyncEntityVersion]? = nil,
+        cursor: String,
+        to sqlite: LocalSQLiteStore,
+        persistVocabularyMirror mirrorWriter: @Sendable ([VocabEntry]) throws -> Void = persistVocabularyMirrorForSync,
+        persistDerivedMirrors derivedMirrorWriter: @Sendable ([SyncPulledChange]) throws -> Void = persistDerivedMirrors
+    ) throws {
+        try repairPendingMirrors(
+            in: sqlite,
+            persistVocabularyMirror: mirrorWriter,
+            persistDerivedMirrors: derivedMirrorWriter
+        )
+        let ordered = SyncPulledChange.applying(changes)
+        let pageVersions = versions ?? ordered.map { change in
+            SyncEntityVersion(
+                entityType: change.entityType,
+                entityID: change.entityId,
+                serverVersion: Int64(change.revision),
+                payload: change.operation == OutboxOperation.delete.rawValue
+                    ? SyncJSONCoding.tombstonePayload
+                    : SyncJSONCoding.data(from: change.payload)
+            )
+        }
+        let vocabularyUpserts = ordered.filter {
+            $0.entityType == OutboxEntityType.vocabulary.rawValue
+                && $0.operation != OutboxOperation.delete.rawValue
+        }
+        let existingVocabulary = Dictionary(
+            uniqueKeysWithValues: try sqlite.loadVocabulary().map { ($0.id.rawValue.lowercased(), VocabEntry($0)) }
+        )
+        let vocabularyRows = try vocabularyUpserts.map { change -> StoredVocabularyOccurrence in
+            let incoming = try vocabulary(from: change)
+            let resolved = existingVocabulary[change.entityId.lowercased()]
+                .map { mergingVocabulary(existing: $0, incoming: incoming) } ?? incoming
+            return StoredVocabularyOccurrence(resolved)
+        }
+        let touchesVocabulary = ordered.contains {
+            $0.entityType == OutboxEntityType.vocabulary.rawValue
+                || ($0.entityType == OutboxEntityType.progress.rawValue
+                    && $0.payload["progressKind"]?.stringValue != "reader")
+                || $0.entityType == OutboxEntityType.reviewEvent.rawValue
+        }
+        let derivedChanges = ordered.filter(isLegacyMirrorOnly)
+        let repair = SyncMirrorRepair(
+            changes: derivedChanges.map {
+                SyncMirrorRepairRecord(
+                    sequence: $0.sequence,
+                    entityType: $0.entityType,
+                    entityID: $0.entityId,
+                    operation: $0.operation,
+                    revision: $0.revision,
+                    changedAt: $0.changedAt,
+                    payload: SyncJSONCoding.data(from: $0.payload)
+                )
+            },
+            refreshVocabulary: touchesVocabulary
+        )
+
+        try sqlite.performSyncPageTransaction {
+            try sqlite.upsertVocabulary(vocabularyRows)
+            for change in ordered {
+                if change.entityType == OutboxEntityType.vocabulary.rawValue,
+                   change.operation != OutboxOperation.delete.rawValue {
+                    continue
+                }
+                if isLegacyMirrorOnly(change) { continue }
+                try apply(change, to: sqlite, updateVocabularyMirror: false)
+            }
+            for version in pageVersions { try sqlite.saveVersion(version) }
+            try sqlite.saveCursor(cursor)
+            if !repair.changes.isEmpty || repair.refreshVocabulary {
+                try sqlite.saveSyncMirrorRepair(repair)
+            }
+        }
+
+        if !repair.changes.isEmpty || repair.refreshVocabulary {
+            try repairPendingMirrors(
+                in: sqlite,
+                persistVocabularyMirror: mirrorWriter,
+                persistDerivedMirrors: derivedMirrorWriter
+            )
+        }
+    }
+
+    /// Compatibility projections are retried from a durable intent row. The vocabulary API is
+    /// non-throwing, so the sync adapter verifies its readback before clearing repair intent.
+    private static func repairPendingMirrors(
+        in sqlite: LocalSQLiteStore,
+        persistVocabularyMirror mirrorWriter: @Sendable ([VocabEntry]) throws -> Void,
+        persistDerivedMirrors derivedMirrorWriter: @Sendable ([SyncPulledChange]) throws -> Void
+    ) throws {
+        guard let repair = try sqlite.loadSyncMirrorRepair() else { return }
+        let changes = try repair.changes.map { record in
+            SyncPulledChange(
+                sequence: record.sequence,
+                entityType: record.entityType,
+                entityId: record.entityID,
+                operation: record.operation,
+                revision: record.revision,
+                changedAt: record.changedAt,
+                payload: try JSONDecoder().decode([String: SyncJSONValue].self, from: record.payload)
+            )
+        }
+        try derivedMirrorWriter(changes)
+        if repair.refreshVocabulary {
+            try mirrorWriter(try sqlite.loadVocabulary().map(VocabEntry.init))
+        }
+        try sqlite.clearSyncMirrorRepair()
+    }
+
+    private static func persistVocabularyMirrorForSync(_ entries: [VocabEntry]) throws {
+        Persistence.saveVocab(entries)
+        let persisted = Persistence.loadVocab()
+        let normalized = try JSONDecoder.iso.decode(
+            [VocabEntry].self,
+            from: JSONEncoder.iso.encode(entries)
+        )
+        guard persisted.count == normalized.count, Set(persisted) == Set(normalized) else {
+            throw AccountSyncApplyError.persistenceFailed("vocabulary mirror")
+        }
+    }
+
+    private static func isLegacyMirrorOnly(_ change: SyncPulledChange) -> Bool {
+        change.entityType == OutboxEntityType.settings.rawValue
+            || change.entityType == OutboxEntityType.lexemeState.rawValue
+            || change.entityType == OutboxEntityType.transcript.rawValue
+    }
+
+    private static func persistDerivedMirrors(_ changes: [SyncPulledChange]) throws {
+        for change in changes {
+            switch change.entityType {
+            case OutboxEntityType.settings.rawValue:
+                try applySettings(change)
+            case OutboxEntityType.lexemeState.rawValue:
+                try applyLemma(change)
+            case OutboxEntityType.transcript.rawValue:
+                try applyTranscript(change)
+            default:
+                break
+            }
         }
     }
 

@@ -141,7 +141,7 @@ struct LibraryView: View {
 #if os(macOS)
         HStack(spacing: 8) {
             Button(action: importPairedBook) {
-                Label("Import audiobook + EPUB", systemImage: "books.vertical.fill")
+                Label("Import Audio or EPUB", systemImage: "books.vertical.fill")
             }
             .buttonStyle(.borderedProminent)
             .tint(Palette.terracotta)
@@ -165,13 +165,13 @@ struct LibraryView: View {
 
     private var emptyLibrary: some View {
         ContentUnavailableView {
-            Label("Build your listening library", systemImage: "books.vertical")
+            Label("Build your reading library", systemImage: "books.vertical")
         } description: {
-            Text("Import audiobook audio with its matching EPUB so playback, published text, and word lookup stay together.")
+            Text("Import audiobook audio, EPUB books, or both. You can attach the missing format to the same book later.")
         } actions: {
 #if os(macOS)
             Button(action: importPairedBook) {
-                Label("Import audiobook + EPUB", systemImage: "square.and.arrow.down")
+                Label("Import Audio or EPUB", systemImage: "square.and.arrow.down")
             }
             .buttonStyle(.borderedProminent)
             .tint(Palette.terracotta)
@@ -256,7 +256,7 @@ struct LibraryView: View {
                 : "Added \(added.joined(separator: ", ")) to \(book.title)."
             Task {
                 await state.rescan()
-                state.selectedBookID = state.books.first(where: { $0.title == book.title })?.id
+                state.selectedBookID = book.id
             }
         } catch {
             bookUpdateResult = error.localizedDescription
@@ -321,7 +321,9 @@ private struct BookCard: View {
                 Text(book.author ?? "Unknown author")
                     .foregroundStyle(Palette.dim)
                 Spacer()
-                Text("\(transcribedCount)/\(book.chapters.count) transcribed")
+                Text(book.mediaAvailability == .ebookOnly
+                    ? "\(book.chapters.count) readable sections"
+                    : "\(transcribedCount)/\(book.chapters.count) transcribed")
                     .foregroundStyle(Palette.dim)
             }
             .font(.caption)
@@ -353,7 +355,12 @@ private struct BookCard: View {
         .tint(Palette.terracotta)
         .accessibilityIdentifier("library.continue.\(book.id)")
         Button(action: onRepair) {
-            Label(book.ebookPath == nil ? "Add EPUB" : "Repair", systemImage: "wrench.and.screwdriver")
+            Label(
+                book.mediaAvailability == .ebookOnly
+                    ? "Add Audio"
+                    : (book.ebookPath == nil ? "Add EPUB" : "Add Files"),
+                systemImage: "wrench.and.screwdriver"
+            )
         }
         .buttonStyle(.bordered)
         .accessibilityIdentifier("library.repair.\(book.id)")
@@ -373,7 +380,9 @@ private struct ChapterStrip: View {
                     Text(book.title)
                         .font(.system(size: 15, weight: .semibold, design: .serif))
                         .foregroundStyle(Palette.ink)
-                    Text("\(book.chapters.count) chapters · \(state.transcribedChapterCount(in: book)) transcribed" + (book.ebookPath == nil ? " · audio only" : " · ebook found"))
+                    Text(book.mediaAvailability == .ebookOnly
+                        ? "\(book.chapters.count) readable EPUB sections"
+                        : "\(book.chapters.count) chapters · \(state.transcribedChapterCount(in: book)) transcribed" + (book.ebookPath == nil ? " · audio only" : " · EPUB found"))
                         .font(.system(size: 11))
                         .foregroundStyle(Palette.dim)
                     AudiobookLanguagePicker(state: state, book: book)
@@ -386,7 +395,12 @@ private struct ChapterStrip: View {
                 .tint(Palette.terracotta)
                 .accessibilityIdentifier("library.continue")
                 Button(action: onAddEbook) {
-                    Label(book.ebookPath == nil ? "Add EPUB" : "Add Another EPUB", systemImage: "book.pages")
+                    Label(
+                        book.mediaAvailability == .ebookOnly
+                            ? "Add Audio"
+                            : (book.ebookPath == nil ? "Add EPUB" : "Add Files"),
+                        systemImage: "book.pages"
+                    )
                 }
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("library.repair")

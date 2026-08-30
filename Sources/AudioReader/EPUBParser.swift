@@ -5,9 +5,15 @@ struct EPUBDocument: Equatable, Sendable {
     var text: String
     var title: String?
     var author: String?
+    var sections: [EPUBSection] = []
 
     var wordCount: Int { Aligner.tokenize(text).count }
     var sentenceCount: Int { EPUBParser.sentences(from: text).count }
+}
+
+struct EPUBSection: Equatable, Sendable {
+    var title: String
+    var text: String
 }
 
 struct EPUBBookMetadata: Equatable, Sendable {
@@ -32,19 +38,27 @@ enum EPUBParser {
         guard (try? FileManager.default.unzipItem(at: epub, to: tmp)) != nil else { return nil }
 
         let htmls = contentDocuments(in: tmp)
-        var parts: [String] = []
-        for file in htmls {
+        var sections: [EPUBSection] = []
+        for (index, file) in htmls.enumerated() {
             let raw = (try? String(contentsOf: file, encoding: .utf8))
                 ?? (try? String(contentsOf: file, encoding: .isoLatin1))
             guard let raw else { continue }
             let text = stripHTML(raw)
             if isBoilerplate(text) { continue }
-            parts.append(text)
+            sections.append(EPUBSection(
+                title: sectionTitle(in: raw) ?? "Section \(index + 1)",
+                text: text
+            ))
         }
-        let joined = parts.joined(separator: "\n\n")
+        let joined = sections.map(\.text).joined(separator: "\n\n")
         guard !joined.isEmpty else { return nil }
         let metadata = packageMetadata(in: tmp)
-        return EPUBDocument(text: joined, title: metadata.title, author: metadata.author)
+        return EPUBDocument(
+            text: joined,
+            title: metadata.title,
+            author: metadata.author,
+            sections: sections
+        )
     }
 
     static func sentences(from text: String) -> [String] {
@@ -66,6 +80,90 @@ enum EPUBParser {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             return Aligner.tokenize(s).count >= 4 ? s : nil
         }
+    }
+
+    /// Adapts immutable published text to the reader's existing sentence model;
+    /// synthetic timing is identity/navigation metadata and must never drive audio.
+    static func readerTranscript(
+        from epubPath: String,
+        sectionIndex: Int,
+        chapterID: String
+    ) -> Transcript? {
+        guard let document = document(from: epubPath),
+              document.sections.indices.contains(sectionIndex)
+        else { return nil }
+        let section = document.sections[sectionIndex]
+        let headingPrefix = section.title + "\n"
+        let readableText = section.text.hasPrefix(headingPrefix)
+            ? String(section.text.dropFirst(headingPrefix.count))
+            : section.text
+        let sentenceTexts = readerSentences(from: readableText)
+        let readableSentences = sentenceTexts.isEmpty ? [section.text] : sentenceTexts
+        var cursor: TimeInterval = 0
+        let segments = readableSentences.enumerated().compactMap { index, sentence -> TranscriptSegment? in
+            let tokens = tokenStrings(in: sentence)
+            guard !tokens.isEmpty else { return nil }
+            let words = tokens.enumerated().map { wordIndex, token in
+                TranscriptWord(
+                    id: LibraryScanner.stableID("\(chapterID)#\(index)#\(wordIndex)"),
+                    text: token,
+                    start: cursor + Double(wordIndex) * 0.1,
+                    end: cursor + Double(wordIndex + 1) * 0.1,
+                    confidence: nil
+                )
+            }
+            let start = cursor
+            cursor += max(1, Double(tokens.count) * 0.1)
+            return TranscriptSegment(
+                id: LibraryScanner.stableID("\(chapterID)#epub-sentence-\(index)"),
+                start: start,
+                end: cursor,
+                words: words
+            )
+        }
+        guard !segments.isEmpty else { return nil }
+        return Transcript(
+            chapterID: chapterID,
+            audioPath: epubPath,
+            createdAt: Date(),
+            locale: "und",
+            segments: segments,
+            source: "EPUB",
+            ebookAligned: false
+        )
+    }
+
+    private static func tokenStrings(in text: String) -> [String] {
+        let pattern = #"[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*|[^\s\p{L}\p{N}]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [text] }
+        let ns = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+        return matches.enumerated().map { index, match in
+            let end = matches.indices.contains(index + 1) ? matches[index + 1].range.location : ns.length
+            return ns.substring(with: NSRange(location: match.range.location, length: end - match.range.location))
+        }
+    }
+
+    /// Reader segmentation preserves every published sentence; the public
+    /// alignment helper intentionally filters short utterances as low-signal.
+    private static func readerSentences(from text: String) -> [String] {
+        let ns = text as NSString
+        var ranges: [NSRange] = []
+        let tokenizer = NLWrapper()
+        tokenizer.enumerateSentences(in: text) { range in
+            ranges.append(range)
+        }
+        let segmented = ranges.compactMap { range -> String? in
+            let sentence = ns.substring(with: range)
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return sentence.isEmpty ? nil : sentence
+        }
+        if !segmented.isEmpty { return segmented }
+        let normalized = text
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? [] : [normalized]
     }
 
     private static func contentDocuments(in root: URL) -> [URL] {
@@ -162,6 +260,17 @@ enum EPUBParser {
         let value = stripHTML(String(xml[range]))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
+    }
+
+    private static func sectionTitle(in html: String) -> String? {
+        let pattern = #"<h[1-6]\b[^>]*>([\s\S]*?)</h[1-6]>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+              match.numberOfRanges >= 2,
+              let range = Range(match.range(at: 1), in: html)
+        else { return nil }
+        let title = stripHTML(String(html[range])).trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? nil : title
     }
 
     private static func resolve(href: String, in root: URL) -> URL? {

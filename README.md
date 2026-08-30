@@ -61,9 +61,9 @@ xcrun simctl launch booted com.johnsonzhang.AudioReader
 
 ### Import a book
 
-On macOS, use **Import** to select audiobook files, an audiobook folder, or an accessible downloaded title from Apple Books. You can also choose a library folder containing one subfolder per book.
+On macOS, use **Import** to select audiobook audio, a DRM-free EPUB, both together, or a folder/collection containing those resources. The Apple Books source can also copy accessible downloaded audiobooks and non-DRM EPUB files when macOS grants file access. It cannot list or bypass protected, cloud-only, or inaccessible Apple Books content.
 
-On iPad, use **Import Files** or **Import Folder** to choose resources from Files or iCloud Drive. The **Apple Books & Device** source lists audiobooks exposed through the device media library.
+On iPad, use **Import Files** or **Import Folder** to choose audiobook audio, a DRM-free EPUB, or both from Files, iCloud Drive, or a document-provider/export location. iPadOS has no supported API for enumerating Apple Books EPUBs, so AudioReader does not inspect or copy the protected Apple Books library. The **Apple Books & Device** source continues to list audiobooks that the public device media-library API exposes.
 
 For the best result, keep each book in its own folder:
 
@@ -75,12 +75,12 @@ Book Title/
 └── cover.jpg
 ```
 
-AudioReader copies explicitly imported resources into its own imported-books library. Re-importing the same audio does not create a duplicate; it can add a missing EPUB or cover to the existing book.
+AudioReader copies explicitly imported resources into its own imported-books library. EPUB-only books open as ordered published-text sections and support reading, dictionary lookup, vocabulary, translation, chapter assistance, summaries, quiz, and review without audio controls. Re-importing the same audio does not create a duplicate. Use a book's **Add Audio**, **Add EPUB**, or **Add Files** action to attach missing companion media explicitly; this preserves the logical book and avoids unsafe title-only merging.
 
 ### Transcribe and read
 
-1. In **Settings → Languages**, choose the audiobook's spoken language independently from **Translate into**.
-2. Select a book and chapter, then select **Transcribe**. The first run may download the selected language's speech assets.
+1. For an audiobook, in **Settings → Languages**, choose the spoken language independently from **Translate into**. EPUB-only books do not require a transcription language.
+2. Select a book and chapter. For audiobook chapters, select **Transcribe**; the first run may download the selected language's speech assets. EPUB-only sections open directly as published text and intentionally omit playback and transcription controls.
    If the book has no companion ebook, the reader displays **EPUB ebook missing** at the top. Select **Add EPUB** and choose the matching `.epub` file.
 3. Wait for transcription and optional EPUB validation/alignment to finish. AudioReader checks extraction quality, book metadata, sampled content, match coverage and scores, reading order, and unmatched passages before EPUB wording can replace speech.
 4. Play the chapter and use the highlighted transcript to follow, seek, replay, or loop sentences.

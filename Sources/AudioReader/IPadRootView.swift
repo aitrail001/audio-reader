@@ -14,6 +14,17 @@ enum IPadBackgroundJobsToolbarPlacement: Equatable {
     }
 }
 
+enum IPadLibraryImportToolbarPlacement: Equatable {
+    case content
+
+    static let owner: Self = .content
+}
+
+enum IPadEPUBImportPolicy {
+    static let appleBooksLibraryEnumerationSupported = false
+    static let supportedEquivalent = "Import a DRM-free EPUB with the Files document picker, share sheet, or an export from Apple Books."
+}
+
 enum IPadSplitColumnPolicy: Equatable {
     static let sidebarMin: CGFloat = 180
     static let sidebarIdeal: CGFloat = 220
@@ -94,13 +105,13 @@ private enum IPadLibrarySource: String, CaseIterable, Identifiable {
 private enum IPadImportRequest: Identifiable {
     case files
     case folder
-    case ebook(bookID: String)
+    case companion(bookID: String)
 
     var id: String {
         switch self {
         case .files: "files"
         case .folder: "folder"
-        case .ebook(let bookID): "ebook-\(bookID)"
+        case .companion(let bookID): "companion-\(bookID)"
         }
     }
 
@@ -108,19 +119,20 @@ private enum IPadImportRequest: Identifiable {
         switch self {
         case .files: [.mp3, .mpeg4Audio, .epub, .image, .audio]
         case .folder: [.folder]
-        case .ebook: [.epub]
+        case .companion: [.mp3, .mpeg4Audio, .epub, .image, .audio]
         }
     }
 
     var allowsMultipleSelection: Bool {
         switch self {
         case .files: true
-        case .folder, .ebook: false
+        case .folder: false
+        case .companion: true
         }
     }
     var importsAsCopy: Bool {
         switch self {
-        case .files, .ebook: true
+        case .files, .companion: true
         case .folder: false
         }
     }
@@ -171,7 +183,7 @@ struct IPadRootView: View {
                 switch request {
                 case .files: importFiles(result)
                 case .folder: importFolder(result)
-                case .ebook(let bookID): importEbook(result, bookID: bookID)
+                case .companion(let bookID): importCompanion(result, bookID: bookID)
                 }
                 importRequest = nil
             }
@@ -420,19 +432,21 @@ struct IPadRootView: View {
             )
             .navigationTitle((source ?? .allBooks).title)
             .toolbar {
-                ToolbarItemGroup(placement: .primaryAction) {
-                    if source == .files {
-                        Button { importRequest = .files } label: { Label("Import Files", systemImage: "doc.badge.plus") }
-                    } else if source == .folders {
-                        Button { importRequest = .folder } label: { Label("Import Folder", systemImage: "folder.badge.plus") }
-                    } else {
-                        Menu {
-                            Button { importRequest = .files } label: { Label("Files", systemImage: "doc.badge.plus") }
-                            Button { importRequest = .folder } label: { Label("Folder", systemImage: "folder.badge.plus") }
-                        } label: {
-                            Label("Import audiobook + EPUB", systemImage: "plus")
+                if IPadLibraryImportToolbarPlacement.owner == .content {
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        if source == .files {
+                            Button { importRequest = .files } label: { Label("Import Files", systemImage: "doc.badge.plus") }
+                        } else if source == .folders {
+                            Button { importRequest = .folder } label: { Label("Import Folder", systemImage: "folder.badge.plus") }
+                        } else {
+                            Menu {
+                                Button { importRequest = .files } label: { Label("Files", systemImage: "doc.badge.plus") }
+                                Button { importRequest = .folder } label: { Label("Folder", systemImage: "folder.badge.plus") }
+                            } label: {
+                                Label("Import Audio or EPUB", systemImage: "plus")
+                            }
+                            .accessibilityIdentifier("library.importMedia")
                         }
-                        .accessibilityIdentifier("library.importPaired")
                     }
                 }
             }
@@ -490,11 +504,11 @@ struct IPadRootView: View {
             IPadBookDetail(
                 state: state,
                 book: book,
-                onAddEbook: { importRequest = .ebook(bookID: book.id) },
+                onAddEbook: { importRequest = .companion(bookID: book.id) },
                 onDelete: { pendingBookDelete = book }
             )
         } else {
-            ContentUnavailableView("Choose an audiobook", systemImage: "books.vertical", description: Text("Select a book, or import one from Files, a folder, Apple Books, or the device audiobook library."))
+            ContentUnavailableView("Choose a book", systemImage: "books.vertical", description: Text("Select a book, or import audiobook audio or a DRM-free EPUB from Files. Apple Books exposes audiobooks here, but does not provide an iPadOS API for enumerating its EPUB library."))
         }
     }
 
@@ -549,7 +563,7 @@ struct IPadRootView: View {
         }
     }
 
-    private func importEbook(_ result: Result<[URL], any Error>, bookID: String) {
+    private func importCompanion(_ result: Result<[URL], any Error>, bookID: String) {
         do {
             guard let book = state.books.first(where: { $0.id == bookID }) else { return }
             let urls = try result.get()
@@ -558,7 +572,7 @@ struct IPadRootView: View {
                 to: URL(fileURLWithPath: book.folderPath, isDirectory: true)
             )
             importMessage = added.isEmpty
-                ? "This EPUB is already attached to \(book.title)."
+                ? "Those files are already attached to \(book.title)."
                 : "Added \(added.joined(separator: ", ")) to \(book.title)."
             Task {
                 await state.rescan()
@@ -702,7 +716,9 @@ private struct IPadBookList: View {
                             Text(book.author ?? "Unknown author")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
-                            Text("\(book.chapters.lazy.filter { readyChapterIDs.contains($0.id) }.count)/\(book.chapters.count) transcribed")
+                            Text(book.mediaAvailability == .ebookOnly
+                                ? "\(book.chapters.count) readable sections"
+                                : "\(book.chapters.lazy.filter { readyChapterIDs.contains($0.id) }.count)/\(book.chapters.count) transcribed")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -723,7 +739,7 @@ private struct IPadBookList: View {
         .accessibilityIdentifier("library.search")
         .overlay {
             if books.isEmpty {
-                ContentUnavailableView("No audiobooks", systemImage: "books.vertical", description: Text("Use Import to add audiobook audio and its matching EPUB."))
+                ContentUnavailableView("No books", systemImage: "books.vertical", description: Text("Use Import to add audiobook audio, a DRM-free EPUB, or both."))
             } else if filteredBooks.isEmpty {
                 ContentUnavailableView.search(text: query)
             }
@@ -748,7 +764,12 @@ private struct IPadBookDetail: View {
                         Text(book.author ?? "Unknown author")
                             .font(.title3)
                             .foregroundStyle(.secondary)
-                        Label("\(state.transcribedChapterCount(in: book)) of \(book.chapters.count) chapters transcribed", systemImage: "waveform.badge.checkmark")
+                        Label(
+                            book.mediaAvailability == .ebookOnly
+                                ? "\(book.chapters.count) readable EPUB sections"
+                                : "\(state.transcribedChapterCount(in: book)) of \(book.chapters.count) chapters transcribed",
+                            systemImage: book.mediaAvailability == .ebookOnly ? "book.pages" : "waveform.badge.checkmark"
+                        )
                             .foregroundStyle(.secondary)
                         AudiobookLanguagePicker(state: state, book: book)
                     }
@@ -768,15 +789,15 @@ private struct IPadBookDetail: View {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(chapter.title)
                                         .font(.headline)
-                                    Text(chapter.duration.map(formatClock) ?? "Duration unavailable")
+                                    Text(chapter.hasAudio ? (chapter.duration.map(formatClock) ?? "Duration unavailable") : "Published text")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                if state.readyChapterIDs.contains(chapter.id) {
-                                    Image(systemName: "checkmark.circle.fill")
+                                if !chapter.hasAudio || state.readyChapterIDs.contains(chapter.id) {
+                                    Image(systemName: chapter.hasAudio ? "checkmark.circle.fill" : "book.pages.fill")
                                         .foregroundStyle(Palette.gold)
-                                        .accessibilityLabel("Transcribed")
+                                        .accessibilityLabel(chapter.hasAudio ? "Transcribed" : "Readable EPUB section")
                                 }
                                 Image(systemName: "chevron.forward")
                                     .foregroundStyle(.tertiary)
@@ -806,7 +827,9 @@ private struct IPadBookDetail: View {
                 Menu {
                     Button(action: onAddEbook) {
                         Label(
-                            book.ebookPath == nil ? "Add EPUB" : "Add Another EPUB",
+                            book.mediaAvailability == .ebookOnly
+                                ? "Add Audio"
+                                : (book.ebookPath == nil ? "Add EPUB" : "Add Files"),
                             systemImage: "book.closed"
                         )
                     }

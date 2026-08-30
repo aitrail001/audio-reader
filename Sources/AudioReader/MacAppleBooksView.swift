@@ -14,7 +14,7 @@ struct MacAppleBooksView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Apple Books")
                         .font(.system(size: 22, weight: .semibold))
-                    Text("Downloaded MP3, M4A, and M4B audiobooks stored by Apple Books")
+                    Text("Accessible downloaded audiobooks and non-DRM EPUB books stored by Apple Books")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -34,7 +34,7 @@ struct MacAppleBooksView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Section("Audiobooks") {
+                Section("Downloaded Books") {
                     ForEach(library.items) { item in
                         HStack(spacing: 14) {
                             cover(item)
@@ -45,11 +45,11 @@ struct MacAppleBooksView: View {
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                                 if item.isProtected {
-                                    Label("Protected — unavailable for transcription", systemImage: "lock.fill")
+                                    Label("Protected or unreadable — unavailable to AudioReader", systemImage: "lock.fill")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 } else {
-                                    Text(formatClock(item.duration))
+                                    Text(item.kind == .ebook ? "EPUB book" : formatClock(item.duration))
                                         .font(.caption.monospacedDigit())
                                         .foregroundStyle(.secondary)
                                 }
@@ -64,6 +64,7 @@ struct MacAppleBooksView: View {
                                     .buttonStyle(.borderedProminent)
                                     .tint(Palette.terracotta)
                                     .disabled(!item.canImport || importingID != nil)
+                                    .accessibilityLabel("Import \(item.title)")
                             }
                         }
                         .padding(.vertical, 5)
@@ -75,9 +76,9 @@ struct MacAppleBooksView: View {
                     ProgressView("Reading Apple Books…")
                 } else if library.items.isEmpty {
                     ContentUnavailableView(
-                        "No audiobooks found",
+                        "No accessible books found",
                         systemImage: "books.vertical",
-                        description: Text("Download an audiobook in Apple Books, then refresh. Cloud-only titles are not stored on this Mac and cannot be listed here.")
+                        description: Text("Download an audiobook or DRM-free EPUB in Apple Books, then refresh. Cloud-only, protected, and files macOS does not grant access to cannot be imported.")
                     )
                 }
             }

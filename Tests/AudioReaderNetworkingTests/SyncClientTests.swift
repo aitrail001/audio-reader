@@ -85,6 +85,31 @@ struct SyncClientTests {
         #expect(http.requests.last?.path.contains("/v1/sync/pull") == true)
     }
 
+    @Test("bootstrap reads latest entity state, manifest hashes, and a consistent cursor")
+    func bootstrapRoundTrip() async throws {
+        let http = StubHTTPClient()
+        http.enqueue(
+            status: 200,
+            json: """
+            {"entities":[{"sequence":7,"entityType":"vocabulary","entityId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","operation":"upsert","revision":3,"changedAt":"2026-08-30T00:00:00Z","payload":{"surface":"loom"},"payloadHash":"5c35de2d8919d3cfad1fc83bf4857a41dbf9c45ca9ffbee8145ad3605617f436"}],"cursor":"9","nextOffset":1,"hasMore":false}
+            """
+        )
+        let client = ProductSyncClient(http: http)
+
+        let bootstrapped = try await client.bootstrap(
+            accessToken: "access",
+            deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            cursor: nil,
+            offset: 0,
+            limit: 100
+        )
+
+        #expect(bootstrapped.cursor == "9")
+        #expect(bootstrapped.entities.first?.revision == 3)
+        #expect(bootstrapped.entities.first?.payloadHash.count == 64)
+        #expect(http.requests.first?.path.contains("/v1/sync/bootstrap?offset=0&limit=100") == true)
+    }
+
     @Test("pulled changes apply vocabulary before progress and reviews")
     func pulledChangesApplyVocabularyBeforeProgress() {
         let progress = SyncPulledChange(
@@ -122,6 +147,233 @@ struct SyncClientTests {
 
 @Suite("Account session sync")
 struct AccountSessionSyncTests {
+    @MainActor
+    @Test("pull work is applied off-main once per page and progress publishes at page boundaries")
+    func syncAppliesOneOffMainTransactionPerPage() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        sync.pullPages = [
+            SyncPullResponse(
+                changes: (1...100).map { index in
+                    SyncPulledChange(
+                        sequence: index,
+                        entityType: "vocabulary",
+                        entityId: String(format: "aaaaaaaa-aaaa-4aaa-8aaa-%012d", index),
+                        operation: "upsert",
+                        revision: 1,
+                        changedAt: "2026-08-30T00:00:00Z",
+                        payload: ["surface": .string("word-\(index)")]
+                    )
+                },
+                cursor: "100",
+                hasMore: false
+            )
+        ]
+        let pageCalls = LockingBox<[(Int, String, Bool)]>([])
+        let preApplyStatus = LockingBox<AccountSyncStatus?>(nil)
+        let sessionBox = LockingBox<AccountSession?>(nil)
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: InMemorySyncOutboxRepository(),
+                cursor: InMemorySyncCursorStore(cursor: "1"),
+                applyPage: { changes, _, cursor in
+                    let recorded = DispatchSemaphore(value: 0)
+                    Task { @MainActor in
+                        preApplyStatus.value = sessionBox.value?.syncStatus
+                        recorded.signal()
+                    }
+                    guard recorded.wait(timeout: .now() + 2) == .success else {
+                        throw StatusObservationError.timedOut
+                    }
+                    pageCalls.value.append((changes.count, cursor, Thread.isMainThread))
+                }
+            )
+        )
+        sessionBox.value = session
+        await session.requestEmailCode("page@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        #expect(pageCalls.value.count == 1)
+        #expect(pageCalls.value.first?.0 == 100)
+        #expect(pageCalls.value.first?.1 == "100")
+        #expect(pageCalls.value.first?.2 == false)
+        #expect(preApplyStatus.value?.phase == .applying)
+        #expect(preApplyStatus.value?.completedCount == 0)
+        #expect(preApplyStatus.value?.totalCount == 100)
+        #expect(session.syncStatus.completedCount == 0)
+        #expect(session.syncStatus.appliedCount == 100)
+    }
+
+    @MainActor
+    @Test("a failed page never reports uncommitted records as completed")
+    func failedPageDoesNotPublishCompletedProgress() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        sync.pullChanges = [
+            SyncPulledChange(
+                sequence: 1,
+                entityType: OutboxEntityType.vocabulary.rawValue,
+                entityId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                operation: OutboxOperation.upsert.rawValue,
+                revision: 1,
+                changedAt: "2026-08-30T00:00:00Z",
+                payload: ["surface": .string("loom")]
+            )
+        ]
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: InMemorySyncOutboxRepository(),
+                cursor: InMemorySyncCursorStore(cursor: "1"),
+                applyPage: { _, _, _ in throw StatusObservationError.applyFailed }
+            )
+        )
+        await session.requestEmailCode("page-failure@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        #expect(session.syncStatus.phase == .failed)
+        #expect(session.syncStatus.completedCount == 0)
+        #expect(session.syncStatus.appliedCount == 0)
+    }
+
+    @MainActor
+    @Test("a committed page reports completion before the next download begins")
+    func committedPagePublishesCompletedProgress() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = TwoPageGatedSyncClient()
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: InMemorySyncOutboxRepository(),
+                cursor: InMemorySyncCursorStore(cursor: "1"),
+                applyPage: { _, _, _ in }
+            )
+        )
+        await session.requestEmailCode("page-success@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        let syncTask = Task { await session.synchronize() }
+        await sync.waitUntilSecondPullStarts()
+
+        #expect(session.syncStatus.phase == .downloading)
+        #expect(session.syncStatus.completedCount == 1)
+
+        await sync.releaseSecondPull()
+        await syncTask.value
+        #expect(session.syncStatus.appliedCount == 1)
+    }
+
+    @MainActor
+    @Test("bootstrap manifest prevents unchanged local uploads and the immediate second sync is empty")
+    func bootstrapManifestSkipsIdenticalLocalRows() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        sync.pullCursor = "5"
+        let payload = Data("{ \"surface\" : \"loom\", \"metadata\" : { \"level\" : 2, \"tags\" : [ { \"b\" : 2, \"a\" : 1 } ] } }".utf8)
+        let serverPayload: [String: SyncJSONValue] = [
+            "metadata": .object([
+                "tags": .array([.object(["a": .number(1), "b": .number(2)])]),
+                "level": .number(2)
+            ]),
+            "surface": .string("loom")
+        ]
+        let serverManifestBytes = Data("{\"metadata\":{\"level\":2,\"tags\":[{\"a\":1,\"b\":2}]},\"surface\":\"loom\"}".utf8)
+        sync.bootstrapPages = [
+            SyncBootstrapResponse(
+                entities: [
+                    SyncBootstrapEntity(
+                        sequence: 5,
+                        entityType: OutboxEntityType.vocabulary.rawValue,
+                        entityId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        operation: OutboxOperation.upsert.rawValue,
+                        revision: 3,
+                        changedAt: "2026-08-30T00:00:00Z",
+                        payload: serverPayload,
+                        payloadHash: SyncJSONCoding.payloadHash(serverManifestBytes)
+                    )
+                ],
+                cursor: "5",
+                nextOffset: 1,
+                hasMore: false
+            )
+        ]
+        let outbox = InMemorySyncOutboxRepository()
+        let cursor = InMemorySyncCursorStore()
+        let versions = InMemorySyncEntityVersionStore()
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: outbox,
+                cursor: cursor,
+                versions: versions,
+                snapshot: {
+                    [
+                        OutboxMutation(
+                            id: MutationID.generate(),
+                            entityType: .vocabulary,
+                            entityID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                            operation: .upsert,
+                            baseRevision: .zero,
+                            occurredAt: Date(),
+                            payload: payload
+                        )
+                    ]
+                }
+            )
+        )
+        await session.requestEmailCode("manifest@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+        await session.synchronize()
+
+        #expect(sync.pushed.isEmpty)
+        #expect(sync.pulledCursors == ["5", "5"])
+        #expect(try outbox.pendingMutations().isEmpty)
+        #expect(try cursor.loadCursor() == "5")
+        #expect(session.syncStatus.appliedCount == 0)
+    }
+
+    @Test("payload hashing canonicalizes JSON but preserves raw fallback semantics")
+    func payloadHashCanonicalizesJSON() {
+        let left = Data("{ \"z\": [ { \"b\": 2, \"a\": 1 } ], \"a\": { \"y\": true, \"x\": null } }".utf8)
+        let right = Data("{\"a\":{\"x\":null,\"y\":true},\"z\":[{\"a\":1,\"b\":2}]}".utf8)
+        #expect(SyncJSONCoding.payloadHash(left) == SyncJSONCoding.payloadHash(right))
+
+        let malformed = Data("not-json".utf8)
+        let expectedRawHash = SHA256.hash(data: malformed).map { String(format: "%02x", $0) }.joined()
+        #expect(SyncJSONCoding.payloadHash(malformed) == expectedRawHash)
+    }
+
     @Test("sync status describes granular entity, batch, pending, and conflict progress")
     func syncStatusDescriptions() {
         let uploading = AccountSyncStatus.uploading(
@@ -1115,6 +1367,56 @@ private actor TwoDeviceInterleavingSyncClient: SyncClient {
 
     func pulledCursors() -> [String] {
         pullHistory
+    }
+}
+
+private enum StatusObservationError: Error {
+    case timedOut
+    case applyFailed
+}
+
+private actor TwoPageGatedSyncClient: SyncClient {
+    private var pullCount = 0
+    private var secondPullWaiters: [CheckedContinuation<Void, Never>] = []
+    private var secondPullRelease: CheckedContinuation<Void, Never>?
+
+    func push(accessToken: String, deviceID: String, request: SyncPushRequest) async throws -> SyncPushResponse {
+        SyncPushResponse(batchId: request.batchId, results: [], cursor: "1")
+    }
+
+    func pull(accessToken: String, deviceID: String, cursor: String, limit: Int) async throws -> SyncPullResponse {
+        pullCount += 1
+        if pullCount == 1 {
+            return SyncPullResponse(
+                changes: [
+                    SyncPulledChange(
+                        sequence: 2,
+                        entityType: OutboxEntityType.vocabulary.rawValue,
+                        entityId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        operation: OutboxOperation.upsert.rawValue,
+                        revision: 1,
+                        changedAt: "2026-08-30T00:00:00Z",
+                        payload: ["surface": .string("loom")]
+                    )
+                ],
+                cursor: "2",
+                hasMore: true
+            )
+        }
+        for waiter in secondPullWaiters { waiter.resume() }
+        secondPullWaiters.removeAll()
+        await withCheckedContinuation { secondPullRelease = $0 }
+        return SyncPullResponse(changes: [], cursor: "2", hasMore: false)
+    }
+
+    func waitUntilSecondPullStarts() async {
+        if pullCount >= 2 { return }
+        await withCheckedContinuation { secondPullWaiters.append($0) }
+    }
+
+    func releaseSecondPull() {
+        secondPullRelease?.resume()
+        secondPullRelease = nil
     }
 }
 

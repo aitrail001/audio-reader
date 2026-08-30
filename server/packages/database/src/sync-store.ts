@@ -76,8 +76,25 @@ export type SyncPullResult = {
   hasMore: boolean;
 };
 
+export type SyncBootstrapEntity = SyncChange & { payloadHash: string };
+
+export type SyncBootstrapInput = {
+  userId: string;
+  cursor: string | null;
+  offset: number;
+  limit: number;
+};
+
+export type SyncBootstrapResult = {
+  entities: SyncBootstrapEntity[];
+  cursor: string;
+  nextOffset: number;
+  hasMore: boolean;
+};
+
 export type SyncStore = {
   push(input: SyncPushInput): Promise<SyncPushResult>;
+  bootstrap(input: SyncBootstrapInput): Promise<SyncBootstrapResult>;
   pull(input: SyncPullInput): Promise<SyncPullResult>;
   latestCursor(userId: string): Promise<string>;
 };
@@ -170,6 +187,36 @@ export function createMemorySyncStore(options: { identity?: IdentityStore } = {}
       });
     },
 
+    async bootstrap(input) {
+      const log = userChanges(input.userId);
+      const snapshotCursor = input.cursor === null ? log.length : parseCursor(input.cursor);
+      const latest = new Map<string, SyncChange>();
+      for (const change of log) {
+        if (change.sequence > snapshotCursor) continue;
+        latest.set(`${change.entityType}|${change.entityId}`, change);
+      }
+      const ordered = [...latest.values()].sort(
+        (left, right) =>
+          left.entityType.localeCompare(right.entityType) ||
+          left.entityId.localeCompare(right.entityId),
+      );
+      const page = ordered.slice(input.offset, input.offset + input.limit);
+      const entities = await Promise.all(
+        page.map(async (change) => ({
+          ...change,
+          payload: { ...change.payload },
+          payloadHash: await hashSyncPayload(change.payload),
+        })),
+      );
+      const nextOffset = input.offset + entities.length;
+      return {
+        entities,
+        cursor: String(snapshotCursor),
+        nextOffset,
+        hasMore: nextOffset < ordered.length,
+      };
+    },
+
     latestCursor(userId) {
       const log = userChanges(userId);
       return Promise.resolve(String(log.length));
@@ -243,6 +290,32 @@ export function createSupabaseSyncStore(rest: RestClient): SyncStore {
         throw new Error("sync pull failed");
       }
       return pulled;
+    },
+
+    async bootstrap(input) {
+      const pageLimit = Math.min(500, Math.max(1, Math.floor(input.limit)));
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/bootstrap_sync_page",
+        body: {
+          p_user_id: input.userId,
+          p_cursor: input.cursor === null ? null : parseCursor(input.cursor),
+          p_offset: Math.max(0, Math.floor(input.offset)),
+          p_limit: pageLimit,
+          p_max_payload_bytes: 1_048_576,
+        },
+      });
+      const parsed = bootstrapResultFromRpc(response.body, input, pageLimit);
+      if (response.status < 200 || response.status >= 300 || parsed === undefined) {
+        throw new Error("sync bootstrap failed");
+      }
+      const entities = await Promise.all(
+        parsed.entities.map(async (change) => ({
+          ...change,
+          payloadHash: await hashSyncPayload(change.payload),
+        })),
+      );
+      return { ...parsed, entities };
     },
 
     async latestCursor(userId) {
@@ -358,10 +431,60 @@ export function createUnavailableSyncStore(): SyncStore {
     pull() {
       return Promise.reject(new Error("database unavailable"));
     },
+    bootstrap() {
+      return Promise.reject(new Error("database unavailable"));
+    },
     latestCursor() {
       return Promise.resolve("0");
     },
   };
+}
+
+function bootstrapResultFromRpc(
+  value: unknown,
+  input: SyncBootstrapInput,
+  pageLimit: number,
+): (Omit<SyncBootstrapResult, "entities"> & { entities: SyncChange[] }) | undefined {
+  if (!isRecord(value) || !Array.isArray(value.entities) || typeof value.hasMore !== "boolean") {
+    return undefined;
+  }
+  const cursor = numericValue(value.cursor, -1);
+  const nextOffset = numericValue(value.nextOffset, -1);
+  if (
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0 ||
+    !Number.isSafeInteger(nextOffset) ||
+    nextOffset !== input.offset + value.entities.length ||
+    value.entities.length > pageLimit ||
+    !value.entities.every(isRecord)
+  ) {
+    return undefined;
+  }
+  if (input.cursor !== null && cursor !== parseCursor(input.cursor)) return undefined;
+  return {
+    entities: value.entities.map(changeFromRow),
+    cursor: String(cursor),
+    nextOffset,
+    hasMore: value.hasMore,
+  };
+}
+
+async function hashSyncPayload(payload: Record<string, unknown>): Promise<string> {
+  const bytes = new TextEncoder().encode(canonicalJSON(payload));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function canonicalJSON(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJSON(value[key])}`)
+      .join(",")}}`;
+  }
+  if (value === undefined) return "null";
+  return JSON.stringify(value);
 }
 
 async function applyMutation(input: {

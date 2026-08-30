@@ -892,6 +892,250 @@ struct AccountSessionFlowTests {
         #expect(merged.nextReview == existing.nextReview)
     }
 
+    @Test("A failed sync page rolls back rows, entity versions, and cursor without refreshing the mirror")
+    func failedSyncPageIsAtomic() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-page-failure-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        let mirrorWrites = LockingCounter()
+        let vocabulary = syncVocabularyChange(index: 1)
+        let invalidProgress = SyncPulledChange(
+            sequence: 2,
+            entityType: OutboxEntityType.progress.rawValue,
+            entityId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T00:00:00Z",
+            payload: ["vocabularyId": .string("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")]
+        )
+
+        #expect(throws: (any Error).self) {
+            try AccountSyncApplicator.applyPage(
+                [vocabulary, invalidProgress],
+                cursor: "2",
+                to: store,
+                persistVocabularyMirror: { _ in mirrorWrites.increment() }
+            )
+        }
+
+        #expect(try store.loadVocabulary().isEmpty)
+        #expect(try store.loadVersion(entityType: vocabulary.entityType, entityID: vocabulary.entityId) == nil)
+        #expect(try store.loadCursor() == "0")
+        #expect(mirrorWrites.value == 0)
+    }
+
+    @Test("A failed mixed sync page does not refresh non-vocabulary legacy mirrors")
+    func failedMixedSyncPageDoesNotRefreshDerivedState() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-page-derived-failure-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        let derivedWrites = LockingCounter()
+        let settings = SyncPulledChange(
+            sequence: 1,
+            entityType: OutboxEntityType.settings.rawValue,
+            entityId: "settings",
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T00:00:00Z",
+            payload: ["targetLanguage": .string("fr")]
+        )
+        let invalidProgress = SyncPulledChange(
+            sequence: 2,
+            entityType: OutboxEntityType.progress.rawValue,
+            entityId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T00:00:00Z",
+            payload: ["vocabularyId": .string("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")]
+        )
+
+        #expect(throws: (any Error).self) {
+            try AccountSyncApplicator.applyPage(
+                [settings, invalidProgress],
+                cursor: "2",
+                to: store,
+                persistDerivedMirrors: { _ in derivedWrites.increment() }
+            )
+        }
+
+        #expect(try store.loadVersion(entityType: settings.entityType, entityID: settings.entityId) == nil)
+        #expect(try store.loadCursor() == "0")
+        #expect(derivedWrites.value == 0)
+    }
+
+    @Test("A post-commit mirror failure is durably retried without replaying canonical history")
+    func failedMirrorRefreshIsRepairedOnNextPageEntry() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-page-mirror-repair-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        let derivedAttempts = LockingCounter()
+        let vocabularyWrites = LockingCounter()
+        let failDerived = LockingValue(true)
+        let failVocabulary = LockingValue(true)
+        let settings = SyncPulledChange(
+            sequence: 1,
+            entityType: OutboxEntityType.settings.rawValue,
+            entityId: "settings",
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T00:00:00Z",
+            payload: ["targetLanguage": .string("fr")]
+        )
+        let vocabulary = syncVocabularyChange(index: 1)
+
+        #expect(throws: (any Error).self) {
+            try AccountSyncApplicator.applyPage(
+                [settings, vocabulary],
+                cursor: "2",
+                to: store,
+                persistVocabularyMirror: { _ in
+                    vocabularyWrites.increment()
+                    if failVocabulary.value { throw MirrorRepairTestError.writeFailed }
+                },
+                persistDerivedMirrors: { _ in
+                    derivedAttempts.increment()
+                    if failDerived.value { throw MirrorRepairTestError.writeFailed }
+                }
+            )
+        }
+
+        #expect(try store.loadCursor() == "2")
+        #expect(try store.loadVocabulary().count == 1)
+        #expect(try store.loadVersion(entityType: settings.entityType, entityID: settings.entityId) != nil)
+        #expect(try store.loadSyncMirrorRepair()?.refreshVocabulary == true)
+        #expect(derivedAttempts.value == 1)
+        #expect(vocabularyWrites.value == 0)
+
+        let repairedChanges = LockingValue<[SyncPulledChange]>([])
+        failDerived.value = false
+        #expect(throws: (any Error).self) {
+            try AccountSyncApplicator.applyPage(
+                [],
+                cursor: "2",
+                to: store,
+                persistVocabularyMirror: { entries in
+                    #expect(entries.count == 1)
+                    vocabularyWrites.increment()
+                    if failVocabulary.value { throw MirrorRepairTestError.writeFailed }
+                },
+                persistDerivedMirrors: { changes in
+                    repairedChanges.value = changes
+                    derivedAttempts.increment()
+                }
+            )
+        }
+        #expect(try store.loadSyncMirrorRepair()?.refreshVocabulary == true)
+        #expect(derivedAttempts.value == 2)
+        #expect(vocabularyWrites.value == 1)
+
+        failVocabulary.value = false
+        try AccountSyncApplicator.applyPage(
+            [],
+            cursor: "2",
+            to: store,
+            persistVocabularyMirror: { entries in
+                #expect(entries.count == 1)
+                vocabularyWrites.increment()
+            },
+            persistDerivedMirrors: { changes in
+                repairedChanges.value = changes
+                derivedAttempts.increment()
+            }
+        )
+
+        #expect(repairedChanges.value.map(\.entityType) == [OutboxEntityType.settings.rawValue])
+        #expect(try store.loadVocabulary().count == 1)
+        #expect(try store.loadCursor() == "2")
+        #expect(try store.loadSyncMirrorRepair() == nil)
+        #expect(derivedAttempts.value == 3)
+        #expect(vocabularyWrites.value == 2)
+    }
+
+    @Test("A 7,000-record bootstrap uses bounded page transactions and one mirror refresh per page")
+    func largeBootstrapUsesBoundedPageWork() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-page-large-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        let mirrorWrites = LockingCounter()
+        let changes = (1...7_000).map(syncVocabularyChange(index:))
+
+        for start in stride(from: 0, to: changes.count, by: 100) {
+            let page = Array(changes[start..<min(start + 100, changes.count)])
+            try AccountSyncApplicator.applyPage(
+                page,
+                cursor: String(start + page.count),
+                to: store,
+                persistVocabularyMirror: { _ in mirrorWrites.increment() }
+            )
+        }
+
+        #expect(try store.loadVocabulary().count == 7_000)
+        #expect(try store.loadCursor() == "7000")
+        #expect(mirrorWrites.value == 70)
+    }
+
+    @Test("A successful learning page commits vocabulary, progress, review, versions, and cursor together")
+    func learningSyncPageCommitsOneTransaction() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-page-learning-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        let mirrorWrites = LockingCounter()
+        let vocabulary = syncVocabularyChange(index: 1)
+        let progress = SyncPulledChange(
+            sequence: 2,
+            entityType: OutboxEntityType.progress.rawValue,
+            entityId: vocabulary.entityId,
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 2,
+            changedAt: "2026-08-30T01:00:00Z",
+            payload: [
+                "vocabularyId": .string(vocabulary.entityId),
+                "reviewCount": .number(1),
+                "lastReviewedAt": .string("2026-08-30T01:00:00Z"),
+                "lastReviewQuality": .string(VocabReviewQuality.remember.rawValue),
+                "reviewIntervalDays": .number(1),
+                "reviewEaseFactor": .number(2.6)
+            ]
+        )
+        let review = SyncPulledChange(
+            sequence: 3,
+            entityType: OutboxEntityType.reviewEvent.rawValue,
+            entityId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            operation: OutboxOperation.append.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T01:00:00Z",
+            payload: [
+                "vocabularyId": .string(vocabulary.entityId),
+                "face": .string("recognition"),
+                "rating": .string(VocabReviewQuality.remember.rawValue),
+                "reviewedAt": .string("2026-08-30T01:00:00Z")
+            ]
+        )
+
+        try AccountSyncApplicator.applyPage(
+            [review, progress, vocabulary],
+            cursor: "3",
+            to: store,
+            persistVocabularyMirror: { _ in mirrorWrites.increment() }
+        )
+
+        #expect(try store.loadVocabulary().first?.reviewCount == 1)
+        #expect(try store.loadReviewEvents().map(\.id.rawValue) == [review.entityId])
+        #expect(try store.loadVersion(entityType: review.entityType, entityID: review.entityId)?.serverVersion == 1)
+        #expect(try store.loadCursor() == "3")
+        #expect(mirrorWrites.value == 1)
+    }
+
     @MainActor
     @Test("Managed Qwen is a shared account provider with no local API key")
     func managedQwenIsSharedAccountProvider() throws {
@@ -921,5 +1165,55 @@ struct AccountSessionFlowTests {
                 .appendingPathComponent(relativePath),
             encoding: .utf8
         )
+    }
+
+    private func syncVocabularyChange(index: Int) -> SyncPulledChange {
+        let suffix = String(format: "%012d", index)
+        return SyncPulledChange(
+            sequence: index,
+            entityType: OutboxEntityType.vocabulary.rawValue,
+            entityId: "aaaaaaaa-aaaa-4aaa-8aaa-\(suffix)",
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T00:00:00Z",
+            payload: [
+                "bookId": .string("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+                "chapterId": .string("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+                "surface": .string("word-\(index)"),
+                "context": .string("context"),
+                "state": .string("learning")
+            ]
+        )
+    }
+}
+
+private enum MirrorRepairTestError: Error {
+    case writeFailed
+}
+
+private final class LockingValue<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Value
+
+    init(_ value: Value) {
+        storage = value
+    }
+
+    var value: Value {
+        get { lock.withLock { storage } }
+        set { lock.withLock { storage = newValue } }
+    }
+}
+
+private final class LockingCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.withLock { count }
+    }
+
+    func increment() {
+        lock.withLock { count += 1 }
     }
 }

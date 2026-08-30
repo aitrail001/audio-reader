@@ -24,6 +24,46 @@ function authHeaders(): Record<string, string> {
 }
 
 describe("sync API", () => {
+  it("returns a latest-state bootstrap manifest before incremental pulls", async () => {
+    const app = createTestApp();
+    await app.fetch(
+      new Request("http://localhost/v1/sync/push", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          deviceId: DEVICE_ID,
+          batchId: BATCH_ID,
+          mutations: [
+            {
+              mutationId: MUTATION_ID,
+              entityType: "progress",
+              entityId: ENTITY_ID,
+              operation: "upsert",
+              baseRevision: 0,
+              occurredAt: "2026-08-26T09:12:04.000Z",
+              payload: { positionSeconds: 184.25 },
+            },
+          ],
+        }),
+      }),
+    );
+
+    const response = await app.fetch(
+      new Request("http://localhost/v1/sync/bootstrap?offset=0&limit=100", {
+        headers: { authorization: "Bearer test", "X-Device-Id": DEVICE_ID },
+      }),
+    );
+    const body = await readJson(response);
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ cursor: "1", nextOffset: 1, hasMore: false });
+    expect(isRecord(body) && Array.isArray(body.entities)).toBe(true);
+    if (isRecord(body) && Array.isArray(body.entities)) {
+      expect(body.entities[0]).toMatchObject({ entityId: ENTITY_ID, revision: 1 });
+      expect(isRecord(body.entities[0]) && body.entities[0].payloadHash).toMatch(/^[0-9a-f]{64}$/);
+    }
+  });
+
   it("rejects unauthenticated push and pull", async () => {
     const app = createTestApp({ authenticate: () => null });
     const pushed = await app.fetch(

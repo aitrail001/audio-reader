@@ -9,7 +9,8 @@ struct LocalSchemaV3MigrationTests {
     func migratesV2Database() throws {
         let url = temporaryDatabaseURL()
         let store = LocalSQLiteStore(fileURL: url)
-        #expect(try store.currentSchemaVersion() == LocalSchemaV3.version)
+        #expect(try store.currentSchemaVersion() == LocalSchemaV4.version)
+        #expect(try store.tableNames().contains("sync_mirror_repairs"))
         #expect(try store.tableNames().contains("local_transcript_overlays"))
         #expect(try store.tableNames().contains("local_transcript_overlay_conflicts"))
     }

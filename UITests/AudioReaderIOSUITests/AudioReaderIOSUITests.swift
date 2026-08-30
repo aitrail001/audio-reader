@@ -12,7 +12,7 @@ final class AudioReaderIOSUITests: XCTestCase {
         revealSidebar(in: app)
         XCTAssertTrue(element("sidebar.library", in: app).waitForExistence(timeout: 5))
         element("sidebar.library", in: app).tap()
-        XCTAssertTrue(element("library.importPaired", in: app).isHittable)
+        XCTAssertTrue(element("library.importMedia", in: app).isHittable)
         XCTAssertTrue(element("library.search", in: app).exists)
     }
 

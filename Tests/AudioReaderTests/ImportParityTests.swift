@@ -25,6 +25,298 @@ struct ImportParityTests {
         #expect(extracted?.contains("shared EPUB extraction") == true)
     }
 
+    @Test("EPUB spine sections remain independently navigable")
+    func preservesEPUBSpineSections() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let epub = try makeEPUB(
+            in: fixture.root,
+            name: "Sectioned Book",
+            title: "Sectioned Book",
+            author: "Ada Reader",
+            sections: [
+                ("Opening", "The opening section contains enough meaningful words for dictionary and translation study."),
+                ("Arrival", "The arrival section contains another complete passage for review and chapter navigation."),
+            ]
+        )
+
+        let document = try #require(EPUBParser.document(from: epub.path))
+
+        #expect(document.title == "Sectioned Book")
+        #expect(document.author == "Ada Reader")
+        #expect(document.sections.map(\.title) == ["Opening", "Arrival"])
+        #expect(document.sections[1].text.contains("another complete passage"))
+    }
+
+    @Test("EPUB reader preserves short published sentences between longer prose")
+    func readerPreservesAllPublishedSentences() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let prose = "This opening sentence contains several words for the reader. Hi. This closing sentence also contains several words."
+        let epub = try makeEPUB(
+            in: fixture.root,
+            name: "Short Sentences",
+            title: "Short Sentences",
+            author: nil,
+            sections: [
+                (
+                    "Greeting",
+                    prose
+                ),
+            ]
+        )
+        let transcript = try #require(EPUBParser.readerTranscript(
+            from: epub.path,
+            sectionIndex: 0,
+            chapterID: "short-sentences"
+        ))
+
+        let published = prose.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        let reconstructed = transcript.segments.map(\.displayText).joined(separator: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+
+        #expect(reconstructed == published)
+        #expect(transcript.segments.contains { $0.displayText == "Hi." })
+    }
+
+    @Test("EPUB reader preserves published punctuation and spacing")
+    func readerPreservesPunctuationSpacing() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let prose = #"The guide said, "Hello, patient world." Please don't panic; we're completely ready."#
+        let epub = try makeEPUB(
+            in: fixture.root,
+            name: "Punctuation",
+            title: "Punctuation",
+            author: nil,
+            sections: [
+                (
+                    "Dialogue",
+                    prose
+                ),
+            ]
+        )
+        let transcript = try #require(EPUBParser.readerTranscript(
+            from: epub.path,
+            sectionIndex: 0,
+            chapterID: "punctuation"
+        ))
+
+        let published = prose.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        let reconstructed = transcript.segments.map(\.displayText).joined(separator: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+
+        #expect(reconstructed == published)
+        #expect(reconstructed.contains(#"said, "Hello, patient world.""#))
+        #expect(reconstructed.contains("don't panic; we're completely ready."))
+    }
+
+    @Test("EPUB-only file import creates a readable logical book")
+    func importsEPUBOnlyFile() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let incoming = fixture.root.appendingPathComponent("incoming", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+        let epub = try makeEPUB(
+            in: incoming,
+            name: "Readable Book",
+            title: "Readable Book",
+            author: "E. Book",
+            sections: [
+                ("One", "This EPUB-only chapter provides enough words to support reading and language study."),
+                ("Two", "A second EPUB-only chapter provides navigation without requiring any audiobook file."),
+            ]
+        )
+
+        let result = try AudiobookImportService.importFiles([epub], into: library)
+        let book = try #require(LibraryScanner.scan(root: library).first)
+
+        #expect(result.createdBook)
+        #expect(book.title == "Readable Book")
+        #expect(book.author == "E. Book")
+        #expect(book.mediaAvailability == .ebookOnly)
+        #expect(book.chapters.map(\.title) == ["One", "Two"])
+        #expect(book.chapters.allSatisfy { !$0.hasAudio && $0.ebookSectionIndex != nil })
+    }
+
+    @Test("Nested folder import discovers EPUB-only, audio-only, and paired books")
+    func importsNestedMixedCollection() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let collection = fixture.root.appendingPathComponent("collection", isDirectory: true)
+        let ebookFolder = collection.appendingPathComponent("Ebook", isDirectory: true)
+        let audioFolder = collection.appendingPathComponent("Audio", isDirectory: true)
+        let pairedFolder = collection.appendingPathComponent("Paired", isDirectory: true)
+        let nestedFolder = collection.appendingPathComponent("Shelf/Deep Ebook", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        for folder in [ebookFolder, audioFolder, pairedFolder, nestedFolder] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        _ = try makeEPUB(
+            in: ebookFolder,
+            name: "Ebook",
+            title: "Ebook",
+            author: nil,
+            sections: [("Read", "This ebook-only nested title contains enough meaningful words for a readable section.")]
+        )
+        _ = try makeEPUB(
+            in: nestedFolder,
+            name: "Deep Ebook",
+            title: "Deep Ebook",
+            author: nil,
+            sections: [("Read", "This deeply nested EPUB title remains a separate logical book in the imported collection.")]
+        )
+        try Data("audio only".utf8).write(to: audioFolder.appendingPathComponent("Audio.m4b"))
+        try Data("paired audio".utf8).write(to: pairedFolder.appendingPathComponent("Paired.m4b"))
+        _ = try makeEPUB(
+            in: pairedFolder,
+            name: "Paired",
+            title: "Paired",
+            author: nil,
+            sections: [("Read", "This paired nested title contains enough meaningful words for its companion text.")]
+        )
+
+        let results = try AudiobookImportService.importFolder(collection, into: library)
+        let books = LibraryScanner.scan(root: library)
+
+        #expect(results.count == 4)
+        #expect(books.contains { $0.title == "Deep Ebook" })
+        #expect(Set(books.map(\.mediaAvailability)) == [.ebookOnly, .audioOnly, .audioAndEbook])
+    }
+
+    @Test("EPUB-only folder import rejects unreadable books before creating a destination")
+    func rejectsUnreadableEPUBOnlyFolder() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let source = fixture.root.appendingPathComponent("Unreadable", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try Data("not an EPUB archive".utf8).write(to: source.appendingPathComponent("Unreadable.epub"))
+
+        var rejection: AudiobookImportError?
+        do {
+            _ = try AudiobookImportService.importFolder(source, into: library)
+        } catch let error as AudiobookImportError {
+            rejection = error
+        } catch {
+            throw error
+        }
+
+        #expect({
+            if case .invalidEbook? = rejection { return true }
+            return false
+        }())
+        #expect(!FileManager.default.fileExists(atPath: library.path))
+    }
+
+    @Test("Explicit audio attachment preserves EPUB identity and reading state keys")
+    func explicitlyAttachesAudioToEPUBBook() async throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let incoming = fixture.root.appendingPathComponent("incoming", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+        let epub = try makeEPUB(
+            in: incoming,
+            name: "Attach Later",
+            title: "Attach Later",
+            author: nil,
+            sections: [("Read", "This imported EPUB retains its logical identity when audio is explicitly attached later.")]
+        )
+        let imported = try AudiobookImportService.importFiles([epub], into: library)
+        let before = try #require(LibraryScanner.scan(root: library).first)
+        let audio = incoming.appendingPathComponent("Attach Later.m4b")
+        try Data("later audio bytes".utf8).write(to: audio)
+
+        _ = try AudiobookImportService.addCompanionFiles([audio], to: imported.folder)
+        let after = try #require(LibraryScanner.scan(root: library).first)
+
+        #expect(after.id == before.id)
+        #expect(after.ebookPath == before.ebookPath)
+        #expect(after.mediaAvailability == .audioAndEbook)
+        #expect(after.chapters.contains { $0.hasAudio })
+        #expect(after.chapters.contains { $0.id == before.chapters.first?.id })
+        let durationLoaded = await LibraryScanner.loadDurations(for: after)
+        #expect(durationLoaded.chapters.contains { $0.id == before.chapters.first?.id })
+    }
+
+    @MainActor
+    @Test("Opening an EPUB-only section prepares published text without loading audio")
+    func opensEPUBOnlySectionWithoutAudio() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let bookFolder = fixture.root.appendingPathComponent("Book", isDirectory: true)
+        try FileManager.default.createDirectory(at: bookFolder, withIntermediateDirectories: true)
+        let epub = try makeEPUB(
+            in: bookFolder,
+            name: "Book",
+            title: "Book",
+            author: nil,
+            sections: [("First", "Published EPUB wording supports dictionary vocabulary translation summary chat quiz and review.")]
+        )
+        let book = try #require(LibraryScanner.scan(root: fixture.root).first)
+        let chapter = try #require(book.chapters.first)
+        let state = AppState()
+        state.books = [book]
+
+        state.open(chapter: chapter, in: book, autoplay: true)
+
+        #expect(state.player.loadedPath == nil)
+        #expect(state.transcript?.source == "EPUB")
+        #expect(state.transcript?.segments.first?.displayText.contains("Published EPUB wording") == true)
+        #expect(state.selectedChapterID == chapter.id)
+        let vocab = VocabEntry(
+            id: "epub-word",
+            word: "Published",
+            context: "Published EPUB wording supports dictionary vocabulary translation summary chat quiz and review.",
+            bookID: book.id,
+            bookTitle: book.title,
+            chapterID: chapter.id,
+            chapterTitle: chapter.title,
+            timestamp: 0,
+            addedAt: Date()
+        )
+        #expect(!state.canPlayVocabSentence(vocab))
+        #expect(epub.resolvingSymlinksInPath().path == book.ebookPath.map {
+            URL(fileURLWithPath: $0).resolvingSymlinksInPath().path
+        })
+    }
+
+#if os(macOS)
+    @Test("macOS Apple Books exposes only accessible downloaded media")
+    func macAppleBooksImportConstraint() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let epub = try makeEPUB(
+            in: fixture.root,
+            name: "Apple Book",
+            title: "Apple Book",
+            author: "Book Author",
+            sections: [("Read", "This accessible downloaded EPUB contains readable published words for import.")]
+        )
+        let item = MacAppleBookItem(
+            id: epub.path,
+            title: "Apple Book",
+            author: "Book Author",
+            duration: 0,
+            location: epub,
+            artworkData: nil,
+            isProtected: false,
+            isCloud: false,
+            kind: .ebook
+        )
+        var protected = item
+        protected.isProtected = true
+        var cloud = item
+        cloud.isCloud = true
+
+        #expect(item.canImport)
+        #expect(!protected.canImport)
+        #expect(!cloud.canImport)
+    }
+#endif
+
     @Test("File import copies audio and companion ebook with source metadata")
     func importsFiles() throws {
         let fixture = try TemporaryFixture()
@@ -135,9 +427,14 @@ struct ImportParityTests {
         let library = fixture.root.appendingPathComponent("library", isDirectory: true)
         try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
         let audio = incoming.appendingPathComponent("Study Book.m4b")
-        let ebook = incoming.appendingPathComponent("Study Book.epub")
+        let ebook = try makeEPUB(
+            in: incoming,
+            name: "Study Book",
+            title: "Study Book",
+            author: nil,
+            sections: [("Read", "This later companion ebook contains enough meaningful published words for alignment.")]
+        )
         try Data("stable audiobook content".utf8).write(to: audio)
-        try Data("later ebook content".utf8).write(to: ebook)
 
         try AudiobookImportService.importFiles([audio], into: library)
         try AudiobookImportService.importFiles([audio, ebook], into: library)
@@ -1189,12 +1486,12 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.4.0")
-        #expect(plist["CFBundleVersion"] as? String == "88")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.4.0")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "88")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.4.0;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 88;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.5.0")
+        #expect(plist["CFBundleVersion"] as? String == "89")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.5.0")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "89")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.5.0;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 89;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
         #expect(plist["ProductAPIBaseURL"] as? String == ProductAPI.hostedProductionBaseURL.absoluteString)
@@ -1236,8 +1533,8 @@ struct ImportParityTests {
         #expect(iPadTests.contains("--uitesting"))
         #expect(macTests.contains("--uitesting-reduce-motion"))
         #expect(iPadTests.contains("--uitesting-reduce-motion"))
-        #expect(macTests.contains("Import audiobook + EPUB"))
-        #expect(iPadTests.contains("library.importPaired"))
+        #expect(macTests.contains("Import Audio or EPUB"))
+        #expect(iPadTests.contains("library.importMedia"))
         #expect(macTests.contains("transcript.restore"))
         #expect(iPadTests.contains("transcript.restore"))
         #expect(macTests.contains("anki.export"))
@@ -1257,4 +1554,39 @@ private struct TemporaryFixture {
     func remove() {
         try? FileManager.default.removeItem(at: root)
     }
+}
+
+private func makeEPUB(
+    in directory: URL,
+    name: String,
+    title: String,
+    author: String?,
+    sections: [(title: String, text: String)]
+) throws -> URL {
+    let source = directory.appendingPathComponent(".\(name)-epub-source", isDirectory: true)
+    let meta = source.appendingPathComponent("META-INF", isDirectory: true)
+    let content = source.appendingPathComponent("OEBPS", isDirectory: true)
+    try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: content, withIntermediateDirectories: true)
+    try Data("application/epub+zip".utf8).write(to: source.appendingPathComponent("mimetype"))
+    try Data("""
+    <?xml version="1.0"?>
+    <container><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>
+    """.utf8).write(to: meta.appendingPathComponent("container.xml"))
+    let manifest = sections.indices.map { index in
+        "<item id=\"s\(index)\" href=\"s\(index).xhtml\" media-type=\"application/xhtml+xml\"/>"
+    }.joined()
+    let spine = sections.indices.map { "<itemref idref=\"s\($0)\"/>" }.joined()
+    let creator = author.map { "<dc:creator>\($0)</dc:creator>" } ?? ""
+    try Data("""
+    <package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>\(title)</dc:title>\(creator)</metadata><manifest>\(manifest)</manifest><spine>\(spine)</spine></package>
+    """.utf8).write(to: content.appendingPathComponent("content.opf"))
+    for (index, section) in sections.enumerated() {
+        try Data("<html><body><h1>\(section.title)</h1><p>\(section.text)</p></body></html>".utf8)
+            .write(to: content.appendingPathComponent("s\(index).xhtml"))
+    }
+    let epub = directory.appendingPathComponent("\(name).epub")
+    try FileManager.default.zipItem(at: source, to: epub, shouldKeepParent: false, compressionMethod: .deflate)
+    try FileManager.default.removeItem(at: source)
+    return epub
 }

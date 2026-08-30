@@ -620,6 +620,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/sync/bootstrap": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read a consistent latest-state snapshot before incremental sync */
+        get: operations["bootstrapSyncState"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/exports": {
         parameters: {
             query?: never;
@@ -1976,6 +1993,15 @@ export interface components {
         SyncPullResponse: {
             changes: components["schemas"]["SyncChange"][];
             cursor: string;
+            hasMore: boolean;
+        };
+        SyncBootstrapEntity: components["schemas"]["SyncChange"] & {
+            payloadHash: string;
+        };
+        SyncBootstrapResponse: {
+            entities: components["schemas"]["SyncBootstrapEntity"][];
+            cursor: string;
+            nextOffset: number;
             hasMore: boolean;
         };
         ExportCreate: {
@@ -4107,6 +4133,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SyncPullResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    bootstrapSyncState: {
+        parameters: {
+            query?: {
+                /** @description Fixed snapshot high-water cursor returned by the first bootstrap page. */
+                cursor?: string;
+                offset?: number;
+                limit?: number;
+            };
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Latest entity state and revision/hash manifest page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncBootstrapResponse"];
                 };
             };
             400: components["responses"]["BadRequest"];

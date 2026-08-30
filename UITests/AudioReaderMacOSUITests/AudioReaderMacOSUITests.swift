@@ -11,7 +11,7 @@ final class AudioReaderMacOSUITests: XCTestCase {
 
         XCTAssertTrue(element("sidebar.library", in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Build your listening library"].exists)
-        XCTAssertTrue(waitForHittable(app.buttons["Import audiobook + EPUB"].firstMatch, timeout: 5))
+        XCTAssertTrue(waitForHittable(app.buttons["Import Audio or EPUB"].firstMatch, timeout: 5))
         XCTAssertTrue(element("library.search", in: app).exists)
     }
 

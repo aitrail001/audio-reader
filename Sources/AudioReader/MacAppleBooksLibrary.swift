@@ -4,6 +4,11 @@ import AVFoundation
 import Foundation
 
 struct MacAppleBookItem: Identifiable, Hashable, Sendable {
+    enum Kind: String, Hashable, Sendable {
+        case audiobook
+        case ebook
+    }
+
     var id: String
     var title: String
     var author: String
@@ -12,6 +17,7 @@ struct MacAppleBookItem: Identifiable, Hashable, Sendable {
     var artworkData: Data?
     var isProtected: Bool
     var isCloud: Bool
+    var kind: Kind = .audiobook
 
     var canImport: Bool {
         !isProtected && !isCloud && location.map { FileManager.default.fileExists(atPath: $0.path) } == true
@@ -31,42 +37,47 @@ final class MacAppleBooksLibrary {
         defer { isLoading = false }
         do {
             items = try await Task.detached(priority: .userInitiated) {
-                try await Self.readDownloadedAudiobooks()
+                try await Self.readDownloadedBooks()
             }.value
             let available = items.filter(\.canImport).count
             let unavailable = items.count - available
             message = unavailable > 0
-                ? "Found \(available) importable and \(unavailable) protected audiobooks downloaded by Apple Books."
-                : "Found \(available) downloaded audiobooks in Apple Books."
+                ? "Found \(available) importable and \(unavailable) protected or unreadable downloaded Apple Books titles."
+                : "Found \(available) accessible downloaded audiobooks and EPUB books in Apple Books."
         } catch {
             items = []
-            message = "Downloaded Apple Books audiobooks could not be read: \(error.localizedDescription)"
+            message = "Downloaded Apple Books files could not be read: \(error.localizedDescription)"
         }
     }
 
-    nonisolated private static func readDownloadedAudiobooks() async throws -> [MacAppleBookItem] {
-        let root = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Containers/com.apple.BKAgentService/Data/Documents/iBooks/Books/Audiobooks")
-        guard FileManager.default.fileExists(atPath: root.path) else { return [] }
+    nonisolated private static func readDownloadedBooks() async throws -> [MacAppleBookItem] {
+        let booksRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Containers/com.apple.BKAgentService/Data/Documents/iBooks/Books")
+        guard FileManager.default.fileExists(atPath: booksRoot.path) else { return [] }
         let keys: [URLResourceKey] = [.isRegularFileKey]
         guard let enumerator = FileManager.default.enumerator(
-            at: root,
+            at: booksRoot,
             includingPropertiesForKeys: keys,
             options: [.skipsHiddenFiles]
         ) else { return [] }
 
-        let supported = Set(["m4b", "m4a", "mp3"])
+        let supportedAudio = Set(["m4b", "m4a", "mp3"])
         let urls = enumerator.compactMap { $0 as? URL }.filter { url in
-            supported.contains(url.pathExtension.lowercased())
+            supportedAudio.contains(url.pathExtension.lowercased())
+                || url.pathExtension.lowercased() == "epub"
         }
         var found: [MacAppleBookItem] = []
         for url in urls {
-            found.append(try await item(for: url))
+            if url.pathExtension.lowercased() == "epub" {
+                found.append(ebookItem(for: url))
+            } else {
+                found.append(try await audiobookItem(for: url))
+            }
         }
         return found.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
     }
 
-    nonisolated private static func item(for url: URL) async throws -> MacAppleBookItem {
+    nonisolated private static func audiobookItem(for url: URL) async throws -> MacAppleBookItem {
         let asset = AVURLAsset(url: url)
         let duration = try await asset.load(.duration).seconds
         let metadata = try await asset.load(.commonMetadata)
@@ -90,7 +101,25 @@ final class MacAppleBooksLibrary {
             location: url,
             artworkData: artworkData,
             isProtected: protected,
-            isCloud: false
+            isCloud: false,
+            kind: .audiobook
+        )
+    }
+
+    /// Apple Books has no public library API; only already-downloaded files that
+    /// macOS grants this process permission to read are considered importable.
+    nonisolated private static func ebookItem(for url: URL) -> MacAppleBookItem {
+        let document = EPUBParser.document(from: url.path)
+        return MacAppleBookItem(
+            id: url.path,
+            title: document?.title ?? url.deletingPathExtension().lastPathComponent,
+            author: document?.author ?? "Unknown author",
+            duration: 0,
+            location: url,
+            artworkData: nil,
+            isProtected: document == nil,
+            isCloud: false,
+            kind: .ebook
         )
     }
 
@@ -109,12 +138,12 @@ final class MacAppleBooksLibrary {
         let result = try AudiobookImportService.importFiles([location], into: libraryRoot)
         let folder = result.folder
         try AudiobookImportService.writeMarkers(
-            source: .deviceAudiobooks,
+            source: .appleBooks,
             title: item.title,
             author: item.author,
             to: folder
         )
-        if let artworkData = item.artworkData {
+        if item.kind == .audiobook, let artworkData = item.artworkData {
             try artworkData.write(to: folder.appendingPathComponent("cover.jpg"), options: .atomic)
         }
     }

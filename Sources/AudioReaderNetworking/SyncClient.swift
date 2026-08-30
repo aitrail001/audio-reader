@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 #if canImport(AudioReaderDomain)
 import AudioReaderDomain
@@ -107,6 +108,64 @@ public struct SyncPullResponse: Codable, Equatable, Sendable {
     public init(changes: [SyncPulledChange], cursor: String, hasMore: Bool) {
         self.changes = changes
         self.cursor = cursor
+        self.hasMore = hasMore
+    }
+}
+
+/// One latest server entity in a consistent initial-sync snapshot.
+public struct SyncBootstrapEntity: Codable, Equatable, Sendable {
+    public var sequence: Int
+    public var entityType: String
+    public var entityId: String
+    public var operation: String
+    public var revision: Int
+    public var changedAt: String
+    public var payload: [String: SyncJSONValue]
+    public var payloadHash: String
+
+    public init(
+        sequence: Int,
+        entityType: String,
+        entityId: String,
+        operation: String,
+        revision: Int,
+        changedAt: String,
+        payload: [String: SyncJSONValue],
+        payloadHash: String
+    ) {
+        self.sequence = sequence
+        self.entityType = entityType
+        self.entityId = entityId
+        self.operation = operation
+        self.revision = revision
+        self.changedAt = changedAt
+        self.payload = payload
+        self.payloadHash = payloadHash
+    }
+
+    public var change: SyncPulledChange {
+        SyncPulledChange(
+            sequence: sequence,
+            entityType: entityType,
+            entityId: entityId,
+            operation: operation,
+            revision: revision,
+            changedAt: changedAt,
+            payload: payload
+        )
+    }
+}
+
+public struct SyncBootstrapResponse: Codable, Equatable, Sendable {
+    public var entities: [SyncBootstrapEntity]
+    public var cursor: String
+    public var nextOffset: Int
+    public var hasMore: Bool
+
+    public init(entities: [SyncBootstrapEntity], cursor: String, nextOffset: Int, hasMore: Bool) {
+        self.entities = entities
+        self.cursor = cursor
+        self.nextOffset = nextOffset
         self.hasMore = hasMore
     }
 }
@@ -366,7 +425,31 @@ public enum SyncJSONValue: Codable, Equatable, Sendable {
 
 public protocol SyncClient: Sendable {
     func push(accessToken: String, deviceID: String, request: SyncPushRequest) async throws -> SyncPushResponse
+    func bootstrap(
+        accessToken: String,
+        deviceID: String,
+        cursor: String?,
+        offset: Int,
+        limit: Int
+    ) async throws -> SyncBootstrapResponse
     func pull(accessToken: String, deviceID: String, cursor: String, limit: Int) async throws -> SyncPullResponse
+}
+
+public extension SyncClient {
+    func bootstrap(
+        accessToken: String,
+        deviceID: String,
+        cursor: String?,
+        offset: Int,
+        limit: Int
+    ) async throws -> SyncBootstrapResponse {
+        _ = accessToken
+        _ = deviceID
+        _ = cursor
+        _ = offset
+        _ = limit
+        return SyncBootstrapResponse(entities: [], cursor: "0", nextOffset: 0, hasMore: false)
+    }
 }
 
 public struct AccountSyncRuntime: Sendable {
@@ -375,7 +458,7 @@ public struct AccountSyncRuntime: Sendable {
     public var cursor: any SyncCursorStoring
     public var versions: (any SyncEntityVersionStoring)?
     public var snapshot: @Sendable () throws -> [OutboxMutation]
-    public var applyChange: @Sendable (SyncPulledChange) throws -> Void
+    public var applyPage: @Sendable ([SyncPulledChange], [SyncEntityVersion], String) throws -> Void
     public var handleConflict: @Sendable (OutboxMutation, Int64) throws -> Void
 
     public init(
@@ -385,6 +468,7 @@ public struct AccountSyncRuntime: Sendable {
         versions: (any SyncEntityVersionStoring)? = nil,
         snapshot: @escaping @Sendable () throws -> [OutboxMutation] = { [] },
         applyChange: @escaping @Sendable (SyncPulledChange) throws -> Void = { _ in },
+        applyPage: (@Sendable ([SyncPulledChange], [SyncEntityVersion], String) throws -> Void)? = nil,
         handleConflict: @escaping @Sendable (OutboxMutation, Int64) throws -> Void = { _, _ in }
     ) {
         self.client = client
@@ -392,13 +476,17 @@ public struct AccountSyncRuntime: Sendable {
         self.cursor = cursor
         self.versions = versions
         self.snapshot = snapshot
-        self.applyChange = applyChange
+        self.applyPage = applyPage ?? { changes, pageVersions, nextCursor in
+            for change in changes { try applyChange(change) }
+            for version in pageVersions { try versions?.saveVersion(version) }
+            try cursor.saveCursor(nextCursor)
+        }
         self.handleConflict = handleConflict
     }
 }
 
-enum SyncJSONCoding {
-    static let tombstonePayload = Data("{\"_deleted\":true}".utf8)
+public enum SyncJSONCoding {
+    public static let tombstonePayload = Data("{\"_deleted\":true}".utf8)
 
     static var encoder: JSONEncoder {
         let encoder = JSONEncoder()
@@ -408,7 +496,7 @@ enum SyncJSONCoding {
 
     static var decoder: JSONDecoder { JSONDecoder() }
 
-    static func payloadsMatch(_ lhs: Data, _ rhs: Data) -> Bool {
+    public static func payloadsMatch(_ lhs: Data, _ rhs: Data) -> Bool {
         let left = try? decoder.decode([String: SyncJSONValue].self, from: lhs)
         let right = try? decoder.decode([String: SyncJSONValue].self, from: rhs)
         if let left, let right {
@@ -417,14 +505,27 @@ enum SyncJSONCoding {
         return lhs == rhs
     }
 
-    static func data(from payload: [String: SyncJSONValue]) -> Data {
+    public static func data(from payload: [String: SyncJSONValue]) -> Data {
         (try? encoder.encode(payload)) ?? Data("{}".utf8)
+    }
+
+    public static func payloadHash(_ data: Data) -> String {
+        // Server manifests hash canonical JSON. Decode and re-encode object payloads so key
+        // order and insignificant whitespace do not turn equal records into uploads.
+        let bytes: Data
+        if let payload = try? decoder.decode([String: SyncJSONValue].self, from: data) {
+            bytes = self.data(from: payload)
+        } else {
+            // Preserve byte-for-byte hashing for malformed/legacy non-JSON payloads.
+            bytes = data
+        }
+        return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
     }
 }
 
 extension SyncPulledChange {
     /// Parent upserts precede dependents; vocabulary tombstones follow them so deletion wins.
-    static func applying(_ changes: [SyncPulledChange]) -> [SyncPulledChange] {
+    public static func applying(_ changes: [SyncPulledChange]) -> [SyncPulledChange] {
         let rank: [String: Int] = [
             OutboxEntityType.book.rawValue: 0,
             OutboxEntityType.chapter.rawValue: 1,

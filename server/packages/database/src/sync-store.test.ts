@@ -25,6 +25,36 @@ function progressMutation(overrides: Partial<SyncMutation> = {}): SyncMutation {
 }
 
 describe("memory sync store", () => {
+  it("bootstraps only the latest revision per entity with a stable cursor and manifest hash", async () => {
+    const store = createMemorySyncStore();
+    await store.push({
+      userId: USER_A,
+      deviceId: DEVICE_A,
+      batchId: BATCH,
+      mutations: [progressMutation()],
+    });
+    await store.push({
+      userId: USER_A,
+      deviceId: DEVICE_A,
+      batchId: crypto.randomUUID(),
+      mutations: [
+        progressMutation({
+          mutationId: MUTATION_B,
+          baseRevision: 1,
+          payload: { positionSeconds: 200, completed: true },
+        }),
+      ],
+    });
+
+    const page = await store.bootstrap({ userId: USER_A, cursor: null, offset: 0, limit: 100 });
+
+    expect(page.cursor).toBe("2");
+    expect(page.entities).toHaveLength(1);
+    expect(page.entities[0]).toMatchObject({ revision: 2, payload: { positionSeconds: 200 } });
+    expect(page.entities[0]?.payloadHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(page.hasMore).toBe(false);
+  });
+
   it("applies a mutation once and isolates users", async () => {
     const store = createMemorySyncStore();
     const first = await store.push({
@@ -104,6 +134,45 @@ describe("memory sync store", () => {
 });
 
 describe("supabase sync store", () => {
+  it("bootstraps a fixed-cursor latest-state page through one database RPC", async () => {
+    const requests: Array<{ url: string; method: string; body: unknown }> = [];
+    const fetchImpl: RestFetch = (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const method = init?.method ?? "GET";
+      const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : null;
+      requests.push({ url, method, body });
+      return Promise.resolve(
+        jsonResponse(200, {
+          entities: [changeRow(12)],
+          cursor: "15",
+          nextOffset: 101,
+          hasMore: true,
+        }),
+      );
+    };
+    const store = createSupabaseSyncStore(
+      createSupabaseRestClient({
+        url: "https://example.supabase.co",
+        serviceRoleKey: "service-role-key",
+        fetch: fetchImpl,
+      }),
+    );
+
+    const page = await store.bootstrap({ userId: USER_A, cursor: "15", offset: 100, limit: 100 });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toContain("/rest/v1/rpc/bootstrap_sync_page");
+    expect(requests[0]?.body).toEqual({
+      p_user_id: USER_A,
+      p_cursor: 15,
+      p_offset: 100,
+      p_limit: 100,
+      p_max_payload_bytes: 1_048_576,
+    });
+    expect(page.cursor).toBe("15");
+    expect(page.entities[0]?.payloadHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it("pushes the complete mutation batch through one database RPC", async () => {
     const requests: Array<{ url: string; method: string; body: unknown }> = [];
     const fetchImpl: RestFetch = (input, init) => {

@@ -43,13 +43,13 @@ public final class AccountSession {
     private static let usageLog = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "product-usage")
     // A live 500-row vocabulary batch exceeded Cloudflare CPU at only 427 KB.
     // Count-bound small rows separately from the byte-bound transcript envelope.
-    private static let syncPushBatchSize = 100
+    nonisolated private static let syncPushBatchSize = 100
     // The largest production transcript is 2.60 MB. A 2.99 MB mixed batch exhausted the
     // Worker, so keep the complete native envelope below 2.625 MiB and send that row alone.
-    private static let syncPushBatchBytes = 2_752_512
-    private static let syncPushEnvelopeReserve = 16 * 1_024
-    private static let syncPullPageLimit = 100
-    private static let syncPullPageCap = 64
+    nonisolated private static let syncPushBatchBytes = 2_752_512
+    nonisolated private static let syncPushEnvelopeReserve = 16 * 1_024
+    nonisolated private static let syncPullPageLimit = 100
+    nonisolated private static let syncPullPageCap = 64
 
     public static let revokedDeviceRecoveryMessage =
         "This device is no longer signed in. Books on this device were kept. Sign in again to reconnect."
@@ -607,15 +607,18 @@ public final class AccountSession {
         let jobID = ProductHTTP.makeRequestID()
         let deviceID = try store.deviceID()
         syncStatus = AccountSyncStatus(phase: .preparing)
-        try enqueueDirtySnapshot(runtime: runtime)
-        let pendingBeforeCoalescing = try runtime.outbox.pendingMutations().count
-        let pending = try coalescePendingMutations(runtime: runtime)
+        try await bootstrapInitialStateIfNeeded(runtime: runtime, deviceID: deviceID, jobID: jobID)
+        try await Task.detached { try Self.enqueueDirtySnapshot(runtime: runtime) }.value
+        let (pendingBeforeCoalescing, pending, batches) = try await Task.detached {
+            let pendingBeforeCoalescing = try runtime.outbox.pendingMutations().count
+            let pending = try Self.coalescePendingMutations(runtime: runtime)
+            return (pendingBeforeCoalescing, pending, try Self.syncPushBatches(pending))
+        }.value
         if pending.count != pendingBeforeCoalescing {
             Self.syncLog.info(
                 "sync_outbox_coalesced message=sync_outbox_coalesced requestId=\(jobID, privacy: .public) superseded=\(pendingBeforeCoalescing - pending.count, privacy: .public) retained=\(pending.count, privacy: .public)"
             )
         }
-        let batches = try Self.syncPushBatches(pending)
         var entityProgress = Self.syncEntityProgress(pending)
         var uploaded = 0
         var conflicts = 0
@@ -687,7 +690,6 @@ public final class AccountSession {
                 )
             }
             let orderedChanges = SyncPulledChange.applying(pulled.changes)
-            var pageApplied = 0
             syncStatus = AccountSyncStatus(
                 phase: .applying,
                 completedCount: 0,
@@ -698,25 +700,21 @@ public final class AccountSession {
                 conflictCount: conflicts,
                 entityProgress: entityProgress
             )
-            for change in orderedChanges {
-                syncStatus.entityType = change.entityType
-                try runtime.applyChange(change)
-                applied += 1
-                pageApplied += 1
-                syncStatus.completedCount = pageApplied
-                syncStatus.appliedCount = applied
-                try runtime.versions?.saveVersion(
-                    SyncEntityVersion(
-                        entityType: change.entityType,
-                        entityID: change.entityId,
-                        serverVersion: Int64(change.revision),
-                        payload: change.operation == OutboxOperation.delete.rawValue
-                            ? SyncJSONCoding.tombstonePayload
-                            : SyncJSONCoding.data(from: change.payload)
-                    )
-                )
-            }
-            try runtime.cursor.saveCursor(pulled.cursor)
+            let pageVersions = Self.entityVersions(for: orderedChanges)
+            try await Task.detached {
+                try runtime.applyPage(orderedChanges, pageVersions, pulled.cursor)
+            }.value
+            applied += orderedChanges.count
+            syncStatus = AccountSyncStatus(
+                phase: .applying,
+                completedCount: orderedChanges.count,
+                totalCount: orderedChanges.count,
+                appliedCount: applied,
+                batchIndex: pages,
+                pendingCount: (try? runtime.outbox.pendingMutations().count) ?? 0,
+                conflictCount: conflicts,
+                entityProgress: entityProgress
+            )
             hasMore = pulled.hasMore
             Self.syncLog.info(
                 "sync_pull_page message=sync_pull_page requestId=\(jobID, privacy: .public) cursor=\(pulled.cursor, privacy: .public) hasMore=\(pulled.hasMore, privacy: .public) changes=\(pulled.changes.count, privacy: .public)"
@@ -742,7 +740,94 @@ public final class AccountSession {
         }
     }
 
-    private static func syncEntityProgress(_ pending: [OutboxMutation]) -> [AccountSyncEntityProgress] {
+    /// A first sync reads one consistent latest-state snapshot before creating upload intent.
+    /// The fixed high-water cursor prevents concurrent writes from changing later bootstrap pages.
+    private func bootstrapInitialStateIfNeeded(
+        runtime: AccountSyncRuntime,
+        deviceID: String,
+        jobID: String
+    ) async throws {
+        guard try runtime.cursor.loadCursor() == "0" else { return }
+        let local = try await Task.detached { try runtime.snapshot() }.value
+        let localByEntity = Dictionary(uniqueKeysWithValues: local.map { (Self.entityKey($0), $0) })
+        var snapshotCursor: String?
+        var offset = 0
+        var hasMore = true
+        var pages = 0
+        while hasMore {
+            let page = try await withAccessToken { access in
+                try await runtime.client.bootstrap(
+                    accessToken: access,
+                    deviceID: deviceID,
+                    cursor: snapshotCursor,
+                    offset: offset,
+                    limit: Self.syncPullPageLimit
+                )
+            }
+            if let snapshotCursor, page.cursor != snapshotCursor {
+                throw AccountSyncRunError.inconsistentBootstrapCursor
+            }
+            snapshotCursor = page.cursor
+            guard page.nextOffset >= offset + page.entities.count else {
+                throw AccountSyncRunError.invalidBootstrapPage
+            }
+            let remoteToApply = page.entities.compactMap { entity -> SyncPulledChange? in
+                let key = "\(entity.entityType)|\(entity.entityId)"
+                guard let localMutation = localByEntity[key] else { return entity.change }
+                let localHash = SyncJSONCoding.payloadHash(localMutation.payload)
+                if localMutation.operation.rawValue == entity.operation && localHash == entity.payloadHash {
+                    return nil
+                }
+                // Preserve a genuinely different local value; after this page records the
+                // server revision, dirty-snapshot enqueue uploads it with the correct base.
+                return nil
+            }
+            let versions = page.entities.map {
+                SyncEntityVersion(
+                    entityType: $0.entityType,
+                    entityID: $0.entityId,
+                    serverVersion: Int64($0.revision),
+                    payload: $0.operation == OutboxOperation.delete.rawValue
+                        ? SyncJSONCoding.tombstonePayload
+                        : SyncJSONCoding.data(from: $0.payload)
+                )
+            }
+            let cursorToPersist = page.hasMore ? "0" : page.cursor
+            if !page.entities.isEmpty || cursorToPersist != "0" {
+                try await Task.detached {
+                    try runtime.applyPage(
+                        SyncPulledChange.applying(remoteToApply),
+                        versions,
+                        cursorToPersist
+                    )
+                }.value
+            }
+            pages += 1
+            offset = page.nextOffset
+            hasMore = page.hasMore
+            Self.syncLog.info(
+                "sync_bootstrap_page message=sync_bootstrap_page requestId=\(jobID, privacy: .public) page=\(pages, privacy: .public) entities=\(page.entities.count, privacy: .public) hasMore=\(page.hasMore, privacy: .public)"
+            )
+            if page.entities.isEmpty && page.hasMore {
+                throw AccountSyncRunError.invalidBootstrapPage
+            }
+        }
+    }
+
+    private static func entityVersions(for changes: [SyncPulledChange]) -> [SyncEntityVersion] {
+        changes.map { change in
+            SyncEntityVersion(
+                entityType: change.entityType,
+                entityID: change.entityId,
+                serverVersion: Int64(change.revision),
+                payload: change.operation == OutboxOperation.delete.rawValue
+                    ? SyncJSONCoding.tombstonePayload
+                    : SyncJSONCoding.data(from: change.payload)
+            )
+        }
+    }
+
+    nonisolated private static func syncEntityProgress(_ pending: [OutboxMutation]) -> [AccountSyncEntityProgress] {
         let totals = Dictionary(grouping: pending, by: { $0.entityType.rawValue }).mapValues(\.count)
         return totals.keys.sorted().map {
             AccountSyncEntityProgress(entityType: $0, completedCount: 0, totalCount: totals[$0] ?? 0)
@@ -751,7 +836,7 @@ public final class AccountSession {
 
     /// Keeps sync pushes below the Worker's sync-only body allowance. Count-only batching is
     /// insufficient because one transcript can be several megabytes while most rows are tiny.
-    static func syncPushBatches(_ pending: [OutboxMutation]) throws -> [[OutboxMutation]] {
+    nonisolated static func syncPushBatches(_ pending: [OutboxMutation]) throws -> [[OutboxMutation]] {
         var batches: [[OutboxMutation]] = []
         var batch: [OutboxMutation] = []
         var encodedBytes = syncPushEnvelopeReserve
@@ -818,7 +903,7 @@ public final class AccountSession {
         }
     }
 
-    private func enqueueDirtySnapshot(runtime: AccountSyncRuntime) throws {
+    nonisolated private static func enqueueDirtySnapshot(runtime: AccountSyncRuntime) throws {
         let candidates = try runtime.snapshot()
         let pending = try runtime.outbox.pendingMutations()
         var pendingByEntity: [String: [OutboxMutation]] = [:]
@@ -862,7 +947,7 @@ public final class AccountSession {
 
     /// Repeated snapshots from older builds may leave many pending rows for one entity.
     /// Keep the latest payload at the highest known server revision before network batching.
-    private func coalescePendingMutations(runtime: AccountSyncRuntime) throws -> [OutboxMutation] {
+    nonisolated private static func coalescePendingMutations(runtime: AccountSyncRuntime) throws -> [OutboxMutation] {
         let pending = try runtime.outbox.pendingMutations()
         struct Winner {
             var order: Int
@@ -893,7 +978,7 @@ public final class AccountSession {
         return winners.values.sorted { $0.order < $1.order }.map(\.mutation)
     }
 
-    private static func entityKey(_ mutation: OutboxMutation) -> String {
+    nonisolated private static func entityKey(_ mutation: OutboxMutation) -> String {
         "\(mutation.entityType.rawValue)|\(mutation.entityID)"
     }
 
@@ -992,12 +1077,18 @@ public final class AccountSession {
 
 private enum AccountSyncRunError: LocalizedError {
     case pullPageLimitReached
+    case inconsistentBootstrapCursor
+    case invalidBootstrapPage
     case mutationTooLarge(entityType: String)
 
     var errorDescription: String? {
         switch self {
         case .pullPageLimitReached:
             "More sync changes remain on the server. Sync again to continue."
+        case .inconsistentBootstrapCursor:
+            "Initial sync changed snapshots between pages. Try syncing again."
+        case .invalidBootstrapPage:
+            "Initial sync returned an invalid page. Try syncing again."
         case .mutationTooLarge(let entityType):
             "One \(entityType.replacingOccurrences(of: "_", with: " ")) record is too large to sync safely. Keep it on this device or shorten that chapter transcript."
         }

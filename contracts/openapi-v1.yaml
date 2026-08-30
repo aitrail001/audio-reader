@@ -1268,6 +1268,43 @@ paths:
           required: true
           schema: *id009
           description: Stable device UUID stored in Keychain.
+  /v1/sync/bootstrap:
+    get:
+      operationId: bootstrapSyncState
+      summary: Read a consistent latest-state snapshot before incremental sync
+      tags:
+        - Sync
+      responses:
+        "200":
+          description: Latest entity state and revision/hash manifest page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncBootstrapResponse"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          description: Fixed snapshot high-water cursor returned by the first bootstrap page.
+          schema:
+            type: string
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - *id013
+        - *id019
   /v1/exports:
     post:
       operationId: createAccountExport
@@ -4530,6 +4567,36 @@ components:
             $ref: "#/components/schemas/SyncChange"
         cursor:
           type: string
+        hasMore:
+          type: boolean
+    SyncBootstrapEntity:
+      allOf:
+        - $ref: "#/components/schemas/SyncChange"
+        - type: object
+          required:
+            - payloadHash
+          properties:
+            payloadHash:
+              type: string
+              pattern: "^[0-9a-f]{64}$"
+    SyncBootstrapResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - entities
+        - cursor
+        - nextOffset
+        - hasMore
+      properties:
+        entities:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncBootstrapEntity"
+        cursor:
+          type: string
+        nextOffset:
+          type: integer
+          minimum: 0
         hasMore:
           type: boolean
     ExportCreate:

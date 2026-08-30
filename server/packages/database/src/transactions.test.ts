@@ -741,6 +741,44 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
     expect(second.hasMore).toBe(false);
   });
 
+  it("bootstraps latest entity state at a fixed cursor instead of replaying history", () => {
+    const session = requireDb(db);
+    execOk(
+      session,
+      `insert into public.sync_changes (
+         user_id, sequence, entity_type, entity_id, operation, revision, mutation_id, payload, changed_at
+       ) values
+       (${sqlString(USER_A)}::uuid, 9101, 'vocabulary', 'bootstrap-latest', 'upsert', 1,
+        'cccccccc-cccc-4ccc-8ccc-ccccccccccc1'::uuid, '{"surface":"old"}'::jsonb, now()),
+       (${sqlString(USER_A)}::uuid, 9102, 'vocabulary', 'bootstrap-latest', 'upsert', 2,
+        'cccccccc-cccc-4ccc-8ccc-ccccccccccc2'::uuid, '{"surface":"latest"}'::jsonb, now()),
+       (${sqlString(USER_A)}::uuid, 9103, 'vocabulary', 'bootstrap-other', 'upsert', 1,
+        'cccccccc-cccc-4ccc-8ccc-ccccccccccc3'::uuid, '{"surface":"other"}'::jsonb, now()),
+       (${sqlString(USER_A)}::uuid, 9104, 'vocabulary', 'bootstrap-latest', 'upsert', 3,
+        'cccccccc-cccc-4ccc-8ccc-ccccccccccc4'::uuid, '{"surface":"future"}'::jsonb, now())`,
+    );
+
+    let offset = 0;
+    let hasMore = true;
+    const entities: Array<Record<string, unknown>> = [];
+    while (hasMore) {
+      const page = callJson(
+        session,
+        `select public.bootstrap_sync_page(
+          ${sqlString(USER_A)}::uuid, 9103, ${String(offset)}, 500, 1048576
+        )`,
+      );
+      expect(page.cursor).toBe("9103");
+      entities.push(...(page.entities as Array<Record<string, unknown>>));
+      offset = Number(page.nextOffset);
+      hasMore = Boolean(page.hasMore);
+    }
+    const latest = entities.filter((entity) => entity.entity_id === "bootstrap-latest");
+
+    expect(latest).toHaveLength(1);
+    expect(latest[0]).toMatchObject({ revision: 2, payload: { surface: "latest" } });
+  });
+
   it("claims one assistant generation per cache key and attaches another user", () => {
     const session = requireDb(db);
     const cacheKey = `cache-key-${crypto.randomUUID()}`;

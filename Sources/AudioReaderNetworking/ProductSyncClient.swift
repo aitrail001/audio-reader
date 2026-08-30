@@ -54,6 +54,30 @@ public struct ProductSyncClient: SyncClient, Sendable {
         )
     }
 
+    public func bootstrap(
+        accessToken: String,
+        deviceID: String,
+        cursor: String?,
+        offset: Int,
+        limit: Int
+    ) async throws -> SyncBootstrapResponse {
+        var components = URLComponents()
+        components.path = "/v1/sync/bootstrap"
+        components.queryItems = [
+            cursor.map { URLQueryItem(name: "cursor", value: $0) },
+            URLQueryItem(name: "offset", value: String(offset)),
+            URLQueryItem(name: "limit", value: String(limit))
+        ].compactMap { $0 }
+        return try await send(
+            method: "GET",
+            path: components.string ?? "/v1/sync/bootstrap",
+            headers: [
+                "Authorization": "Bearer \(accessToken)",
+                "X-Device-Id": deviceID
+            ]
+        )
+    }
+
     private func send<Body: Encodable, Response: Decodable>(
         method: String,
         path: String,
@@ -108,6 +132,7 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
     public var pullCursor: String = "0"
     public var pullHasMore = false
     public var pullPages: [SyncPullResponse] = []
+    public var bootstrapPages: [SyncBootstrapResponse] = []
     public var pushStatus: String = "applied"
     public var conflictRevision: Int?
     private let lock = NSLock()
@@ -148,6 +173,24 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
                 return pullPages.removeFirst()
             }
             return SyncPullResponse(changes: pullChanges, cursor: pullCursor, hasMore: pullHasMore)
+        }
+    }
+
+    public func bootstrap(
+        accessToken: String,
+        deviceID: String,
+        cursor: String?,
+        offset: Int,
+        limit: Int
+    ) async throws -> SyncBootstrapResponse {
+        _ = accessToken
+        _ = deviceID
+        _ = cursor
+        _ = offset
+        _ = limit
+        return withLock {
+            if !bootstrapPages.isEmpty { return bootstrapPages.removeFirst() }
+            return SyncBootstrapResponse(entities: [], cursor: "0", nextOffset: 0, hasMore: false)
         }
     }
 

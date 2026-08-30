@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import OSLog
 
 struct AudiobookImportResult: Sendable {
     var folder: URL
@@ -49,6 +50,7 @@ final class EbookReplacementTransaction {
 
 enum AudiobookImportError: LocalizedError {
     case noAudioFiles
+    case noSupportedBookFiles
     case protectedOrUnavailable
     case exportUnavailable
     case unsafeDeletionTarget
@@ -58,6 +60,7 @@ enum AudiobookImportError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noAudioFiles: "No supported MP3, M4A, M4B, AAC, WAV, or CAF audiobook files were found."
+        case .noSupportedBookFiles: "No supported audiobook audio or readable EPUB files were found."
         case .protectedOrUnavailable: "This audiobook is protected or not downloaded as an accessible media file."
         case .exportUnavailable: "This audiobook cannot be copied into AudioReader for transcription."
         case .unsafeDeletionTarget: "AudioReader can only delete a book stored directly in its imported library."
@@ -69,66 +72,83 @@ enum AudiobookImportError: LocalizedError {
 }
 
 enum AudiobookImportService {
+    private static let log = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "book-import")
     private static let fingerprintMarker = ".audioreader-audio-fingerprint"
+    private static let ebookSectionsMarker = ".audioreader-ebook-sections"
 
     @discardableResult
     static func importFiles(_ urls: [URL], into root: URL = Persistence.importedBooksURL) throws -> AudiobookImportResult {
+        log.info("book_import_started source=files selected_count=\(urls.count, privacy: .public)")
         let audio = urls.filter { LibraryScanner.audioExt.contains($0.pathExtension.lowercased()) }
-        guard !audio.isEmpty else { throw AudiobookImportError.noAudioFiles }
+        let ebooks = urls.filter { LibraryScanner.ebookExt.contains($0.pathExtension.lowercased()) }
+        guard !audio.isEmpty || !ebooks.isEmpty else { throw AudiobookImportError.noSupportedBookFiles }
         let accessed = urls.filter { $0.startAccessingSecurityScopedResource() }
         defer { accessed.forEach { $0.stopAccessingSecurityScopedResource() } }
-        let fingerprint = try audioFingerprint(for: audio)
-        if let existing = try existingBookFolder(matchingFingerprint: fingerprint, in: root) {
+        let fingerprint = try audio.isEmpty ? nil : audioFingerprint(for: audio)
+        if let fingerprint, let existing = try existingBookFolder(matchingFingerprint: fingerprint, in: root) {
             let added = try copyCompanionFiles(from: urls, to: existing)
+            log.info("book_import_finished source=files outcome=enriched added_count=\(added.count, privacy: .public)")
             return .init(folder: existing, createdBook: false, addedFileNames: added)
         }
-        let title = audio.first?.deletingPathExtension().lastPathComponent ?? "Imported Audiobook"
+        let ebookDocument = ebooks.first.flatMap { EPUBParser.document(from: $0.path) }
+        guard audio.isEmpty == false || ebookDocument != nil else { throw AudiobookImportError.invalidEbook }
+        let title = ebookDocument?.title
+            ?? audio.first?.deletingPathExtension().lastPathComponent
+            ?? ebooks.first?.deletingPathExtension().lastPathComponent
+            ?? "Imported Book"
         let folder = try newBookFolder(title: title, in: root)
-        try writeMarkers(source: .files, title: title, author: nil, to: folder)
+        try writeMarkers(source: .files, title: title, author: ebookDocument?.author, to: folder)
         for url in urls where isSupportedImport(url) {
             try FileManager.default.copyItem(at: url, to: folder.appendingPathComponent(url.lastPathComponent))
         }
-        try writeMarker(fingerprint, named: fingerprintMarker, to: folder)
+        if let fingerprint { try writeMarker(fingerprint, named: fingerprintMarker, to: folder) }
+        if audio.isEmpty { try writeMarker("1", named: ebookSectionsMarker, to: folder) }
+        log.info("book_import_finished source=files outcome=created audio_count=\(audio.count, privacy: .public) ebook_count=\(ebooks.count, privacy: .public)")
         return .init(folder: folder, createdBook: true, addedFileNames: urls.map(\.lastPathComponent))
     }
 
     @discardableResult
     static func importFolder(_ url: URL, into root: URL = Persistence.importedBooksURL) throws -> [AudiobookImportResult] {
+        log.info("book_import_started source=folder")
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-        let children = (try? FileManager.default.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        )) ?? []
-        let bookFolders = children.filter { candidate in
-            (try? candidate.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-                && LibraryScanner.containsAudio(in: candidate)
+        let sources = importSourceFolders(in: url)
+        guard sources.contains(where: { LibraryScanner.containsBookMedia(in: $0) }) else {
+            throw AudiobookImportError.noSupportedBookFiles
         }
-        let sources = bookFolders.isEmpty ? [url] : bookFolders
-        guard sources.contains(where: { LibraryScanner.containsAudio(in: $0) }) else {
-            throw AudiobookImportError.noAudioFiles
-        }
-        return try sources.map { source in
-            let audio = audioFiles(in: source)
-            let fingerprint = try audioFingerprint(for: audio)
-            if let existing = try existingBookFolder(matchingFingerprint: fingerprint, in: root) {
-                let added = try copyCompanionFiles(from: allFiles(in: source), to: existing)
+        let results: [AudiobookImportResult] = try sources.map { source in
+            let files = allFiles(in: source)
+            let audio = files.filter { LibraryScanner.audioExt.contains($0.pathExtension.lowercased()) }
+            if audio.isEmpty {
+                let ebooks = files.filter { LibraryScanner.ebookExt.contains($0.pathExtension.lowercased()) }
+                guard ebooks.contains(where: isReadableEbook) else {
+                    throw AudiobookImportError.invalidEbook
+                }
+            }
+            let fingerprint = try audio.isEmpty ? nil : audioFingerprint(for: audio)
+            if let fingerprint, let existing = try existingBookFolder(matchingFingerprint: fingerprint, in: root) {
+                let added = try copyCompanionFiles(from: files, to: existing)
                 return .init(folder: existing, createdBook: false, addedFileNames: added)
             }
             let destination = try newBookFolder(title: source.lastPathComponent, in: root)
             try copyDirectoryContents(from: source, to: destination)
             try writeMarkers(source: .localFolder, title: source.lastPathComponent, author: nil, to: destination)
-            try writeMarker(fingerprint, named: fingerprintMarker, to: destination)
-            return .init(folder: destination, createdBook: true, addedFileNames: allFiles(in: source).map(\.lastPathComponent))
+            if let fingerprint { try writeMarker(fingerprint, named: fingerprintMarker, to: destination) }
+            if audio.isEmpty { try writeMarker("1", named: ebookSectionsMarker, to: destination) }
+            return .init(folder: destination, createdBook: true, addedFileNames: files.map(\.lastPathComponent))
         }
+        log.info("book_import_finished source=folder outcome=success book_count=\(results.count, privacy: .public)")
+        return results
     }
 
     @discardableResult
     static func addCompanionFiles(_ urls: [URL], to folder: URL) throws -> [String] {
+        log.info("book_attachment_started selected_count=\(urls.count, privacy: .public)")
         let accessed = urls.filter { $0.startAccessingSecurityScopedResource() }
         defer { accessed.forEach { $0.stopAccessingSecurityScopedResource() } }
-        return try copyCompanionFiles(from: urls, to: folder)
+        let added = try copyCompanionFiles(from: urls, to: folder)
+        log.info("book_attachment_finished outcome=success added_count=\(added.count, privacy: .public)")
+        return added
     }
 
     @discardableResult
@@ -289,11 +309,19 @@ enum AudiobookImportService {
 
     private static func copyCompanionFiles(from urls: [URL], to folder: URL) throws -> [String] {
         var added: [String] = []
-        for source in urls where isSupportedImport(source) && !LibraryScanner.audioExt.contains(source.pathExtension.lowercased()) {
+        for source in urls where isSupportedImport(source) {
+            if LibraryScanner.ebookExt.contains(source.pathExtension.lowercased()),
+               !isReadableEbook(source) {
+                throw AudiobookImportError.invalidEbook
+            }
             let destination = try uniqueDestination(for: source, in: folder)
             guard destination != nil else { continue }
             try FileManager.default.copyItem(at: source, to: destination!)
             added.append(destination!.lastPathComponent)
+        }
+        let audio = audioFiles(in: folder)
+        if !audio.isEmpty {
+            try writeMarker(audioFingerprint(for: audio), named: fingerprintMarker, to: folder)
         }
         return added
     }
@@ -323,6 +351,32 @@ enum AudiobookImportService {
         ))?.filter {
             (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
         } ?? []
+    }
+
+    /// A folder with direct media is one logical book; otherwise recurse into
+    /// collection folders until book folders are found, without title guessing.
+    private static func importSourceFolders(in folder: URL) -> [URL] {
+        if containsDirectBookMedia(in: folder) { return [folder] }
+        let children = (try? FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        return children
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .flatMap(importSourceFolders)
+    }
+
+    private static func containsDirectBookMedia(in folder: URL) -> Bool {
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        return files.contains { url in
+            let ext = url.pathExtension.lowercased()
+            return LibraryScanner.audioExt.contains(ext) || LibraryScanner.ebookExt.contains(ext)
+        }
     }
 
     private static func audioFiles(in folder: URL) -> [URL] {

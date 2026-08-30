@@ -33,6 +33,18 @@ struct IPadToolbarPlacementPolicyTests {
         ) == .detail)
     }
 
+    @Test("Library media import remains owned by the visible content column")
+    func contentColumnOwnsMediaImportToolbar() {
+        #expect(IPadLibraryImportToolbarPlacement.owner == .content)
+    }
+
+    @Test("iPad EPUB parity uses supported user-provided document paths")
+    func ipadUsesDocumentPickerForEPUB() {
+        #expect(!IPadEPUBImportPolicy.appleBooksLibraryEnumerationSupported)
+        #expect(IPadEPUBImportPolicy.supportedEquivalent.contains("Files document picker"))
+        #expect(IPadEPUBImportPolicy.supportedEquivalent.contains("DRM-free EPUB"))
+    }
+
     @Test("Opening the reader focuses the detail column instead of keeping three equal columns")
     func readerUsesFocusedDetailColumns() {
         #expect(IPadSplitColumnPolicy.mode(

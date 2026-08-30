@@ -77,24 +77,26 @@ struct PlayerView: View {
                 readerProgressConflictBanner
             }
             lyricPane
-            VStack(spacing: playbackChromeSpacing) {
-                if state.isDeepReadingPaused, let segment = state.currentSegment {
-                    ListenFirstCoachView(state: state, segment: segment)
-                }
-                PlaybackChrome(state: state)
+            if state.selectedChapter?.hasAudio == true {
+                VStack(spacing: playbackChromeSpacing) {
+                    if state.isDeepReadingPaused, let segment = state.currentSegment {
+                        ListenFirstCoachView(state: state, segment: segment)
+                    }
+                    PlaybackChrome(state: state)
 #if os(iOS)
-                iPadCompactPlaybackBar
+                    iPadCompactPlaybackBar
 #else
-                ViewThatFits(in: .horizontal) {
-                    desktopExpandedPlaybackControls
-                    desktopCompactPlaybackControls
-                }
+                    ViewThatFits(in: .horizontal) {
+                        desktopExpandedPlaybackControls
+                        desktopCompactPlaybackControls
+                    }
 #endif
+                }
+                .padding(.horizontal, playbackChromeHorizontalPadding)
+                .padding(.top, playbackChromeTopPadding)
+                .padding(.bottom, playbackChromeBottomPadding)
+                .background(Palette.panel)
             }
-            .padding(.horizontal, playbackChromeHorizontalPadding)
-            .padding(.top, playbackChromeTopPadding)
-            .padding(.bottom, playbackChromeBottomPadding)
-            .background(Palette.panel)
         }
         .background(Palette.bg)
         .navigationTitle(readerNavigationTitle)
@@ -376,14 +378,16 @@ struct PlayerView: View {
             .accessibilityLabel("Chapter AI")
             .help("Chapter AI")
 
-            Button {
-                state.transcribeSelected(force: state.transcript != nil)
-            } label: {
-                Image(systemName: "waveform")
+            if state.selectedChapter?.hasAudio == true {
+                Button {
+                    state.transcribeSelected(force: state.transcript != nil)
+                } label: {
+                    Image(systemName: "waveform")
+                }
+                .disabled(state.isTranscribing)
+                .accessibilityLabel(state.transcript == nil ? "Transcribe" : "Re-transcribe")
+                .help(state.transcript == nil ? "Transcribe chapter" : "Re-transcribe chapter")
             }
-            .disabled(state.selectedChapter == nil || state.isTranscribing)
-            .accessibilityLabel(state.transcript == nil ? "Transcribe" : "Re-transcribe")
-            .help(state.transcript == nil ? "Transcribe chapter" : "Re-transcribe chapter")
         }
         .fixedSize(horizontal: true, vertical: false)
     }
@@ -533,15 +537,17 @@ struct PlayerView: View {
             .accessibilityLabel("Chapter AI")
             .help("Chapter AI")
         }
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                state.transcribeSelected(force: state.transcript != nil)
-            } label: {
-                Image(systemName: "waveform")
+        if state.selectedChapter?.hasAudio == true {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    state.transcribeSelected(force: state.transcript != nil)
+                } label: {
+                    Image(systemName: "waveform")
+                }
+                .disabled(state.isTranscribing)
+                .accessibilityLabel(state.transcript == nil ? "Transcribe" : "Re-transcribe")
+                .help(state.transcript == nil ? "Transcribe chapter" : "Re-transcribe chapter")
             }
-            .disabled(state.selectedChapter == nil || state.isTranscribing)
-            .accessibilityLabel(state.transcript == nil ? "Transcribe" : "Re-transcribe")
-            .help(state.transcript == nil ? "Transcribe chapter" : "Re-transcribe chapter")
         }
     }
 #endif

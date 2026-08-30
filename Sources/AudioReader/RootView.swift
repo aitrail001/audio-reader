@@ -125,16 +125,21 @@ struct RootView: View {
                     Label("Apple Books", systemImage: "books.vertical")
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("source.appleBooks")
 
                 Button(action: importFiles) {
                     Label("Files", systemImage: "doc.badge.plus")
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Import Audio or EPUB Files")
+                .accessibilityIdentifier("source.files")
 
                 Button(action: importFolder) {
                     Label("Folders", systemImage: "folder.badge.plus")
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Import Book Folder")
+                .accessibilityIdentifier("source.folders")
             }
 
             Section("Cloud") {
