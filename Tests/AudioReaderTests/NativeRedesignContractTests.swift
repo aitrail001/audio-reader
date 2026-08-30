@@ -64,6 +64,8 @@ struct NativeRedesignContractTests {
         #expect(player.contains("transcript.edit"))
         #expect(player.contains("transcript.preview"))
         #expect(player.contains("transcript.save"))
+        #expect(player.contains("ToolbarItemGroup(placement: .topBarTrailing)"))
+        #expect(player.contains("private func saveCorrection()"))
         #expect(player.contains("transcript.restore"))
         #expect(player.contains("state.saveTranscriptCorrection"))
         #expect(player.contains("state.restoreTranscriptCorrection"))
@@ -77,9 +79,18 @@ struct NativeRedesignContractTests {
     func dueReviewPrimaryAction() throws {
         let vocabulary = try source("Sources/AudioReader/VocabularyView.swift")
 
-        #expect(vocabulary.contains("Review due — "))
+        #expect(vocabulary.contains("due in this view"))
         #expect(vocabulary.contains("words.reviewDue"))
-        #expect(vocabulary.contains("VocabularyLearningAnalytics.queue(entries: filtered, at: Date()).due"))
+        #expect(vocabulary.contains("VocabularyListFilter.allCases"))
+        #expect(vocabulary.contains("VocabularyFilterProjection.make"))
+        #expect(vocabulary.contains("ForEach(page.entries)"))
+        #expect(vocabulary.contains("words.pagePicker"))
+        #expect(vocabulary.contains("page.rangeDescription"))
+        #expect(!vocabulary.contains("visibleLimit"))
+        #expect(vocabulary.contains(".task(id: learningRefreshRequest)"))
+        #expect(vocabulary.contains("withTaskCancellationHandler"))
+        #expect(vocabulary.contains("learningSnapshotRequest == learningRefreshRequest"))
+        #expect(!vocabulary.contains("private var filtered"))
         #expect(!vocabulary.contains("VocabReviewScheduler.dueEntries(in: filtered"))
         #expect(vocabulary.contains("minHeight: 44"))
     }
@@ -90,10 +101,11 @@ struct NativeRedesignContractTests {
         let review = try source("Sources/AudioReader/VocabularyReviewView.swift")
 
         #expect(appState.contains("@discardableResult\n    func reviewVocabulary("))
-        #expect(appState.contains(") -> Bool"))
-        #expect(review.contains("guard state.reviewVocabulary("))
-        #expect(review.contains("else { return }"))
-        #expect(review.contains("reviewedCount += 1"))
+        #expect(appState.contains(") async -> Bool"))
+        #expect(review.contains("await state.reviewVocabulary("))
+        #expect(review.contains("reviewedCount = nextReviewedCount"))
+        #expect(review.contains("isSavingReview"))
+        #expect(review.contains(".interactiveDismissDisabled(isSavingReview)"))
     }
 
     @Test("Learning dashboard stays on the opaque paper stack and uses a quiet streak symbol")

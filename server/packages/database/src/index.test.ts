@@ -7,7 +7,7 @@ describe("@audio-reader/database", () => {
   });
 
   it("exports the core multi-user table contract", () => {
-    expect(CORE_TABLES).toHaveLength(35);
+    expect(CORE_TABLES).toHaveLength(38);
     expect(CORE_TABLES).toContain("chat_messages");
     expect(CORE_TABLES).toContain("passwordless_hits");
     expect(CORE_TABLES).toContain("profiles");
@@ -17,12 +17,16 @@ describe("@audio-reader/database", () => {
     expect(CORE_TABLES).toContain("product_events");
     expect(CORE_TABLES).toContain("sync_batches");
     expect(CORE_TABLES).toContain("sync_mutation_outcomes");
+    expect(CORE_TABLES).toContain("user_analytics_preferences");
+    expect(CORE_TABLES).toContain("user_progress_summaries");
+    expect(CORE_TABLES).toContain("object_write_leases");
   });
 
   it("exports privileged transaction function names", () => {
     expect(TRANSACTION_FUNCTIONS).toContain("claim_idempotency_record");
     expect(TRANSACTION_FUNCTIONS).toContain("claim_assistant_generation");
     expect(TRANSACTION_FUNCTIONS).toContain("append_audit_event");
+    expect(TRANSACTION_FUNCTIONS).toContain("admin_user_progress_summary");
   });
 
   it("creates a ready fake database client with identity and sync stores", async () => {

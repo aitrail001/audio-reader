@@ -287,6 +287,7 @@ export async function withIdempotency(
   next: () => Promise<Response>,
   requestId: string,
   principal?: Principal | null,
+  precomputedBodyDigest?: string,
 ): Promise<Response> {
   const key = request.headers.get("Idempotency-Key")?.trim() ?? "";
   if (key.length < KEY_MIN || key.length > KEY_MAX) {
@@ -307,7 +308,7 @@ export async function withIdempotency(
     pathname: url.pathname,
     key,
   });
-  const fingerprint = await fingerprintRequest(request, principalId);
+  const fingerprint = await fingerprintRequest(request, principalId, precomputedBodyDigest);
 
   const claim = await settleClaim(store, storageKey, fingerprint);
   if (claim.status === "unavailable") {
@@ -377,8 +378,17 @@ function replay(record: IdempotencyRecord): Response {
   });
 }
 
-async function fingerprintRequest(request: Request, principalId: string): Promise<string> {
-  const body = await request.clone().text();
+async function fingerprintRequest(
+  request: Request,
+  principalId: string,
+  precomputedBodyDigest?: string,
+): Promise<string> {
+  // Sync clients hash the already-encoded body so the Worker does not clone multi-megabyte
+  // transcripts. Other routes still derive the fingerprint from their request body here.
+  const bodyFingerprint =
+    precomputedBodyDigest === undefined
+      ? await request.clone().text()
+      : `sha256:${precomputedBodyDigest}`;
   const url = new URL(request.url);
   const deviceId = request.headers.get("X-Device-Id")?.trim() ?? "";
   const canonical = [
@@ -387,7 +397,7 @@ async function fingerprintRequest(request: Request, principalId: string): Promis
     url.pathname,
     url.search,
     deviceId,
-    body,
+    bodyFingerprint,
   ].join("\n");
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
   const bytes = new Uint8Array(digest);

@@ -127,6 +127,9 @@ describe("supabase sync store", () => {
           }),
         );
       }
+      if (method === "PATCH") {
+        return Promise.resolve(jsonResponse(204, null));
+      }
       return Promise.resolve(jsonResponse(500, null));
     };
     const store = createSupabaseSyncStore(
@@ -144,21 +147,38 @@ describe("supabase sync store", () => {
     });
     expect(pushed.results[0]?.status).toBe("applied");
     expect(pushed.cursor).toBe("1");
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(3);
     expect(requests[0]?.body).toMatchObject({
       p_user_id: USER_A,
       p_device_id: DEVICE_A,
       p_batch_id: BATCH,
       p_mutations: [progressMutation()],
     });
+    expect(requests[1]?.url).toContain(`/rest/v1/sync_batches?user_id=eq.${USER_A}`);
+    expect(requests[1]?.url).toContain(`batch_id=eq.${BATCH}`);
+    expect(requests[1]?.body).toEqual({ device_id: DEVICE_A });
+    expect(requests[2]?.url).toContain(`/rest/v1/devices?user_id=eq.${USER_A}`);
+    expect(requests[2]?.url).toContain(`id=eq.${DEVICE_A}`);
+    const deviceBody = requests[2]?.body;
+    expect(isRecord(deviceBody)).toBe(true);
+    expect(isRecord(deviceBody) ? typeof deviceBody.last_sync_at : "missing").toBe("string");
+    expect(isRecord(deviceBody) ? typeof deviceBody.last_seen_at : "missing").toBe("string");
   });
 
-  it("pulls only one bounded page plus a has-more sentinel", async () => {
-    const urls: string[] = [];
-    const fetchImpl: RestFetch = (input) => {
+  it("pulls one database-byte-bounded page instead of materializing rows in the Worker", async () => {
+    const requests: Array<{ url: string; method: string; body: unknown }> = [];
+    const fetchImpl: RestFetch = (input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      urls.push(url);
-      return Promise.resolve(jsonResponse(200, [changeRow(11), changeRow(12), changeRow(13)]));
+      const method = init?.method ?? "GET";
+      const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : null;
+      requests.push({ url, method, body });
+      return Promise.resolve(
+        jsonResponse(200, {
+          changes: [changeRow(11), changeRow(12)],
+          cursor: "12",
+          hasMore: true,
+        }),
+      );
     };
     const store = createSupabaseSyncStore(
       createSupabaseRestClient({
@@ -170,13 +190,15 @@ describe("supabase sync store", () => {
 
     const pulled = await store.pull({ userId: USER_A, cursor: "10", limit: 2 });
 
-    expect(urls).toHaveLength(1);
-    expect(urls[0]).toContain("sequence=gt.10");
-    expect(urls[0]).toContain(
-      "select=sequence%2Centity_type%2Centity_id%2Coperation%2Crevision%2Cchanged_at%2Cpayload",
-    );
-    expect(urls[0]).toContain("order=sequence.asc");
-    expect(urls[0]).toContain("limit=3");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.method).toBe("POST");
+    expect(requests[0]?.url).toContain("/rest/v1/rpc/pull_sync_page");
+    expect(requests[0]?.body).toEqual({
+      p_user_id: USER_A,
+      p_cursor: 10,
+      p_limit: 2,
+      p_max_payload_bytes: 1_048_576,
+    });
     expect(pulled.changes.map((change) => change.sequence)).toEqual([11, 12]);
     expect(pulled.cursor).toBe("12");
     expect(pulled.hasMore).toBe(true);
@@ -252,4 +274,8 @@ function jsonResponse(status: number, body: unknown): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

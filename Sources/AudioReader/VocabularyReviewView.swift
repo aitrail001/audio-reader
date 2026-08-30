@@ -13,6 +13,10 @@ struct VocabularyReviewView: View {
     @State private var reviewedCount = 0
     @State private var dictHeight: CGFloat = 160
     @State private var showDictionaryEntry = false
+    @State private var dictionaryPresentation = VocabularyDictionaryPresentation.empty
+    @State private var completionDescription = "Review complete."
+    @State private var isPreparingAnswer = false
+    @State private var isSavingReview = false
 
     private var entry: VocabEntry? {
         guard entryIDs.indices.contains(currentIndex) else { return nil }
@@ -41,9 +45,11 @@ struct VocabularyReviewView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { dismiss() }
+                        .disabled(isSavingReview)
                 }
             }
         }
+        .interactiveDismissDisabled(isSavingReview)
         .background(Palette.bg)
         .onChange(of: currentIndex) { _, _ in
             state.stopVocabSentencePlayback()
@@ -82,13 +88,21 @@ struct VocabularyReviewView: View {
                     qualityButtons(for: entry)
                         .transition(.opacity)
                 } else {
-                    Button("Show answer") {
-                        isRevealed = true
+                    Button {
+                        reveal(entry)
+                    } label: {
+                        if isPreparingAnswer {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("Show answer")
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Palette.gold)
                     .foregroundStyle(Palette.inkOnGold)
                     .controlSize(.large)
+                    .disabled(isPreparingAnswer)
                     .keyboardShortcut(.space, modifiers: [])
                     .accessibilityHint("Flips the card to show the translation and dictionary entry.")
                 }
@@ -101,7 +115,7 @@ struct VocabularyReviewView: View {
 
     private func front(of entry: VocabEntry) -> some View {
         Button {
-            isRevealed = true
+            reveal(entry)
         } label: {
             VStack(alignment: .leading, spacing: 22) {
                 switch prompt(for: entry) {
@@ -170,12 +184,12 @@ struct VocabularyReviewView: View {
                 }
             }
 
-            if dictionaryHTML(for: entry) != nil || !dictionarySummary(for: entry).isEmpty {
+            if dictionaryPresentation.html != nil || !dictionaryPresentation.summary.isEmpty {
                 answerSection(entry.dictionaryName.map { "Apple Dictionary · \($0)" } ?? "Apple Dictionary") {
-                    if !dictionarySummary(for: entry).isEmpty {
-                        DictionarySummaryView(lines: dictionarySummary(for: entry))
+                    if !dictionaryPresentation.summary.isEmpty {
+                        DictionarySummaryView(lines: dictionaryPresentation.summary)
                     }
-                    if let html = dictionaryHTML(for: entry) {
+                    if let html = dictionaryPresentation.html {
                         Button(showDictionaryEntry ? "Hide full entry" : "Show full dictionary entry") {
                             showDictionaryEntry.toggle()
                         }
@@ -192,7 +206,7 @@ struct VocabularyReviewView: View {
             }
 
             if entry.translation?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
-               dictionarySummary(for: entry).isEmpty {
+               dictionaryPresentation.summary.isEmpty {
                 ContentUnavailableView(
                     "No saved answer",
                     systemImage: "text.book.closed",
@@ -249,6 +263,7 @@ struct VocabularyReviewView: View {
         }
         .buttonStyle(.borderedProminent)
         .tint(quality.tint)
+        .disabled(isSavingReview)
         .accessibilityHint("Schedules the next review in \(quality.intervalLabel(for: entry)).")
     }
 
@@ -265,33 +280,56 @@ struct VocabularyReviewView: View {
         }
     }
 
-    private var completionDescription: String {
-        let count = "You reviewed \(reviewedCount) \(reviewedCount == 1 ? "card" : "cards")."
-        let snapshot = VocabularyLearningAnalytics.snapshot(
-            entries: state.vocab,
-            events: state.vocabReviewEvents,
-            at: Date()
-        )
-        let progress = "Today: \(snapshot.todayReviewCount). Streak: \(snapshot.streakDays) \(snapshot.streakDays == 1 ? "day" : "days")."
-        let sessionIDs = Set(entryIDs)
-        let sessionEntries = state.vocab.filter { sessionIDs.contains($0.id) }
-        guard let next = VocabReviewScheduler.nextReviewDate(in: sessionEntries, after: Date()) else {
-            return "\(count) \(progress)"
+    private func grade(_ entry: VocabEntry, quality: VocabReviewQuality) {
+        guard !isSavingReview else { return }
+        isSavingReview = true
+        Task { @MainActor in
+            defer { isSavingReview = false }
+            guard await state.reviewVocabulary(
+                entry.id,
+                quality: quality,
+                face: prompt(for: entry)
+            ) else { return }
+            let nextReviewedCount = reviewedCount + 1
+            if currentIndex + 1 >= entryIDs.count {
+                let entries = state.vocab
+                let events = state.vocabReviewEvents
+                let sessionIDs = entryIDs
+                completionDescription = await Task.detached(priority: .utility) {
+                    VocabularyReviewCompletion.description(
+                        reviewedCount: nextReviewedCount,
+                        entryIDs: sessionIDs,
+                        entries: entries,
+                        events: events,
+                        at: Date()
+                    )
+                }.value
+            }
+            reviewedCount = nextReviewedCount
+            currentIndex += 1
+            isRevealed = false
+            showDictionaryEntry = false
+            dictionaryPresentation = .empty
+            dictHeight = 160
         }
-        return "\(count) \(progress) Next round: \(next.formatted(date: .abbreviated, time: .shortened))."
     }
 
-    private func grade(_ entry: VocabEntry, quality: VocabReviewQuality) {
-        guard state.reviewVocabulary(
-            entry.id,
-            quality: quality,
-            face: prompt(for: entry)
-        ) else { return }
-        reviewedCount += 1
-        currentIndex += 1
-        isRevealed = false
-        showDictionaryEntry = false
-        dictHeight = 160
+    private func reveal(_ entry: VocabEntry) {
+        guard !isPreparingAnswer else { return }
+        isPreparingAnswer = true
+        let entryID = entry.id
+        Task { @MainActor in
+            let presentation = await Task.detached(priority: .userInitiated) {
+                VocabularyDictionaryPresentation(entry: entry)
+            }.value
+            guard self.entry?.id == entryID else {
+                isPreparingAnswer = false
+                return
+            }
+            dictionaryPresentation = presentation
+            isRevealed = true
+            isPreparingAnswer = false
+        }
     }
 
     private func prompt(for entry: VocabEntry) -> VocabReviewPrompt {
@@ -326,19 +364,25 @@ struct VocabularyReviewView: View {
         }
     }
 
-    private func dictionarySummary(for entry: VocabEntry) -> [String] {
-        DictionaryLookup.concisePreview(
-            definition: entry.definition,
-            html: entry.dictionaryHTML,
-            limit: 3
-        )
-    }
+}
 
-    private func dictionaryHTML(for entry: VocabEntry) -> String? {
-        let source = entry.dictionaryHTML
-            ?? (entry.definition.flatMap { DictionaryLookup.looksLikeMarkup($0) ? $0 : nil })
-        guard let source, !source.isEmpty else { return nil }
-        return DictionaryLookup.displayHTML(source)
+private enum VocabularyReviewCompletion {
+    static func description(
+        reviewedCount: Int,
+        entryIDs: [String],
+        entries: [VocabEntry],
+        events: [StoredReviewEvent],
+        at date: Date
+    ) -> String {
+        let count = "You reviewed \(reviewedCount) \(reviewedCount == 1 ? "card" : "cards")."
+        let snapshot = VocabularyLearningAnalytics.snapshot(entries: entries, events: events, at: date)
+        let progress = "Today: \(snapshot.todayReviewCount). Streak: \(snapshot.streakDays) \(snapshot.streakDays == 1 ? "day" : "days")."
+        let sessionIDs = Set(entryIDs)
+        let sessionEntries = entries.filter { sessionIDs.contains($0.id) }
+        guard let next = VocabReviewScheduler.nextReviewDate(in: sessionEntries, after: date) else {
+            return "\(count) \(progress)"
+        }
+        return "\(count) \(progress) Next round: \(next.formatted(date: .abbreviated, time: .shortened))."
     }
 }
 

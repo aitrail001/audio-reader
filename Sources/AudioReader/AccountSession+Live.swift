@@ -397,7 +397,13 @@ enum AccountSyncApplicator {
     ) throws -> VocabEntry? {
         switch change.entityType {
         case OutboxEntityType.vocabulary.rawValue:
-            guard change.operation != OutboxOperation.delete.rawValue else { return nil }
+            if change.operation == OutboxOperation.delete.rawValue {
+                try store.applyVocabularyTombstone(
+                    localID: vocabularyTombstoneLocalID(from: change),
+                    entityID: change.entityId
+                )
+                return nil
+            }
             let incoming = try vocabulary(from: change)
             let existing = try store.loadVocabulary().first {
                 $0.id.rawValue.caseInsensitiveCompare(change.entityId) == .orderedSame
@@ -410,6 +416,7 @@ enum AccountSyncApplicator {
             guard let stored = try store.loadVocabulary().first(where: {
                 $0.id.rawValue.caseInsensitiveCompare(vocabularyID) == .orderedSame
             }) else {
+                if try store.isVocabularyTombstoned(entityID: vocabularyID) { return nil }
                 throw AccountSyncApplyError.missingVocabularyParent(vocabularyID)
             }
             var entry = VocabEntry(stored)
@@ -421,6 +428,7 @@ enum AccountSyncApplicator {
             guard let stored = try store.loadVocabulary().first(where: {
                 $0.id == event.vocabularyID
             }) else {
+                if try store.isVocabularyTombstoned(entityID: event.vocabularyID.rawValue) { return nil }
                 throw AccountSyncApplyError.missingVocabularyParent(event.vocabularyID.rawValue)
             }
             if try store.containsReviewEvent(id: event.id) {
@@ -434,6 +442,17 @@ enum AccountSyncApplicator {
         default:
             throw AccountSyncApplyError.unsupportedLearningEntity(change.entityType)
         }
+    }
+
+    /// A legacy local vocabulary ID is accepted only when it maps back to the remote entity ID;
+    /// this preserves cross-device deletion without allowing a payload to target another row.
+    private static func vocabularyTombstoneLocalID(from change: SyncPulledChange) -> VocabularyOccurrenceID {
+        if let rawLocalID = nonempty(change.payload["localId"]?.stringValue),
+           let localID = VocabularyOccurrenceID.remote(rawValue: rawLocalID),
+           syncEntityID(localID.rawValue, kind: "vocab").caseInsensitiveCompare(change.entityId) == .orderedSame {
+            return localID
+        }
+        return VocabularyOccurrenceID(rawValue: change.entityId)
     }
 
     private static func vocabulary(from change: SyncPulledChange) throws -> VocabEntry {

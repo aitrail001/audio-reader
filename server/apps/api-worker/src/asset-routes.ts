@@ -1,12 +1,13 @@
 import type { Principal } from "@audio-reader/auth";
 import type { components } from "@audio-reader/contract";
-import type { OpsStore } from "@audio-reader/database";
+import type { IdentityStore, OpsStore } from "@audio-reader/database";
 import { readJsonObject } from "./body";
 import { jsonResponse } from "./http";
 import { withIdempotency, type IdempotencyStore } from "./idempotency";
 import type { ObjectStore } from "./object-store";
 import {
   UUID_PATTERN,
+  conflict,
   fieldError,
   methodNotAllowed,
   notFound,
@@ -34,6 +35,7 @@ export type AssetRouteContext = {
   authenticate: (request: Request) => Promise<Principal | null>;
   idempotencyStore: IdempotencyStore;
   ops?: OpsStore;
+  identity?: IdentityStore;
   objects?: ObjectStore;
 };
 
@@ -188,8 +190,33 @@ async function putUploadBody(
     return notFound(context.requestId);
   }
   const bytes = new Uint8Array(await context.request.arrayBuffer());
+  if (!(await objectWriteIsAllowed(context.identity, principal.accountId))) {
+    return conflict(context.requestId, "Account deletion is already in progress.");
+  }
+  const lease = await ops.beginObjectWrite(principal.accountId, asset.objectKey);
   await objects.put(asset.objectKey, bytes);
+  // Account deletion and storage writes are separate systems. Re-check after the write and
+  // compensate so a request that raced the deletion sweep cannot recreate private media.
+  if (!(await objectWriteIsAllowed(context.identity, principal.accountId))) {
+    await objects.delete(asset.objectKey);
+    await ops.finishObjectWrite(lease.id);
+    return conflict(context.requestId, "Account deletion began while the upload was in progress.");
+  }
+  await ops.finishObjectWrite(lease.id);
   return jsonResponse({ ok: true });
+}
+
+async function objectWriteIsAllowed(
+  identity: IdentityStore | undefined,
+  accountId: string,
+): Promise<boolean> {
+  if (identity === undefined) {
+    return true;
+  }
+  const profile = await identity.getProfileByUserId(accountId);
+  return (
+    profile !== undefined && profile.status !== "deletion_pending" && profile.status !== "deleted"
+  );
 }
 
 async function completeUpload(

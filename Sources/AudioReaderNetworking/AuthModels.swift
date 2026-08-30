@@ -373,6 +373,16 @@ public struct APIProblemFieldError: Codable, Equatable, Sendable {
     public var message: String
 }
 
+public struct AccountAnalyticsPreference: Codable, Equatable, Sendable {
+    public var operatorLearningAnalyticsEnabled: Bool
+    public var updatedAt: String
+
+    public init(operatorLearningAnalyticsEnabled: Bool, updatedAt: String) {
+        self.operatorLearningAnalyticsEnabled = operatorLearningAnalyticsEnabled
+        self.updatedAt = updatedAt
+    }
+}
+
 public enum AuthClientError: Error, Equatable, LocalizedError {
     case unauthorized(String)
     case deviceRevoked(String)

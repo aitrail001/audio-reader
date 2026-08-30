@@ -11,6 +11,8 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
 
     private let lock = NSRecursiveLock()
     private let connection: SQLiteConnection
+    private var schemaIsReady = false
+    private(set) var schemaApplicationCount = 0
 
     public init(fileURL: URL) {
         url = fileURL
@@ -142,6 +144,34 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         try connection.run("UPDATE sync_outbox SET status = ? WHERE id = ?") { [connection] stmt in
             connection.bind(stmt, 1, OutboxMutationStatus.acknowledged.rawValue)
             connection.bind(stmt, 2, id.rawValue)
+        }
+    }
+
+    /// Marks duplicate snapshot rows in bounded SQL chunks so a large legacy backlog is
+    /// compacted in one transaction instead of issuing tens of thousands of autocommits.
+    public func markAcknowledged(ids: [MutationID]) throws {
+        guard !ids.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            for start in stride(from: 0, to: ids.count, by: 500) {
+                let chunk = Array(ids[start..<min(start + 500, ids.count)])
+                let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+                try connection.run(
+                    "UPDATE sync_outbox SET status = ? WHERE status = ? AND id IN (\(placeholders))"
+                ) { [connection] stmt in
+                    connection.bind(stmt, 1, OutboxMutationStatus.acknowledged.rawValue)
+                    connection.bind(stmt, 2, OutboxMutationStatus.pending.rawValue)
+                    for (offset, id) in chunk.enumerated() {
+                        connection.bind(stmt, Int32(offset + 3), id.rawValue)
+                    }
+                }
+            }
+            try connection.exec("COMMIT")
+        } catch {
+            try? connection.exec("ROLLBACK")
+            throw error
         }
     }
 
@@ -598,6 +628,125 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         }
     }
 
+    /// Local removal and its outbox tombstone share one SQLite transaction so a crash cannot
+    /// leave review children or a stale upsert capable of reviving the vocabulary row.
+    public func deleteVocabularyAndEnqueueTombstone(
+        localID: VocabularyOccurrenceID,
+        entityID: String,
+        occurredAt: Date = Date()
+    ) throws {
+        let payload = try JSONSerialization.data(
+            withJSONObject: ["_deleted": true, "localId": localID.rawValue],
+            options: [.sortedKeys]
+        )
+        try deleteVocabularyGraph(
+            localID: localID,
+            entityID: entityID,
+            tombstone: OutboxMutation(
+                id: MutationID.generate(),
+                entityType: .vocabulary,
+                entityID: entityID,
+                operation: .delete,
+                baseRevision: .zero,
+                occurredAt: occurredAt,
+                payload: payload
+            )
+        )
+    }
+
+    /// Pulled tombstones use the same relational delete without echoing a new mutation.
+    public func applyVocabularyTombstone(localID: VocabularyOccurrenceID, entityID: String) throws {
+        try deleteVocabularyGraph(localID: localID, entityID: entityID, tombstone: nil)
+    }
+
+    /// An explicit last-applied marker distinguishes deletion from legacy empty version rows.
+    public func isVocabularyTombstoned(entityID: String) throws -> Bool {
+        guard let version = try loadVersion(
+            entityType: OutboxEntityType.vocabulary.rawValue,
+            entityID: entityID
+        ) else { return false }
+        guard let object = try? JSONSerialization.jsonObject(with: version.payload) as? [String: Any]
+        else { return false }
+        return object["_deleted"] as? Bool == true
+    }
+
+    private func deleteVocabularyGraph(
+        localID: VocabularyOccurrenceID,
+        entityID: String,
+        tombstone: OutboxMutation?
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let legacyTableExists = try !connection.query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vocab' LIMIT 1"
+        ).isEmpty
+        let version = try connection.query(
+            "SELECT server_version FROM entity_versions WHERE entity_type = ? AND entity_id = ? LIMIT 1",
+            bind: { [connection] stmt in
+                connection.bind(stmt, 1, OutboxEntityType.vocabulary.rawValue)
+                connection.bind(stmt, 2, entityID)
+            }
+        ).first?.int("server_version") ?? 0
+        let pendingRevision = try connection.query(
+            "SELECT MAX(base_revision) AS revision FROM sync_outbox WHERE status = ? AND entity_type = ? AND entity_id = ?",
+            bind: { [connection] stmt in
+                connection.bind(stmt, 1, OutboxMutationStatus.pending.rawValue)
+                connection.bind(stmt, 2, OutboxEntityType.vocabulary.rawValue)
+                connection.bind(stmt, 3, entityID)
+            }
+        ).first?.int("revision") ?? 0
+
+        try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try connection.run("DELETE FROM local_review_events WHERE vocabulary_id = ?") { [connection] stmt in
+                connection.bind(stmt, 1, localID.rawValue)
+            }
+            try connection.run("DELETE FROM local_review_cards WHERE vocabulary_id = ?") { [connection] stmt in
+                connection.bind(stmt, 1, localID.rawValue)
+            }
+            try connection.run("DELETE FROM local_vocabulary_occurrences WHERE id = ?") { [connection] stmt in
+                connection.bind(stmt, 1, localID.rawValue)
+            }
+            if legacyTableExists {
+                try connection.run("DELETE FROM vocab WHERE id = ?") { [connection] stmt in
+                    connection.bind(stmt, 1, localID.rawValue)
+                }
+            }
+            if var tombstone {
+                try connection.run(
+                    "UPDATE sync_outbox SET status = ? WHERE status = ? AND entity_type = ? AND entity_id = ?"
+                ) { [connection] stmt in
+                    connection.bind(stmt, 1, OutboxMutationStatus.acknowledged.rawValue)
+                    connection.bind(stmt, 2, OutboxMutationStatus.pending.rawValue)
+                    connection.bind(stmt, 3, OutboxEntityType.vocabulary.rawValue)
+                    connection.bind(stmt, 4, entityID)
+                }
+                tombstone.baseRevision = ServerVersion(Int64(max(version, pendingRevision)))
+                try connection.run(
+                    """
+                    INSERT INTO sync_outbox(
+                      id, entity_type, entity_id, operation, base_revision, occurred_at, payload, status
+                    ) VALUES (?,?,?,?,?,?,?,?)
+                    """
+                ) { [connection] stmt in
+                    connection.bind(stmt, 1, tombstone.id.rawValue)
+                    connection.bind(stmt, 2, tombstone.entityType.rawValue)
+                    connection.bind(stmt, 3, tombstone.entityID)
+                    connection.bind(stmt, 4, tombstone.operation.rawValue)
+                    connection.bind(stmt, 5, Int(tombstone.baseRevision.rawValue))
+                    connection.bindDate(stmt, 6, tombstone.occurredAt)
+                    connection.bind(stmt, 7, tombstone.payload)
+                    connection.bind(stmt, 8, OutboxMutationStatus.pending.rawValue)
+                }
+            }
+            try connection.exec("COMMIT")
+        } catch {
+            try? connection.exec("ROLLBACK")
+            throw error
+        }
+    }
+
     public func loadKnownLemmas() throws -> [StoredKnownLemma] {
         lock.lock()
         defer { lock.unlock() }
@@ -646,6 +795,12 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         }
     }
 
+    /// The relational vocabulary row is the canonical review schedule used to
+    /// repair a failed legacy mirror without relying on timestamp ordering.
+    public func loadReviewVocabularySnapshot() throws -> [StoredVocabularyOccurrence]? {
+        try loadVocabulary()
+    }
+
     public func containsReviewEvent(id: ReviewEventID) throws -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -676,7 +831,7 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
                 return
             }
             try ensureLearningParents(for: vocabulary, at: event.reviewedAt)
-            try insertVocabulary([vocabulary])
+            try upsertVocabularyReviewSchedule(vocabulary)
             try insertReviewCards([
                 StoredLocalReviewCard(
                     id: "card:\(vocabulary.id.rawValue):\(event.face)",
@@ -737,10 +892,13 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
     }
 
     private func applySchemaUnlocked() throws {
+        guard !schemaIsReady else { return }
         for sql in LocalSchemaV3.createStatements {
             try connection.exec(sql)
         }
         try connection.exec("PRAGMA user_version = \(LocalSchemaV3.version)")
+        schemaIsReady = true
+        schemaApplicationCount += 1
     }
 
     private func loadReceiptUnlocked() throws -> LocalMigrationReceipt? {
@@ -959,6 +1117,39 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
                 connection.bindDate(stmt, 29, entry.addedAt)
                 connection.bindDate(stmt, 30, entry.addedAt)
             }
+        }
+    }
+
+    /// Existing vocabulary rows may have changed while a review save was in
+    /// flight, so only scheduler-owned columns are updated on conflict.
+    private func upsertVocabularyReviewSchedule(_ vocabulary: StoredVocabularyOccurrence) throws {
+        let exists = try !connection.query(
+            "SELECT 1 FROM local_vocabulary_occurrences WHERE id = ? LIMIT 1",
+            bind: { [connection] stmt in
+                connection.bind(stmt, 1, vocabulary.id.rawValue)
+            }
+        ).isEmpty
+        guard exists else {
+            try insertVocabulary([vocabulary])
+            return
+        }
+        try connection.run(
+            """
+            UPDATE local_vocabulary_occurrences SET
+              review_count = ?, next_review = ?, last_reviewed_at = ?,
+              last_review_quality = ?, review_interval_days = ?, review_ease_factor = ?,
+              updated_at = ?
+            WHERE id = ?
+            """
+        ) { [connection] stmt in
+            connection.bind(stmt, 1, vocabulary.reviewCount)
+            connection.bindDate(stmt, 2, vocabulary.nextReview)
+            connection.bindDate(stmt, 3, vocabulary.lastReviewedAt)
+            connection.bind(stmt, 4, vocabulary.lastReviewQuality)
+            connection.bind(stmt, 5, vocabulary.reviewIntervalDays)
+            connection.bind(stmt, 6, vocabulary.reviewEaseFactor)
+            connection.bindDate(stmt, 7, vocabulary.lastReviewedAt ?? vocabulary.addedAt)
+            connection.bind(stmt, 8, vocabulary.id.rawValue)
         }
     }
 

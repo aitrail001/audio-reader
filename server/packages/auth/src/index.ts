@@ -1,6 +1,11 @@
 export const packageId = "@audio-reader/auth" as const;
 
-export { createFakePrincipal, type Principal, type PrincipalRole } from "./principal";
+export {
+  createFakePrincipal,
+  type AdminRole,
+  type Principal,
+  type PrincipalRole,
+} from "./principal";
 export {
   LOCAL_JWT_CONFIG,
   extractBearerToken,

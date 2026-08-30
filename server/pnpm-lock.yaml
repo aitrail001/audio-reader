@@ -124,6 +124,9 @@ importers:
 
   apps/job-worker:
     dependencies:
+      '@audio-reader/api-worker':
+        specifier: workspace:*
+        version: link:../api-worker
       '@audio-reader/database':
         specifier: workspace:*
         version: link:../../packages/database

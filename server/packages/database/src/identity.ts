@@ -2,6 +2,9 @@ import { restRow, restRows, type RestClient } from "./rest";
 
 export type IdentityAccountStatus = "active" | "suspended" | "deletion_pending" | "deleted";
 
+export type IdentityAdminRole =
+  "support_readonly" | "operator" | "privacy_officer" | "billing_operator" | "superadmin";
+
 export type IdentityProfile = {
   id: string;
   accountId: string;
@@ -94,6 +97,8 @@ export type IdentityStore = {
     status: IdentityAccountStatus,
   ): Promise<IdentityProfile | undefined>;
   hasAdminRole(userId: string): Promise<boolean>;
+  /** Active grants let sensitive Operator routes enforce narrower capabilities than admin. */
+  adminRoles(userId: string): Promise<IdentityAdminRole[]>;
   // True when any unrevoked admin_roles row exists. Used so bootstrap email
   // grants at most the first operator and never re-grants after a revoke.
   hasAnyAdminRole(): Promise<boolean>;
@@ -153,6 +158,10 @@ export function createMemoryIdentityStore(options: { now?: () => Date } = {}): I
       const existing = profiles.get(input.userId);
       const timestamp = currentIso();
       if (existing !== undefined) {
+        // A deletion tombstone blocks session reuse without collecting fresh identity data.
+        if (existing.status === "deletion_pending" || existing.status === "deleted") {
+          return Promise.resolve(cloneProfile(existing));
+        }
         if (existing.email !== input.email) {
           existing.email = input.email;
           existing.updatedAt = timestamp;
@@ -183,7 +192,11 @@ export function createMemoryIdentityStore(options: { now?: () => Date } = {}): I
 
     patchProfile(userId, patch) {
       const existing = profiles.get(userId);
-      if (existing === undefined) {
+      if (
+        existing === undefined ||
+        existing.status === "deletion_pending" ||
+        existing.status === "deleted"
+      ) {
         return Promise.resolve(undefined);
       }
       if (patch.displayName !== undefined) {
@@ -335,6 +348,10 @@ export function createMemoryIdentityStore(options: { now?: () => Date } = {}): I
       return Promise.resolve(admins.has(userId));
     },
 
+    adminRoles(userId) {
+      return Promise.resolve(admins.has(userId) ? ["operator"] : []);
+    },
+
     hasAnyAdminRole() {
       return Promise.resolve(admins.size > 0);
     },
@@ -461,6 +478,11 @@ export function createSupabaseIdentityStore(rest: RestClient): IdentityStore {
     async ensureProfile(input) {
       const existing = await selectProfile(input.userId);
       if (existing !== undefined) {
+        // Hosted JWT validation checks this status after ensureProfile. Preserve the tombstone and
+        // avoid rewriting email/settings before that authentication path rejects the session.
+        if (existing.status === "deletion_pending" || existing.status === "deleted") {
+          return existing;
+        }
         if (existing.email !== input.email) {
           await rest.request({
             method: "PATCH",
@@ -498,10 +520,18 @@ export function createSupabaseIdentityStore(rest: RestClient): IdentityStore {
       const response = await rest.request({
         method: "PATCH",
         path: "/profiles",
-        query: { user_id: `eq.${userId}` },
+        // A request authenticated just before deletion must not repopulate the retained tombstone.
+        query: {
+          user_id: `eq.${userId}`,
+          account_status: "eq.active",
+          deleted_at: "is.null",
+        },
         prefer: "return=representation",
         body,
       });
+      if (response.status >= 400 || response.status === 0) {
+        return undefined;
+      }
       const row = restRow(response.body);
       return row === undefined ? undefined : profileFromRow(row);
     },
@@ -694,6 +724,31 @@ export function createSupabaseIdentityStore(rest: RestClient): IdentityStore {
       return isAdminRoleRow(restRow(response.body));
     },
 
+    async adminRoles(userId) {
+      const response = await rest.request({
+        method: "GET",
+        path: "/admin_roles",
+        query: {
+          user_id: `eq.${userId}`,
+          revoked_at: "is.null",
+          select: "role",
+        },
+      });
+      if (!isRestOk(response.status)) {
+        return [];
+      }
+      return restRows(response.body).flatMap((row): IdentityAdminRole[] => {
+        const role = row.role;
+        return role === "support_readonly" ||
+          role === "operator" ||
+          role === "privacy_officer" ||
+          role === "billing_operator" ||
+          role === "superadmin"
+          ? [role]
+          : [];
+      });
+    },
+
     async hasAnyAdminRole() {
       const response = await rest.request({
         method: "GET",
@@ -779,6 +834,9 @@ export function createUnavailableIdentityStore(): IdentityStore {
     },
     hasAdminRole() {
       return Promise.resolve(false);
+    },
+    adminRoles() {
+      return Promise.resolve([]);
     },
     hasAnyAdminRole() {
       return Promise.resolve(true);

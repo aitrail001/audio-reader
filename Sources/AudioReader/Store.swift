@@ -157,6 +157,38 @@ final class LibraryStore: @unchecked Sendable {
         for entry in entries { upsertVocabUnlocked(entry) }
     }
 
+    /// Review saves own only the scheduling fields; the JSON row may have been
+    /// edited or refreshed by sync while the review repository was writing.
+    func updateVocabReviewSchedule(_ schedule: StoredVocabularyReviewSchedule) {
+        lock.lock()
+        defer { lock.unlock() }
+        let rows = query("SELECT json FROM vocab WHERE id = ? LIMIT 1") { stmt in
+            self.bind(stmt, 1, schedule.vocabularyID.rawValue)
+        }
+        guard let json = rows.first?["json"],
+              let data = json.data(using: .utf8),
+              let current = try? JSONDecoder.iso.decode(VocabEntry.self, from: data)
+        else { return }
+        let merged = schedule.merging(into: StoredVocabularyOccurrence(current))
+        upsertVocabUnlocked(VocabEntry(merged))
+    }
+
+    /// My List owns only membership; an in-flight review may update scheduling
+    /// fields in the same JSON row before this mutation acquires the store lock.
+    func updateVocabLearnList(id: String, included: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        let rows = query("SELECT json FROM vocab WHERE id = ? LIMIT 1") { stmt in
+            self.bind(stmt, 1, id)
+        }
+        guard let json = rows.first?["json"],
+              let data = json.data(using: .utf8),
+              var current = try? JSONDecoder.iso.decode(VocabEntry.self, from: data)
+        else { return }
+        current.isInLearnList = included
+        upsertVocabUnlocked(current)
+    }
+
     private func upsertVocabUnlocked(_ entry: VocabEntry) {
         guard let json = try? JSONEncoder.iso.encode(entry),
               let jsonStr = String(data: json, encoding: .utf8)
@@ -196,13 +228,21 @@ final class LibraryStore: @unchecked Sendable {
         for item in items { upsertVocabUnlocked(item) }
     }
 
-    func deleteVocab(id: String) {
+    /// The relational delete and sync tombstone are committed before the optional JSON mirror.
+    func deleteVocabAndEnqueueSync(id: String) throws {
         lock.lock()
         defer { lock.unlock() }
-        guard let stmt = try? prepare("DELETE FROM vocab WHERE id = ?") else { return }
-        defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, id)
-        sqlite3_step(stmt)
+        let localStore = LocalSQLiteStore(fileURL: url)
+        try localStore.deleteVocabularyAndEnqueueTombstone(
+            localID: VocabularyOccurrenceID(rawValue: id),
+            entityID: AccountSyncApplicator.syncEntityID(id, kind: "vocab")
+        )
+        let mirrorURL = persistenceRoot.appendingPathComponent("vocab.json")
+        guard let data = try? Data(contentsOf: mirrorURL),
+              var items = try? JSONDecoder.iso.decode([VocabEntry].self, from: data)
+        else { return }
+        items.removeAll { $0.id.caseInsensitiveCompare(id) == .orderedSame }
+        try JSONEncoder.iso.encode(items).write(to: mirrorURL, options: .atomic)
     }
 
     // MARK: - Glosses
@@ -472,8 +512,16 @@ struct LibraryStoreVocabularyRepository: VocabularyRepository {
         store.upsertVocab(entries.map(VocabEntry.init))
     }
 
+    func updateVocabularyReviewSchedule(_ schedule: StoredVocabularyReviewSchedule) throws {
+        store.updateVocabReviewSchedule(schedule)
+    }
+
+    func updateVocabularyLearnList(id: VocabularyOccurrenceID, included: Bool) throws {
+        store.updateVocabLearnList(id: id.rawValue, included: included)
+    }
+
     func deleteVocabulary(id: VocabularyOccurrenceID) throws {
-        store.deleteVocab(id: id.rawValue)
+        try store.deleteVocabAndEnqueueSync(id: id.rawValue)
     }
 }
 

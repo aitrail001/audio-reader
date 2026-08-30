@@ -5,6 +5,7 @@ export type ObjectStore = {
   ping(): Promise<ReadinessStatus>;
   put(key: string, value: Uint8Array): Promise<void>;
   get(key: string): Promise<Uint8Array | undefined>;
+  list(prefix: string): Promise<string[]>;
   delete(key: string): Promise<void>;
   signedDownloadUrl?(key: string, expiresSeconds?: number): Promise<string | undefined>;
 };
@@ -19,6 +20,8 @@ export function createFakeObjectStore(options: { status?: ReadinessStatus } = {}
       return Promise.resolve();
     },
     get: (key) => Promise.resolve(objects.get(key)),
+    list: (prefix) =>
+      Promise.resolve([...objects.keys()].filter((key) => key.startsWith(prefix)).sort()),
     delete: (key) => {
       objects.delete(key);
       return Promise.resolve();
@@ -31,6 +34,7 @@ export function createUnavailableObjectStore(): ObjectStore {
     ping: () => Promise.resolve("unavailable"),
     put: () => Promise.reject(new Error("storage unavailable")),
     get: () => Promise.resolve(undefined),
+    list: () => Promise.reject(new Error("storage unavailable")),
     delete: () => Promise.resolve(),
   };
 }
@@ -55,6 +59,16 @@ export function createR2ObjectStore(bucket: R2Bucket): ObjectStore {
       }
       return new Uint8Array(await object.arrayBuffer());
     },
+    async list(prefix) {
+      const keys: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await bucket.list({ prefix, limit: 1000, ...(cursor ? { cursor } : {}) });
+        keys.push(...page.objects.map((object) => object.key));
+        cursor = page.truncated ? page.cursor : undefined;
+      } while (cursor !== undefined);
+      return keys.sort();
+    },
     async delete(key) {
       await bucket.delete(key);
     },
@@ -66,6 +80,7 @@ export function createResolvingObjectStore(resolve: () => Promise<ObjectStore>):
     ping: async () => (await resolve()).ping(),
     put: async (key, value) => (await resolve()).put(key, value),
     get: async (key) => (await resolve()).get(key),
+    list: async (prefix) => (await resolve()).list(prefix),
     delete: async (key) => (await resolve()).delete(key),
     signedDownloadUrl: async (key, expiresSeconds) => {
       const inner = await resolve();
@@ -150,6 +165,45 @@ export function createSupabaseObjectStore(options: SupabaseStorageOptions): Obje
         throw new Error("supabase storage download failed");
       }
       return new Uint8Array(await response.arrayBuffer());
+    },
+    async list(prefix) {
+      const keys: string[] = [];
+      for (let offset = 0; ; offset += 1000) {
+        const response = await fetchImpl(
+          `${origin}/storage/v1/object/list/${encodeURIComponent(bucket)}`,
+          {
+            method: "POST",
+            headers: { ...headers, "content-type": "application/json" },
+            body: JSON.stringify({
+              prefix,
+              limit: 1000,
+              offset,
+              sortBy: { column: "name", order: "asc" },
+            }),
+          },
+        );
+        if (!response.ok) {
+          throw new Error("supabase storage list failed");
+        }
+        const payload: unknown = await response.json();
+        if (!Array.isArray(payload)) {
+          throw new Error("supabase storage list response was invalid");
+        }
+        const names: string[] = [];
+        for (const item of payload as unknown[]) {
+          if (
+            typeof item === "object" &&
+            item !== null &&
+            "name" in item &&
+            typeof item.name === "string"
+          ) {
+            names.push(item.name.startsWith(prefix) ? item.name : `${prefix}${item.name}`);
+          }
+        }
+        keys.push(...names);
+        if (payload.length < 1000) break;
+      }
+      return [...new Set(keys)].sort();
     },
     async delete(key) {
       const response = await fetchImpl(objectUrl(key), { method: "DELETE", headers });

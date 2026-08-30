@@ -4,6 +4,7 @@ import { createFakeQwenClient } from "@audio-reader/qwen";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
 import { assistantMethodError, isAssistantPath } from "./assistant-routes";
+import { listOperatorEvents } from "./operator-events";
 
 const DEVICE_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
 const AUTH_HEADERS = {
@@ -316,7 +317,7 @@ describe("managed Qwen assistant API", () => {
 
   it("returns a chat reply that can be fetched on the stream URL", async () => {
     const app = createTestApp({
-      qwen: createFakeQwenClient({ text: "The ice is a metaphor." }),
+      qwen: createFakeQwenClient({ text: '{"answer":"The ice is a metaphor."}' }),
     });
     const response = await app.fetch(
       new Request("http://localhost/v1/ai/chat", {
@@ -351,6 +352,187 @@ describe("managed Qwen assistant API", () => {
     const payload = await readJson(message);
     expect(isRecord(payload) && payload.text).toBe("The ice is a metaphor.");
     expect(isRecord(payload) && payload.role).toBe("assistant");
+  });
+
+  it("returns validated raw heard_quiz JSON assembled from only supplied heard segments", async () => {
+    const requests: Array<{ messages: readonly { role: string; content: string }[] }> = [];
+    const database = createFakeDatabaseClient();
+    await database.ops.putAnalyticsPreference(createFakePrincipal().accountId, true);
+    const inner = createFakeQwenClient({
+      text: '{"questions":[{"id":"q1","kind":"comprehension","prompt":"What happened?","choices":["A","B","C","D"],"answerIndex":0,"rationale":"A follows the passage.","segmentID":"s1"},{"id":"q2","kind":"sequencing","prompt":"What came next?","choices":["A","B","C","D"],"answerIndex":1,"rationale":"B follows the passage.","segmentID":"s2"}]}',
+    });
+    const app = createTestApp({
+      database,
+      qwen: {
+        ping: () => inner.ping(),
+        pingDetailed: () => inner.pingDetailed(),
+        complete: (request) => {
+          requests.push(request);
+          return inner.complete(request);
+        },
+      },
+    });
+    const response = await postAssistant(
+      app,
+      "/v1/ai/heard-quizzes",
+      {
+        task: "heard_quiz",
+        chapterId: DEVICE_ID,
+        sourceLanguage: "en",
+        targetLanguage: "zh-Hans",
+        learnerLevel: "B1",
+        bookTitle: "The Example Book",
+        author: "Ada Author",
+        chapterTitle: "An Arrival",
+        segments: [
+          { id: "s1", text: "First completed sentence." },
+          { id: "s2", text: "Second completed sentence." },
+        ],
+      },
+      "idempotency-key-heard-quiz-01",
+    );
+    expect(response.status).toBe(200);
+    const body = await readJson(response);
+    expect(
+      isRecord(body) && typeof body.raw === "string" ? JSON.parse(body.raw) : null,
+    ).toMatchObject({
+      questions: [{ segmentID: "s1" }, { segmentID: "s2" }],
+    });
+    const prompt = requests[0]?.messages.map((message) => message.content).join("\n") ?? "";
+    expect(prompt).toContain("Task: heard_quiz");
+    expect(prompt).toContain("HEARD id=s1");
+    expect(prompt).toContain("The Example Book");
+    expect(prompt).not.toContain("future sentence");
+    const events = await database.ops.listProductEvents();
+    expect(events.map((event) => event.name)).toContain("ai.heard_quiz.succeeded");
+    expect(JSON.stringify(events)).not.toContain("First completed sentence");
+    expect(JSON.stringify(events)).not.toContain("The Example Book");
+    const requestId = response.headers.get("X-Request-Id") ?? "";
+    const terminal = listOperatorEvents({ requestId }).filter((event) =>
+      ["managed_qwen_ok", "managed_qwen_failed"].includes(event.kind),
+    );
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0]).toMatchObject({
+      kind: "managed_qwen_ok",
+      requestId,
+      task: "heard_quiz",
+      metadata: { promptVersion: "qwen-managed-v1" },
+    });
+    expect(typeof terminal[0]?.metadata?.model).toBe("string");
+    expect(terminal[0]?.metadata?.model).not.toBe("");
+    expect(JSON.stringify(terminal)).not.toMatch(
+      /First completed sentence|Second completed sentence|The Example Book|questions|HEARD id=/,
+    );
+  });
+
+  it("rejects heard_quiz output that cites a segment outside the bounded request", async () => {
+    const app = createTestApp({
+      qwen: createFakeQwenClient({
+        text: '{"questions":[{"id":"q1","kind":"comprehension","prompt":"What happened?","choices":["A","B","C","D"],"answerIndex":0,"rationale":"A.","segmentID":"future"},{"id":"q2","kind":"sequencing","prompt":"Then?","choices":["A","B","C","D"],"answerIndex":1,"rationale":"B.","segmentID":"s1"}]}',
+      }),
+    });
+    const response = await postAssistant(
+      app,
+      "/v1/ai/heard-quizzes",
+      {
+        task: "heard_quiz",
+        chapterId: DEVICE_ID,
+        sourceLanguage: "en",
+        targetLanguage: "zh-Hans",
+        learnerLevel: "B1",
+        segments: [{ id: "s1", text: "Only heard sentence." }],
+      },
+      "idempotency-key-heard-quiz-02",
+    );
+    expect(response.status).toBe(502);
+    const body = await readJson(response);
+    expect(isRecord(body) && body.code).toBe("invalid_upstream_response");
+    const requestId = response.headers.get("X-Request-Id") ?? "";
+    const terminal = listOperatorEvents({ requestId }).filter((event) =>
+      ["managed_qwen_ok", "managed_qwen_failed"].includes(event.kind),
+    );
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0]).toMatchObject({
+      kind: "managed_qwen_failed",
+      requestId,
+      task: "heard_quiz",
+      status: "invalid_output",
+      metadata: { promptVersion: "qwen-managed-v1" },
+    });
+    expect(typeof terminal[0]?.metadata?.model).toBe("string");
+    expect(terminal[0]?.metadata?.model).not.toBe("");
+    expect(JSON.stringify(terminal)).not.toMatch(/Only heard sentence|future|questions|HEARD id=/);
+  });
+
+  it.each([
+    {
+      name: "sentence",
+      path: "/v1/ai/translations",
+      output: "a bare translation",
+      body: sentenceBody("Malformed sentence output", {
+        editionFingerprint: "ed-invalid-sentence",
+        chapterFingerprint: "ch-invalid-sentence",
+      }),
+    },
+    {
+      name: "word",
+      path: "/v1/ai/translations",
+      output: '{"translation":"noun — ice"}',
+      body: sentenceBody("ice", {
+        task: "word",
+        contextBefore: "The ice closed over the channel.",
+        editionFingerprint: "ed-invalid-word",
+        chapterFingerprint: "ch-invalid-word",
+      }),
+    },
+    {
+      name: "chapter_batch",
+      path: "/v1/ai/translation-batches",
+      output: '{"translations":[{"id":"s1","translation":"一。","notes":[]}]}',
+      body: batchBody(
+        [
+          { id: "s1", text: "One." },
+          { id: "s2", text: "Two." },
+        ],
+        {
+          editionFingerprint: "ed-invalid-batch",
+          chapterFingerprint: "ch-invalid-batch",
+        },
+      ),
+    },
+    {
+      name: "chapter_summary",
+      path: "/v1/ai/chapter-summaries",
+      output: '{"overview":"Only one field"}',
+      body: summaryBody(["Malformed summary output."], {
+        editionFingerprint: "ed-invalid-summary",
+        chapterFingerprint: "ch-invalid-summary",
+      }),
+    },
+    {
+      name: "chat",
+      path: "/v1/ai/chat",
+      output: "a bare chat answer",
+      body: {
+        chapterId: DEVICE_ID,
+        question: "What happened?",
+        sourceLanguage: "en",
+        targetLanguage: "zh",
+        learnerLevel: "intermediate",
+      },
+    },
+  ])("rejects malformed $name output before returning or caching it", async (testCase) => {
+    const app = createTestApp({ qwen: createFakeQwenClient({ text: testCase.output }) });
+    const response = await postAssistant(
+      app,
+      testCase.path,
+      testCase.body,
+      `idempotency-key-invalid-${testCase.name}`,
+    );
+
+    expect(response.status).toBe(502);
+    const body = await readJson(response);
+    expect(isRecord(body) && body.code).toBe("invalid_upstream_response");
   });
 
   it("returns 503 when managed Qwen is unavailable", async () => {
@@ -476,6 +658,46 @@ describe("managed Qwen assistant API", () => {
     expect(response.status).toBe(503);
     const body = await readJson(response);
     expect(isRecord(body) && body.detail).toBe("Managed Qwen policy for translation is disabled.");
+  });
+
+  it("fails closed before calling Qwen when a persisted prompt contract is invalid", async () => {
+    const database = createFakeDatabaseClient();
+    const translation = (await database.ops.listPolicies()).find(
+      (policy) => policy.task === "translation",
+    );
+    expect(translation).toBeDefined();
+    if (translation === undefined) return;
+    await database.ops.patchPolicy(translation.id, { schemaVersion: "2" });
+    let completions = 0;
+    const inner = createFakeQwenClient({ text: '{"translation":"你好","notes":[]}' });
+    const app = createTestApp({
+      database,
+      qwen: {
+        ping: () => inner.ping(),
+        pingDetailed: () => inner.pingDetailed(),
+        complete: (request) => {
+          completions += 1;
+          return inner.complete(request);
+        },
+      },
+    });
+
+    const response = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      sentenceBody("Invalid persisted prompt contract.", {
+        editionFingerprint: "ed-invalid-contract",
+        chapterFingerprint: "ch-invalid-contract",
+      }),
+      "idempotency-key-invalid-prompt-contract",
+    );
+
+    expect(response.status).toBe(503);
+    expect(completions).toBe(0);
+    const body = await readJson(response);
+    expect(String(isRecord(body) ? body.detail : "")).toContain(
+      "prompt contract validation failed",
+    );
   });
 
   it("sends the operator system prompt instead of the hard-coded default", async () => {
@@ -1660,7 +1882,7 @@ describe("managed Qwen assistant API", () => {
     expect(byId.get("s2")?.provenance).toBe("generated");
   });
 
-  it("accepts a single-object translation payload for a one-sentence batch", async () => {
+  it("rejects a single-object translation payload for a one-sentence batch", async () => {
     const app = createTestApp({
       qwen: createFakeQwenClient({ text: '{"translation":"一句。","notes":[]}' }),
     });
@@ -1684,15 +1906,9 @@ describe("managed Qwen assistant API", () => {
         }),
       }),
     );
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(502);
     const body = await readJson(response);
-    const results =
-      isRecord(body) && Array.isArray(body.results)
-        ? (body.results as Record<string, unknown>[])
-        : [];
-    expect(results).toHaveLength(1);
-    expect(results[0]?.translation).toBe("一句。");
-    expect(results[0]?.targetId).toBe("s1");
+    expect(isRecord(body) && body.code).toBe("invalid_upstream_response");
   });
 
   it("does not consume summary quota on a cache hit", async () => {
@@ -1977,7 +2193,7 @@ describe("managed Qwen cache identity and batch edge cases", () => {
     expect(completions).toBe(1);
   });
 
-  it("records missingIds when Qwen omits a sentence from a batch", async () => {
+  it("rejects a batch when Qwen omits a requested sentence", async () => {
     const database = createFakeDatabaseClient();
     const app = createTestApp({
       database,
@@ -1997,10 +2213,9 @@ describe("managed Qwen cache identity and batch edge cases", () => {
       ),
       "idempotency-key-qwen-partial-1",
     );
-    expect(generated.status).toBe(200);
+    expect(generated.status).toBe(502);
     const body = await readJson(generated);
-    expect(isRecord(body) && body.missingIds).toEqual(["s2"]);
-    expect(isRecord(body) && Array.isArray(body.results) ? body.results : []).toHaveLength(1);
+    expect(isRecord(body) && body.code).toBe("invalid_upstream_response");
 
     const lookup = await postAssistant(
       app,
@@ -2015,11 +2230,11 @@ describe("managed Qwen cache identity and batch edge cases", () => {
       "idempotency-key-qwen-partial-2",
     );
     const looked = await readJson(lookup);
-    expect(isRecord(looked) && looked.cacheHitCount).toBe(1);
-    expect(isRecord(looked) && looked.missingIds).toEqual(["s2"]);
+    expect(isRecord(looked) && looked.cacheHitCount).toBe(0);
+    expect(isRecord(looked) && looked.missingIds).toEqual(["s1", "s2"]);
   });
 
-  it("parses batch units from results and targetId fields", async () => {
+  it("rejects legacy results and targetId fields outside the batch contract", async () => {
     const app = createTestApp({
       qwen: createFakeQwenClient({
         text: JSON.stringify({
@@ -2039,14 +2254,9 @@ describe("managed Qwen cache identity and batch edge cases", () => {
       }),
       "idempotency-key-qwen-batch-results",
     );
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(502);
     const body = await readJson(response);
-    const results =
-      isRecord(body) && Array.isArray(body.results)
-        ? (body.results as Record<string, unknown>[])
-        : [];
-    expect(results).toHaveLength(1);
-    expect(results[0]?.translation).toBe("一。");
+    expect(isRecord(body) && body.code).toBe("invalid_upstream_response");
   });
 
   it("returns 503 when a batch generate cannot reach Qwen", async () => {
@@ -2310,7 +2520,15 @@ describe("managed Qwen cache identity and batch edge cases", () => {
     const app = createTestApp({
       database,
       qwen: createFakeQwenClient({
-        text: JSON.stringify({ translation: "ice", notes: [] }),
+        text: JSON.stringify({
+          translation: "noun — ice",
+          connection: "",
+          examples: [
+            { source: "The ice melted.", translation: "冰融化了。" },
+            { source: "Ice covered the lake.", translation: "冰覆盖着湖面。" },
+          ],
+          notes: [],
+        }),
         onComplete: () => {
           completions += 1;
         },
@@ -2372,7 +2590,7 @@ describe("managed Qwen cache identity and batch edge cases", () => {
     const app = createTestApp({
       database,
       qwen: createFakeQwenClient({
-        text: "Chat about ice.",
+        text: '{"answer":"Chat about ice."}',
         onComplete: () => {
           completions += 1;
         },

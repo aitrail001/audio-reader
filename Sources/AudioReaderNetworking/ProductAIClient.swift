@@ -15,6 +15,7 @@ public struct ProductTranslationRequest: Codable, Equatable, Sendable {
     public var contextNext: [String]
     public var targetId: String?
     public var bookTitle: String
+    public var author: String
     public var chapterTitle: String
     public var lookupOnly: Bool
     public var refresh: Bool
@@ -33,6 +34,7 @@ public struct ProductTranslationRequest: Codable, Equatable, Sendable {
         contextNext: [String] = [],
         targetId: String? = nil,
         bookTitle: String = "",
+        author: String = "",
         chapterTitle: String = "",
         lookupOnly: Bool = false,
         refresh: Bool = false
@@ -50,6 +52,7 @@ public struct ProductTranslationRequest: Codable, Equatable, Sendable {
         self.contextNext = contextNext
         self.targetId = targetId
         self.bookTitle = bookTitle
+        self.author = author
         self.chapterTitle = chapterTitle
         self.lookupOnly = lookupOnly
         self.refresh = refresh
@@ -79,6 +82,7 @@ public struct ProductTranslationBatchRequest: Codable, Equatable, Sendable {
     public var contextPrevious: [String]
     public var contextNext: [String]
     public var bookTitle: String
+    public var author: String
     public var chapterTitle: String
     public var lookupOnly: Bool
     public var refreshIds: [String]
@@ -95,6 +99,7 @@ public struct ProductTranslationBatchRequest: Codable, Equatable, Sendable {
         contextPrevious: [String] = [],
         contextNext: [String] = [],
         bookTitle: String = "",
+        author: String = "",
         chapterTitle: String = "",
         lookupOnly: Bool = false,
         refreshIds: [String] = []
@@ -111,6 +116,7 @@ public struct ProductTranslationBatchRequest: Codable, Equatable, Sendable {
         self.contextPrevious = contextPrevious
         self.contextNext = contextNext
         self.bookTitle = bookTitle
+        self.author = author
         self.chapterTitle = chapterTitle
         self.lookupOnly = lookupOnly
         self.refreshIds = refreshIds
@@ -187,6 +193,7 @@ public struct ProductChapterSummaryRequest: Codable, Equatable, Sendable {
     public var editionFingerprint: String
     public var chapterFingerprint: String
     public var bookTitle: String
+    public var author: String
     public var chapterTitle: String
     public var segments: [String]
     public var lookupOnly: Bool
@@ -200,6 +207,7 @@ public struct ProductChapterSummaryRequest: Codable, Equatable, Sendable {
         editionFingerprint: String = "",
         chapterFingerprint: String = "",
         bookTitle: String = "",
+        author: String = "",
         chapterTitle: String = "",
         segments: [String] = [],
         lookupOnly: Bool = false,
@@ -212,6 +220,7 @@ public struct ProductChapterSummaryRequest: Codable, Equatable, Sendable {
         self.editionFingerprint = editionFingerprint
         self.chapterFingerprint = chapterFingerprint
         self.bookTitle = bookTitle
+        self.author = author
         self.chapterTitle = chapterTitle
         self.segments = segments
         self.lookupOnly = lookupOnly
@@ -235,6 +244,57 @@ public struct ProductChapterSummary: Codable, Equatable, Sendable {
     public var createdAt: String
 }
 
+public struct ProductHeardSegment: Codable, Equatable, Sendable {
+    public var id: String
+    public var text: String
+
+    public init(id: String, text: String) {
+        self.id = id
+        self.text = text
+    }
+}
+
+public struct ProductHeardQuizRequest: Codable, Equatable, Sendable {
+    public var task: String
+    public var chapterId: String
+    public var sourceLanguage: String
+    public var targetLanguage: String
+    public var learnerLevel: String
+    public var bookTitle: String
+    public var author: String
+    public var chapterTitle: String
+    public var segments: [ProductHeardSegment]
+
+    public init(
+        chapterId: String,
+        sourceLanguage: String,
+        targetLanguage: String,
+        learnerLevel: String,
+        bookTitle: String = "",
+        author: String = "",
+        chapterTitle: String = "",
+        segments: [ProductHeardSegment]
+    ) {
+        self.task = "heard_quiz"
+        self.chapterId = chapterId
+        self.sourceLanguage = sourceLanguage
+        self.targetLanguage = targetLanguage
+        self.learnerLevel = learnerLevel
+        self.bookTitle = bookTitle
+        self.author = author
+        self.chapterTitle = chapterTitle
+        self.segments = segments
+    }
+}
+
+public struct ProductHeardQuizResponse: Codable, Equatable, Sendable {
+    public var raw: String
+
+    public init(raw: String) {
+        self.raw = raw
+    }
+}
+
 public struct ProductChatRequest: Codable, Equatable, Sendable {
     public var threadId: String?
     public var chapterId: String
@@ -242,6 +302,9 @@ public struct ProductChatRequest: Codable, Equatable, Sendable {
     public var sourceLanguage: String
     public var targetLanguage: String
     public var learnerLevel: String
+    public var bookTitle: String
+    public var author: String
+    public var chapterTitle: String
     public var contextSegments: [String]
 
     public init(
@@ -251,6 +314,9 @@ public struct ProductChatRequest: Codable, Equatable, Sendable {
         sourceLanguage: String,
         targetLanguage: String,
         learnerLevel: String,
+        bookTitle: String = "",
+        author: String = "",
+        chapterTitle: String = "",
         contextSegments: [String] = []
     ) {
         self.threadId = threadId
@@ -259,6 +325,9 @@ public struct ProductChatRequest: Codable, Equatable, Sendable {
         self.sourceLanguage = sourceLanguage
         self.targetLanguage = targetLanguage
         self.learnerLevel = learnerLevel
+        self.bookTitle = bookTitle
+        self.author = author
+        self.chapterTitle = chapterTitle
         self.contextSegments = contextSegments
     }
 }
@@ -295,6 +364,12 @@ public protocol ProductAIClient: Sendable {
         request: ProductChapterSummaryRequest
     ) async throws -> ProductChapterSummary
 
+    func heardQuiz(
+        accessToken: String,
+        deviceID: String,
+        request: ProductHeardQuizRequest
+    ) async throws -> ProductHeardQuizResponse
+
     func chat(
         accessToken: String,
         deviceID: String,
@@ -319,7 +394,10 @@ extension ProductAIClient {
         sourceLanguage: String = "en",
         targetLanguage: String = "zh",
         learnerLevel: String = "intermediate",
-        chapterID: String = ManagedAccountCredentials.unscopedChapterID
+        chapterID: String = ManagedAccountCredentials.unscopedChapterID,
+        bookTitle: String = "",
+        author: String = "",
+        chapterTitle: String = ""
     ) async throws -> String {
         let accepted = try await chat(
             accessToken: accessToken,
@@ -330,6 +408,9 @@ extension ProductAIClient {
                 sourceLanguage: sourceLanguage,
                 targetLanguage: targetLanguage,
                 learnerLevel: learnerLevel,
+                bookTitle: bookTitle,
+                author: author,
+                chapterTitle: chapterTitle,
                 contextSegments: [system]
             )
         )
@@ -451,6 +532,20 @@ public struct LiveProductAIClient: ProductAIClient, Sendable {
         )
     }
 
+    public func heardQuiz(
+        accessToken: String,
+        deviceID: String,
+        request: ProductHeardQuizRequest
+    ) async throws -> ProductHeardQuizResponse {
+        try await send(
+            method: "POST",
+            path: "/v1/ai/heard-quizzes",
+            accessToken: accessToken,
+            deviceID: deviceID,
+            body: request
+        )
+    }
+
     public func chat(
         accessToken: String,
         deviceID: String,
@@ -559,10 +654,12 @@ public final class FakeProductAIClient: ProductAIClient, @unchecked Sendable {
         createdAt: "2026-08-28T00:00:00Z"
     )
     public var reply = "Managed Qwen reply"
+    public var heardQuizRaw = #"{"questions":[]}"#
     public private(set) var translateCalls = 0
     public private(set) var translateBatchCalls = 0
     public private(set) var summarizeCalls = 0
     public private(set) var chatCalls = 0
+    public private(set) var heardQuizCalls = 0
     private let lock = NSLock()
     private var messages: [String: ProductChatMessage] = [:]
 
@@ -638,6 +735,20 @@ public final class FakeProductAIClient: ProductAIClient, @unchecked Sendable {
         return withLock {
             summarizeCalls += 1
             return summary
+        }
+    }
+
+    public func heardQuiz(
+        accessToken: String,
+        deviceID: String,
+        request: ProductHeardQuizRequest
+    ) async throws -> ProductHeardQuizResponse {
+        _ = accessToken
+        _ = deviceID
+        _ = request
+        return withLock {
+            heardQuizCalls += 1
+            return ProductHeardQuizResponse(raw: heardQuizRaw)
         }
     }
 

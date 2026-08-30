@@ -61,21 +61,25 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
     subject: string,
     requestId: string,
   ): Promise<Principal> {
-    let admin =
-      identity === undefined
-        ? false
-        : ((await identity.hasAdminRole?.(profile.accountId)) ?? false);
+    let adminRoles = (await identity?.adminRoles?.(profile.accountId)) ?? [];
+    let admin = adminRoles.length > 0;
+    if (!admin && identity?.adminRoles === undefined) {
+      admin = (await identity?.hasAdminRole?.(profile.accountId)) ?? false;
+      adminRoles = admin ? ["operator"] : [];
+    }
     const bootstrap = options.adminBootstrapEmail?.trim().toLowerCase() ?? "";
     const bootstrapMatch =
       !admin && bootstrap !== "" && profile.email.trim().toLowerCase() === bootstrap;
     if (bootstrapMatch && identity !== undefined) {
       admin = await grantBootstrapAdmin(identity, profile.accountId, requestId);
+      if (admin) adminRoles = ["operator"];
     }
     return {
       subject,
       profileId: profile.id,
       accountId: profile.accountId,
       role: admin ? ("admin" as const) : ("user" as const),
+      adminRoles,
       email: profile.email,
     };
   }

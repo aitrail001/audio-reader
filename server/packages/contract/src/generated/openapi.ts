@@ -566,6 +566,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/ai/heard-quizzes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Generate a retrieval quiz from an explicitly bounded heard passage
+         * @description The Worker uses only the supplied completed segments and validates every question against the server-owned quiz contract before returning the raw JSON.
+         */
+        post: operations["createHeardQuiz"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/sync/push": {
         parameters: {
             query?: never;
@@ -651,6 +671,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/me/analytics-preferences": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get explicit analytics sharing preferences */
+        get: operations["getAnalyticsPreferences"];
+        /** Set explicit analytics sharing preferences */
+        put: operations["putAnalyticsPreferences"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/auth/blocked-attempts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List privacy-bounded blocked passwordless attempts
+         * @description Requires access.read; raw email and IP values are never returned.
+         */
+        get: operations["adminListBlockedAttempts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get the signed-in administrator's effective roles and capabilities */
+        get: operations["adminGetCapabilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/users": {
         parameters: {
             query?: never;
@@ -680,6 +755,26 @@ export interface paths {
         };
         /** Get support-safe user metadata */
         get: operations["adminGetUser"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users/{userId}/progress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an audited privacy-safe user progress summary
+         * @description Requires support_readonly, operator, privacy_officer, or superadmin. Sync health is operational metadata; reading and learning aggregates are returned only after explicit user consent. Raw sync payloads and reading content are never returned.
+         */
+        get: operations["adminGetUserProgress"];
         put?: never;
         post?: never;
         delete?: never;
@@ -788,6 +883,40 @@ export interface paths {
         head?: never;
         /** Update or roll out a Qwen task policy */
         patch: operations["adminPatchLlmPolicy"];
+        trace?: never;
+    };
+    "/v1/admin/llm/policies/{policyId}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Validate and render every layer of a Managed Qwen prompt */
+        post: operations["adminPreviewLlmPolicy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/llm/policies/{policyId}/probe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run a correlated Managed Qwen prompt probe */
+        post: operations["adminProbeLlmPolicy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/v1/admin/cache": {
@@ -1650,6 +1779,7 @@ export interface components {
             editionFingerprint: string;
             chapterFingerprint: string;
             bookTitle?: string;
+            author?: string;
             chapterTitle?: string;
             targetId?: string | null;
             promptVersion: string;
@@ -1675,6 +1805,7 @@ export interface components {
             editionFingerprint: string;
             chapterFingerprint: string;
             bookTitle?: string;
+            author?: string;
             chapterTitle?: string;
             promptVersion?: string;
             /** @description Return cache hits without calling Qwen. Misses stay in missingIds with HTTP 200. */
@@ -1717,6 +1848,7 @@ export interface components {
             editionFingerprint: string;
             chapterFingerprint: string;
             bookTitle?: string;
+            author?: string;
             chapterTitle?: string;
             segments?: string[];
             /** @description Return a cache hit without calling Qwen. Misses are 404. */
@@ -1757,6 +1889,9 @@ export interface components {
             sourceLanguage: string;
             targetLanguage: string;
             learnerLevel: string;
+            bookTitle?: string;
+            author?: string;
+            chapterTitle?: string;
             contextSegments?: string[];
         };
         ChatAccepted: {
@@ -1766,6 +1901,27 @@ export interface components {
             messageId: string;
             /** Format: uri-reference */
             streamUrl: string;
+        };
+        HeardSegment: {
+            id: string;
+            text: string;
+        };
+        HeardQuizRequest: {
+            /** @enum {string} */
+            task: "heard_quiz";
+            /** Format: uuid */
+            chapterId: string;
+            sourceLanguage: string;
+            targetLanguage: string;
+            learnerLevel: string;
+            bookTitle?: string;
+            author?: string;
+            chapterTitle?: string;
+            segments: components["schemas"]["HeardSegment"][];
+        };
+        HeardQuizResponse: {
+            /** @description Server-validated structured quiz JSON returned unchanged from the provider. */
+            raw: string;
         };
         SyncMutation: {
             /** Format: uuid */
@@ -1864,6 +2020,10 @@ export interface components {
             startedAt?: string | null;
             finishedAt?: string | null;
         };
+        AdminCapabilities: {
+            roles: ("support_readonly" | "operator" | "privacy_officer" | "billing_operator" | "superadmin")[];
+            capabilities: ("users.read" | "users.manage" | "roles.manage" | "policies.read" | "policies.manage" | "ai.probe" | "runtime.read" | "runtime.manage" | "cache.read" | "cache.manage" | "jobs.read" | "jobs.manage" | "flags.read" | "flags.manage" | "quotas.read" | "quotas.manage" | "privacy.read" | "privacy.manage" | "metrics.read" | "activity.read" | "access.read" | "diagnostics.read" | "admin.full")[];
+        };
         AdminUser: {
             /** Format: uuid */
             id: string;
@@ -1894,6 +2054,68 @@ export interface components {
                 id: string;
                 title: string;
                 chapterCount?: number;
+            }[];
+        };
+        AnalyticsPreference: {
+            operatorLearningAnalyticsEnabled: boolean;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        AdminUserProgress: {
+            /** Format: uuid */
+            accountId: string;
+            /** Format: date-time */
+            generatedAt: string;
+            expiresAt: string | null;
+            consent: components["schemas"]["AnalyticsPreference"];
+            sync: components["schemas"]["AdminUserSyncSummary"];
+            reading: components["schemas"]["AdminUserReadingSummary"] | null;
+            review: components["schemas"]["AdminUserReviewSummary"] | null;
+            learning: components["schemas"]["AdminUserLearningSummary"] | null;
+            activity: {
+                eventsPath: string;
+                auditPath: string;
+            };
+        };
+        AdminUserSyncSummary: {
+            lastSuccessfulAt: string | null;
+            lastDevice: {
+                id: string;
+                platform: string;
+                name: string | null;
+            } | null;
+            entityCounts: {
+                entityType: string;
+                count: number;
+            }[];
+            /** @description Null when device-local outbox state has not reached the server. */
+            pendingCount: number | null;
+            conflictCount: number;
+        };
+        AdminUserReadingSummary: {
+            lastActivityAt: string | null;
+            activeBooks: number;
+            completedBooks: number;
+            currentChapter: number | null;
+            completionPercent: number | null;
+        };
+        AdminUserReviewSummary: {
+            due: number;
+            new: number;
+            learning: number;
+            reviewsLast30Days: number;
+            reviewsPerActiveDay: number;
+            retentionRate: number | null;
+            streakDays: number;
+        };
+        AdminUserLearningSummary: {
+            vocabulary: number;
+            known: number;
+            learning: number;
+            aiUsesLast30Days: number;
+            aiUsesByFeature: {
+                feature: string;
+                count: number;
             }[];
         };
         AdminAction: {
@@ -1933,6 +2155,54 @@ export interface components {
             maxInputTokens?: number;
             maxOutputTokens?: number;
             timeoutMs?: number;
+        };
+        ManagedPromptPreviewRequest: {
+            /** @enum {string} */
+            subtask: "sentence" | "word" | "chapter_batch" | "chapter_summary" | "chat" | "heard_quiz";
+            draft?: {
+                systemPrompt?: string;
+                userPrompt?: string;
+                schemaVersion?: string;
+            };
+        };
+        ManagedPromptPreview: {
+            /** @enum {string} */
+            subtask: "sentence" | "word" | "chapter_batch" | "chapter_summary" | "chat" | "heard_quiz";
+            editable: {
+                system: string;
+                userTemplate: string;
+                renderedUser: string;
+            };
+            enforced: {
+                taskContract: string;
+                requestContext: string;
+            };
+            effective: {
+                system: string;
+                user: string;
+            };
+            outputSchema: {
+                [key: string]: unknown;
+            };
+            validation: {
+                valid: boolean;
+                fieldErrors: {
+                    [key: string]: string;
+                };
+            };
+            contractFingerprint: string;
+        };
+        ManagedPromptProbe: components["schemas"]["ManagedPromptPreview"] & {
+            requestId: string;
+            model: string;
+            providerStatus: string;
+            parsedResult?: {
+                [key: string]: unknown;
+            } | null;
+            outputValidation: {
+                valid: boolean;
+                errors?: string[];
+            };
         };
         RuntimeConfig: {
             qwen: {
@@ -2162,8 +2432,9 @@ export interface components {
                 /** @enum {boolean} */
                 profileDeletionCascadesEvents: true;
                 /** @enum {boolean} */
-                completedDeletionRequestPurgesEvents: false;
-                automaticRetentionDays: number | null;
+                completedDeletionRequestPurgesEvents: true;
+                /** @enum {integer} */
+                automaticRetentionDays: 90;
             };
             sampled: boolean;
         };
@@ -2341,6 +2612,7 @@ export interface components {
         DeviceId: string;
         /** @description Unique key for a logical mutation; reuse with different content is rejected. */
         IdempotencyKey: string;
+        /** @description Opaque continuation token returned by the previous page; clients must not interpret it. */
         Cursor: string;
         Limit: number;
         BookId: string;
@@ -2873,6 +3145,7 @@ export interface operations {
     listBooks: {
         parameters: {
             query?: {
+                /** @description Opaque continuation token returned by the previous page; clients must not interpret it. */
                 cursor?: string;
                 limit?: number;
             };
@@ -3283,6 +3556,7 @@ export interface operations {
     listVocabulary: {
         parameters: {
             query?: {
+                /** @description Opaque continuation token returned by the previous page; clients must not interpret it. */
                 cursor?: string;
                 limit?: number;
                 bookId?: string;
@@ -3455,6 +3729,7 @@ export interface operations {
     listDueReviews: {
         parameters: {
             query?: {
+                /** @description Opaque continuation token returned by the previous page; clients must not interpret it. */
                 cursor?: string;
                 limit?: number;
             };
@@ -3735,6 +4010,43 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    createHeardQuiz: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HeardQuizRequest"];
+            };
+        };
+        responses: {
+            /** @description Validated raw heard-quiz JSON */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HeardQuizResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+            502: components["responses"]["InternalError"];
+        };
+    };
     pushSyncMutations: {
         parameters: {
             query?: never;
@@ -3775,6 +4087,7 @@ export interface operations {
     pullSyncChanges: {
         parameters: {
             query?: {
+                /** @description Opaque continuation token returned by the previous page; clients must not interpret it. */
                 cursor?: string;
                 limit?: number;
             };
@@ -3910,9 +4223,135 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    getAnalyticsPreferences: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current analytics preferences */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnalyticsPreference"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    putAnalyticsPreferences: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    operatorLearningAnalyticsEnabled: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description Updated analytics preferences */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnalyticsPreference"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminListBlockedAttempts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Blocked attempts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: {
+                            id: string;
+                            action: string;
+                            reason: string;
+                            emailHash: string;
+                            ipHash: string;
+                            deviceId: string | null;
+                            /** Format: date-time */
+                            at: string;
+                            requestId?: string;
+                        }[];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminGetCapabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Effective role and capability set */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminCapabilities"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     adminListUsers: {
         parameters: {
             query?: {
+                /** @description Opaque continuation token returned by the previous page; clients must not interpret it. */
                 cursor?: string;
                 limit?: number;
                 query?: string;
@@ -3960,6 +4399,36 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AdminUser"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminGetUserProgress: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Privacy-safe progress summary */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUserProgress"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -4195,9 +4664,74 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    adminPreviewLlmPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                policyId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManagedPromptPreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Effective prompt preview */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedPromptPreview"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["Unprocessable"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminProbeLlmPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                policyId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManagedPromptPreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Rendered prompt and parsed probe result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedPromptProbe"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["Unprocessable"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     adminListCacheEntries: {
         parameters: {
             query?: {
+                /** @description Opaque continuation token returned by the previous page; clients must not interpret it. */
                 cursor?: string;
                 limit?: number;
                 task?: string;
@@ -4301,6 +4835,7 @@ export interface operations {
     adminListJobs: {
         parameters: {
             query?: {
+                /** @description Opaque continuation token returned by the previous page; clients must not interpret it. */
                 cursor?: string;
                 limit?: number;
                 status?: string;
@@ -4481,12 +5016,14 @@ export interface operations {
     adminListAuditEvents: {
         parameters: {
             query?: {
+                /** @description Opaque continuation token returned by the previous page; clients must not interpret it. */
                 cursor?: string;
                 limit?: number;
                 actorId?: string;
                 action?: string;
                 requestId?: string;
                 resourceType?: string;
+                resourceId?: string;
             };
             header?: never;
             path?: never;
@@ -4650,6 +5187,7 @@ export interface operations {
                 requestId?: string;
                 from?: string;
                 to?: string;
+                /** @description Opaque continuation token returned by the previous page; clients must not interpret it. */
                 cursor?: string;
                 limit?: number;
             };
@@ -4815,6 +5353,7 @@ export interface operations {
     adminListPrivacyRequests: {
         parameters: {
             query?: {
+                /** @description Opaque continuation token returned by the previous page; clients must not interpret it. */
                 cursor?: string;
                 limit?: number;
                 status?: string;

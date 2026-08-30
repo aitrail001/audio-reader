@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public struct ProductSyncClient: SyncClient, Sendable {
@@ -19,15 +20,19 @@ public struct ProductSyncClient: SyncClient, Sendable {
     }
 
     public func push(accessToken: String, deviceID: String, request: SyncPushRequest) async throws -> SyncPushResponse {
-        try await send(
+        let data = try encoder.encode(request)
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return try await send(
             method: "POST",
             path: "/v1/sync/push",
             headers: [
                 "Authorization": "Bearer \(accessToken)",
                 "X-Device-Id": deviceID,
-                "Idempotency-Key": request.batchId
+                "Idempotency-Key": request.batchId,
+                // Lets the Worker fingerprint a large transcript without cloning its body.
+                "X-Content-SHA256": digest
             ],
-            body: request
+            data: data
         )
     }
 

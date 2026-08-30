@@ -358,8 +358,8 @@ export const PREVIEW_ANALYTICS: ProductAnalytics = {
     identifiersReturned: "pseudonymous",
     durableOwnershipKeysStored: true,
     profileDeletionCascadesEvents: true,
-    completedDeletionRequestPurgesEvents: false,
-    automaticRetentionDays: null,
+    completedDeletionRequestPurgesEvents: true,
+    automaticRetentionDays: 90,
   },
   sampled: false,
 };

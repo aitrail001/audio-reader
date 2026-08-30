@@ -128,6 +128,90 @@ struct LocalSchemaV3MigrationTests {
         #expect(try store.loadReviewEvents() == [event])
     }
 
+    @Test("Review writes reuse the schema established when the store opens")
+    func reviewWriteDoesNotReapplySchema() throws {
+        let store = LocalSQLiteStore(fileURL: temporaryDatabaseURL())
+        let reviewedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let vocabulary = StoredVocabularyOccurrence(
+            id: VocabularyOccurrenceID(rawValue: "vocab-schema"),
+            surface: "whale",
+            category: "word",
+            sourceLanguage: "en",
+            context: "Call me Ishmael.",
+            bookID: BookID(rawValue: "book-1"),
+            bookTitle: "Moby-Dick",
+            chapterID: ChapterID(rawValue: "chapter-1"),
+            chapterTitle: "Loomings",
+            timestamp: 12,
+            addedAt: reviewedAt,
+            reviewCount: 1,
+            nextReview: reviewedAt.addingTimeInterval(86_400),
+            lastReviewedAt: reviewedAt,
+            lastReviewQuality: "remember",
+            reviewIntervalDays: 1,
+            reviewEaseFactor: 2.5,
+            isInLearnList: false
+        )
+        let event = StoredReviewEvent(
+            id: ReviewEventID(rawValue: "review-schema"),
+            vocabularyID: vocabulary.id,
+            face: "recognition",
+            rating: "remember",
+            reviewedAt: reviewedAt
+        )
+        let applicationsAfterOpen = store.schemaApplicationCount
+
+        try store.appendReviewEvent(event, vocabulary: vocabulary)
+
+        #expect(applicationsAfterOpen == 1)
+        #expect(store.schemaApplicationCount == applicationsAfterOpen)
+    }
+
+    @Test("Review writes update only schedule fields on an existing vocabulary row")
+    func reviewWritePreservesConcurrentVocabularyFields() throws {
+        let store = LocalSQLiteStore(fileURL: temporaryDatabaseURL())
+        let reviewedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        var latest = StoredVocabularyOccurrence(
+            id: VocabularyOccurrenceID(rawValue: "vocab-review-merge"),
+            surface: "whale",
+            category: "word",
+            context: "Call me Ishmael.",
+            bookID: BookID(rawValue: "book-1"),
+            bookTitle: "Moby-Dick",
+            chapterID: ChapterID(rawValue: "chapter-1"),
+            chapterTitle: "Loomings",
+            timestamp: 12,
+            addedAt: reviewedAt.addingTimeInterval(-60)
+        )
+        latest.translation = "latest translation"
+        latest.isInLearnList = true
+        try store.upsertVocabulary(latest)
+
+        var staleReviewed = latest
+        staleReviewed.translation = "stale translation"
+        staleReviewed.isInLearnList = false
+        staleReviewed.reviewCount = 1
+        staleReviewed.nextReview = reviewedAt.addingTimeInterval(7 * 86_400)
+        staleReviewed.lastReviewedAt = reviewedAt
+        staleReviewed.lastReviewQuality = "remember"
+        staleReviewed.reviewIntervalDays = 7
+        let event = StoredReviewEvent(
+            id: ReviewEventID(rawValue: "review-merge"),
+            vocabularyID: staleReviewed.id,
+            face: "recognition",
+            rating: "remember",
+            reviewedAt: reviewedAt
+        )
+
+        try store.appendReviewEvent(event, vocabulary: staleReviewed)
+
+        let stored = try #require(store.loadVocabulary().first)
+        #expect(stored.translation == "latest translation")
+        #expect(stored.isInLearnList)
+        #expect(stored.reviewCount == 1)
+        #expect(stored.lastReviewedAt == reviewedAt)
+    }
+
     @Test("same-revision progress from another device is retained for explicit resolution")
     func readerProgressConflictRetention() throws {
         let store = LocalSQLiteStore(fileURL: temporaryDatabaseURL())

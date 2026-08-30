@@ -86,11 +86,13 @@ AudioReader copies explicitly imported resources into its own imported-books lib
 4. Play the chapter and use the highlighted transcript to follow, seek, replay, or loop sentences.
 5. Choose **Spoken**, **Ebook**, or **Both** when the EPUB and individual sentence matches are trusted. Unreadable, likely-wrong, different-edition, and uncertain EPUBs show the same warning and recovery actions on macOS and iPadOS. **Recheck EPUB** validates an existing transcript again without retranscribing audio; **Replace EPUB** installs another file; and **Use This EPUB Anyway** remains an explicit option after assessment and still permits only strong individual matches.
 6. Select a word for dictionary lookup or save it to **Vocabulary**. Use **Open in text** later to return to its source passage.
-7. Turn on **Study overlay** in the reader header or **Reading** menu to underline unknown and learning content words throughout the chapter, not only the current sentence. **Chapter words** is a chapter-level list (macOS also has a header button, not only a menu item). **Shadow this sentence** scores on-device speech against the current sentence. **Chapter quiz** is a local cloze and “what comes next” check; it does not add XP, streaks-as-flames, or remote content libraries. Study days are a quiet local calendar count.
+7. Turn on **Study overlay** in the reader header or **Reading** menu to underline unknown and learning content words throughout the chapter, not only the current sentence. **Chapter words** is a chapter-level list (macOS also has a header button, not only a menu item). **Shadow this sentence** reports how many expected words on-device speech recognition heard; it is not a pronunciation or accent score. **Chapter quiz** is a local cloze and “what comes next” check; it does not add XP, streaks-as-flames, or remote content libraries. Study days are a quiet local calendar count.
 
-Enable **Deep Reading** from the playback controls when you want time to inspect or research each sentence. AudioReader plays the current sentence and pauses while keeping it highlighted. Select **Continue** to advance to and play the next sentence. On iPad, both controls are available in the reader playback bar, and **Command–Return** also continues when using a hardware keyboard. Deep Reading and sentence looping are mutually exclusive.
+Enable **Listen First** from the playback controls or **Reading** menu when you want to practise decoding speech before relying on text. AudioReader conceals the unfinished and future sentences, pauses at the current sentence boundary, then reveals the completed sentence with Replay, Explain, Shadow, Quick Quiz, and Continue actions. Quick Quiz is opt-in: it sends only a bounded set of already-heard resolved sentences to the selected AI provider, validates structured output, and falls back to the same local quiz when AI is unavailable or invalid. On iPad, controls retain 44-point targets, and **Command–Return** continues with a hardware keyboard. Listen First and sentence looping are mutually exclusive.
 
 Transcripts, vocabulary, settings, accepted translations, and chapter-translation checkpoints are stored locally under the platform's AudioReader application-support container. Imported iPad books are stored in the app's Documents directory.
+
+Signed-in learners control optional Operator learning analytics under **Settings → Account**. The switch defaults off. When enabled, support can see aggregate counts and timestamps for sync, reading, review, vocabulary, and AI-feature use; it never exposes reading text, transcripts, saved words, translations, notes, prompts, or audio.
 
 ### Configure optional AI assistance
 
@@ -123,7 +125,7 @@ Core reading-assistant prompts and translation results are provider-neutral. Pro
 | Option–Left / Option–Right | Previous or next sentence |
 | Command–R | Replay the current sentence |
 | Command–L | Toggle sentence loop |
-| Command–D | Toggle Deep Reading |
+| Command–D | Toggle Listen First |
 | Command–Return | Continue with the next sentence |
 | Command–Option–S | Toggle study overlay |
 | Command–K | Mark the selected word known |
@@ -155,19 +157,22 @@ stay local; another device may need the same local media for playback. See
 ### Learn in AudioReader
 
 **Words** is a complete local-first learning loop rather than an Anki launcher.
-Its primary action starts due learning cards, then due mature reviews, then up
-to 20 new cards per day. Grades update the card schedule and append immutable
-review history atomically, so a failed save never advances the visible session.
-The learning dashboard reports today's reviews, study-day streak, 30-day
-retention, a seven-day due forecast, and progress by book. Review schedules and
-history synchronize with the rest of learning data when account sync is on;
-the same workflow remains available offline without an account.
+It opens on a shared macOS/iPadOS **Today** page with the exact cards in the
+next session. Its primary action starts due learning cards, then due mature
+reviews, then up to 20 new cards per day. Grades update the card schedule and
+append immutable review history atomically, so a failed save never advances
+the visible session. Today also reports review count, study-day streak, 30-day
+retention, a seven-day due forecast, and progress by book. The separate
+**Vocabulary** page keeps search, book/list/category filters, list management,
+paginated cards, and export available without crowding the study flow. Review
+schedules and history synchronize with the rest of learning data when account
+sync is on; the same workflow remains available offline without an account.
 
 ### Export to Anki
 
 Anki is an optional alternative and interoperability path. In **Words**, select
 entries and choose **Export to Anki**, or use the current
-filtered view, Learning List, or All Vocabulary scope. AudioReader creates a
+filtered view, My List, or All Vocabulary scope. AudioReader creates a
 ZIP with `notes.tsv`, `manifest.json`, and deduplicated flat M4A clips. Missing
 or protected media produces text-only cards and an omission report instead of
 failing the export. Extract the ZIP before importing the TSV into Anki Desktop;

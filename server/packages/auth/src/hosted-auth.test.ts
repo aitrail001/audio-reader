@@ -487,6 +487,7 @@ describe("hosted GoTrue auth service", () => {
       new Request("https://audio-reader.local/session", { headers }),
     );
     expect(first?.role).toBe("admin");
+    expect(first?.adminRoles).toEqual(["operator"]);
     expect(await empty.hasAdminRole(bootstrapId)).toBe(true);
     const again = await firstAuth.authenticate(
       new Request("https://audio-reader.local/session", { headers }),
@@ -509,6 +510,32 @@ describe("hosted GoTrue auth service", () => {
     );
     expect(second?.role).toBe("user");
     expect(await occupied.hasAdminRole(bootstrapId)).toBe(false);
+  });
+
+  it("preserves scoped admin roles instead of collapsing them into generic admin", async () => {
+    const userId = "abababab-abab-4bab-8bab-abababababab";
+    const identity = createMemoryIdentityStore();
+    await identity.ensureProfile({ userId, email: EMAIL });
+    Object.assign(identity, {
+      adminRoles: () => Promise.resolve(["privacy_officer" as const]),
+    });
+    const { fetch } = createFetch(() => jsonResponse(500, { message: "unused" }));
+    const auth = createHostedAuthService({
+      jwt: JWT,
+      supabaseUrl: "https://example.supabase.co",
+      supabaseAnonKey: "anon-key",
+      fetch,
+      identity,
+    });
+    const token = await signAccessToken({ sub: userId, email: EMAIL }, JWT);
+
+    const principal = await auth.authenticate(
+      new Request("https://audio-reader.local/session", {
+        headers: { authorization: `Bearer ${token}` },
+      }),
+    );
+
+    expect(principal).toMatchObject({ role: "admin", adminRoles: ["privacy_officer"] });
   });
 
   it("maps GoTrue refresh outages to not_ready instead of invalid_refresh", async () => {

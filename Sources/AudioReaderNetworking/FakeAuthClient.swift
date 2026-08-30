@@ -18,6 +18,7 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
     private var profiles: [String: AccountProfile] = [:]
     private var tokenSerial = 0
     private var exportAssets: [String: Data] = [:]
+    private var operatorLearningAnalyticsEnabled = false
 
     public init() {}
 
@@ -219,6 +220,34 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
         try withLock {
             _ = try sessionLocked(accessToken: accessToken, deviceID: deviceID)
             recordedUsage.append(contentsOf: events)
+        }
+    }
+
+    public func analyticsPreference(
+        accessToken: String,
+        deviceID: String
+    ) async throws -> AccountAnalyticsPreference {
+        try withLock {
+            _ = try sessionLocked(accessToken: accessToken, deviceID: deviceID)
+            return AccountAnalyticsPreference(
+                operatorLearningAnalyticsEnabled: operatorLearningAnalyticsEnabled,
+                updatedAt: Self.timestamp()
+            )
+        }
+    }
+
+    public func setAnalyticsPreference(
+        accessToken: String,
+        deviceID: String,
+        enabled: Bool
+    ) async throws -> AccountAnalyticsPreference {
+        try withLock {
+            _ = try sessionLocked(accessToken: accessToken, deviceID: deviceID)
+            operatorLearningAnalyticsEnabled = enabled
+            return AccountAnalyticsPreference(
+                operatorLearningAnalyticsEnabled: enabled,
+                updatedAt: Self.timestamp()
+            )
         }
     }
 

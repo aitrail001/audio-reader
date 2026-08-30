@@ -4,7 +4,7 @@ import { REQUEST_ID_HEADER } from "@audio-reader/observability";
 import { createFakeQwenClient } from "@audio-reader/qwen";
 import { describe, expect, it, vi } from "vitest";
 import { createApiAppFromEnv, createTestApp, type WorkerEnv } from "./app";
-import { DEFAULT_MAX_BODY_BYTES } from "./body";
+import { DEFAULT_MAX_BODY_BYTES, SYNC_PUSH_MAX_BODY_BYTES } from "./body";
 import { createFakeObjectStore } from "./object-store";
 
 const HEALTH_PATHS = ["/v1/health", "/healthz", "/readyz"] as const;
@@ -277,6 +277,7 @@ describe("api-worker HTTP contract", () => {
 
   it("uses the default JSON body limit", () => {
     expect(DEFAULT_MAX_BODY_BYTES).toBe(1_048_576);
+    expect(SYNC_PUSH_MAX_BODY_BYTES).toBe(3_145_728);
   });
 
   it("rejects a missing content-type on JSON writes with problem+json", async () => {

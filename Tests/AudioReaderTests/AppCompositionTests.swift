@@ -104,7 +104,7 @@ struct AppCompositionTests {
 
     @MainActor
     @Test("Vocabulary review and learn-list updates persist through the injected repository")
-    func vocabularyMutationsPersistThroughInjectedRepository() throws {
+    func vocabularyMutationsPersistThroughInjectedRepository() async throws {
         let vocabulary = InMemoryVocabularyRepository()
         let knownLemmas = InMemoryKnownLemmaRepository()
         let token = "review-\(UUID().uuidString)"
@@ -117,7 +117,7 @@ struct AppCompositionTests {
             composition: AppComposition(vocabulary: vocabulary, knownLemmas: knownLemmas)
         )
         state.setVocabularyLearnList(token, included: false)
-        state.reviewVocabulary(token, quality: .remember, at: now)
+        await state.reviewVocabulary(token, quality: .remember, at: now)
 
         let stored = try #require(try vocabulary.loadVocabulary().first { $0.id.rawValue == token })
         #expect(stored.isInLearnList == false)

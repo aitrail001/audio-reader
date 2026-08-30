@@ -141,7 +141,11 @@ export function createRuntimeConfigService(input: {
     if (cache !== undefined && cache.expiresAt > now()) {
       return cache;
     }
-    const stored = await input.ops?.getOperatorSettings();
+    const settingsRead = await input.ops?.readOperatorSettings();
+    if (settingsRead !== undefined && !settingsRead.ok) {
+      throw new Error("operator_settings_unavailable");
+    }
+    const stored = settingsRead?.value;
     let secrets: OperatorSecrets = {};
     const nonce = stored?.nonce;
     const ciphertext = stored?.ciphertext;
@@ -236,6 +240,7 @@ export function createRuntimeConfigService(input: {
 
   async function view(): Promise<RuntimeConfigView> {
     const snapshot = await resolved();
+    const supabaseBucket = input.env.SUPABASE_STORAGE_BUCKET?.trim() ?? "";
     const denyEnvSecrets = snapshot.state.ciphertextPresent && !snapshot.state.secretsDecryptable;
     const qwenSource =
       (snapshot.state.secrets.qwenApiKey?.trim() ?? "") !== ""
@@ -280,14 +285,17 @@ export function createRuntimeConfigService(input: {
           snapshot.gcsBucket !== "" && snapshot.gcsJson !== ""
             ? "gcs"
             : (input.env.SUPABASE_URL?.trim() ?? "") !== "" &&
+                supabaseBucket !== "" &&
                 (input.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
                   input.env.SUPABASE_SECRET_KEY?.trim() ||
                   "") !== ""
               ? "supabase"
               : "none",
         ...(snapshot.gcsBucket === ""
-          ? snapshot.gcsJson === "" && (input.env.SUPABASE_URL?.trim() ?? "") !== ""
-            ? { bucket: "audio-reader-assets" }
+          ? snapshot.gcsJson === "" &&
+            (input.env.SUPABASE_URL?.trim() ?? "") !== "" &&
+            supabaseBucket !== ""
+            ? { bucket: supabaseBucket }
             : {}
           : { bucket: snapshot.gcsBucket }),
         serviceAccountConfigured: snapshot.gcsJson !== "",
@@ -498,11 +506,17 @@ export function createRuntimeConfigService(input: {
       const supabaseUrl = input.env.SUPABASE_URL?.trim() ?? "";
       const supabaseKey =
         input.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || input.env.SUPABASE_SECRET_KEY?.trim() || "";
-      const supabase = tryCreateSupabaseObjectStore({
-        ...(supabaseUrl === "" ? {} : { url: supabaseUrl }),
-        ...(supabaseKey === "" ? {} : { serviceRoleKey: supabaseKey }),
-        ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
-      });
+      const supabaseBucket = input.env.SUPABASE_STORAGE_BUCKET?.trim() ?? "";
+      // Match the Job Worker resolver: database credentials alone do not identify storage.
+      const supabase =
+        supabaseBucket === ""
+          ? undefined
+          : tryCreateSupabaseObjectStore({
+              ...(supabaseUrl === "" ? {} : { url: supabaseUrl }),
+              ...(supabaseKey === "" ? {} : { serviceRoleKey: supabaseKey }),
+              bucket: supabaseBucket,
+              ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
+            });
       const store =
         gcs ??
         supabase ??

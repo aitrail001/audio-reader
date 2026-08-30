@@ -45,7 +45,24 @@ public protocol VocabularyRepository: Sendable {
     func loadVocabulary() throws -> [StoredVocabularyOccurrence]
     func saveVocabulary(_ entries: [StoredVocabularyOccurrence]) throws
     func upsertVocabulary(_ entries: [StoredVocabularyOccurrence]) throws
+    func updateVocabularyReviewSchedule(_ schedule: StoredVocabularyReviewSchedule) throws
+    func updateVocabularyLearnList(id: VocabularyOccurrenceID, included: Bool) throws
     func deleteVocabulary(id: VocabularyOccurrenceID) throws
+}
+
+public extension VocabularyRepository {
+    /// Compatibility implementation for repositories without a native partial
+    /// update. Production stores override this to make the merge atomic.
+    func updateVocabularyReviewSchedule(_ schedule: StoredVocabularyReviewSchedule) throws {
+        guard let current = try loadVocabulary().first(where: { $0.id == schedule.vocabularyID }) else { return }
+        try upsertVocabulary([schedule.merging(into: current)])
+    }
+
+    func updateVocabularyLearnList(id: VocabularyOccurrenceID, included: Bool) throws {
+        guard var current = try loadVocabulary().first(where: { $0.id == id }) else { return }
+        current.isInLearnList = included
+        try upsertVocabulary([current])
+    }
 }
 
 public protocol KnownLemmaRepository: Sendable {
@@ -55,6 +72,7 @@ public protocol KnownLemmaRepository: Sendable {
 
 public protocol ReviewEventRepository: Sendable {
     func loadReviewEvents() throws -> [StoredReviewEvent]
+    func loadReviewVocabularySnapshot() throws -> [StoredVocabularyOccurrence]?
     func appendReviewEvent(_ event: StoredReviewEvent) throws
     func appendReviewEvent(
         _ event: StoredReviewEvent,
@@ -63,6 +81,8 @@ public protocol ReviewEventRepository: Sendable {
 }
 
 public extension ReviewEventRepository {
+    func loadReviewVocabularySnapshot() throws -> [StoredVocabularyOccurrence]? { nil }
+
     /// Repositories that do not enforce relational vocabulary ownership can
     /// store the additive event directly; SQLite overrides this to upsert the
     /// reviewed card and its local parent rows in the same transaction.
@@ -84,7 +104,16 @@ public protocol SyncOutboxRepository: Sendable {
     func enqueue(_ mutation: OutboxMutation) throws
     func pendingMutations() throws -> [OutboxMutation]
     func markAcknowledged(id: MutationID) throws
+    func markAcknowledged(ids: [MutationID]) throws
     func updatePending(_ mutation: OutboxMutation) throws
+}
+
+public extension SyncOutboxRepository {
+    func markAcknowledged(ids: [MutationID]) throws {
+        for id in ids {
+            try markAcknowledged(id: id)
+        }
+    }
 }
 
 public protocol SyncCursorStoring: Sendable {

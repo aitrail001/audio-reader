@@ -67,15 +67,13 @@ export type ProductAnalytics = {
     identifiersReturned: "pseudonymous";
     durableOwnershipKeysStored: true;
     profileDeletionCascadesEvents: true;
-    completedDeletionRequestPurgesEvents: false;
-    automaticRetentionDays: null;
+    completedDeletionRequestPurgesEvents: true;
+    automaticRetentionDays: 90;
   };
   sampled: boolean;
 };
 
 const MINIMUM_PRIVATE_BUCKET = 3;
-const MAX_SOURCE_EVENTS = 5000;
-
 type Dimensions = {
   country: string;
   region: string;
@@ -103,6 +101,7 @@ export function buildProductAnalytics(
   const fromMs = Date.parse(input.from);
   const toMs = Date.parse(input.to);
   const selected = source.filter((event) => {
+    if (event.purpose !== "learning_analytics") return false;
     const at = Date.parse(event.createdAt);
     if (!Number.isFinite(at) || at < fromMs || at >= toMs) return false;
     return matchesFilters(dimensions(event), input.filters);
@@ -165,10 +164,10 @@ export function buildProductAnalytics(
       identifiersReturned: "pseudonymous",
       durableOwnershipKeysStored: true,
       profileDeletionCascadesEvents: true,
-      completedDeletionRequestPurgesEvents: false,
-      automaticRetentionDays: null,
+      completedDeletionRequestPurgesEvents: true,
+      automaticRetentionDays: 90,
     },
-    sampled: source.length >= MAX_SOURCE_EVENTS,
+    sampled: false,
   };
 }
 

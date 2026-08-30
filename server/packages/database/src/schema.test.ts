@@ -30,6 +30,7 @@ const JSON_COLUMNS_ALLOWED = new Map<string, readonly string[]>([
   ["audit_events", ["metadata", "before_metadata", "after_metadata"]],
   ["operator_settings", ["payload"]],
   ["product_events", ["properties"]],
+  ["user_progress_summaries", ["sync_entity_counts", "ai_uses_by_feature"]],
 ]);
 
 function loadMigrationSql(): string {
@@ -164,6 +165,7 @@ describe("multi-user postgres schema migrations", () => {
       ["idempotency_records", "profiles"],
       ["admin_roles", "profiles"],
       ["privacy_requests", "profiles"],
+      ["object_write_leases", "profiles"],
       ["canonical_editions", "canonical_works"],
       ["books", "canonical_works"],
       ["books", "canonical_editions"],

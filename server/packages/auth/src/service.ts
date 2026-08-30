@@ -178,6 +178,11 @@ export type AuthIdentityStore = {
   revokeDevice(userId: string, deviceId: string): Promise<DeviceRevokeResult>;
   isDeviceRevoked(userId: string, deviceId: string): Promise<boolean>;
   hasAdminRole?(userId: string): Promise<boolean>;
+  adminRoles?(
+    userId: string,
+  ): Promise<
+    ("support_readonly" | "operator" | "privacy_officer" | "billing_operator" | "superadmin")[]
+  >;
   grantAdminRole?(userId: string): Promise<void>;
 };
 
@@ -291,6 +296,7 @@ export function createMemoryAuthService(options: MemoryAuthServiceOptions): Auth
       profileId: account.profileId,
       accountId: account.id,
       role: "user",
+      adminRoles: [],
       email,
     };
   }

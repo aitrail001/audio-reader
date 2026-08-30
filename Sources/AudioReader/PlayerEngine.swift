@@ -22,6 +22,9 @@ final class PlayerEngine {
     private var observer: Any?
     private var endObserver: NSObjectProtocol?
 
+    /// App-owned playback modes subscribe here so they keep working off the reader screen.
+    var onTick: (@MainActor (TimeInterval) -> Void)?
+
     var currentTime: TimeInterval = 0
     var duration: TimeInterval = 0
     var isPlaying: Bool = false
@@ -155,17 +158,20 @@ final class PlayerEngine {
         let seconds = max(0, time.seconds - mediaStart)
         if let limit = chapterDuration, seconds >= limit - 0.02 {
             currentTime = limit
+            onTick?(currentTime)
             pause()
             return
         }
         if let clipEnd, seconds >= clipEnd - 0.02 {
             currentTime = clipEnd
+            onTick?(currentTime)
             pause()
             return
         }
         if abs(currentTime - seconds) < 0.05 { return }
         currentTime = seconds
         applyLoopIfNeeded()
+        onTick?(currentTime)
     }
 
     private func applyLoopIfNeeded() {

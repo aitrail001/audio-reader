@@ -11,17 +11,17 @@ translation, summary, and chat go through the product API.
 
 ## What this stack implements today
 
-| Surface | Status |
-|---|---|
-| macOS app | Full local reading, transcription, study, optional LLM providers including Managed Qwen |
-| iPadOS app | Same product contract as macOS (ChatGPT-plan Codex login remains macOS-only; Managed Qwen is on both) |
-| Product API (Cloudflare Worker) | Health, CORS, problem+json, email OTP, Google/Microsoft PKCE, JWT refresh/logout, bootstrap, `GET`/`PATCH /v1/me`, `GET`/`PUT /v1/me/settings`, device list/revoke, `POST /v1/sync/push`, `GET /v1/sync/pull`, library/progress/vocab/reviews/transcripts, R2 upload tickets, privacy export/deletion, admin users/jobs/policies/cache, managed Qwen `POST /v1/ai/{translations,translation-batches,chapter-summaries,chat}` plus `GET` chat messages, HMAC shared cache, lookup-only cache reads, single-flight generation, and daily quotas. Local completes OAuth via `GET /v1/auth/oauth/local-complete` 302 onto `audioreader://auth/callback`. Staging/production return a Supabase Auth (GoTrue) authorize URL and never expose local-complete. |
-| Postgres schema + RLS | Versioned migrations in `server/supabase/migrations/` |
-| Local Docker API | Worker on `http://127.0.0.1:8787` with in-memory adapters + Postgres schema sandbox |
-| Hosted Qwen | Worker uses the QwenCloud Singapore token-plan endpoint (`token-plan.ap-southeast-1.maas.aliyuncs.com`) with `QWEN_API_KEY` (from repo-root `.env.local` `qwen-key`). Native **Managed Qwen (account)** in Settings sends product tasks to `/v1/ai/*`. Sentence/word translations, chapter-aligned sentence batches, and chapter summaries use HMAC-SHA256 shared cache keys (`CACHE_HMAC_SECRET`). Cache is checked before Qwen; `lookupOnly` never generates; a batch stores each sentence under its own key (neighbors are prompt context only). `refresh` / `refreshIds` skip cache for a generate. Native apps auto-load sentence and summary hits; word lookups stay on-demand. Single-flight generation and `user_assistant_results` wrappers apply. Daily quota counts a real Qwen call, not a cache hit. Chat is private and not cached. |
-| Sync / profile persistence | With `SUPABASE_SERVICE_ROLE_KEY`, the Worker persists profiles, devices, settings, library, and the sync changelog through PostgREST. Native 1.0.69 drains settings, books, transcripts, vocabulary, reviews, progress, and known lemmas when Settings → Account sync is on. |
-| Object storage | Upload tickets PUT to `/v1/uploads/{id}/body`. Local/test uses an in-Worker memory store. Staging/production use Google Cloud Storage when a bucket and service-account JSON are set in the admin portal (`/v1/admin/runtime-config`) or Worker env (`GCS_BUCKET`, `GCS_SERVICE_ACCOUNT_JSON`). Health reports `storage`. |
-| Admin console | Hosted at `https://audio-reader-admin.pages.dev`. Sign in with product email OTP (or paste an admin JWT). Desk, Trace, Audit, Metrics, Flags, Quotas, Policies, users, jobs, cache, and privacy are all operator-facing. Desk shows live health and diagnostics. Policies edit per-task model and system prompt. Trace lists Managed Qwen events by request id. Audit stores mutations with before/after metadata. CORS allowlists that origin. |
+| Surface                         | Status                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS app                       | Full local reading, transcription, study, optional LLM providers including Managed Qwen                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| iPadOS app                      | Same product contract as macOS (ChatGPT-plan Codex login remains macOS-only; Managed Qwen is on both)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Product API (Cloudflare Worker) | Health, CORS, problem+json, email OTP, Google/Microsoft PKCE, JWT refresh/logout, bootstrap, `GET`/`PATCH /v1/me`, `GET`/`PUT /v1/me/settings`, device list/revoke, `POST /v1/sync/push`, `GET /v1/sync/pull`, library/progress/vocab/reviews/transcripts, R2 upload tickets, privacy export/deletion and analytics preferences, scoped/audited admin user-progress summaries, admin users/jobs/policies/cache, managed Qwen `POST /v1/ai/{translations,translation-batches,chapter-summaries,chat,heard-quizzes}` plus `GET` chat messages, HMAC shared cache, lookup-only cache reads, single-flight generation, and daily quotas. Local completes OAuth via `GET /v1/auth/oauth/local-complete` 302 onto `audioreader://auth/callback`. Staging/production return a Supabase Auth (GoTrue) authorize URL and never expose local-complete.      |
+| Postgres schema + RLS           | Versioned migrations in `server/supabase/migrations/`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Local Docker API                | Worker on `http://127.0.0.1:8787` with in-memory adapters + Postgres schema sandbox                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Hosted Qwen                     | Worker uses the QwenCloud Singapore token-plan endpoint (`token-plan.ap-southeast-1.maas.aliyuncs.com`) with `QWEN_API_KEY` (from repo-root `.env.local` `qwen-key`). Native **Managed Qwen (account)** in Settings sends product tasks to `/v1/ai/*`. Sentence/word translations, chapter-aligned sentence batches, and chapter summaries use HMAC-SHA256 shared cache keys (`CACHE_HMAC_SECRET`). Cache is checked before Qwen; `lookupOnly` never generates; a batch stores each sentence under its own key (neighbors are prompt context only). `refresh` / `refreshIds` skip cache for a generate. Native apps auto-load sentence and summary hits; word lookups stay on-demand. Single-flight generation and `user_assistant_results` wrappers apply. Daily quota counts a real Qwen call, not a cache hit. Chat is private and not cached. |
+| Sync / profile persistence      | With `SUPABASE_SERVICE_ROLE_KEY`, the Worker persists profiles, devices, settings, library, and the sync changelog through PostgREST. Native 1.0.69 drains settings, books, transcripts, vocabulary, reviews, progress, and known lemmas when Settings → Account sync is on.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Object storage                  | Upload tickets PUT to `/v1/uploads/{id}/body`. Local/test uses an in-Worker memory store. Staging/production use Google Cloud Storage when a bucket and service-account JSON are set in the admin portal (`/v1/admin/runtime-config`) or Worker env (`GCS_BUCKET`, `GCS_SERVICE_ACCOUNT_JSON`). Health reports `storage`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Admin console                   | Hosted at `https://audio-reader-admin.pages.dev`. Sign in with product email OTP (or paste an admin JWT). Desk, Trace, Audit, Metrics, Flags, Quotas, Policies, users, jobs, cache, and privacy are all operator-facing. Desk shows live health and diagnostics. Policies validates editable prompt layers, renders the enforced task contract and final messages for all six subtasks, shows the output schema and cache impact, and can run a correlated Qwen probe. User detail shows consented aggregate progress only; every read is role-scoped and audited. Trace lists Managed Qwen events by request id. Audit stores mutations and probes without prompt or reading text. CORS allowlists that origin.                                                                                                                                  |
 
 Local and test Workers mint sessions in-process (`LOCAL_DEV_OTP=123456`). Staging
 and production **never** mint stub OTPs. With `SUPABASE_URL`,
@@ -331,14 +331,53 @@ JSON or Apple Keychain. LLM API keys stay in the separate AES-GCM credential vau
 
 ### 3.3 Health and incidents
 
-| Path | Use |
-|---|---|
-| `GET /healthz` | Process up |
-| `GET /readyz` | Gate traffic; `503` + `Problem` when database or Qwen is not `ok`. Optional object storage does not fail readiness. |
-| `GET /v1/health` | Product payload with `database`, `storage`, `qwen` |
+| Path             | Use                                                                                                                 |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `GET /healthz`   | Process up                                                                                                          |
+| `GET /readyz`    | Gate traffic; `503` + `Problem` when database or Qwen is not `ok`. Optional object storage does not fail readiness. |
+| `GET /v1/health` | Product payload with `database`, `storage`, `qwen`                                                                  |
 
 Every response includes `X-Request-Id` (also `Problem.traceId`). Correlate
 Worker logs with that header.
+
+Sync push logs record only request ID, mutation count, content length, and cursor.
+Sync pull logs record only request ID, cursor, page size, and `hasMore`; transcript
+payloads and reading text are never logged. Push envelopes are limited to 3 MiB,
+and database-side pull pages are limited to one MiB of encoded payload.
+
+Per-user Operator progress is served by `GET /v1/admin/users/{userId}/progress`. It requires an
+active `support_readonly`, `operator`, `privacy_officer`, or `superadmin` grant and appends an
+`admin_user_progress_read` audit event. Sync health is always support-visible; reading, review,
+learning, and AI-use counts remain hidden until the user enables them through
+the shared macOS/iPadOS Settings → Account control, backed by the device-bound
+`PUT /v1/me/analytics-preferences`. The database RPC returns only counts, coarse percentages,
+timestamps, and device attribution—never sync payloads, titles, transcripts, context, definitions,
+translations, or notes. Without consent the RPC computes sync health only and does not persist a
+detailed snapshot. Learner behavior events are rejected unless that preference is active, and
+opt-out atomically deletes both prior learning events and a prior snapshot. Required operational and
+security events use a distinct purpose and never contribute to learning dashboards. The Job Worker's
+scheduled path purges snapshots and product events after 90 days independently of Operator reads,
+and account deletion completes only after
+`delete_account_data` cascades private rows and retains an anonymous deleted tombstone that prevents
+a still-valid identity token from recreating the account. `request_account_deletion` atomically writes
+the temporary privacy request, durable deletion job, minimized audit event, and `deletion_pending`
+status. A database trigger serializes every account-owned service-role insert/update with profile
+deletion and rejects writes after the account becomes deletion-pending or deleted.
+
+Hosted jobs are stored and atomically leased in Postgres so API and Job Worker isolates cannot claim
+the same job. Upload and export writes first create a server-only `object_write_leases` row; account
+deletion defers without spending its retry budget until live leases finish, and expired lease keys
+join the deletion sweep. Before deleting metadata, the Job Worker enumerates database object keys plus the
+account storage prefix, deletes and verifies audio, EPUB, cover, transcript, and export bodies through
+the configured GCS/Supabase Storage/R2 provider, then executes the database cascade. Partial storage
+failure leaves metadata and the job intact for retry. The Job Worker performs live database and
+storage probes for health and fails scheduled/queue execution closed when either dependency is
+unavailable. An unavailable or malformed hosted Operator-settings read is an unavailable storage
+configuration, never permission to fall through to another provider. Supabase Storage is selected
+only when both Workers have the same explicit `SUPABASE_STORAGE_BUCKET`. User-entered deletion
+reasons live only in the cascading privacy request and are not
+copied into durable jobs or immutable audit events. Transient failures return the leased job to queued
+and dead-letter only at the configured attempt limit.
 
 Passwordless rate limits in this phase are **isolate-local in-memory buckets**.
 Do not treat them as production-grade abuse control; replace with Durable
@@ -356,10 +395,11 @@ Objects, KV, or the Cloudflare Rate Limiting API before public issuance.
 ### 3.5 Native vs server versioning
 
 - Apple apps use `x.y.z` (`CFBundleShortVersionString`) plus integer
-  `CFBundleVersion`. This release is `1.3.0 (87)` for both macOS and iPadOS.
+  `CFBundleVersion`. This release is `1.4.0 (88)` for both macOS and iPadOS.
 - Server packages stay `0.0.0` private workspace versions. Worker
-  `APP_VERSION` is independent. The API Worker is `1.4.0`; the unchanged job
-  Worker keeps its existing version. The Operator console is `0.7.0`.
+  `APP_VERSION` is independent. The API Worker is `1.5.0`. This release
+  introduces the Job Worker's first tracked runtime version at `1.0.0`. The
+  Operator console is `0.8.0`.
 - Production OTP From is `AudioReader <audio.reader.service@gmail.com>`. Verify
   that address in Resend; `onboarding@resend.dev` only delivers to the Resend account.
 
@@ -419,11 +459,11 @@ That script:
 
 Compose services:
 
-| Service | Port on the host | Role |
-|---|---|---|
-| `api` | `8787` | Wrangler local Worker, `ENVIRONMENT=local` |
-| `postgres` | `54329` | Postgres 18, trust auth, user `postgres` |
-| `migrate` | — | One-shot SQL apply, then exits |
+| Service    | Port on the host | Role                                       |
+| ---------- | ---------------- | ------------------------------------------ |
+| `api`      | `8787`           | Wrangler local Worker, `ENVIRONMENT=local` |
+| `postgres` | `54329`          | Postgres 18, trust auth, user `postgres`   |
+| `migrate`  | —                | One-shot SQL apply, then exits             |
 
 Stop:
 
@@ -457,6 +497,9 @@ psql "postgres://postgres@127.0.0.1:54329/postgres" \
 ```
 
 ### 5.3 HTTP smoke (already run by `pnpm dev:docker`)
+
+This command is an HTTP client only. Start `pnpm dev:api` or `pnpm dev:docker`
+first and leave it running while the probe executes.
 
 ```bash
 cd server
@@ -516,34 +559,34 @@ docker compose up --build -d api
 
 ## 6. Troubleshooting
 
-| Symptom | Check |
-|---|---|
-| App account calls fail immediately | `curl http://127.0.0.1:8787/healthz`; start `pnpm dev:docker` |
-| OTP `401` | Local code is `123456` only when `ENVIRONMENT=local` and `LOCAL_DEV_OTP` is set. Production never accepts it |
-| OTP `429` | Isolate rate limits; wait or recreate the `api` container |
-| Google/Microsoft sign-in hangs locally | The API must be local (`ENVIRONMENT=local`) so authorize returns `/v1/auth/oauth/local-complete`. Restart `pnpm dev:api` or `pnpm dev:docker`. |
-| Hosted Google/Microsoft opens Safari then fails | Add `audioreader://auth/callback` and `audioreader://**` to Supabase redirect URLs and change Site URL off `http://localhost:3000`. Enable the provider; Worker must be `--env staging\|production` with `SUPABASE_ANON_KEY`. |
-| Hosted OTP is `503` | Set `SUPABASE_URL`, `SUPABASE_JWT_SECRET`, and `SUPABASE_ANON_KEY` as Wrangler secrets for that `--env`. |
+| Symptom                                                 | Check                                                                                                                                                                                                                                                    |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| App account calls fail immediately                      | `curl http://127.0.0.1:8787/healthz`; start `pnpm dev:docker`                                                                                                                                                                                            |
+| OTP `401`                                               | Local code is `123456` only when `ENVIRONMENT=local` and `LOCAL_DEV_OTP` is set. Production never accepts it                                                                                                                                             |
+| OTP `429`                                               | Isolate rate limits; wait or recreate the `api` container                                                                                                                                                                                                |
+| Google/Microsoft sign-in hangs locally                  | The API must be local (`ENVIRONMENT=local`) so authorize returns `/v1/auth/oauth/local-complete`. Restart `pnpm dev:api` or `pnpm dev:docker`.                                                                                                           |
+| Hosted Google/Microsoft opens Safari then fails         | Add `audioreader://auth/callback` and `audioreader://**` to Supabase redirect URLs and change Site URL off `http://localhost:3000`. Enable the provider; Worker must be `--env staging\|production` with `SUPABASE_ANON_KEY`.                            |
+| Hosted OTP is `503`                                     | Set `SUPABASE_URL`, `SUPABASE_JWT_SECRET`, and `SUPABASE_ANON_KEY` as Wrangler secrets for that `--env`.                                                                                                                                                 |
 | Admin console email is a magic link, not a 6-digit code | Production/staging Workers send a six-digit code with Resend (`RESEND_API_KEY`) after GoTrue `generate_link`. Without that secret they fall back to GoTrue `/otp`, which emails a magic link. Site URL should be `https://audio-reader-admin.pages.dev`. |
-| Wrangler deploy used local CORS | Always `pnpm deploy:production` or `wrangler deploy --env production` |
-| iPad device cannot reach API | Not `localhost`; use Mac LAN IP; ATS allows local HTTP only |
-| `docker info` fails | Start Docker Desktop; `pnpm dev:docker` prints a clear error |
-| Postgres port busy | Host maps **54329**, not 5432, to avoid Homebrew Postgres |
-| `readyz` is `503` in production | Database or Qwen probe failed. Optional `storage` `unavailable` is expected until GCS is configured in the admin portal. |
-| Version mismatch after install | Repackage with `./scripts/package_app.sh` and `./scripts/package_ipad_simulator.sh`; `CFBundleShortVersionString` must match `MARKETING_VERSION` |
+| Wrangler deploy used local CORS                         | Always `pnpm deploy:production` or `wrangler deploy --env production`                                                                                                                                                                                    |
+| iPad device cannot reach API                            | Not `localhost`; use Mac LAN IP; ATS allows local HTTP only                                                                                                                                                                                              |
+| `docker info` fails                                     | Start Docker Desktop; `pnpm dev:docker` prints a clear error                                                                                                                                                                                             |
+| Postgres port busy                                      | Host maps **54329**, not 5432, to avoid Homebrew Postgres                                                                                                                                                                                                |
+| `readyz` is `503` in production                         | Database or Qwen probe failed. Optional `storage` `unavailable` is expected until GCS is configured in the admin portal.                                                                                                                                 |
+| Version mismatch after install                          | Repackage with `./scripts/package_app.sh` and `./scripts/package_ipad_simulator.sh`; `CFBundleShortVersionString` must match `MARKETING_VERSION`                                                                                                         |
 
 ---
 
 ## 7. Related files
 
-| Path | Role |
-|---|---|
-| `README.md` | Product usage for readers |
-| `server/README.md` | Workspace commands and Worker behavior |
-| `server/docker-compose.yml` | Local API + Postgres |
-| `server/Dockerfile` | Wrangler local image |
-| `contracts/openapi-v1.yaml` | Public product contract |
-| `docs/architecture/ADR-002-*.md` | Why Workers + Supabase |
+| Path                                             | Role                                                                                                  |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `README.md`                                      | Product usage for readers                                                                             |
+| `server/README.md`                               | Workspace commands and Worker behavior                                                                |
+| `server/docker-compose.yml`                      | Local API + Postgres                                                                                  |
+| `server/Dockerfile`                              | Wrangler local image                                                                                  |
+| `contracts/openapi-v1.yaml`                      | Public product contract                                                                               |
+| `docs/architecture/ADR-002-*.md`                 | Why Workers + Supabase                                                                                |
 | `Sources/AudioReaderNetworking/AuthModels.swift` | `ProductAPI` base URL: env `AUDIOREADER_API_BASE_URL`, then plist `ProductAPIBaseURL`, then localhost |
-| `server/scripts/preflight-deploy.sh` | Named-env checks + Wrangler login |
-| `server/scripts/deploy-worker.sh` | `wrangler deploy --env staging\|production` |
+| `server/scripts/preflight-deploy.sh`             | Named-env checks + Wrangler login                                                                     |
+| `server/scripts/deploy-worker.sh`                | `wrangler deploy --env staging\|production`                                                           |

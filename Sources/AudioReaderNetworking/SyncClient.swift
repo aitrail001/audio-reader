@@ -398,6 +398,8 @@ public struct AccountSyncRuntime: Sendable {
 }
 
 enum SyncJSONCoding {
+    static let tombstonePayload = Data("{\"_deleted\":true}".utf8)
+
     static var encoder: JSONEncoder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -421,7 +423,7 @@ enum SyncJSONCoding {
 }
 
 extension SyncPulledChange {
-    /// Books and vocabulary first so progress/reviews can attach to rows that exist.
+    /// Parent upserts precede dependents; vocabulary tombstones follow them so deletion wins.
     static func applying(_ changes: [SyncPulledChange]) -> [SyncPulledChange] {
         let rank: [String: Int] = [
             OutboxEntityType.book.rawValue: 0,
@@ -435,8 +437,12 @@ extension SyncPulledChange {
             OutboxEntityType.reviewEvent.rawValue: 8
         ]
         return changes.sorted { lhs, rhs in
-            let left = rank[lhs.entityType] ?? 50
-            let right = rank[rhs.entityType] ?? 50
+            // A vocabulary upsert is a dependency, while its tombstone must run after
+            // dependent progress/reviews so one pull page ends in the deleted state.
+            let left = lhs.entityType == OutboxEntityType.vocabulary.rawValue &&
+                lhs.operation == OutboxOperation.delete.rawValue ? 9 : rank[lhs.entityType] ?? 50
+            let right = rhs.entityType == OutboxEntityType.vocabulary.rawValue &&
+                rhs.operation == OutboxOperation.delete.rawValue ? 9 : rank[rhs.entityType] ?? 50
             if left != right { return left < right }
             return lhs.sequence < rhs.sequence
         }

@@ -18,6 +18,7 @@ export type WorkerEnv = {
   SUPABASE_JWT_AUDIENCE?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   SUPABASE_SECRET_KEY?: string;
+  SUPABASE_STORAGE_BUCKET?: string;
   QWEN_API_KEY?: string;
   QWEN_BASE_URL?: string;
   QWEN_MODEL?: string;

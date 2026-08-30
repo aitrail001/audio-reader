@@ -145,11 +145,21 @@ describe("operator session refresh", () => {
     expectLogsRedacted();
   });
 
-  it("posts logout then clears the session even when logout fails", async () => {
+  it("clears the local session before a stalled logout request completes", async () => {
     storeSession({ accessToken: ACCESS, refreshToken: REFRESH });
-    const fetchMock = vi.fn(() => Promise.reject(new TypeError("Failed to fetch")));
+    const observed: Array<string | null> = [];
+    const stop = subscribeSession((session) => observed.push(session?.accessToken ?? null));
+    let finishLogout: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          finishLogout = resolve;
+        }),
+    );
     vi.stubGlobal("fetch", fetchMock);
-    await logoutSession();
+    const pendingLogout = logoutSession();
+    expect(loadStoredSession()).toBeNull();
+    expect(observed.at(-1)).toBeNull();
     const logoutCall = fetchMock.mock.calls[0] as [string, RequestInit] | undefined;
     expect(logoutCall).toBeDefined();
     expect(String(logoutCall?.[0])).toContain("/v1/auth/logout");
@@ -157,6 +167,9 @@ describe("operator session refresh", () => {
       method: "POST",
       body: JSON.stringify({ refreshToken: REFRESH }),
     });
+    finishLogout?.(new Response(null, { status: 204 }));
+    await pendingLogout;
+    stop();
     expect(loadStoredSession()).toBeNull();
   });
 

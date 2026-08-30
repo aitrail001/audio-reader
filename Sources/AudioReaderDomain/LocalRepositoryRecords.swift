@@ -370,6 +370,59 @@ public struct StoredVocabularyOccurrence: Codable, Equatable, Sendable {
     }
 }
 
+/// The scheduler-owned subset of a vocabulary occurrence. Review persistence
+/// must not replace user-controlled or sync-updated vocabulary fields.
+public struct StoredVocabularyReviewSchedule: Equatable, Sendable {
+    public var vocabularyID: VocabularyOccurrenceID
+    public var reviewCount: Int
+    public var nextReview: Date?
+    public var lastReviewedAt: Date?
+    public var lastReviewQuality: String?
+    public var reviewIntervalDays: Double
+    public var reviewEaseFactor: Double
+
+    public init(
+        vocabularyID: VocabularyOccurrenceID,
+        reviewCount: Int,
+        nextReview: Date?,
+        lastReviewedAt: Date?,
+        lastReviewQuality: String?,
+        reviewIntervalDays: Double,
+        reviewEaseFactor: Double
+    ) {
+        self.vocabularyID = vocabularyID
+        self.reviewCount = reviewCount
+        self.nextReview = nextReview
+        self.lastReviewedAt = lastReviewedAt
+        self.lastReviewQuality = lastReviewQuality
+        self.reviewIntervalDays = reviewIntervalDays
+        self.reviewEaseFactor = reviewEaseFactor
+    }
+
+    public init(_ occurrence: StoredVocabularyOccurrence) {
+        self.init(
+            vocabularyID: occurrence.id,
+            reviewCount: occurrence.reviewCount,
+            nextReview: occurrence.nextReview,
+            lastReviewedAt: occurrence.lastReviewedAt,
+            lastReviewQuality: occurrence.lastReviewQuality,
+            reviewIntervalDays: occurrence.reviewIntervalDays,
+            reviewEaseFactor: occurrence.reviewEaseFactor
+        )
+    }
+
+    public func merging(into occurrence: StoredVocabularyOccurrence) -> StoredVocabularyOccurrence {
+        var merged = occurrence
+        merged.reviewCount = reviewCount
+        merged.nextReview = nextReview
+        merged.lastReviewedAt = lastReviewedAt
+        merged.lastReviewQuality = lastReviewQuality
+        merged.reviewIntervalDays = reviewIntervalDays
+        merged.reviewEaseFactor = reviewEaseFactor
+        return merged
+    }
+}
+
 /// Exact reader resume position is chapter-relative so M4B chapter offsets can
 /// change without moving the user's logical place in the chapter.
 public struct StoredReaderProgress: Codable, Equatable, Sendable, Identifiable {

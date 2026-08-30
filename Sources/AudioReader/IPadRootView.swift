@@ -406,7 +406,7 @@ struct IPadRootView: View {
             List {
                 Section("Saved") {
                     LabeledContent("Items", value: "\(state.vocab.count)")
-                    LabeledContent("Learn list", value: "\(state.vocab.count(where: \.isInLearnList))")
+                    LabeledContent("My list", value: "\(state.vocab.count(where: \.isInLearnList))")
                 }
             }
             .navigationTitle("Saved words")

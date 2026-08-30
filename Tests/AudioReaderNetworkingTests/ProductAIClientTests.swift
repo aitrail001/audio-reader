@@ -4,6 +4,41 @@ import Testing
 
 @Suite("Product managed Qwen client")
 struct ProductAIClientTests {
+    @Test("heard quiz posts an explicit task with typed bounded segments and returns raw JSON")
+    func heardQuizPostsBoundedSegments() async throws {
+        let http = StubHTTPClient()
+        http.enqueue(
+            status: 200,
+            json: #"{"raw":"{\"questions\":[]}"}"#
+        )
+        let client = LiveProductAIClient(http: http)
+        let result = try await client.heardQuiz(
+            accessToken: "access",
+            deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            request: ProductHeardQuizRequest(
+                chapterId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                sourceLanguage: "en",
+                targetLanguage: "zh-Hans",
+                learnerLevel: "B1",
+                bookTitle: "The Example Book",
+                author: "Ada Author",
+                chapterTitle: "An Arrival",
+                segments: [
+                    ProductHeardSegment(id: "s1", text: "First."),
+                    ProductHeardSegment(id: "s2", text: "Second.")
+                ]
+            )
+        )
+        #expect(result.raw == #"{"questions":[]}"#)
+        #expect(http.requests.first?.path == "/v1/ai/heard-quizzes")
+        let body = try #require(http.requests.first?.body)
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(json["task"] as? String == "heard_quiz")
+        #expect(json["bookTitle"] as? String == "The Example Book")
+        let segments = try #require(json["segments"] as? [[String: Any]])
+        #expect(segments.map { $0["id"] as? String } == ["s1", "s2"])
+    }
+
     @Test("translate posts the product task and decodes a cacheable result")
     func translatePostsProductTask() async throws {
         let http = StubHTTPClient()
@@ -22,12 +57,20 @@ struct ProductAIClientTests {
                 sourceLanguage: "en",
                 targetLanguage: "zh",
                 learnerLevel: "intermediate",
-                source: "Hello"
+                source: "Hello",
+                bookTitle: "The Example Book",
+                author: "Ada Author",
+                chapterTitle: "An Arrival"
             )
         )
         #expect(result.translation == "你好")
         #expect(http.requests.first?.path == "/v1/ai/translations")
         #expect(http.requests.first?.headers["Authorization"] == "Bearer access")
+        let body = try #require(http.requests.first?.body)
+        let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        #expect(json?["bookTitle"] as? String == "The Example Book")
+        #expect(json?["author"] as? String == "Ada Author")
+        #expect(json?["chapterTitle"] as? String == "An Arrival")
     }
 
     @Test("translateBatch posts the chapter block and decodes per-sentence cache results")

@@ -65,6 +65,25 @@ test("change review appears only after a mutation is initiated", async ({ page }
   await expect(review.getByLabel("Reason (5+ characters)")).toHaveValue("");
 });
 
+test("policy editor distinguishes editable and enforced prompt layers", async ({ page }) => {
+  await page.goto("/?preview=1&section=policies");
+  await expect(page.getByRole("heading", { name: "Policies" })).toBeVisible();
+
+  const translation = page
+    .locator("section.ledger")
+    .filter({ has: page.getByRole("heading", { name: /translation/i }) })
+    .first();
+  await expect(translation.getByLabel("Editable policy system instructions")).toBeVisible();
+  await expect(translation.getByLabel("Editable user-message template")).toBeVisible();
+  await expect(translation.getByLabel("Preview task for translation")).toHaveValue("sentence");
+  await expect(translation.getByRole("option")).toHaveText(["sentence", "word", "chapter batch"]);
+  await expect(translation.getByRole("button", { name: "Run staging probe" })).toBeDisabled();
+
+  await translation.getByLabel("Schema version").fill("2");
+  await expect(translation.getByRole("alert")).toContainText("Only schema version 1");
+  await expect(translation.getByRole("button", { name: "Validate & preview" })).toBeDisabled();
+});
+
 test("captures the incident-first Desk visual contract", async ({ page }, testInfo) => {
   await page.goto("/?preview=1&section=overview");
   await expect(page.getByRole("heading", { name: "Desk" })).toBeVisible();

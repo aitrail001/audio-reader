@@ -304,12 +304,10 @@ export async function verifyOtp(
   return session;
 }
 
-/**
- * Revoke the refresh token on the server when we have one, then always drop
- * local storage so a failed logout cannot leave the operator signed in.
- */
+/** Drop local authority synchronously, then make the best-effort server-side refresh-token revoke. */
 export async function logoutSession(): Promise<void> {
   const refreshToken = loadStoredSession()?.refreshToken?.trim() ?? "";
+  storeSession(null);
   try {
     if (refreshToken !== "") {
       const response = await fetch(`${API_BASE}/v1/auth/logout`, {
@@ -329,8 +327,6 @@ export async function logoutSession(): Promise<void> {
     }
   } catch {
     logAuth("admin_session_logout", "failed");
-  } finally {
-    storeSession(null);
   }
 }
 

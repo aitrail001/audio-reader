@@ -98,6 +98,22 @@ describe("memory identity store", () => {
     expect(stale.code).toBe("conflict");
     expect(stale.current.revision).toBe(1);
   });
+
+  it("does not repopulate a deleted identity tombstone", async () => {
+    const store = createMemoryIdentityStore();
+    await store.ensureProfile({ userId: USER_A, email: "before@example.com" });
+    await store.setAccountStatus(USER_A, "deleted");
+    const tombstone = await store.ensureProfile({ userId: USER_A, email: "after@example.com" });
+    expect(tombstone.status).toBe("deleted");
+    expect(tombstone.email).toBe("before@example.com");
+    await expect(
+      store.patchProfile(USER_A, { displayName: "Repopulated PII" }),
+    ).resolves.toBeUndefined();
+    await expect(store.getProfileByUserId(USER_A)).resolves.toMatchObject({
+      status: "deleted",
+      displayName: null,
+    });
+  });
 });
 
 describe("supabase identity store", () => {
@@ -193,5 +209,59 @@ describe("supabase identity store", () => {
     });
     const store = createSupabaseIdentityStore(rest);
     await expect(store.isDeviceRevoked(USER_A, DEVICE_A)).resolves.toBe(true);
+  });
+
+  it("does not write email or settings when authentication finds a deleted tombstone", async () => {
+    const calls: RecordedCall[] = [];
+    const fetchImpl: RestFetch = (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const headers = new Headers(init?.headers);
+      calls.push({
+        url,
+        method: init?.method ?? "GET",
+        body: typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : null,
+        authorization: headers.get("authorization") ?? undefined,
+        prefer: headers.get("prefer") ?? undefined,
+      });
+      if (url.includes("/profiles") && (init?.method ?? "GET") === "GET") {
+        return Promise.resolve(
+          jsonResponse(200, [
+            {
+              id: "11111111-1111-4111-8111-111111111111",
+              user_id: USER_A,
+              email: null,
+              display_name: null,
+              avatar_url: null,
+              account_status: "deleted",
+              created_at: "2026-08-27T12:00:00.000Z",
+              updated_at: "2026-08-30T04:00:00.000Z",
+              deletion_pending_at: "2026-08-30T04:00:00.000Z",
+              deleted_at: "2026-08-30T04:00:00.000Z",
+            },
+          ]),
+        );
+      }
+      return Promise.resolve(jsonResponse(500, { message: "unexpected write" }));
+    };
+    const store = createSupabaseIdentityStore(
+      createSupabaseRestClient({
+        url: "https://example.supabase.co",
+        serviceRoleKey: "service-role-key",
+        fetch: fetchImpl,
+      }),
+    );
+    const tombstone = await store.ensureProfile({ userId: USER_A, email: "new@example.com" });
+    expect(tombstone.status).toBe("deleted");
+    expect(tombstone.email).toBe("");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.method).toBe("GET");
+
+    await expect(
+      store.patchProfile(USER_A, { displayName: "Repopulated PII" }),
+    ).resolves.toBeUndefined();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.method).toBe("PATCH");
+    expect(calls[1]?.url).toContain("account_status=eq.active");
+    expect(calls[1]?.url).toContain("deleted_at=is.null");
   });
 });

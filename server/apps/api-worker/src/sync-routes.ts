@@ -15,6 +15,7 @@ type SyncPushResponse = components["schemas"]["SyncPushResponse"];
 type SyncPullResponse = components["schemas"]["SyncPullResponse"];
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 const SYNC_METHODS: Record<string, readonly string[]> = {
   "/v1/sync/push": ["POST"],
   "/v1/sync/pull": ["GET", "HEAD"],
@@ -82,6 +83,10 @@ async function pushSync(context: SyncRouteContext): Promise<Response> {
   if (deviceId instanceof Response) {
     return deviceId;
   }
+  const contentDigest = optionalContentDigest(context.request, context.requestId);
+  if (contentDigest instanceof Response) {
+    return contentDigest;
+  }
   return withIdempotency(
     context.idempotencyStore,
     context.request,
@@ -105,11 +110,19 @@ async function pushSync(context: SyncRouteContext): Promise<Response> {
       if (mutations instanceof Response) {
         return mutations;
       }
+      logSync("sync_push_start", context.requestId, {
+        mutations: mutations.length,
+        contentLength: context.request.headers.get("content-length") ?? "unknown",
+      });
       const pushed = await sync.push({
         userId: principal.accountId,
         deviceId,
         batchId,
         mutations,
+      });
+      logSync("sync_push_finish", context.requestId, {
+        mutations: mutations.length,
+        cursor: pushed.cursor,
       });
       const payload: SyncPushResponse = {
         batchId: pushed.batchId,
@@ -137,7 +150,23 @@ async function pushSync(context: SyncRouteContext): Promise<Response> {
     },
     context.requestId,
     principal,
+    contentDigest,
   );
+}
+
+function optionalContentDigest(request: Request, requestId: string): string | undefined | Response {
+  const digest = request.headers.get("X-Content-SHA256")?.trim();
+  if (digest === undefined || digest === "") {
+    return undefined;
+  }
+  if (!SHA256_PATTERN.test(digest)) {
+    return fieldError(
+      requestId,
+      "X-Content-SHA256",
+      "X-Content-SHA256 must be a SHA-256 hex digest.",
+    );
+  }
+  return digest.toLowerCase();
 }
 
 async function pullSync(context: SyncRouteContext, url: URL): Promise<Response> {
@@ -160,10 +189,16 @@ async function pullSync(context: SyncRouteContext, url: URL): Promise<Response> 
   if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
     return fieldError(context.requestId, "limit", "limit must be an integer between 1 and 500.");
   }
+  logSync("sync_pull_start", context.requestId, { cursor, limit });
   const pulled = await sync.pull({
     userId: principal.accountId,
     cursor,
     limit,
+  });
+  logSync("sync_pull_finish", context.requestId, {
+    cursor: pulled.cursor,
+    changes: pulled.changes.length,
+    hasMore: pulled.hasMore,
   });
   const payload: SyncPullResponse = {
     changes: pulled.changes,
@@ -171,6 +206,17 @@ async function pullSync(context: SyncRouteContext, url: URL): Promise<Response> 
     hasMore: pulled.hasMore,
   };
   return asHead(context.request, jsonResponse(payload));
+}
+
+/** Logs sync boundaries and counts without exposing learning payloads. */
+function logSync(
+  message: string,
+  requestId: string,
+  details: Record<string, string | number | boolean>,
+): void {
+  console.warn(
+    JSON.stringify({ level: "warn", message, component: "sync", requestId, ...details }),
+  );
 }
 
 async function requirePrincipal(context: SyncRouteContext): Promise<Principal | Response> {

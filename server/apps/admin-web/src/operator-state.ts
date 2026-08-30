@@ -44,6 +44,13 @@ export const FILTER_KEYS = [
 
 export type OperatorFilters = Partial<Record<(typeof FILTER_KEYS)[number], string>>;
 
+export type AdminLoadIdentity = { accessToken: string; generation: number };
+
+/** Async Operator responses may update privileged state only for the session generation that made them. */
+export function isCurrentAdminLoad(request: AdminLoadIdentity, active: AdminLoadIdentity): boolean {
+  return request.accessToken === active.accessToken && request.generation === active.generation;
+}
+
 /** URL state intentionally excludes secrets and mutation reasons. */
 export function initialOperatorLocation(search: string): {
   section: Section;
@@ -87,7 +94,32 @@ export function policyDraftErrors(draft: PolicyDraft): Record<string, string> {
   const errors: Record<string, string> = {};
   if (draft.model.trim() === "") errors.model = "Model is required.";
   if (draft.promptVersion.trim() === "") errors.promptVersion = "Prompt version is required.";
-  if (draft.schemaVersion.trim() === "") errors.schemaVersion = "Schema version is required.";
+  if (draft.schemaVersion.trim() === "") {
+    errors.schemaVersion = "Schema version is required.";
+  } else if (draft.schemaVersion.trim() !== "1") {
+    errors.schemaVersion = "Only schema version 1 is supported.";
+  }
+  const allowed = new Set([
+    "task",
+    "source",
+    "context",
+    "segments",
+    "question",
+    "chapterId",
+    "bookTitle",
+    "author",
+    "chapterTitle",
+    "sourceLanguage",
+    "targetLanguage",
+    "learnerLevel",
+  ]);
+  for (const match of draft.userPrompt.matchAll(/\{\{\s*([^{}]+?)\s*\}\}/g)) {
+    const name = match[1]?.trim() ?? "";
+    if (!allowed.has(name)) {
+      errors.userPrompt = `Unknown placeholder: {{${name}}}.`;
+      break;
+    }
+  }
   validateInt(errors, "maxInputTokens", draft.maxInputTokens, 1, 1_000_000);
   validateInt(errors, "maxOutputTokens", draft.maxOutputTokens, 1, 1_000_000);
   validateInt(errors, "timeoutMs", draft.timeoutMs, 1_000, 300_000);

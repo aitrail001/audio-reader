@@ -351,14 +351,14 @@ struct VocabularyReviewTests {
 
     @MainActor
     @Test("Grading appends a local review event with the displayed face and rating")
-    func gradingAppendsReviewEvent() throws {
+    func gradingAppendsReviewEvent() async throws {
         let reviews = InMemoryReviewEventRepository()
         let state = AppState(composition: .inMemory(reviewEvents: reviews))
         state.vocab = [entry(id: "reviewed")]
         state.vocabReviewPrompt = .reverse
         let reviewedAt = Date(timeIntervalSince1970: 2_000_000)
 
-        let saved = state.reviewVocabulary(
+        let saved = await state.reviewVocabulary(
             "reviewed",
             quality: .vague,
             face: .recognition,
@@ -376,7 +376,7 @@ struct VocabularyReviewTests {
 
     @MainActor
     @Test("A history write failure leaves the review due instead of advancing an unsynced card")
-    func gradingFailureDoesNotAdvanceCard() {
+    func gradingFailureDoesNotAdvanceCard() async {
         let state = AppState(composition: AppComposition(
             vocabulary: InMemoryVocabularyRepository(),
             knownLemmas: InMemoryKnownLemmaRepository(),
@@ -384,7 +384,7 @@ struct VocabularyReviewTests {
         ))
         state.vocab = [entry(id: "reviewed")]
 
-        let saved = state.reviewVocabulary("reviewed", quality: .remember, face: .recognition)
+        let saved = await state.reviewVocabulary("reviewed", quality: .remember, face: .recognition)
 
         #expect(!saved)
         #expect(state.vocab.first?.reviewCount == 0)
@@ -395,14 +395,58 @@ struct VocabularyReviewTests {
 
     @MainActor
     @Test("Grading a missing card reports failure without creating history")
-    func gradingMissingCardReportsFailure() {
+    func gradingMissingCardReportsFailure() async {
         let reviews = InMemoryReviewEventRepository()
         let state = AppState(composition: .inMemory(reviewEvents: reviews))
 
-        let saved = state.reviewVocabulary("missing", quality: .remember)
+        let saved = await state.reviewVocabulary("missing", quality: .remember)
 
         #expect(!saved)
         #expect((try? reviews.loadReviewEvents())?.isEmpty == true)
+    }
+
+    @MainActor
+    @Test("Durable review history repairs a failed vocabulary mirror on reload")
+    func reviewHistoryRepairsFailedMirror() async {
+        let original = entry(id: "reviewed")
+        let vocabulary = FailingUpsertVocabularyRepository(entries: [original])
+        let reviews = InMemoryReviewEventRepository()
+        let composition = AppComposition(
+            vocabulary: vocabulary,
+            knownLemmas: InMemoryKnownLemmaRepository(),
+            reviewEvents: reviews
+        )
+        let reviewedAt = Date(timeIntervalSince1970: 2_000_000)
+        let state = AppState(composition: composition)
+
+        #expect(await state.reviewVocabulary("reviewed", quality: .remember, at: reviewedAt))
+
+        let reloaded = AppState(composition: composition)
+        #expect(reloaded.vocab.first?.reviewCount == 1)
+        #expect(reloaded.vocab.first?.lastReviewedAt == reviewedAt)
+        #expect(reloaded.vocabReviewEvents.count == 1)
+    }
+
+    @MainActor
+    @Test("Review schedule recovery distinguishes events with the same timestamp")
+    func reviewHistoryRepairsSameTimestampMirrorFailure() async {
+        let vocabulary = FailOnSecondUpsertVocabularyRepository(entries: [entry(id: "reviewed")])
+        let reviews = InMemoryReviewEventRepository()
+        let composition = AppComposition(
+            vocabulary: vocabulary,
+            knownLemmas: InMemoryKnownLemmaRepository(),
+            reviewEvents: reviews
+        )
+        let reviewedAt = Date(timeIntervalSince1970: 2_000_000)
+        let state = AppState(composition: composition)
+
+        #expect(await state.reviewVocabulary("reviewed", quality: .remember, at: reviewedAt))
+        #expect(await state.reviewVocabulary("reviewed", quality: .vague, at: reviewedAt))
+
+        let reloaded = AppState(composition: composition)
+        #expect(reloaded.vocab.first?.reviewCount == 2)
+        #expect(reloaded.vocab.first?.lastReviewQuality == .vague)
+        #expect(reloaded.vocabReviewEvents.count == 2)
     }
 
     @Test("Sentence playback uses the matching transcript segment bounds")
@@ -629,5 +673,49 @@ private struct FailingReviewEventRepository: ReviewEventRepository {
 
     func appendReviewEvent(_ event: StoredReviewEvent) throws {
         throw Failure()
+    }
+}
+
+private final class FailingUpsertVocabularyRepository: VocabularyRepository, @unchecked Sendable {
+    struct Failure: Error {}
+    private let entries: [StoredVocabularyOccurrence]
+
+    init(entries: [VocabEntry]) {
+        self.entries = entries.map(StoredVocabularyOccurrence.init)
+    }
+
+    func loadVocabulary() throws -> [StoredVocabularyOccurrence] { entries }
+    func saveVocabulary(_ entries: [StoredVocabularyOccurrence]) throws {}
+    func upsertVocabulary(_ entries: [StoredVocabularyOccurrence]) throws { throw Failure() }
+    func deleteVocabulary(id: VocabularyOccurrenceID) throws {}
+}
+
+private final class FailOnSecondUpsertVocabularyRepository: VocabularyRepository, @unchecked Sendable {
+    struct Failure: Error {}
+    private let lock = NSLock()
+    private var entries: [StoredVocabularyOccurrence]
+    private var upsertCount = 0
+
+    init(entries: [VocabEntry]) {
+        self.entries = entries.map(StoredVocabularyOccurrence.init)
+    }
+
+    func loadVocabulary() throws -> [StoredVocabularyOccurrence] { lock.withLock { entries } }
+    func saveVocabulary(_ entries: [StoredVocabularyOccurrence]) throws { lock.withLock { self.entries = entries } }
+    func upsertVocabulary(_ updates: [StoredVocabularyOccurrence]) throws {
+        try lock.withLock {
+            upsertCount += 1
+            guard upsertCount < 2 else { throw Failure() }
+            for update in updates {
+                if let index = entries.firstIndex(where: { $0.id == update.id }) {
+                    entries[index] = update
+                } else {
+                    entries.append(update)
+                }
+            }
+        }
+    }
+    func deleteVocabulary(id: VocabularyOccurrenceID) throws {
+        lock.withLock { entries.removeAll { $0.id == id } }
     }
 }

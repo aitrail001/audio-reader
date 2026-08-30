@@ -7,13 +7,30 @@ import AudioReaderNetworking
 enum ManagedProductLLM {
     private static let client = LiveProductAIClient(baseURL: ProductAPI.resolvedBaseURL)
 
-    static func complete(system: String, user: String) async throws -> String {
+    static func complete(
+        system: String,
+        user: String,
+        sourceLanguage: String = "en",
+        targetLanguage: String = "zh",
+        learnerLevel: String = "intermediate",
+        chapterID: String = ManagedAccountCredentials.unscopedChapterID,
+        bookTitle: String = "",
+        author: String = "",
+        chapterTitle: String = ""
+    ) async throws -> String {
         let credentials = try credentials()
         return try await client.complete(
             accessToken: credentials.accessToken,
             deviceID: credentials.deviceID,
             system: system,
-            user: user
+            user: user,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+            learnerLevel: learnerLevel,
+            chapterID: chapterID,
+            bookTitle: bookTitle,
+            author: author,
+            chapterTitle: chapterTitle
         )
     }
 
@@ -30,6 +47,7 @@ enum ManagedProductLLM {
         editionFingerprint: String = "",
         chapterFingerprint: String = "",
         bookTitle: String = "",
+        author: String = "",
         chapterTitle: String = "",
         lookupOnly: Bool = false,
         refresh: Bool = false
@@ -51,6 +69,7 @@ enum ManagedProductLLM {
                 contextNext: contextNext,
                 targetId: targetID,
                 bookTitle: bookTitle,
+                author: author,
                 chapterTitle: chapterTitle,
                 lookupOnly: lookupOnly,
                 refresh: refresh
@@ -70,6 +89,7 @@ enum ManagedProductLLM {
         editionFingerprint: String = "",
         chapterFingerprint: String = "",
         bookTitle: String = "",
+        author: String = "",
         chapterTitle: String = "",
         lookupOnly: Bool = false,
         refreshIds: [String] = []
@@ -89,6 +109,7 @@ enum ManagedProductLLM {
                 contextPrevious: contextPrevious,
                 contextNext: contextNext,
                 bookTitle: bookTitle,
+                author: author,
                 chapterTitle: chapterTitle,
                 lookupOnly: lookupOnly,
                 refreshIds: refreshIds
@@ -107,6 +128,7 @@ enum ManagedProductLLM {
         editionFingerprint: String = "",
         chapterFingerprint: String = "",
         bookTitle: String = "",
+        author: String = "",
         chapterTitle: String = ""
     ) async throws -> ProductTranslationResult? {
         do {
@@ -121,6 +143,7 @@ enum ManagedProductLLM {
                 editionFingerprint: editionFingerprint,
                 chapterFingerprint: chapterFingerprint,
                 bookTitle: bookTitle,
+                author: author,
                 chapterTitle: chapterTitle,
                 lookupOnly: true
             )
@@ -186,6 +209,7 @@ enum ManagedProductLLM {
         editionFingerprint: String = "",
         chapterFingerprint: String = "",
         bookTitle: String = "",
+        author: String = "",
         chapterTitle: String = ""
     ) async throws -> String {
         let result = try await translate(
@@ -201,6 +225,7 @@ enum ManagedProductLLM {
             editionFingerprint: editionFingerprint,
             chapterFingerprint: chapterFingerprint,
             bookTitle: bookTitle,
+            author: author,
             chapterTitle: chapterTitle
         )
         let notes = result.notes.map {
@@ -231,6 +256,7 @@ enum ManagedProductLLM {
         segments: [String],
         editionFingerprint: String = "",
         bookTitle: String = "",
+        author: String = "",
         chapterTitle: String = "",
         lookupOnly: Bool = false,
         refresh: Bool = false
@@ -247,6 +273,7 @@ enum ManagedProductLLM {
                 editionFingerprint: editionFingerprint,
                 chapterFingerprint: chapterID,
                 bookTitle: bookTitle,
+                author: author,
                 chapterTitle: chapterTitle,
                 segments: segments,
                 lookupOnly: lookupOnly,
@@ -266,6 +293,35 @@ enum ManagedProductLLM {
         return String(data: data, encoding: .utf8) ?? summary.overview
     }
 
+    /// Sends only the completed Listen First sentence window; the server validates every cited id.
+    static func heardQuiz(
+        chapterID: String,
+        sourceLanguage: String,
+        targetLanguage: String,
+        learnerLevel: String,
+        segments: [ProductHeardSegment],
+        bookTitle: String = "",
+        author: String = "",
+        chapterTitle: String = ""
+    ) async throws -> String {
+        let credentials = try credentials()
+        let response = try await client.heardQuiz(
+            accessToken: credentials.accessToken,
+            deviceID: credentials.deviceID,
+            request: ProductHeardQuizRequest(
+                chapterId: hashedChapterID(chapterID),
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                learnerLevel: learnerLevel,
+                bookTitle: bookTitle,
+                author: author,
+                chapterTitle: chapterTitle,
+                segments: segments
+            )
+        )
+        return response.raw
+    }
+
     static func lookupSummary(
         chapterID: String,
         sourceLanguage: String,
@@ -274,6 +330,7 @@ enum ManagedProductLLM {
         segments: [String],
         editionFingerprint: String = "",
         bookTitle: String = "",
+        author: String = "",
         chapterTitle: String = ""
     ) async throws -> String? {
         do {
@@ -285,6 +342,7 @@ enum ManagedProductLLM {
                 segments: segments,
                 editionFingerprint: editionFingerprint,
                 bookTitle: bookTitle,
+                author: author,
                 chapterTitle: chapterTitle,
                 lookupOnly: true
             )

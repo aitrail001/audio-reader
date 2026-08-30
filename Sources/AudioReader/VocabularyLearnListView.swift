@@ -6,40 +6,36 @@ struct VocabularyLearnListView: View {
     let title: String
     let onReviewDue: ([String]) -> Void
 
-    private var entries: [VocabEntry] {
-        VocabReviewScheduler.scopedEntries(in: state.vocab, scope: scope)
-    }
-
-    private var dueEntries: [VocabEntry] {
-        VocabReviewScheduler.dueEntries(in: state.vocab, scope: scope, at: Date())
-    }
-
     var body: some View {
+        let entries = VocabReviewScheduler.scopedEntries(in: state.vocab, scope: scope)
+        let queue = VocabularyLearningAnalytics.queue(entries: entries, at: Date())
+        let session = queue.sessionBreakdown
+        let sessionIDs = queue.session.map(\.id)
         List {
             Section {
-                if dueEntries.isEmpty {
-                    Label("Nothing is due for review. Browse or remove items below.", systemImage: "checkmark.circle")
+                if sessionIDs.isEmpty {
+                    Label("Nothing is due for review. Browse or remove saved items below.", systemImage: "checkmark.circle")
                         .foregroundStyle(Palette.dim)
                 } else {
                     Button {
-                        onReviewDue(dueEntries.map(\.id))
+                        onReviewDue(sessionIDs)
                     } label: {
                         Label(
-                            "Review \(dueEntries.count) due",
+                            sessionLabel(session),
                             systemImage: "rectangle.stack"
                         )
                     }
                     .foregroundStyle(Palette.gold)
-                    .accessibilityHint("Starts a review containing only the due items in this list.")
+                    .accessibilityHint("Starts due cards first, followed by up to \(VocabularyLearningPolicy.dailyNewCardLimit) new cards from My list.")
                 }
             }
 
             Section("Items") {
                 if entries.isEmpty {
                     ContentUnavailableView(
-                        "Learn list is empty",
+                        "My list is empty",
                         systemImage: "star",
-                        description: Text("Add items from Vocabulary to include them here.")
+                        description: Text("Add items from Vocabulary to include them in focused study.")
                     )
                 } else {
                     ForEach(entries) { entry in
@@ -76,8 +72,14 @@ struct VocabularyLearnListView: View {
                 Label("Remove", systemImage: "star.slash")
             }
             .buttonStyle(.borderless)
-            .accessibilityLabel("Remove \(entry.word) from learn list")
+            .accessibilityLabel("Remove \(entry.word) from My list")
         }
         .padding(.vertical, 4)
+    }
+
+    private func sessionLabel(_ session: VocabularyStudySessionBreakdown) -> String {
+        if session.dueCount == 0 { return "Study \(session.newCount) new" }
+        if session.newCount == 0 { return "Review \(session.dueCount) due" }
+        return "Study \(session.dueCount) due + \(session.newCount) new"
     }
 }

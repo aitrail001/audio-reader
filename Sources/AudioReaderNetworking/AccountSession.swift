@@ -23,6 +23,7 @@ public final class AccountSession {
     public private(set) var quotas: [Quota] = []
     public private(set) var lastExportStatus: String?
     public private(set) var pendingExport: AccountExportFile?
+    public private(set) var operatorLearningAnalyticsEnabled: Bool?
     var pendingOAuth: PendingOAuth?
     var pendingAuthorizationURL: URL?
     @ObservationIgnored private var syncTask: Task<Void, Never>?
@@ -40,8 +41,12 @@ public final class AccountSession {
     public var onLearningDataApplied: (@MainActor () -> Void)?
     private static let syncLog = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "account-sync")
     private static let usageLog = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "product-usage")
-    private static let syncPushBatchSize = 500
-    private static let syncPushBatchBytes = 6 * 1_024 * 1_024
+    // A live 500-row vocabulary batch exceeded Cloudflare CPU at only 427 KB.
+    // Count-bound small rows separately from the byte-bound transcript envelope.
+    private static let syncPushBatchSize = 100
+    // The largest production transcript is 2.60 MB. A 2.99 MB mixed batch exhausted the
+    // Worker, so keep the complete native envelope below 2.625 MiB and send that row alone.
+    private static let syncPushBatchBytes = 2_752_512
     private static let syncPushEnvelopeReserve = 16 * 1_024
     private static let syncPullPageLimit = 100
     private static let syncPullPageCap = 64
@@ -192,6 +197,7 @@ public final class AccountSession {
             guard mode.isSignedIn else { return }
             try await loadDevices()
             try await refreshProductBootstrap()
+            try? await loadAnalyticsPreference()
         }
     }
 
@@ -433,6 +439,35 @@ public final class AccountSession {
         }
     }
 
+    /// Reloads the learner-owned switch that gates optional Operator learning aggregates.
+    public func refreshAnalyticsPreference() async {
+        guard mode.isSignedIn else {
+            operatorLearningAnalyticsEnabled = nil
+            return
+        }
+        await run(activity: "Refreshing privacy preference…") {
+            try await loadAnalyticsPreference()
+            errorMessage = nil
+        }
+    }
+
+    /// Only aggregate counts and timestamps are shared; content remains excluded server-side.
+    public func setOperatorLearningAnalyticsEnabled(_ enabled: Bool) async {
+        guard mode.isSignedIn else { return }
+        await run(activity: "Updating privacy preference…") {
+            let deviceID = try store.deviceID()
+            let preference = try await withAccessToken { access in
+                try await client.setAnalyticsPreference(
+                    accessToken: access,
+                    deviceID: deviceID,
+                    enabled: enabled
+                )
+            }
+            operatorLearningAnalyticsEnabled = preference.operatorLearningAnalyticsEnabled
+            errorMessage = nil
+        }
+    }
+
     public func revokeDevice(_ device: AccountDevice) async {
         await run(activity: "Revoking device…") {
             let currentID = try store.deviceID()
@@ -504,6 +539,7 @@ public final class AccountSession {
             try runtime.cursor.saveCursor(cursor)
         }
         try await loadDevices()
+        try? await loadAnalyticsPreference()
     }
 
     private func persist(tokens: TokenPair, profile: AccountProfile, mode: AccountMode) throws {
@@ -529,6 +565,15 @@ public final class AccountSession {
             return
         }
         devices = listed.filter { !$0.revoked }
+    }
+
+    private func loadAnalyticsPreference() async throws {
+        let deviceID = try store.deviceID()
+        let preference = try await withAccessToken { access in
+            try await client.analyticsPreference(accessToken: access, deviceID: deviceID)
+        }
+        guard mode.isSignedIn else { return }
+        operatorLearningAnalyticsEnabled = preference.operatorLearningAnalyticsEnabled
     }
 
     private func withAccessToken<T>(_ operation: (String) async throws -> T) async throws -> T {
@@ -563,7 +608,13 @@ public final class AccountSession {
         let deviceID = try store.deviceID()
         syncStatus = AccountSyncStatus(phase: .preparing)
         try enqueueDirtySnapshot(runtime: runtime)
-        let pending = try runtime.outbox.pendingMutations()
+        let pendingBeforeCoalescing = try runtime.outbox.pendingMutations().count
+        let pending = try coalescePendingMutations(runtime: runtime)
+        if pending.count != pendingBeforeCoalescing {
+            Self.syncLog.info(
+                "sync_outbox_coalesced message=sync_outbox_coalesced requestId=\(jobID, privacy: .public) superseded=\(pendingBeforeCoalescing - pending.count, privacy: .public) retained=\(pending.count, privacy: .public)"
+            )
+        }
         let batches = try Self.syncPushBatches(pending)
         var entityProgress = Self.syncEntityProgress(pending)
         var uploaded = 0
@@ -594,7 +645,9 @@ public final class AccountSession {
                 let pushed = try await withAccessToken { access in
                     try await runtime.client.push(accessToken: access, deviceID: deviceID, request: request)
                 }
-                try runtime.cursor.saveCursor(pushed.cursor)
+                // A push returns the server high-water mark, which can include changes from
+                // another device that this client has not pulled. Only a successfully applied
+                // pull page may advance the local acknowledgement cursor.
                 for result in pushed.results {
                     try applyPushResult(result, lookup: &lookup, runtime: runtime, jobID: jobID)
                     if result.status == "applied" || result.status == "duplicate" {
@@ -657,7 +710,9 @@ public final class AccountSession {
                         entityType: change.entityType,
                         entityID: change.entityId,
                         serverVersion: Int64(change.revision),
-                        payload: SyncJSONCoding.data(from: change.payload)
+                        payload: change.operation == OutboxOperation.delete.rawValue
+                            ? SyncJSONCoding.tombstonePayload
+                            : SyncJSONCoding.data(from: change.payload)
                     )
                 )
             }
@@ -704,6 +759,9 @@ public final class AccountSession {
 
         for mutation in pending {
             let mutationBytes = try encoder.encode(mutation.productMutation()).count + 1
+            guard syncPushEnvelopeReserve + mutationBytes <= syncPushBatchBytes else {
+                throw AccountSyncRunError.mutationTooLarge(entityType: mutation.entityType.rawValue)
+            }
             if !batch.isEmpty,
                batch.count >= syncPushBatchSize || encodedBytes + mutationBytes > syncPushBatchBytes
             {
@@ -763,29 +821,35 @@ public final class AccountSession {
     private func enqueueDirtySnapshot(runtime: AccountSyncRuntime) throws {
         let candidates = try runtime.snapshot()
         let pending = try runtime.outbox.pendingMutations()
-        var pendingByEntity: [String: OutboxMutation] = [:]
+        var pendingByEntity: [String: [OutboxMutation]] = [:]
         for item in pending {
-            pendingByEntity[Self.entityKey(item)] = item
+            pendingByEntity[Self.entityKey(item), default: []].append(item)
         }
         for var candidate in candidates {
             let key = Self.entityKey(candidate)
+            let existingRows = pendingByEntity[key] ?? []
             if let version = try runtime.versions?.loadVersion(
                 entityType: candidate.entityType.rawValue,
                 entityID: candidate.entityID
             ) {
                 candidate.baseRevision = ServerVersion(version.serverVersion)
                 if SyncJSONCoding.payloadsMatch(version.payload, candidate.payload) {
+                    // The learner reverted to the last server-applied value. Any older local
+                    // intent for this entity is stale and must not be uploaded after the skip.
+                    try runtime.outbox.markAcknowledged(ids: existingRows.map(\.id))
                     continue
                 }
             } else {
                 candidate.baseRevision = candidate.baseRevision.rawValue == 0 ? .zero : candidate.baseRevision
             }
-            if let existing = pendingByEntity[key] {
+            if let existing = existingRows.last {
+                candidate.baseRevision = max(existing.baseRevision, candidate.baseRevision)
                 if SyncJSONCoding.payloadsMatch(existing.payload, candidate.payload),
                    existing.baseRevision == candidate.baseRevision {
                     continue
                 }
                 var updated = existing
+                updated.operation = candidate.operation
                 updated.payload = candidate.payload
                 updated.baseRevision = candidate.baseRevision
                 updated.occurredAt = candidate.occurredAt
@@ -796,8 +860,41 @@ public final class AccountSession {
         }
     }
 
+    /// Repeated snapshots from older builds may leave many pending rows for one entity.
+    /// Keep the latest payload at the highest known server revision before network batching.
+    private func coalescePendingMutations(runtime: AccountSyncRuntime) throws -> [OutboxMutation] {
+        let pending = try runtime.outbox.pendingMutations()
+        struct Winner {
+            var order: Int
+            var mutation: OutboxMutation
+            var needsUpdate: Bool
+        }
+        var winners: [String: Winner] = [:]
+        var superseded: [MutationID] = []
+        for (order, mutation) in pending.enumerated() {
+            let key = Self.entityKey(mutation)
+            guard let existing = winners[key] else {
+                winners[key] = Winner(order: order, mutation: mutation, needsUpdate: false)
+                continue
+            }
+            var replacement = mutation
+            replacement.baseRevision = max(existing.mutation.baseRevision, mutation.baseRevision)
+            winners[key] = Winner(
+                order: existing.order,
+                mutation: replacement,
+                needsUpdate: replacement.baseRevision != mutation.baseRevision
+            )
+            superseded.append(existing.mutation.id)
+        }
+        for winner in winners.values where winner.needsUpdate {
+            try runtime.outbox.updatePending(winner.mutation)
+        }
+        try runtime.outbox.markAcknowledged(ids: superseded)
+        return winners.values.sorted { $0.order < $1.order }.map(\.mutation)
+    }
+
     private static func entityKey(_ mutation: OutboxMutation) -> String {
-        "\(mutation.entityType.rawValue)|\(mutation.entityID)|\(mutation.operation.rawValue)"
+        "\(mutation.entityType.rawValue)|\(mutation.entityID)"
     }
 
     private func refreshAccessTokenKeepingSession() async throws {
@@ -834,6 +931,7 @@ public final class AccountSession {
         quotas = []
         lastExportStatus = nil
         pendingExport = nil
+        operatorLearningAnalyticsEnabled = nil
         pendingOAuth = nil
         pendingAuthorizationURL = nil
         pendingEmail = nil
@@ -894,11 +992,14 @@ public final class AccountSession {
 
 private enum AccountSyncRunError: LocalizedError {
     case pullPageLimitReached
+    case mutationTooLarge(entityType: String)
 
     var errorDescription: String? {
         switch self {
         case .pullPageLimitReached:
             "More sync changes remain on the server. Sync again to continue."
+        case .mutationTooLarge(let entityType):
+            "One \(entityType.replacingOccurrences(of: "_", with: " ")) record is too large to sync safely. Keep it on this device or shorten that chapter transcript."
         }
     }
 }

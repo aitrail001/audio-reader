@@ -2,6 +2,7 @@ import type { Principal } from "@audio-reader/auth";
 import { problemResponse } from "./http";
 
 export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ISO_CURSOR_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 export async function requirePrincipal(input: {
   authenticate: (request: Request) => Promise<Principal | null>;
@@ -186,6 +187,60 @@ export function pageCursor<T>(
   return {
     items: sliced,
     nextCursor: next < items.length ? String(next) : null,
+  };
+}
+
+export type TimeIdCursor = { createdAt: string; id: string };
+
+/** Keeps database sort keys opaque so clients only store and replay continuation tokens. */
+export function encodeTimeIdCursor(cursor: TimeIdCursor): string {
+  return btoa(JSON.stringify([cursor.createdAt, cursor.id]))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+}
+
+export function decodeTimeIdCursor(
+  value: string | null,
+): { ok: true; cursor: TimeIdCursor | null } | { ok: false } {
+  if (value === null || value.trim() === "") {
+    return { ok: true, cursor: null };
+  }
+  try {
+    const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
+    const decoded = JSON.parse(
+      atob(normalized + "=".repeat((4 - (normalized.length % 4)) % 4)),
+    ) as unknown;
+    if (
+      !Array.isArray(decoded) ||
+      decoded.length !== 2 ||
+      typeof decoded[0] !== "string" ||
+      !ISO_CURSOR_TIMESTAMP.test(decoded[0]) ||
+      !Number.isFinite(Date.parse(decoded[0])) ||
+      typeof decoded[1] !== "string" ||
+      !UUID_PATTERN.test(decoded[1])
+    ) {
+      return { ok: false };
+    }
+    return { ok: true, cursor: { createdAt: decoded[0], id: decoded[1] } };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Expects a stable database-ordered `limit + 1` read and emits the next opaque keyset cursor. */
+export function timeIdCursorPage<T extends TimeIdCursor>(
+  items: T[],
+  limit: number,
+): { items: T[]; nextCursor: string | null } {
+  const pageItems = items.slice(0, limit);
+  const last = pageItems.at(-1);
+  return {
+    items: pageItems,
+    nextCursor:
+      items.length > limit && last !== undefined
+        ? encodeTimeIdCursor({ createdAt: last.createdAt, id: last.id })
+        : null,
   };
 }
 

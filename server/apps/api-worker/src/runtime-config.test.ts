@@ -4,6 +4,44 @@ import { describe, expect, it } from "vitest";
 import { OperatorWrappingNotConfiguredError, createRuntimeConfigService } from "./runtime-config";
 
 describe("runtime config wrapping", () => {
+  it("fails storage resolution closed when hosted Operator settings cannot be read", async () => {
+    const database = createFakeDatabaseClient();
+    Object.assign(database.ops, {
+      readOperatorSettings: () => Promise.resolve({ ok: false, error: "unavailable" } as const),
+    });
+    const runtime = createRuntimeConfigService({
+      env: {
+        ENVIRONMENT: "production",
+        SUPABASE_URL: "https://example.supabase.co",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+      },
+      ops: database.ops,
+      wrappingSecret: "test-operator-secret-key",
+    });
+
+    await expect(runtime.resolveStorage({ useFakes: false })).rejects.toThrow(
+      "operator_settings_unavailable",
+    );
+  });
+
+  it("does not infer Supabase Storage from database credentials alone", async () => {
+    const database = createFakeDatabaseClient();
+    const runtime = createRuntimeConfigService({
+      env: {
+        ENVIRONMENT: "production",
+        SUPABASE_URL: "https://example.supabase.co",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+      },
+      ops: database.ops,
+      wrappingSecret: "test-operator-secret-key",
+    });
+
+    await expect((await runtime.resolveStorage({ useFakes: false })).ping()).resolves.toBe(
+      "unavailable",
+    );
+    await expect(runtime.view()).resolves.toMatchObject({ storage: { provider: "none" } });
+  });
+
   it("marks saved secrets undecryptable when the wrapping key changed", async () => {
     const database = createFakeDatabaseClient();
     const cipher = await encryptOperatorSecrets("old-wrapping-secret", {

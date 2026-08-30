@@ -18,6 +18,7 @@ import {
 import {
   destinationQuery,
   initialOperatorLocation,
+  isCurrentAdminLoad,
   mutationSummary,
   policyDraftErrors,
   quotaReductionNeedsConfirmation,
@@ -56,7 +57,9 @@ import {
   isPreviewMode,
 } from "./preview-data";
 import type {
+  AdminCapabilities,
   AdminUser,
+  AdminUserProgress,
   AuditEvent,
   BlockedAttempt,
   CacheAction,
@@ -65,6 +68,7 @@ import type {
   HealthPayload,
   Job,
   MetricsSnapshot,
+  ManagedPromptPreview,
   ProductAnalytics,
   OperatorDiagnostics,
   OperatorEvent,
@@ -237,6 +241,10 @@ export function App() {
   const [panelErrors, setPanelErrors] = useState<Partial<Record<Section, string>>>({});
   const panelLoadCounts = useRef<Partial<Record<Section, number>>>({});
   const [loadingPanels, setLoadingPanels] = useState<Partial<Record<Section, boolean>>>({});
+  const [adminCapabilities, setAdminCapabilities] = useState<AdminCapabilities>({
+    roles: [],
+    capabilities: [],
+  });
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [userQuery, setUserQuery] = useState(initialLocation.current.filters.userQuery ?? "");
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -292,6 +300,10 @@ export function App() {
   const [openUserId, setOpenUserId] = useState<string | null>(null);
   const [openCacheId, setOpenCacheId] = useState<string | null>(null);
   const [userDetail, setUserDetail] = useState<AdminUser | null>(null);
+  const [userProgress, setUserProgress] = useState<AdminUserProgress | null>(null);
+  const [userProgressStatus, setUserProgressStatus] = useState<"idle" | "loading" | "unavailable">(
+    "idle",
+  );
   const [cacheDetail, setCacheDetail] = useState<CacheEntry | null>(null);
   const [armed, setArmed] = useState<string | null>(null);
   const [cursors, setCursors] = useState<{
@@ -330,6 +342,8 @@ export function App() {
   const [metricsContentCategory, setMetricsContentCategory] = useState(
     initialLocation.current.filters.metricsContentCategory ?? "",
   );
+  const activeAccessToken = useRef(token);
+  const adminLoadGeneration = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -427,17 +441,68 @@ export function App() {
     };
   }, []);
 
+  function clearSessionScopedState(): void {
+    adminLoadGeneration.current += 1;
+    panelLoadCounts.current = {};
+    setBusy(false);
+    setLoadingPanels({});
+    setAdminCapabilities({ roles: [], capabilities: [] });
+    setUsers([]);
+    setJobs([]);
+    setPolicies([]);
+    setDrafts({});
+    setCache([]);
+    setRuntime(null);
+    setMetrics(null);
+    setAnalytics(null);
+    setAudit([]);
+    setBlocked([]);
+    setFlags([]);
+    setQuotas([]);
+    setQuotaDrafts({});
+    setPrivacy([]);
+    setDiagnostics(null);
+    setEvents([]);
+    setUsageEvents([]);
+    setUserDetail(null);
+    setUserProgress(null);
+    setCacheDetail(null);
+    setOpenUserId(null);
+    setOpenCacheId(null);
+    setQwenKey("");
+    setGcsJson("");
+    setTurnstileSecret("");
+    setQwenBaseUrl("");
+    setQwenModel("");
+    setGcsBucket("");
+    setSentenceContextCount("1");
+    setReason("");
+    setMutationPreview("");
+    setArmed(null);
+    setCode("");
+    setTokenDraft("");
+    setTurnstileToken("");
+    setPanelErrors({});
+    setCursors({ users: null, jobs: null, cache: null, audit: null, usage: null, privacy: null });
+  }
+
   const rememberSession = (session: StoredSession | string | null) => {
     if (preview) {
       setToken(session === null || session === "" ? "" : "preview");
       return;
     }
     if (session === null || session === "") {
+      clearSessionScopedState();
+      activeAccessToken.current = "";
       storeSession(null);
       setToken("");
       return;
     }
     const next = typeof session === "string" ? { accessToken: session } : session;
+    if (activeAccessToken.current !== next.accessToken) {
+      clearSessionScopedState();
+      activeAccessToken.current = next.accessToken;
+    }
     storeSession(next);
     setToken(next.accessToken);
   };
@@ -448,7 +513,12 @@ export function App() {
     }
     // Storage is source of truth after silent refresh or a wipe; React token must follow.
     return subscribeSession((session) => {
-      setToken(session?.accessToken ?? "");
+      const nextAccess = session?.accessToken ?? "";
+      if (activeAccessToken.current !== nextAccess) {
+        clearSessionScopedState();
+        activeAccessToken.current = nextAccess;
+      }
+      setToken(nextAccess);
     });
   }, [preview]);
 
@@ -463,6 +533,7 @@ export function App() {
   const loadAdmin = useCallback(
     async (access = token) => {
       if (preview) {
+        setAdminCapabilities({ roles: ["superadmin"], capabilities: ["*"] });
         setUsers(PREVIEW_USERS);
         setJobs(PREVIEW_JOBS);
         setPolicies(PREVIEW_POLICIES);
@@ -490,8 +561,39 @@ export function App() {
         setAdminError("Sign in or paste an admin access token.");
         return;
       }
+      const loadIdentity = {
+        accessToken: access,
+        generation: adminLoadGeneration.current + 1,
+      };
+      adminLoadGeneration.current = loadIdentity.generation;
+      const isCurrentLoad = () =>
+        isCurrentAdminLoad(loadIdentity, {
+          accessToken: activeAccessToken.current,
+          generation: adminLoadGeneration.current,
+        });
+      if (!isCurrentLoad()) {
+        return;
+      }
       setBusy(true);
       try {
+        const capabilitiesPayload = await getJson<AdminCapabilities>(
+          "/v1/admin/capabilities",
+          access,
+        );
+        if (!isCurrentLoad()) return;
+        setAdminCapabilities(capabilitiesPayload);
+        const permits = (capability: string) =>
+          capabilitiesPayload.capabilities.includes(capability);
+        if (!permits("runtime.manage")) {
+          setQwenKey("");
+          setGcsJson("");
+          setTurnstileSecret("");
+        }
+        const authorized = <T,>(
+          capability: string,
+          request: () => Promise<T>,
+          empty: T,
+        ): Promise<T> => (permits(capability) ? request() : Promise.resolve(empty));
         const from = new Date(metricsFrom).toISOString();
         const to = new Date(metricsTo).toISOString();
         const usersQuery = new URLSearchParams();
@@ -564,18 +666,27 @@ export function App() {
         ): Promise<T | null> => {
           const pending = (panelLoadCounts.current[panel] ?? 0) + 1;
           panelLoadCounts.current[panel] = pending;
-          setLoadingPanels((current) => ({ ...current, [panel]: true }));
+          if (isCurrentLoad()) {
+            setLoadingPanels((current) => ({ ...current, [panel]: true }));
+          }
           try {
             return await request;
           } catch (cause: unknown) {
+            if (!isCurrentLoad()) return null;
             if (cause instanceof AdminSessionError) throw cause;
+            if (cause instanceof AdminApiError && (cause.status === 401 || cause.status === 403)) {
+              clearSessionScopedState();
+              throw cause;
+            }
             const message = describeAdminError(cause);
             setPanelErrors((current) => ({ ...current, [panel]: message }));
             return stale;
           } finally {
-            const remaining = Math.max(0, (panelLoadCounts.current[panel] ?? 1) - 1);
-            panelLoadCounts.current[panel] = remaining;
-            setLoadingPanels((current) => ({ ...current, [panel]: remaining > 0 }));
+            if (isCurrentLoad()) {
+              const remaining = Math.max(0, (panelLoadCounts.current[panel] ?? 1) - 1);
+              panelLoadCounts.current[panel] = remaining;
+              setLoadingPanels((current) => ({ ...current, [panel]: remaining > 0 }));
+            }
           }
         };
         const [
@@ -595,91 +706,181 @@ export function App() {
           eventsPayload,
           usagePayload,
         ] = await Promise.all([
-          independent(
-            "users",
-            getJson<unknown>(`/v1/admin/users?${usersQuery.toString()}`, access),
-            { items: users, nextCursor: cursors.users },
+          authorized(
+            "users.read",
+            () =>
+              independent(
+                "users",
+                getJson<unknown>(`/v1/admin/users?${usersQuery.toString()}`, access),
+                { items: users, nextCursor: cursors.users },
+              ),
+            { items: [], nextCursor: null },
           ),
-          independent("jobs", getJson<unknown>(`/v1/admin/jobs?${jobQuery.toString()}`, access), {
-            items: jobs,
-            nextCursor: cursors.jobs,
-          }),
-          independent(
-            "policies",
-            getJson<Policy[] | { items?: Policy[] }>("/v1/admin/llm/policies", access),
-            policies,
+          authorized(
+            "jobs.read",
+            () =>
+              independent(
+                "jobs",
+                getJson<unknown>(`/v1/admin/jobs?${jobQuery.toString()}`, access),
+                {
+                  items: jobs,
+                  nextCursor: cursors.jobs,
+                },
+              ),
+            { items: [], nextCursor: null },
           ),
-          independent(
-            "cache",
-            getJson<unknown>(`/v1/admin/cache?${cacheQuery.toString()}`, access),
-            { items: cache, nextCursor: cursors.cache },
+          authorized(
+            "policies.read",
+            () =>
+              independent(
+                "policies",
+                getJson<Policy[] | { items?: Policy[] }>("/v1/admin/llm/policies", access),
+                policies,
+              ),
+            [],
           ),
-          independent(
-            "overview",
-            getJson<RuntimeConfig>("/v1/admin/runtime-config", access),
-            runtime,
+          authorized(
+            "cache.read",
+            () =>
+              independent(
+                "cache",
+                getJson<unknown>(`/v1/admin/cache?${cacheQuery.toString()}`, access),
+                { items: cache, nextCursor: cursors.cache },
+              ),
+            { items: [], nextCursor: null },
           ),
-          independent(
-            "metrics",
-            getJson<MetricsSnapshot>(
-              `/v1/admin/metrics?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
-              access,
-            ),
-            metrics,
+          authorized(
+            "runtime.read",
+            () =>
+              independent(
+                "overview",
+                getJson<RuntimeConfig>("/v1/admin/runtime-config", access),
+                runtime,
+              ),
+            null,
           ),
-          independent(
-            "metrics",
-            getJson<ProductAnalytics>(
-              `/v1/admin/product-analytics?${analyticsQuery.toString()}`,
-              access,
-            ),
-            analytics,
+          authorized(
+            "metrics.read",
+            () =>
+              independent(
+                "metrics",
+                getJson<MetricsSnapshot>(
+                  `/v1/admin/metrics?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+                  access,
+                ),
+                metrics,
+              ),
+            null,
           ),
-          independent(
-            "audit",
-            getJson<unknown>(`/v1/admin/audit-events?${auditQuery.toString()}`, access),
-            { items: audit, nextCursor: cursors.audit },
+          authorized(
+            "metrics.read",
+            () =>
+              independent(
+                "metrics",
+                getJson<ProductAnalytics>(
+                  `/v1/admin/product-analytics?${analyticsQuery.toString()}`,
+                  access,
+                ),
+                analytics,
+              ),
+            null,
           ),
-          independent("access", getJson<unknown>("/v1/admin/auth/blocked-attempts", access), {
-            items: blocked,
-          }),
-          independent(
-            "flags",
-            getJsonOrNull<FeatureFlag[]>("/v1/admin/feature-flags", access),
-            flags,
+          authorized(
+            "activity.read",
+            () =>
+              independent(
+                "audit",
+                getJson<unknown>(`/v1/admin/audit-events?${auditQuery.toString()}`, access),
+                { items: audit, nextCursor: cursors.audit },
+              ),
+            { items: [], nextCursor: null },
           ),
-          independent("quotas", getJsonOrNull<Quota[]>("/v1/admin/quotas", access), quotas),
-          independent(
-            "privacy",
-            getJsonOrNull<unknown>(`/v1/admin/privacy-requests?${privacyQuery.toString()}`, access),
-            { items: privacy, nextCursor: cursors.privacy },
+          authorized(
+            "access.read",
+            () =>
+              independent("access", getJson<unknown>("/v1/admin/auth/blocked-attempts", access), {
+                items: blocked,
+              }),
+            { items: [] },
           ),
-          independent(
-            "overview",
-            getJsonOrNull<OperatorDiagnostics>("/v1/admin/diagnostics", access),
-            diagnostics,
+          authorized(
+            "flags.read",
+            () =>
+              independent(
+                "flags",
+                getJsonOrNull<FeatureFlag[]>("/v1/admin/feature-flags", access),
+                flags,
+              ),
+            [],
           ),
-          independent(
-            "trace",
-            getJsonOrNull<OperatorEvent[]>(
-              `/v1/admin/events${eventsQuery.toString() === "" ? "" : `?${eventsQuery.toString()}`}`,
-              access,
-            ),
-            events,
+          authorized(
+            "quotas.read",
+            () => independent("quotas", getJsonOrNull<Quota[]>("/v1/admin/quotas", access), quotas),
+            [],
           ),
-          independent(
-            "usage",
-            getJsonOrNull<unknown>(`/v1/admin/product-events?${usageQuery.toString()}`, access),
-            { items: usageEvents, nextCursor: cursors.usage },
+          authorized(
+            "privacy.read",
+            () =>
+              independent(
+                "privacy",
+                getJsonOrNull<unknown>(
+                  `/v1/admin/privacy-requests?${privacyQuery.toString()}`,
+                  access,
+                ),
+                { items: privacy, nextCursor: cursors.privacy },
+              ),
+            { items: [], nextCursor: null },
+          ),
+          authorized(
+            "diagnostics.read",
+            () =>
+              independent(
+                "overview",
+                getJsonOrNull<OperatorDiagnostics>("/v1/admin/diagnostics", access),
+                diagnostics,
+              ),
+            null,
+          ),
+          authorized(
+            "activity.read",
+            () =>
+              independent(
+                "trace",
+                getJsonOrNull<OperatorEvent[]>(
+                  `/v1/admin/events${eventsQuery.toString() === "" ? "" : `?${eventsQuery.toString()}`}`,
+                  access,
+                ),
+                events,
+              ),
+            [],
+          ),
+          authorized(
+            "activity.read",
+            () =>
+              independent(
+                "usage",
+                getJsonOrNull<unknown>(`/v1/admin/product-events?${usageQuery.toString()}`, access),
+                { items: usageEvents, nextCursor: cursors.usage },
+              ),
+            { items: [], nextCursor: null },
           ),
         ]);
+        if (!isCurrentLoad()) return;
         const nextPolicies = pageItems<Policy>(policiesPayload);
         setUsers(pageItems<AdminUser>(usersPayload));
         setJobs(pageItems<Job>(jobsPayload));
         setPolicies(nextPolicies);
         setDrafts(draftsFrom(nextPolicies));
         setCache(pageItems<CacheEntry>(cachePayload));
-        if (runtimePayload !== null) applyRuntime(runtimePayload);
+        if (runtimePayload !== null) {
+          applyRuntime(runtimePayload);
+        } else {
+          setRuntime(null);
+          setQwenBaseUrl("");
+          setQwenModel("");
+          setGcsBucket("");
+          setSentenceContextCount("1");
+        }
         setMetrics(metricsPayload);
         setAnalytics(analyticsPayload);
         setAudit(pageItems<AuditEvent>(auditPayload));
@@ -708,7 +909,11 @@ export function App() {
         setAdminError(null);
         setStatus("Operator data loaded.");
       } catch (cause: unknown) {
+        if (!isCurrentLoad()) return;
         const message = cause instanceof Error ? cause.message : "admin request failed";
+        if (cause instanceof AdminApiError && (cause.status === 401 || cause.status === 403)) {
+          clearSessionScopedState();
+        }
         if (cause instanceof AdminSessionError) {
           if (cause.outcome === "invalid") {
             rememberSession(null);
@@ -718,7 +923,9 @@ export function App() {
         }
         setAdminError(message);
       } finally {
-        setBusy(false);
+        if (isCurrentLoad()) {
+          setBusy(false);
+        }
       }
     },
     [
@@ -1017,15 +1224,34 @@ export function App() {
     if (openUserId === user.accountId) {
       setOpenUserId(null);
       setUserDetail(null);
+      setUserProgress(null);
+      setUserProgressStatus("idle");
       return;
     }
     setOpenUserId(user.accountId);
     setUserDetail(user);
+    setUserProgress(null);
+    setUserProgressStatus(preview ? "idle" : "loading");
     if (preview) {
       return;
     }
     try {
-      setUserDetail(await getJson<AdminUser>(`/v1/admin/users/${user.accountId}`, token));
+      const [detail, progress] = await Promise.allSettled([
+        getJson<AdminUser>(`/v1/admin/users/${user.accountId}`, token),
+        getJson<AdminUserProgress>(`/v1/admin/users/${user.accountId}/progress`, token),
+      ]);
+      if (detail.status === "fulfilled") {
+        setUserDetail(detail.value);
+      }
+      if (progress.status === "fulfilled") {
+        setUserProgress(progress.value);
+        setUserProgressStatus("idle");
+      } else {
+        setUserProgressStatus("unavailable");
+      }
+      if (detail.status === "rejected") {
+        throw detail.reason;
+      }
     } catch (cause: unknown) {
       setUserDetail(user);
       setAdminError(cause instanceof Error ? cause.message : "could not load user");
@@ -1051,7 +1277,19 @@ export function App() {
     }
   }
 
-  const canMutate = !busy;
+  const hasCapability = (capability: string) =>
+    adminCapabilities.capabilities.includes("*") ||
+    adminCapabilities.capabilities.includes(capability);
+  const canManageUsers = !busy && hasCapability("users.manage");
+  const canManageRoles = !busy && hasCapability("roles.manage");
+  const canManagePolicies = !busy && hasCapability("policies.manage");
+  const canProbeAI = !busy && hasCapability("ai.probe");
+  const canManageRuntime = !busy && hasCapability("runtime.manage");
+  const canManageJobs = !busy && hasCapability("jobs.manage");
+  const canManageCache = !busy && hasCapability("cache.manage");
+  const canManageFlags = !busy && hasCapability("flags.manage");
+  const canManageQuotas = !busy && hasCapability("quotas.manage");
+  const canManagePrivacy = !busy && hasCapability("privacy.manage");
   const signedIn = token.trim() !== "";
   const activePanelBusy = loadingPanels[section] === true;
 
@@ -1246,7 +1484,8 @@ export function App() {
               jobs={jobs}
               quotas={quotas}
               events={events}
-              reasonReady={canMutate}
+              reasonReady={canManageRuntime}
+              canProbe={canProbeAI}
               busy={busy}
               onProbe={() => {
                 void probeQwen();
@@ -1304,10 +1543,13 @@ export function App() {
               users={users}
               userQuery={userQuery}
               busy={busy}
-              canMutate={canMutate}
+              canMutate={canManageUsers}
+              canManageRoles={canManageRoles}
               armed={armed}
               openUserId={openUserId}
               userDetail={userDetail}
+              userProgress={userProgress}
+              userProgressStatus={userProgressStatus}
               nextCursor={cursors.users}
               onQuery={setUserQuery}
               onApply={() => {
@@ -1332,7 +1574,7 @@ export function App() {
               policies={policies}
               drafts={drafts}
               busy={busy}
-              canMutate={canMutate}
+              canMutate={canManagePolicies}
               onDraft={(id, patch) => {
                 setDrafts((current) => {
                   const existing = current[id];
@@ -1393,6 +1635,24 @@ export function App() {
                   summary,
                 );
               }}
+              onPreview={async (policy, draft, subtask, probe) => {
+                if (preview) {
+                  throw new Error("Prompt validation requires a connected API.");
+                }
+                return sendJson<ManagedPromptPreview>(
+                  `/v1/admin/llm/policies/${policy.id}/${probe ? "probe" : "preview"}`,
+                  token,
+                  "POST",
+                  {
+                    subtask,
+                    draft: {
+                      systemPrompt: draft.systemPrompt,
+                      userPrompt: draft.userPrompt,
+                      schemaVersion: draft.schemaVersion,
+                    },
+                  },
+                );
+              }}
             />
           ) : null}
 
@@ -1401,7 +1661,7 @@ export function App() {
               jobs={jobs}
               jobStatus={jobStatus}
               busy={busy}
-              canMutate={canMutate}
+              canMutate={canManageJobs}
               armed={armed}
               nextCursor={cursors.jobs}
               onStatus={setJobStatus}
@@ -1426,7 +1686,7 @@ export function App() {
               cacheTask={cacheTask}
               cacheFingerprint={cacheFingerprint}
               busy={busy}
-              canMutate={canMutate}
+              canMutate={canManageCache}
               armed={armed}
               openCacheId={openCacheId}
               cacheDetail={cacheDetail}
@@ -1546,7 +1806,7 @@ export function App() {
             <FlagsPanel
               flags={flags}
               busy={busy}
-              canMutate={canMutate}
+              canMutate={canManageFlags}
               onToggle={(flag) => {
                 if (
                   flag.key === "managed_qwen" &&
@@ -1587,7 +1847,7 @@ export function App() {
               quotas={quotas}
               drafts={quotaDrafts}
               busy={busy}
-              canMutate={canMutate}
+              canMutate={canManageQuotas}
               onDraft={(key, value) => {
                 setQuotaDrafts((current) => ({ ...current, [key]: value }));
               }}
@@ -1621,7 +1881,7 @@ export function App() {
               requests={privacy}
               status={privacyStatus}
               busy={busy}
-              canMutate={canMutate}
+              canMutate={canManagePrivacy}
               armed={armed}
               onArm={setArmed}
               onMutate={(path, action, message) => {
@@ -1750,6 +2010,7 @@ function DeskPanel(props: {
   quotas: Quota[];
   events: OperatorEvent[];
   reasonReady: boolean;
+  canProbe: boolean;
   busy: boolean;
   onProbe: () => void;
   qwenBaseUrl: string;
@@ -1949,7 +2210,12 @@ function DeskPanel(props: {
             </tbody>
           </table>
           <div className="actions">
-            <button type="button" className="ghost" disabled={props.busy} onClick={props.onProbe}>
+            <button
+              type="button"
+              className="ghost"
+              disabled={props.busy || !props.canProbe}
+              onClick={props.onProbe}
+            >
               Probe Qwen completion
             </button>
           </div>
@@ -2033,6 +2299,7 @@ function DeskPanel(props: {
           <label>
             Qwen base URL
             <input
+              disabled={!props.reasonReady}
               value={props.qwenBaseUrl}
               onChange={(event) => {
                 props.onQwenBaseUrl(event.target.value);
@@ -2042,6 +2309,7 @@ function DeskPanel(props: {
           <label>
             Qwen model
             <input
+              disabled={!props.reasonReady}
               value={props.qwenModel}
               onChange={(event) => {
                 props.onQwenModel(event.target.value);
@@ -2053,6 +2321,7 @@ function DeskPanel(props: {
           Sentence context
           <input
             inputMode="numeric"
+            disabled={!props.reasonReady}
             value={props.sentenceContextCount}
             onChange={(event) => {
               props.onSentenceContextCount(event.target.value);
@@ -2068,6 +2337,7 @@ function DeskPanel(props: {
           <input
             type="password"
             autoComplete="off"
+            disabled={!props.reasonReady}
             value={props.qwenKey}
             onChange={(event) => {
               props.onQwenKey(event.target.value);
@@ -2077,6 +2347,7 @@ function DeskPanel(props: {
         <label>
           Object-store bucket
           <input
+            disabled={!props.reasonReady}
             value={props.gcsBucket}
             onChange={(event) => {
               props.onGcsBucket(event.target.value);
@@ -2086,6 +2357,7 @@ function DeskPanel(props: {
         <label>
           GCS service account JSON (leave blank to keep)
           <textarea
+            disabled={!props.reasonReady}
             value={props.gcsJson}
             spellCheck={false}
             onChange={(event) => {
@@ -2098,6 +2370,7 @@ function DeskPanel(props: {
           <input
             type="password"
             autoComplete="off"
+            disabled={!props.reasonReady}
             value={props.turnstileSecret}
             onChange={(event) => {
               props.onTurnstileSecret(event.target.value);
@@ -2252,9 +2525,12 @@ function UsersPanel(props: {
   userQuery: string;
   busy: boolean;
   canMutate: boolean;
+  canManageRoles: boolean;
   armed: string | null;
   openUserId: string | null;
   userDetail: AdminUser | null;
+  userProgress: AdminUserProgress | null;
+  userProgressStatus: "idle" | "loading" | "unavailable";
   nextCursor: string | null;
   onQuery: (value: string) => void;
   onApply: () => void;
@@ -2375,6 +2651,7 @@ function UsersPanel(props: {
               <UserActions
                 user={user}
                 canMutate={props.canMutate}
+                canManageRoles={props.canManageRoles}
                 armed={props.armed}
                 onArm={props.onArm}
                 onMutate={props.onMutate}
@@ -2387,6 +2664,8 @@ function UsersPanel(props: {
           return (
             <UserDetail
               user={detail}
+              progress={props.openUserId === user.accountId ? props.userProgress : null}
+              progressStatus={props.userProgressStatus}
               loaded={
                 detail.devices !== undefined ||
                 detail.books !== undefined ||
@@ -2410,6 +2689,7 @@ function UsersPanel(props: {
 function UserActions(props: {
   user: AdminUser;
   canMutate: boolean;
+  canManageRoles: boolean;
   armed: string | null;
   onArm: (id: string | null) => void;
   onMutate: (path: string, message: string) => void;
@@ -2463,7 +2743,7 @@ function UserActions(props: {
       <ConfirmButton
         id={`grant:${user.accountId}`}
         armed={props.armed}
-        disabled={!props.canMutate}
+        disabled={!props.canManageRoles}
         label="Grant admin"
         confirm="Confirm grant"
         onArm={props.onArm}
@@ -2478,7 +2758,12 @@ function UserActions(props: {
   );
 }
 
-function UserDetail(props: { user: AdminUser; loaded: boolean }) {
+function UserDetail(props: {
+  user: AdminUser;
+  loaded: boolean;
+  progress: AdminUserProgress | null;
+  progressStatus: "idle" | "loading" | "unavailable";
+}) {
   const user = props.user;
   const devices = user.devices ?? [];
   const books = user.books ?? [];
@@ -2509,6 +2794,11 @@ function UserDetail(props: { user: AdminUser; loaded: boolean }) {
           <span className={`pill ${statusTone(user.status)}`}>{user.status}</span>
         </dd>
       </dl>
+      <UserProgressSummary
+        accountId={user.accountId}
+        progress={props.progress}
+        status={props.progressStatus}
+      />
       <div className="prose-pair">
         <figure>
           <figcaption>Devices ({String(devices.length || user.deviceCount)})</figcaption>
@@ -2610,6 +2900,135 @@ function UserDetail(props: { user: AdminUser; loaded: boolean }) {
   );
 }
 
+function UserProgressSummary(props: {
+  accountId: string;
+  progress: AdminUserProgress | null;
+  status: "idle" | "loading" | "unavailable";
+}) {
+  if (props.status === "loading") {
+    return (
+      <div className="progress-summary" aria-live="polite" aria-busy="true">
+        <p className="empty">Loading privacy-safe sync and learning progress…</p>
+      </div>
+    );
+  }
+  if (props.progress === null) {
+    return props.status === "unavailable" ? (
+      <div className="progress-summary" role="status">
+        <p className="empty">
+          Progress is unavailable. This account may require a scoped support role or a fresh sync.
+        </p>
+      </div>
+    ) : null;
+  }
+  const progress = props.progress;
+  const consented = progress.consent.operatorLearningAnalyticsEnabled;
+  const activityHref = `?${destinationQuery("usage", {
+    usageAccountId: props.accountId,
+  }).toString()}`;
+  return (
+    <section className="progress-summary" aria-labelledby={`progress-${props.accountId}`}>
+      <div className="progress-heading">
+        <div>
+          <h3 id={`progress-${props.accountId}`}>Progress and activity</h3>
+          <p>
+            Counts and timestamps only. Reading text, transcripts, definitions, translations, and
+            notes are never shown here.
+          </p>
+        </div>
+        <a className="button-link ghost" href={activityHref}>
+          Open filtered activity
+        </a>
+      </div>
+      <dl className="detail-grid wide">
+        <dt>Last successful sync</dt>
+        <dd>{formatWhen(progress.sync.lastSuccessfulAt)}</dd>
+        <dt>Last device</dt>
+        <dd>
+          {progress.sync.lastDevice === null || progress.sync.lastDevice === undefined
+            ? "—"
+            : `${progress.sync.lastDevice.name ?? progress.sync.lastDevice.platform} · ${progress.sync.lastDevice.platform}`}
+        </dd>
+        <dt>Pending</dt>
+        <dd>{progress.sync.pendingCount ?? "Reported on device"}</dd>
+        <dt>Conflicts recorded</dt>
+        <dd>{progress.sync.conflictCount}</dd>
+        <dt>Entity counts</dt>
+        <dd>
+          {progress.sync.entityCounts.length === 0
+            ? "No synced entities"
+            : progress.sync.entityCounts
+                .map((item) => `${item.entityType.replaceAll("_", " ")} ${String(item.count)}`)
+                .join(" · ")}
+        </dd>
+        <dt>Learning analytics</dt>
+        <dd>
+          <span className={`pill ${consented ? "ok" : "warn"}`}>
+            {consented ? "user enabled" : "consent required"}
+          </span>
+        </dd>
+      </dl>
+      {!consented ? (
+        <p className="empty" role="status">
+          Reading, review, learning, and AI-use summaries remain hidden until the user explicitly
+          enables Operator learning analytics.
+        </p>
+      ) : progress.reading !== null &&
+        progress.reading !== undefined &&
+        progress.review !== null &&
+        progress.review !== undefined &&
+        progress.learning !== null &&
+        progress.learning !== undefined ? (
+        <div className="progress-columns">
+          <dl>
+            <dt>Reading</dt>
+            <dd>{progress.reading.activeBooks} active books</dd>
+            <dd>{progress.reading.completedBooks} completed books</dd>
+            <dd>
+              {progress.reading.completionPercent === null ||
+              progress.reading.completionPercent === undefined
+                ? "No current completion"
+                : `${String(progress.reading.completionPercent)}% current completion`}
+            </dd>
+            <dd>Last active {formatWhen(progress.reading.lastActivityAt)}</dd>
+          </dl>
+          <dl>
+            <dt>Review</dt>
+            <dd>
+              {progress.review.due} due · {progress.review.new} new
+            </dd>
+            <dd>{progress.review.learning} learning</dd>
+            <dd>{progress.review.reviewsLast30Days} reviews in 30 days</dd>
+            <dd>
+              {progress.review.retentionRate === null || progress.review.retentionRate === undefined
+                ? "No retention sample"
+                : `${String(Math.round(progress.review.retentionRate * 100))}% retention`}
+              {` · ${String(progress.review.streakDays)} day streak`}
+            </dd>
+          </dl>
+          <dl>
+            <dt>Learning</dt>
+            <dd>{progress.learning.vocabulary} vocabulary items</dd>
+            <dd>
+              {progress.learning.learning} learning · {progress.learning.known} known
+            </dd>
+            <dd>{progress.learning.aiUsesLast30Days} AI uses in 30 days</dd>
+            <dd>
+              {progress.learning.aiUsesByFeature.length === 0
+                ? "No AI feature activity"
+                : progress.learning.aiUsesByFeature
+                    .map((item) => `${item.feature} ${String(item.count)}`)
+                    .join(" · ")}
+            </dd>
+          </dl>
+        </div>
+      ) : (
+        <p className="empty">No learning summary has been materialized from a successful sync.</p>
+      )}
+    </section>
+  );
+}
+
 function PoliciesPanel(props: {
   policies: Policy[];
   drafts: Record<string, PolicyDraft>;
@@ -2618,23 +3037,75 @@ function PoliciesPanel(props: {
   onDraft: (id: string, patch: Partial<PolicyDraft>) => void;
   onToggle: (policy: Policy) => void;
   onSave: (policy: Policy) => void;
+  onPreview: (
+    policy: Policy,
+    draft: PolicyDraft,
+    subtask: ManagedPromptPreview["subtask"],
+    probe: boolean,
+  ) => Promise<ManagedPromptPreview>;
 }) {
+  const [subtasks, setSubtasks] = useState<Record<string, ManagedPromptPreview["subtask"]>>({});
+  const [previews, setPreviews] = useState<
+    Record<string, { draftHash: string; value: ManagedPromptPreview }>
+  >({});
+  const [previewBusy, setPreviewBusy] = useState<string | null>(null);
+  const [previewErrors, setPreviewErrors] = useState<Record<string, string>>({});
+
+  const availableSubtasks = (task: string): ManagedPromptPreview["subtask"][] => {
+    if (task === "translation") return ["sentence", "word", "chapter_batch"];
+    if (task === "chapter_summary") return ["chapter_summary"];
+    return ["chat", "heard_quiz"];
+  };
+  const draftHash = (draft: PolicyDraft, subtask: ManagedPromptPreview["subtask"]): string =>
+    JSON.stringify({ draft, subtask });
+
+  const validate = async (policy: Policy, draft: PolicyDraft, probe: boolean) => {
+    const subtask = subtasks[policy.id] ?? availableSubtasks(policy.task)[0] ?? "chat";
+    setPreviewBusy(policy.id);
+    setPreviewErrors((current) => ({ ...current, [policy.id]: "" }));
+    try {
+      const value = await props.onPreview(policy, draft, subtask, probe);
+      setPreviews((current) => ({
+        ...current,
+        [policy.id]: { draftHash: draftHash(draft, subtask), value },
+      }));
+    } catch (cause: unknown) {
+      setPreviewErrors((current) => ({
+        ...current,
+        [policy.id]: describeAdminError(cause),
+      }));
+    } finally {
+      setPreviewBusy(null);
+    }
+  };
+
   return (
     <>
       <h2>Policies</h2>
       <p className="lede">
-        Each Managed Qwen task has its own model, canary, system prompt, and user prompt. Saving
-        writes them to Postgres. Canary 0 uses the Desk model when Desk is set; canary 100 uses this
-        policy model for every account. Translation and chapter summary must still return the JSON
-        shape the app parses. Prompt version is a cache label; editing either prompt also busts
-        shared cache. User-prompt placeholders include source, sourceLanguage, targetLanguage,
-        learnerLevel, task, chapterId, segments, question, and context.
+        Inspect exactly what Managed Qwen receives. Editable policy text is combined with a
+        read-only task contract, required book context, and a server-owned output schema. Validate
+        the current draft before saving; prompt-affecting changes invalidate shared cache entries.
       </p>
       {props.policies.length === 0 ? (
         <p className="empty">No Qwen policies loaded.</p>
       ) : (
         props.policies.map((policy) => {
           const draft = props.drafts[policy.id];
+          if (draft === undefined) return null;
+          const choices = availableSubtasks(policy.task);
+          const subtask = subtasks[policy.id] ?? choices[0] ?? "chat";
+          const preview = previews[policy.id];
+          const currentHash = draftHash(draft, subtask);
+          const previewCurrent = preview?.draftHash === currentHash;
+          const errors = policyDraftErrors(draft);
+          const changes = [
+            ["Model", policy.model, draft.model],
+            ["Prompt version", policy.promptVersion, draft.promptVersion],
+            ["Schema version", policy.schemaVersion ?? "1", draft.schemaVersion],
+            ["System instructions", policy.systemPrompt ?? "", draft.systemPrompt],
+            ["User template", policy.userPrompt ?? "", draft.userPrompt],
+          ].filter(([, before, after]) => before !== after);
           return (
             <section className="ledger" key={policy.id}>
               <h3>
@@ -2650,7 +3121,8 @@ function PoliciesPanel(props: {
                 <label>
                   Model
                   <input
-                    value={draft?.model ?? policy.model}
+                    disabled={!props.canMutate}
+                    value={draft.model}
                     onChange={(event) => {
                       props.onDraft(policy.id, { model: event.target.value });
                     }}
@@ -2659,7 +3131,8 @@ function PoliciesPanel(props: {
                 <label>
                   Prompt version
                   <input
-                    value={draft?.promptVersion ?? policy.promptVersion}
+                    disabled={!props.canMutate}
+                    value={draft.promptVersion}
                     onChange={(event) => {
                       props.onDraft(policy.id, { promptVersion: event.target.value });
                     }}
@@ -2669,7 +3142,8 @@ function PoliciesPanel(props: {
                   Canary %
                   <input
                     inputMode="numeric"
-                    value={draft?.canaryPercent ?? String(policy.canaryPercent ?? 0)}
+                    disabled={!props.canMutate}
+                    value={draft.canaryPercent}
                     onChange={(event) => {
                       props.onDraft(policy.id, { canaryPercent: event.target.value });
                     }}
@@ -2680,7 +3154,8 @@ function PoliciesPanel(props: {
                 <label>
                   Schema version
                   <input
-                    value={draft?.schemaVersion ?? policy.schemaVersion ?? "1"}
+                    disabled={!props.canMutate}
+                    value={draft.schemaVersion}
                     onChange={(event) => {
                       props.onDraft(policy.id, { schemaVersion: event.target.value });
                     }}
@@ -2690,7 +3165,8 @@ function PoliciesPanel(props: {
                   Input token limit
                   <input
                     inputMode="numeric"
-                    value={draft?.maxInputTokens ?? String(policy.maxInputTokens ?? 8_000)}
+                    disabled={!props.canMutate}
+                    value={draft.maxInputTokens}
                     onChange={(event) => {
                       props.onDraft(policy.id, { maxInputTokens: event.target.value });
                     }}
@@ -2700,7 +3176,8 @@ function PoliciesPanel(props: {
                   Output token limit
                   <input
                     inputMode="numeric"
-                    value={draft?.maxOutputTokens ?? String(policy.maxOutputTokens ?? 2_000)}
+                    disabled={!props.canMutate}
+                    value={draft.maxOutputTokens}
                     onChange={(event) => {
                       props.onDraft(policy.id, { maxOutputTokens: event.target.value });
                     }}
@@ -2710,7 +3187,8 @@ function PoliciesPanel(props: {
                   Timeout (ms)
                   <input
                     inputMode="numeric"
-                    value={draft?.timeoutMs ?? String(policy.timeoutMs ?? 30_000)}
+                    disabled={!props.canMutate}
+                    value={draft.timeoutMs}
                     onChange={(event) => {
                       props.onDraft(policy.id, { timeoutMs: event.target.value });
                     }}
@@ -2718,27 +3196,138 @@ function PoliciesPanel(props: {
                 </label>
               </div>
               <label>
-                System prompt
+                Editable policy system instructions
                 <textarea
                   className="prompt-editor"
+                  disabled={!props.canMutate}
                   spellCheck={false}
-                  value={draft?.systemPrompt ?? policy.systemPrompt ?? ""}
+                  value={draft.systemPrompt}
                   onChange={(event) => {
                     props.onDraft(policy.id, { systemPrompt: event.target.value });
                   }}
                 />
               </label>
               <label>
-                User prompt
+                Editable user-message template
                 <textarea
                   className="prompt-editor"
+                  disabled={!props.canMutate}
                   spellCheck={false}
-                  value={draft?.userPrompt ?? policy.userPrompt ?? ""}
+                  value={draft.userPrompt}
                   onChange={(event) => {
                     props.onDraft(policy.id, { userPrompt: event.target.value });
                   }}
                 />
               </label>
+              <div className="grid-3 prompt-preview-controls">
+                <label>
+                  Preview task
+                  <select
+                    aria-label={`Preview task for ${policy.task}`}
+                    disabled={!props.canMutate}
+                    value={subtask}
+                    onChange={(event) => {
+                      setSubtasks((current) => ({
+                        ...current,
+                        [policy.id]: event.target.value as ManagedPromptPreview["subtask"],
+                      }));
+                    }}
+                  >
+                    {choices.map((choice) => (
+                      <option value={choice} key={choice}>
+                        {choice.replaceAll("_", " ")}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={
+                    !props.canMutate || previewBusy === policy.id || Object.keys(errors).length > 0
+                  }
+                  onClick={() => void validate(policy, draft, false)}
+                >
+                  Validate &amp; preview
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={!props.canMutate || previewBusy === policy.id || !previewCurrent}
+                  onClick={() => void validate(policy, draft, true)}
+                >
+                  Run staging probe
+                </button>
+              </div>
+              {Object.entries(errors).map(([field, message]) => (
+                <p className="field-error" role="alert" key={field}>
+                  {field}: {message}
+                </p>
+              ))}
+              {previewErrors[policy.id] ? (
+                <p className="field-error" role="alert">
+                  {previewErrors[policy.id]}
+                </p>
+              ) : null}
+              {preview !== undefined && !previewCurrent ? (
+                <p className="pill warn" role="status">
+                  Preview out of date
+                </p>
+              ) : null}
+              {previewCurrent ? (
+                <div className="prompt-contract" aria-live="polite">
+                  <p>
+                    <span className="pill ok">contract valid</span>{" "}
+                    <span className="mono">{preview.value.contractFingerprint.slice(0, 12)}</span>
+                  </p>
+                  <details open>
+                    <summary>Enforced task contract</summary>
+                    <pre>{preview.value.enforced.taskContract}</pre>
+                  </details>
+                  <details>
+                    <summary>Effective system message</summary>
+                    <pre>{preview.value.effective.system}</pre>
+                  </details>
+                  <details>
+                    <summary>Effective user message</summary>
+                    <pre>{preview.value.effective.user}</pre>
+                  </details>
+                  <details>
+                    <summary>Output contract</summary>
+                    <pre>{formatJson(preview.value.outputSchema)}</pre>
+                  </details>
+                  {preview.value.requestId ? (
+                    <p>
+                      Probe {preview.value.outputValidation?.valid === true ? "passed" : "failed"}
+                      {" · "}
+                      <span className="mono">request {preview.value.requestId}</span>
+                    </p>
+                  ) : null}
+                  {preview.value.parsedResult ? (
+                    <details>
+                      <summary>Parsed probe result</summary>
+                      <pre>{formatJson(preview.value.parsedResult)}</pre>
+                    </details>
+                  ) : null}
+                </div>
+              ) : null}
+              {changes.length > 0 ? (
+                <div className="change-summary">
+                  <h4>Before / after</h4>
+                  {changes.map(([label, before, after]) => (
+                    <p key={label}>
+                      <strong>{label}:</strong> <span className="mono">{before || "(blank)"}</span>
+                      {" → "}
+                      <span className="mono">{after || "(blank)"}</span>
+                    </p>
+                  ))}
+                  <p className="lede tight">
+                    Saving changes to model, prompt text, prompt version, schema, or enforced
+                    contracts changes the cache fingerprint; earlier generated entries will miss and
+                    regenerate on demand.
+                  </p>
+                </div>
+              ) : null}
               <div className="actions">
                 <button
                   type="button"
@@ -2753,7 +3342,7 @@ function PoliciesPanel(props: {
                 <button
                   type="button"
                   className="primary"
-                  disabled={!props.canMutate || props.busy}
+                  disabled={!props.canMutate || props.busy || !previewCurrent}
                   onClick={() => {
                     props.onSave(policy);
                   }}

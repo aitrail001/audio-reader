@@ -33,10 +33,16 @@ final class AppState {
     private(set) var retainedTranscriptOverlays: [StoredTranscriptOverlay] = []
     private(set) var transcriptOverlayConflictStates: [String: StoredTranscriptOverlayState] = [:]
     private(set) var readerProgressState: StoredReaderProgressState?
+    private(set) var vocabularyLearningRevision: UInt = 0
     var vocab: [VocabEntry] = [] {
-        didSet { refreshStudyIndex() }
+        didSet {
+            vocabularyLearningRevision &+= 1
+            if !suppressesVocabularyStudyIndexRefresh { refreshStudyIndex() }
+        }
     }
-    private(set) var vocabReviewEvents: [StoredReviewEvent] = []
+    private(set) var vocabReviewEvents: [StoredReviewEvent] = [] {
+        didSet { vocabularyLearningRevision &+= 1 }
+    }
     var knownLemmas: [KnownLemmaRecord] = [] {
         didSet { refreshStudyIndex() }
     }
@@ -44,6 +50,7 @@ final class AppState {
     var chapterStudyPresentation: ChapterStudyPresentation?
     var shadowingSegment: TranscriptSegment?
     var chapterQuizSession: ChapterQuizSession?
+    var chapterQuizTitle = "Chapter quiz"
     var studyActivityLog = StudyActivityLog.empty
     var appleIntelligenceAvailability: AppleIntelligenceAvailability = .unavailable("Not checked")
     var tab: AppTab = .library
@@ -67,6 +74,8 @@ final class AppState {
     private(set) var playingVocabEntryID: String?
     private(set) var deepReadingActiveSentenceID: String?
     private(set) var deepReadingPausedSentenceID: String?
+    private(set) var listenFirstReplayRevealedSegmentID: String?
+    var isHeardQuizWorking = false
     var glosses: [GlossEntry] = [] {
         didSet { chapterGlossGeneration &+= 1 }
     }
@@ -109,6 +118,10 @@ final class AppState {
     private var pendingReveal: PendingReveal?
     @ObservationIgnored private var chapterGlossGeneration = 0
     @ObservationIgnored private var chapterGlossIndexCache = ChapterGlossIndexCache()
+    @ObservationIgnored private var suppressesVocabularyStudyIndexRefresh = false
+#if DEBUG
+    @ObservationIgnored private(set) var studyIndexRefreshCount = 0
+#endif
     var llmJobQueue = BackgroundJobQueue(maxConcurrentPerKind: 2)
     @ObservationIgnored private var llmJobOperations: [UUID: @MainActor (UUID) async -> Void] = [:]
     @ObservationIgnored private var chapterTranslationStopRequests: Set<UUID> = []
@@ -419,6 +432,9 @@ final class AppState {
     var chapterStudyItems: [ChapterStudyItem] { studyIndex.priming }
 
     func refreshStudyIndex() {
+#if DEBUG
+        studyIndexRefreshCount += 1
+#endif
         studyIndex = StudyIndex.build(
             segments: presentedTranscript?.segments ?? [],
             language: studyLexiconLanguage,
@@ -455,7 +471,74 @@ final class AppState {
             language: studyLexiconLanguage
         )
         guard !quiz.questions.isEmpty else { return }
+        chapterQuizTitle = "Chapter quiz"
         chapterQuizSession = ChapterQuizSession(quiz: quiz)
+    }
+
+    /// Requests an optional AI quiz over only the resolved sentences completed before the pause.
+    func requestHeardQuiz() {
+        guard !isHeardQuizWorking,
+              let transcript = presentedTranscript,
+              let pausedID = deepReadingPausedSentenceID,
+              let passage = HeardPassage.recent(in: transcript, throughSegmentID: pausedID)
+        else { return }
+        let fallback = {
+            HeardQuizResolver.resolve(
+                response: "",
+                passage: passage,
+                language: self.studyLexiconLanguage
+            )
+        }
+#if DEBUG
+        // UI automation proves the interaction contract without depending on a provider or network.
+        if UITestLaunchScenario.isRequested {
+            let quiz = fallback()
+            guard !quiz.questions.isEmpty else { return }
+            chapterQuizTitle = "Quick quiz"
+            chapterQuizSession = ChapterQuizSession(quiz: quiz)
+            return
+        }
+#endif
+        let task = ReadingAssistantPrompt.heardQuiz(
+            passage: passage,
+            language: studyLanguage,
+            sourceLanguage: currentAudiobookLanguage,
+            readerLevel: readerLanguageLevel
+        )
+        let origin = selectedOrigin()
+        isHeardQuizWorking = true
+        account.recordUsage(name: "ai.chat.requested", properties: ["feature": "heard_quiz"])
+        enqueueChapterAssistant(
+            kind: .chapterChat,
+            origin: origin,
+            targetID: "heard-quiz-\(pausedID)",
+            system: task.system,
+            user: "\(bookMetadata(book: selectedBook, chapter: selectedChapter))\n\n\(task.user)",
+            structuredJSON: true,
+            heardQuizSegments: passage.segments.map {
+                ProductHeardSegment(id: $0.id, text: $0.displayText)
+            },
+            completion: { response in
+                self.isHeardQuizWorking = false
+                let quiz = HeardQuizResolver.resolve(
+                    response: response,
+                    passage: passage,
+                    language: self.studyLexiconLanguage
+                )
+                if !quiz.questions.isEmpty {
+                    self.chapterQuizTitle = "Quick quiz"
+                    self.chapterQuizSession = ChapterQuizSession(quiz: quiz)
+                }
+            },
+            failure: {
+                self.isHeardQuizWorking = false
+                let quiz = fallback()
+                if !quiz.questions.isEmpty {
+                    self.chapterQuizTitle = "Quick quiz"
+                    self.chapterQuizSession = ChapterQuizSession(quiz: quiz)
+                }
+            }
+        )
     }
 
     func recordStudyActivity(now: Date = Date()) {
@@ -852,13 +935,20 @@ final class AppState {
         } else {
             settings = .default
         }
-        vocab = ((try? vocabularyRepository.loadVocabulary()) ?? []).map { stored in
+        let loadedVocabulary = ((try? vocabularyRepository.loadVocabulary()) ?? []).map { stored in
             var copy = VocabEntry(stored)
             copy.sanitizeDictionaryFields()
             return copy
         }
         knownLemmas = ((try? knownLemmaRepository.loadKnownLemmas()) ?? []).map(KnownLemmaRecord.init)
-        vocabReviewEvents = (try? reviewEventRepository.loadReviewEvents()) ?? []
+        let loadedReviewEvents = (try? reviewEventRepository.loadReviewEvents()) ?? []
+        let reviewedVocabulary = (try? reviewEventRepository.loadReviewVocabularySnapshot()) ?? nil
+        vocab = VocabularyReviewHistoryReconciler.reconcile(
+            entries: loadedVocabulary,
+            events: loadedReviewEvents,
+            authoritativeSchedules: reviewedVocabulary ?? []
+        )
+        vocabReviewEvents = loadedReviewEvents
         appleIntelligenceAvailability = AppleIntelligenceAvailability.current()
         if usesLivePersistence {
             studyActivityLog = Persistence.loadStudyActivityLog()
@@ -871,6 +961,9 @@ final class AppState {
             textSource = raw
         }
         player.rate = Float(settings.playbackRate)
+        player.onTick = { [weak self] seconds in
+            self?.handlePlayerTick(seconds)
+        }
         self.account.onLearningDataApplied = { [weak self] in
             self?.reloadSyncedLearningData()
         }
@@ -1197,6 +1290,7 @@ final class AppState {
         transcriptionJobOrigin = BackgroundJobOrigin(
             bookID: book.id,
             bookTitle: book.title,
+            author: book.author ?? "",
             chapterID: chapter.id,
             chapterTitle: chapter.title
         )
@@ -1331,10 +1425,18 @@ final class AppState {
 
     func replaySentence() {
         if let current = currentSegment {
+            if settings.deepReadingMode {
+                listenFirstReplayRevealedSegmentID = current.id
+            }
             player.seek(current.start)
             armDeepReadingSentence(current)
             player.play()
         }
+    }
+
+    func revealListenFirstSentence(_ segmentID: String) {
+        guard settings.deepReadingMode else { return }
+        listenFirstReplayRevealedSegmentID = segmentID
     }
 
     var canContinueDeepReading: Bool {
@@ -1359,6 +1461,7 @@ final class AppState {
         } else {
             deepReadingActiveSentenceID = nil
             deepReadingPausedSentenceID = nil
+            listenFirstReplayRevealedSegmentID = nil
         }
         persistSettings()
     }
@@ -1397,6 +1500,7 @@ final class AppState {
               transcript.segments.indices.contains(index + 1)
         else { return }
         let next = transcript.segments[index + 1]
+        listenFirstReplayRevealedSegmentID = nil
         player.seek(next.start)
         armDeepReadingSentence(next)
         player.play()
@@ -1426,6 +1530,18 @@ final class AppState {
         persistCurrentReaderProgress(force: true)
     }
 
+    /// PlayerEngine calls this independently of SwiftUI view lifetime.
+    func handlePlayerTick(_ seconds: TimeInterval) {
+        if abs(player.currentTime - seconds) > 0.001 {
+            player.currentTime = seconds
+        }
+        tickPlaybackModes()
+    }
+
+    func flushReaderProgress() {
+        persistCurrentReaderProgress(force: true)
+    }
+
     private func armDeepReadingSentence(_ sentence: TranscriptSegment? = nil) {
         guard settings.deepReadingMode, let sentence = sentence ?? currentSegment else {
             deepReadingActiveSentenceID = nil
@@ -1438,6 +1554,7 @@ final class AppState {
 
     private func resetDeepReadingAfterSeek() {
         deepReadingPausedSentenceID = nil
+        listenFirstReplayRevealedSegmentID = nil
         if settings.deepReadingMode, player.isPlaying {
             armDeepReadingSentence()
         } else {
@@ -1505,24 +1622,29 @@ final class AppState {
 
     func removeVocab(_ entry: VocabEntry) {
         vocab.removeAll { $0.id == entry.id }
-        persistVocabulary()
+        try? vocabularyRepository.deleteVocabulary(id: VocabularyOccurrenceID(rawValue: entry.id))
     }
 
     func setVocabularyLearnList(_ entryID: String, included: Bool) {
         guard let index = vocab.firstIndex(where: { $0.id == entryID }) else { return }
-        vocab[index].isInLearnList = included
-        persistVocabularyUpdates([vocab[index]])
+        var updated = vocab[index]
+        updated.isInLearnList = included
+        replaceVocabularyEntry(at: index, with: updated, refreshStudyIndex: false)
+        try? vocabularyRepository.updateVocabularyLearnList(
+            id: VocabularyOccurrenceID(rawValue: entryID),
+            included: included
+        )
     }
 
-    /// Returns true only after the local card schedule and additive history are
-    /// committed together; review UIs must keep the current card on failure.
+    /// Keeps repository I/O off the main actor. The relational review event is
+    /// the recovery source if the legacy vocabulary mirror cannot be updated.
     @discardableResult
     func reviewVocabulary(
         _ entryID: String,
         quality: VocabReviewQuality,
         face: VocabReviewPrompt? = nil,
         at date: Date = Date()
-    ) -> Bool {
+    ) async -> Bool {
         guard let index = vocab.firstIndex(where: { $0.id == entryID }) else { return false }
         let reviewed = VocabReviewScheduler.applying(quality, to: vocab[index], at: date)
         let displayedFace = face ?? vocabReviewPrompt
@@ -1533,17 +1655,39 @@ final class AppState {
             rating: quality.rawValue,
             reviewedAt: date
         )
+        let saveStartedAt = Date()
         Self.reviewLog.info(
             "review_save_start message=review_save_start requestId=\(event.id.rawValue, privacy: .public) component=vocabulary-review outcome=started resource=\(reviewed.id, privacy: .private(mask: .hash))"
         )
+        let reviewRepository = reviewEventRepository
+        let vocabularyRepository = vocabularyRepository
+        let storedVocabulary = StoredVocabularyOccurrence(reviewed)
+        let reviewSchedule = StoredVocabularyReviewSchedule(storedVocabulary)
         do {
-            try reviewEventRepository.appendReviewEvent(
-                event,
-                vocabulary: StoredVocabularyOccurrence(reviewed)
-            )
-            vocab[index] = reviewed
-            persistVocabularyUpdates([reviewed])
+            let mirrorFailure = try await Task.detached(priority: .userInitiated) {
+                try reviewRepository.appendReviewEvent(event, vocabulary: storedVocabulary)
+                do {
+                    try vocabularyRepository.updateVocabularyReviewSchedule(reviewSchedule)
+                    return nil as String?
+                } catch {
+                    return String(describing: error)
+                }
+            }.value
+            guard let currentIndex = vocab.firstIndex(where: { $0.id == entryID }) else {
+                Self.reviewLog.warning(
+                    "review_save_finish message=review_save_finish requestId=\(event.id.rawValue, privacy: .public) component=vocabulary-review outcome=saved_card_removed"
+                )
+                return false
+            }
+            let current = StoredVocabularyOccurrence(vocab[currentIndex])
+            let merged = VocabEntry(reviewSchedule.merging(into: current))
+            replaceVocabularyEntry(at: currentIndex, with: merged, refreshStudyIndex: false)
             vocabReviewEvents.append(event)
+            if let mirrorFailure {
+                Self.reviewLog.warning(
+                    "review_mirror_finish message=review_mirror_finish requestId=\(event.id.rawValue, privacy: .public) component=vocabulary-review outcome=recoverable_failure error=\(mirrorFailure, privacy: .private(mask: .hash))"
+                )
+            }
             account.recordUsage(
                 name: "review.completed",
                 properties: [
@@ -1557,16 +1701,32 @@ final class AppState {
                 ]
             )
             Self.reviewLog.info(
-                "review_save_finish message=review_save_finish requestId=\(event.id.rawValue, privacy: .public) component=vocabulary-review outcome=saved"
+                "review_save_finish message=review_save_finish requestId=\(event.id.rawValue, privacy: .public) component=vocabulary-review outcome=saved elapsedMs=\(Int(Date().timeIntervalSince(saveStartedAt) * 1_000), privacy: .public)"
             )
             return true
         } catch {
             Self.reviewLog.error(
-                "review_save_finish message=review_save_finish requestId=\(event.id.rawValue, privacy: .public) component=vocabulary-review outcome=failed error=\(String(describing: error), privacy: .private(mask: .hash))"
+                "review_save_finish message=review_save_finish requestId=\(event.id.rawValue, privacy: .public) component=vocabulary-review outcome=failed elapsedMs=\(Int(Date().timeIntervalSince(saveStartedAt) * 1_000), privacy: .public) error=\(String(describing: error), privacy: .private(mask: .hash))"
             )
             errorMessage = "The review could not be saved. This card is still due."
             return false
         }
+    }
+
+    /// Review scheduling and list membership do not change lexical familiarity,
+    /// so those mutations must not rebuild every token in the presented chapter.
+    private func replaceVocabularyEntry(
+        at index: Int,
+        with entry: VocabEntry,
+        refreshStudyIndex: Bool
+    ) {
+        guard !refreshStudyIndex else {
+            vocab[index] = entry
+            return
+        }
+        suppressesVocabularyStudyIndexRefresh = true
+        defer { suppressesVocabularyStudyIndexRefresh = false }
+        vocab[index] = entry
     }
 
     func canPlayVocabSentence(_ entry: VocabEntry) -> Bool {
@@ -1712,13 +1872,20 @@ final class AppState {
         loaded.grokAuthentication = GrokAuthentication.apiKey.rawValue
 #endif
         settings = loaded
-        vocab = ((try? vocabularyRepository.loadVocabulary()) ?? []).map { stored in
+        let loadedVocabulary = ((try? vocabularyRepository.loadVocabulary()) ?? []).map { stored in
             var copy = VocabEntry(stored)
             copy.sanitizeDictionaryFields()
             return copy
         }
         knownLemmas = ((try? knownLemmaRepository.loadKnownLemmas()) ?? []).map(KnownLemmaRecord.init)
-        vocabReviewEvents = (try? reviewEventRepository.loadReviewEvents()) ?? []
+        let loadedReviewEvents = (try? reviewEventRepository.loadReviewEvents()) ?? []
+        let reviewedVocabulary = (try? reviewEventRepository.loadReviewVocabularySnapshot()) ?? nil
+        vocab = VocabularyReviewHistoryReconciler.reconcile(
+            entries: loadedVocabulary,
+            events: loadedReviewEvents,
+            authoritativeSchedules: reviewedVocabulary ?? []
+        )
+        vocabReviewEvents = loadedReviewEvents
         selectedDictionaryName = settings.preferredDictionary
         player.rate = Float(settings.playbackRate)
         refreshStudyIndex()
@@ -1982,6 +2149,7 @@ final class AppState {
         BackgroundJobOrigin(
             bookID: selectedBook?.id,
             bookTitle: selectedBook?.title ?? "Unknown book",
+            author: selectedBook?.author ?? "",
             chapterID: selectedChapter?.id ?? transcript?.chapterID,
             chapterTitle: selectedChapter?.title ?? "Unknown chapter"
         )
@@ -2223,6 +2391,7 @@ final class AppState {
                 editionFingerprint: origin.bookID ?? "",
                 chapterFingerprint: origin.chapterID ?? "",
                 bookTitle: origin.bookTitle,
+                author: origin.author,
                 chapterTitle: origin.chapterTitle,
                 lookupOnly: true
             )
@@ -2317,6 +2486,7 @@ final class AppState {
                         editionFingerprint: book?.id ?? "",
                         chapterFingerprint: chapter?.id ?? "",
                         bookTitle: book?.title ?? "",
+                        author: book?.author ?? "",
                         chapterTitle: chapter?.title ?? "",
                         refreshIds: Array(forceIDs)
                     )
@@ -2336,7 +2506,14 @@ final class AppState {
                         effort: effort,
                         enableThinking: enableThinking,
                         grokAuthentication: grokAuthentication,
-                        openAIAuthentication: openAIAuthentication
+                        openAIAuthentication: openAIAuthentication,
+                        sourceLanguage: self.currentAudiobookLanguage.languageCode,
+                        targetLanguage: self.settings.targetLanguage,
+                        learnerLevel: self.readerLanguageLevel.rawValue,
+                        chapterID: origin.chapterID ?? "",
+                        bookTitle: origin.bookTitle,
+                        author: origin.author,
+                        chapterTitle: origin.chapterTitle
                     )
                     parsed = try ChapterTranslationBatch.parseAvailable(
                         raw,
@@ -2484,6 +2661,7 @@ final class AppState {
                         editionFingerprint: book?.id ?? "",
                         chapterFingerprint: chapter?.id ?? "",
                         bookTitle: book?.title ?? "",
+                        author: book?.author ?? "",
                         chapterTitle: chapter?.title ?? "",
                         refresh: force
                     )
@@ -2678,6 +2856,7 @@ final class AppState {
                                 editionFingerprint: book?.id ?? "",
                                 chapterFingerprint: chapter?.id ?? "",
                                 bookTitle: book?.title ?? "",
+                                author: book?.author ?? "",
                                 chapterTitle: chapter?.title ?? "",
                                 refreshIds: resumedMode == .retranslateAll ? remaining.map(\.id) : []
                             )
@@ -3150,6 +3329,7 @@ final class AppState {
                     segments: segments,
                     editionFingerprint: origin.bookID ?? "",
                     bookTitle: origin.bookTitle,
+                    author: origin.author,
                     chapterTitle: origin.chapterTitle
                 ) else { return }
                 let presentation = try ChapterSummaryPresentation.parse(raw)
@@ -3177,10 +3357,17 @@ final class AppState {
         system: String,
         user: String,
         refresh: Bool = false,
-        completion: @escaping @MainActor (String) -> Void
+        structuredJSON: Bool = false,
+        heardQuizSegments: [ProductHeardSegment]? = nil,
+        completion: @escaping @MainActor (String) -> Void,
+        failure: (@MainActor () -> Void)? = nil
     ) {
         let provider = llmProvider
         if let configurationError = llmConfigurationError(for: provider) {
+            if let failure {
+                failure()
+                return
+            }
             chapterAssistantError = configurationError.localizedDescription
             presentSettings()
             return
@@ -3205,7 +3392,18 @@ final class AppState {
         ) { _ in
             do {
                 let result: String
-                if provider == .managedQwen, kind == .chapterSummary {
+                if provider == .managedQwen, let heardQuizSegments {
+                    result = try await ManagedProductLLM.heardQuiz(
+                        chapterID: origin.chapterID ?? "",
+                        sourceLanguage: self.currentAudiobookLanguage.languageCode,
+                        targetLanguage: self.settings.targetLanguage,
+                        learnerLevel: self.readerLanguageLevel.rawValue,
+                        segments: heardQuizSegments,
+                        bookTitle: origin.bookTitle,
+                        author: origin.author,
+                        chapterTitle: origin.chapterTitle
+                    )
+                } else if provider == .managedQwen, kind == .chapterSummary {
                     let transcript = origin.chapterID.flatMap { Persistence.loadTranscript(chapterID: $0) }
                         ?? self.transcript
                     let segments = transcript?.segments.map(\.displayText) ?? []
@@ -3217,8 +3415,28 @@ final class AppState {
                         segments: segments,
                         editionFingerprint: origin.bookID ?? self.selectedBookID ?? "",
                         bookTitle: origin.bookTitle,
+                        author: origin.author,
                         chapterTitle: origin.chapterTitle,
                         refresh: refresh
+                    )
+                } else if structuredJSON {
+                    result = try await GrokClient.shared.completeStructuredJSON(
+                        provider: provider,
+                        system: system,
+                        user: user,
+                        baseURL: baseURL,
+                        model: model,
+                        effort: effort,
+                        enableThinking: enableThinking,
+                        grokAuthentication: grokAuthentication,
+                        openAIAuthentication: openAIAuthentication,
+                        sourceLanguage: self.currentAudiobookLanguage.languageCode,
+                        targetLanguage: self.settings.targetLanguage,
+                        learnerLevel: self.readerLanguageLevel.rawValue,
+                        chapterID: origin.chapterID ?? "",
+                        bookTitle: origin.bookTitle,
+                        author: origin.author,
+                        chapterTitle: origin.chapterTitle
                     )
                 } else {
                     result = try await GrokClient.shared.complete(
@@ -3230,7 +3448,14 @@ final class AppState {
                         effort: effort,
                         enableThinking: enableThinking,
                         grokAuthentication: grokAuthentication,
-                        openAIAuthentication: openAIAuthentication
+                        openAIAuthentication: openAIAuthentication,
+                        sourceLanguage: self.currentAudiobookLanguage.languageCode,
+                        targetLanguage: self.settings.targetLanguage,
+                        learnerLevel: self.readerLanguageLevel.rawValue,
+                        chapterID: origin.chapterID ?? "",
+                        bookTitle: origin.bookTitle,
+                        author: origin.author,
+                        chapterTitle: origin.chapterTitle
                     )
                 }
                 completion(result)
@@ -3241,6 +3466,7 @@ final class AppState {
                 if self.isSelected(origin) {
                     self.chapterAssistantError = error.localizedDescription
                 }
+                failure?()
             }
         }
     }
@@ -3601,6 +3827,18 @@ final class AppState {
 #endif
     }
 }
+
+#if DEBUG
+extension AppState {
+    /// Produces a completed-sentence pause without touching a user's media or provider credentials.
+    func prepareUITestListenFirstPause(segmentID: String, time: TimeInterval) {
+        settings.deepReadingMode = true
+        player.currentTime = time
+        deepReadingActiveSentenceID = nil
+        deepReadingPausedSentenceID = segmentID
+    }
+}
+#endif
 
 private struct PendingReveal {
     var kind: TextRevealKind

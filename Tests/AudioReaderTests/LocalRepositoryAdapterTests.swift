@@ -118,6 +118,21 @@ struct LocalRepositoryAdapterTests {
         #expect(fromStore.first { $0.id == "vocab-1" }?.lastReviewQuality == .remember)
         #expect(fromStore.count == 2)
 
+        let schedule = StoredVocabularyReviewSchedule(
+            vocabularyID: first.id,
+            reviewCount: 2,
+            nextReview: occurredAt.addingTimeInterval(7 * 86_400),
+            lastReviewedAt: occurredAt,
+            lastReviewQuality: "vague",
+            reviewIntervalDays: 7,
+            reviewEaseFactor: 2.4
+        )
+        try repo.updateVocabularyReviewSchedule(schedule)
+        let scheduleUpdated = try #require(try repo.loadVocabulary().first { $0.id == first.id })
+        #expect(scheduleUpdated.translation == "森林")
+        #expect(scheduleUpdated.reviewCount == 2)
+        #expect(scheduleUpdated.lastReviewQuality == "vague")
+
         try repo.deleteVocabulary(id: VocabularyOccurrenceID(rawValue: "vocab-2"))
         #expect(try repo.loadVocabulary().map(\.surface) == ["forest"])
     }

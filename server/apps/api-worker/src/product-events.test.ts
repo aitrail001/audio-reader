@@ -2,7 +2,7 @@ import { createFakePrincipal } from "@audio-reader/auth";
 import { createFakeDatabaseClient } from "@audio-reader/database";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
-import { toProductEvent } from "./product-events";
+import { captureProductEvent, toProductEvent } from "./product-events";
 
 const USER_ID = "00000000-0000-4000-8000-000000000002";
 const DEVICE_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
@@ -20,6 +20,7 @@ describe("product event privacy", () => {
       id: "00000000-0000-4000-8000-000000000099",
       accountId: USER_ID,
       deviceId: DEVICE_ID,
+      purpose: "learning_analytics",
       name: "reading.chapter_opened",
       outcome: "ok",
       requestId: "legacy-row",
@@ -40,6 +41,7 @@ describe("product event privacy", () => {
       id: "00000000-0000-4000-8000-000000000098",
       accountId: USER_ID,
       deviceId: null,
+      purpose: "learning_analytics",
       name: "reading.chapter_opened",
       outcome: "ok",
       requestId: "legacy-numeric-row",
@@ -51,6 +53,7 @@ describe("product event privacy", () => {
 
   it("derives coarse geography and device metadata while rejecting sensitive content", async () => {
     const database = createFakeDatabaseClient();
+    await database.ops.putAnalyticsPreference(USER_ID, true);
     await database.identity.bootstrapDevice(USER_ID, {
       deviceId: DEVICE_ID,
       platform: "macos",
@@ -113,5 +116,68 @@ describe("product event privacy", () => {
     expect(JSON.stringify(stored?.properties)).not.toMatch(
       /book-stable-id|Raw book title|Private reading text|reader@example|203\.0\.113|Melbourne|-37\.8|unknownNote/,
     );
+  });
+
+  it("rejects learner behavior collection by default while retaining required operational events", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.bootstrapDevice(USER_ID, {
+      deviceId: DEVICE_ID,
+      platform: "macos",
+      appVersion: "1.5.0",
+      buildNumber: "89",
+    });
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ accountId: USER_ID }),
+    });
+    const response = await app.fetch(
+      new Request("http://localhost/v1/me/events", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test",
+          "content-type": "application/json",
+          "x-device-id": DEVICE_ID,
+        },
+        body: JSON.stringify({ events: [{ name: "reading.session.completed" }] }),
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toEqual({ accepted: 0 });
+    await expect(database.ops.listProductEvents()).resolves.toEqual([]);
+
+    await expect(
+      captureProductEvent(database.ops, {
+        accountId: USER_ID,
+        name: "security.session_revoked",
+        requestId: "security-1",
+        purpose: "operational",
+      }),
+    ).resolves.toBe(true);
+    await expect(database.ops.listProductEvents()).resolves.toMatchObject([
+      { name: "security.session_revoked", purpose: "operational" },
+    ]);
+  });
+
+  it("purges previously collected learner events immediately when the learner opts out", async () => {
+    const database = createFakeDatabaseClient();
+    await database.ops.putAnalyticsPreference(USER_ID, true);
+    await captureProductEvent(database.ops, {
+      accountId: USER_ID,
+      name: "review.completed",
+      requestId: "review-1",
+    });
+    await captureProductEvent(database.ops, {
+      accountId: USER_ID,
+      name: "security.session_revoked",
+      requestId: "security-2",
+      purpose: "operational",
+    });
+
+    await database.ops.putAnalyticsPreference(USER_ID, false);
+
+    await expect(database.ops.listProductEvents()).resolves.toMatchObject([
+      { name: "security.session_revoked", purpose: "operational" },
+    ]);
   });
 });

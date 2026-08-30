@@ -209,6 +209,15 @@ struct ChapterQuizTests {
         #expect(session.selections.dropFirst().allSatisfy { $0 == nil })
     }
 
+    @Test("Quiz rationale stays hidden until the learner scores the attempt")
+    func rationaleRequiresAnAttempt() {
+        let quiz = ChapterQuizBuilder.build(segments: quizSegments(), language: "en", limit: 4)
+        var session = ChapterQuizSession(quiz: quiz)
+        #expect(session.visibleRationale(for: 0) == nil)
+        session.isRevealed = true
+        #expect(session.visibleRationale(for: 0) == quiz.questions[0].rationale)
+    }
+
     @Test("Quiz choice identities are unique across every question")
     func choiceIdentitiesAreUnique() {
         let quiz = ChapterQuizBuilder.build(segments: quizSegments(), language: "en", limit: 6)

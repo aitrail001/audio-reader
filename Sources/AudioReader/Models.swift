@@ -348,17 +348,20 @@ struct LibraryScanProgress: Equatable, Sendable {
 struct BackgroundJobOrigin: Equatable, Sendable {
     var bookID: String?
     var bookTitle: String
+    var author: String
     var chapterID: String?
     var chapterTitle: String
 
     init(
         bookID: String? = nil,
         bookTitle: String,
+        author: String = "",
         chapterID: String? = nil,
         chapterTitle: String
     ) {
         self.bookID = bookID
         self.bookTitle = bookTitle
+        self.author = author
         self.chapterID = chapterID
         self.chapterTitle = chapterTitle
     }
@@ -449,7 +452,7 @@ struct LLMChatMessage: Identifiable, Hashable, Sendable {
     var text: String
 }
 
-enum VocabCategory: String, Codable, CaseIterable, Identifiable, Sendable {
+enum VocabCategory: String, Codable, CaseIterable, Hashable, Identifiable, Sendable {
     case word
     case phrase
     case sentence

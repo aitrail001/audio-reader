@@ -5,6 +5,11 @@ export type HealthPayload = {
   dependencies?: Record<string, string>;
 };
 
+export type AdminCapabilities = {
+  roles: string[];
+  capabilities: string[];
+};
+
 export type AdminUserDevice = {
   id: string;
   platform: string;
@@ -34,6 +39,44 @@ export type AdminUser = {
   quotas?: Quota[];
   devices?: AdminUserDevice[];
   books?: AdminUserBook[];
+};
+
+export type AdminUserProgress = {
+  accountId: string;
+  generatedAt: string;
+  expiresAt?: string | null;
+  consent: { operatorLearningAnalyticsEnabled: boolean; updatedAt: string };
+  sync: {
+    lastSuccessfulAt?: string | null;
+    lastDevice?: { id: string; platform: string; name?: string | null } | null;
+    entityCounts: Array<{ entityType: string; count: number }>;
+    pendingCount?: number | null;
+    conflictCount: number;
+  };
+  reading?: {
+    lastActivityAt?: string | null;
+    activeBooks: number;
+    completedBooks: number;
+    currentChapter?: number | null;
+    completionPercent?: number | null;
+  } | null;
+  review?: {
+    due: number;
+    new: number;
+    learning: number;
+    reviewsLast30Days: number;
+    reviewsPerActiveDay: number;
+    retentionRate?: number | null;
+    streakDays: number;
+  } | null;
+  learning?: {
+    vocabulary: number;
+    known: number;
+    learning: number;
+    aiUsesLast30Days: number;
+    aiUsesByFeature: Array<{ feature: string; count: number }>;
+  } | null;
+  activity: { eventsPath: string; auditPath: string };
 };
 
 export type Job = {
@@ -67,6 +110,21 @@ export type Policy = {
   timeoutMs?: number;
   createdAt?: string;
   updatedAt?: string;
+};
+
+export type ManagedPromptPreview = {
+  subtask: "sentence" | "word" | "chapter_batch" | "chapter_summary" | "chat" | "heard_quiz";
+  editable: { system: string; userTemplate: string; renderedUser: string };
+  enforced: { taskContract: string; requestContext: string };
+  effective: { system: string; user: string };
+  outputSchema: Record<string, unknown>;
+  validation: { valid: boolean; fieldErrors: Record<string, string> };
+  contractFingerprint: string;
+  requestId?: string;
+  model?: string;
+  providerStatus?: string;
+  parsedResult?: Record<string, unknown> | null;
+  outputValidation?: { valid: boolean; errors?: string[] };
 };
 
 export type CacheEntry = {
@@ -160,8 +218,8 @@ export type ProductAnalytics = {
     identifiersReturned: "pseudonymous";
     durableOwnershipKeysStored: true;
     profileDeletionCascadesEvents: true;
-    completedDeletionRequestPurgesEvents: false;
-    automaticRetentionDays: null;
+    completedDeletionRequestPurgesEvents: true;
+    automaticRetentionDays: 90;
   };
   sampled: boolean;
 };

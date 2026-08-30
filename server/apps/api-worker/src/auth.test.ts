@@ -631,6 +631,20 @@ describe("product authentication API", () => {
     }).fetch(new Request("http://localhost/v1/admin/auth/blocked-attempts"));
     expect(userDenied.status).toBe(403);
 
+    const scopedDenied = await createTestApp({
+      auth,
+      passwordlessLimiter,
+      authenticate: () => createFakePrincipal({ role: "admin", adminRoles: ["billing_operator"] }),
+    }).fetch(new Request("http://localhost/v1/admin/auth/blocked-attempts"));
+    expect(scopedDenied.status).toBe(403);
+
+    const supportAllowed = await createTestApp({
+      auth,
+      passwordlessLimiter,
+      authenticate: () => createFakePrincipal({ role: "admin", adminRoles: ["support_readonly"] }),
+    }).fetch(new Request("http://localhost/v1/admin/auth/blocked-attempts"));
+    expect(supportAllowed.status).toBe(200);
+
     const listed = await createTestApp({
       auth,
       passwordlessLimiter,

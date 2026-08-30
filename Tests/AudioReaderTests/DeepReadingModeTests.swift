@@ -57,6 +57,21 @@ struct DeepReadingModeTests {
         #expect(state.canContinueDeepReading == false)
     }
 
+    @Test("Player ticks drive Listen First even when the reader view is not mounted")
+    func playerTicksAreOwnedByAppState() {
+        let state = makeState()
+        state.settings.deepReadingMode = true
+        state.player.currentTime = 0.5
+        state.player.isPlaying = true
+
+        state.handlePlayerTick(0.5)
+        state.player.currentTime = 2.06
+        state.handlePlayerTick(2.06)
+
+        #expect(state.player.isPlaying == false)
+        #expect(state.deepReadingPausedSentenceID == "first")
+    }
+
     private func makeState() -> AppState {
         let first = TranscriptSegment(
             id: "first",

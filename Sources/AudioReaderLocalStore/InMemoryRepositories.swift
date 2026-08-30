@@ -304,6 +304,21 @@ public final class InMemoryVocabularyRepository: VocabularyRepository, @unchecke
         }
     }
 
+    public func updateVocabularyReviewSchedule(_ schedule: StoredVocabularyReviewSchedule) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let current = items[schedule.vocabularyID] else { return }
+        items[schedule.vocabularyID] = schedule.merging(into: current)
+    }
+
+    public func updateVocabularyLearnList(id: VocabularyOccurrenceID, included: Bool) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard var current = items[id] else { return }
+        current.isInLearnList = included
+        items[id] = current
+    }
+
     public func deleteVocabulary(id: VocabularyOccurrenceID) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -333,6 +348,7 @@ public final class InMemoryKnownLemmaRepository: KnownLemmaRepository, @unchecke
 public final class InMemoryReviewEventRepository: ReviewEventRepository, @unchecked Sendable {
     private let lock = NSLock()
     private var items: [StoredReviewEvent] = []
+    private var reviewedVocabulary: [VocabularyOccurrenceID: StoredVocabularyOccurrence] = [:]
 
     public init() {}
 
@@ -347,6 +363,23 @@ public final class InMemoryReviewEventRepository: ReviewEventRepository, @unchec
         defer { lock.unlock() }
         guard !items.contains(where: { $0.id == event.id }) else { return }
         items.append(event)
+    }
+
+    public func appendReviewEvent(
+        _ event: StoredReviewEvent,
+        vocabulary: StoredVocabularyOccurrence
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !items.contains(where: { $0.id == event.id }) else { return }
+        items.append(event)
+        reviewedVocabulary[vocabulary.id] = vocabulary
+    }
+
+    public func loadReviewVocabularySnapshot() throws -> [StoredVocabularyOccurrence]? {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(reviewedVocabulary.values)
     }
 }
 
@@ -404,6 +437,16 @@ public final class InMemorySyncOutboxRepository: SyncOutboxRepository, @unchecke
         defer { lock.unlock() }
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         items[index].status = .acknowledged
+    }
+
+    public func markAcknowledged(ids: [MutationID]) throws {
+        let idSet = Set(ids)
+        guard !idSet.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        for index in items.indices where idSet.contains(items[index].id) {
+            items[index].status = .acknowledged
+        }
     }
 
     public func updatePending(_ mutation: OutboxMutation) throws {

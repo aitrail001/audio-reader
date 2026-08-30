@@ -72,7 +72,7 @@ export function productEventMethodError(
   return undefined;
 }
 
-/** Persist a usage row without failing the caller. Analytics must not block product APIs. */
+/** Persist an explicitly permitted event without letting analytics availability block product APIs. */
 export async function captureProductEvent(
   ops: OpsStore | undefined,
   input: {
@@ -81,16 +81,35 @@ export async function captureProductEvent(
     name: string;
     outcome?: OpsProductEvent["outcome"];
     requestId: string;
+    purpose?: OpsProductEvent["purpose"];
     properties?: Record<string, unknown>;
   },
-): Promise<void> {
+): Promise<boolean> {
   if (ops === undefined || !EVENT_NAME.test(input.name)) {
-    return;
+    return false;
   }
   try {
+    const purpose = input.purpose ?? "learning_analytics";
+    if (
+      purpose === "learning_analytics" &&
+      !(await ops.analyticsPreference(input.accountId)).operatorLearningAnalyticsEnabled
+    ) {
+      console.warn(
+        JSON.stringify({
+          level: "info",
+          message: "product_event_suppressed",
+          requestId: input.requestId,
+          name: input.name,
+          purpose,
+          outcome: "analytics_disabled",
+        }),
+      );
+      return false;
+    }
     await ops.recordProductEvent({
       accountId: input.accountId,
       deviceId: input.deviceId ?? null,
+      purpose,
       name: input.name,
       outcome: input.outcome ?? "ok",
       requestId: input.requestId,
@@ -103,8 +122,10 @@ export async function captureProductEvent(
         requestId: input.requestId,
         name: input.name,
         outcome: input.outcome ?? "ok",
+        purpose,
       }),
     );
+    return true;
   } catch (error: unknown) {
     console.warn(
       JSON.stringify({
@@ -115,6 +136,7 @@ export async function captureProductEvent(
         detail: error instanceof Error ? error.message : "unknown",
       }),
     );
+    return false;
   }
 }
 
@@ -176,7 +198,7 @@ export async function handleProductEventRoute(
           Object.entries(item.properties).filter(([key]) => !serverOwnedKeys.has(key)),
         )
       : {};
-    await captureProductEvent(ops, {
+    const stored = await captureProductEvent(ops, {
       accountId: principal.accountId,
       deviceId,
       name: item.name,
@@ -187,7 +209,7 @@ export async function handleProductEventRoute(
         ...serverProperties,
       },
     });
-    accepted += 1;
+    if (stored) accepted += 1;
   }
   return jsonResponse({ accepted }, 202);
 }

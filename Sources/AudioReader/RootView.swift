@@ -12,28 +12,34 @@ struct RootView: View {
 #endif
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 300)
-        } detail: {
-            switch state.tab {
-            case .library:
-                LibraryView(state: state)
-            case .player:
-                PlayerView(state: state)
-            case .vocab:
-                VocabularyView(state: state)
-            case .settings:
-                SettingsView(state: state)
-            }
-        }
-        .background(Palette.bg)
-        .safeAreaInset(edge: .top, spacing: 0) {
+        VStack(spacing: 0) {
             WorkStatusBanner(
                 library: state.libraryScanProgress,
                 accountMessage: state.account.activityMessage
             )
+
+            NavigationSplitView {
+                sidebar
+                    .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 300)
+            } detail: {
+                switch state.tab {
+                case .library:
+                    LibraryView(state: state)
+                case .player:
+                    PlayerView(state: state)
+                case .vocab:
+                    VocabularyView(state: state)
+                case .settings:
+                    SettingsView(state: state)
+                }
+            }
+            // The explicit fill keeps a tall detail from pushing the split view above the window,
+            // without reintroducing the macOS safe-area/split-resize constraint feedback crash.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .layoutPriority(1)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Palette.bg)
         .toolbar {
             if !state.backgroundJobs.isEmpty {
                 ToolbarItem(placement: .automatic) {

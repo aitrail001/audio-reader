@@ -1,7 +1,9 @@
 import { problemResponse } from "./http";
 
 export const DEFAULT_MAX_BODY_BYTES = 1_048_576;
-export const SYNC_PUSH_MAX_BODY_BYTES = 8_388_608;
+// Real chapter transcripts exceed the generic limit, but a measured 2.99 MB mixed batch
+// exhausted the Worker. Native batches stay below 2.625 MiB; this ceiling is the hard stop.
+export const SYNC_PUSH_MAX_BODY_BYTES = 3_145_728;
 
 const WRITE_METHODS = new Set(["POST", "PUT", "PATCH"]);
 

@@ -1,4 +1,8 @@
-import { LOCAL_PASSWORDLESS_HMAC_SECRET, createFakePrincipal } from "@audio-reader/auth";
+import {
+  LOCAL_PASSWORDLESS_HMAC_SECRET,
+  createFakePrincipal,
+  type AdminRole,
+} from "@audio-reader/auth";
 import { RestPersistenceError, createFakeDatabaseClient } from "@audio-reader/database";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
@@ -6,9 +10,14 @@ import { createRuntimeConfigService } from "./runtime-config";
 
 const DEVICE_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
 const USER_ID = "00000000-0000-4000-8000-000000000002";
+const OPERATOR_ID = "00000000-0000-4000-8000-000000000003";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function pageItems(value: unknown): Array<Record<string, unknown>> {
+  return isRecord(value) && Array.isArray(value.items) ? value.items.filter(isRecord) : [];
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -16,11 +25,642 @@ async function readJson(response: Response): Promise<unknown> {
 }
 
 describe("admin and privacy API", () => {
+  it.each([
+    ["suspend", "suspend_user"],
+    ["unsuspend", "unsuspend_user"],
+    ["revoke-sessions", "revoke_sessions"],
+  ] as const)(
+    "prevents an operator from applying %s to a superadmin account",
+    async (action, auditAction) => {
+      const database = createFakeDatabaseClient();
+      await database.identity.ensureProfile({ userId: USER_ID, email: "owner@example.com" });
+      await database.identity.ensureProfile({ userId: OPERATOR_ID, email: "ops@example.com" });
+      database.identity.seedActiveDevice?.(USER_ID, DEVICE_ID);
+      const originalAdminRoles = database.identity.adminRoles.bind(database.identity);
+      Object.assign(database.identity, {
+        adminRoles: (userId: string) =>
+          userId === USER_ID
+            ? Promise.resolve(["superadmin"] as const)
+            : originalAdminRoles(userId),
+      });
+      const app = createTestApp({
+        database,
+        authenticate: () =>
+          createFakePrincipal({
+            role: "admin",
+            accountId: OPERATOR_ID,
+            adminRoles: ["operator"],
+          }),
+      });
+
+      const response = await app.fetch(
+        new Request(`http://localhost/v1/admin/users/${USER_ID}/${action}`, {
+          method: "POST",
+          headers: {
+            authorization: "Bearer scoped-admin",
+            "content-type": "application/json",
+            "x-device-id": DEVICE_ID,
+            "idempotency-key": `protect-superadmin-${action}`,
+          },
+          body: JSON.stringify({ reason: "support request" }),
+        }),
+      );
+
+      expect(response.status).toBe(403);
+      expect(await readJson(response)).toMatchObject({ code: "forbidden" });
+      expect((await database.identity.getProfileByUserId(USER_ID))?.status).toBe("active");
+      expect((await database.identity.listDevices(USER_ID))[0]?.revoked).toBe(false);
+      expect(await database.ops.listAudit({ action: auditAction })).toHaveLength(0);
+    },
+  );
+
+  it("preserves ordinary user management for operators", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "learner@example.com" });
+    const app = createTestApp({
+      database,
+      authenticate: () =>
+        createFakePrincipal({
+          role: "admin",
+          accountId: OPERATOR_ID,
+          adminRoles: ["operator"],
+        }),
+    });
+
+    const response = await app.fetch(
+      new Request(`http://localhost/v1/admin/users/${USER_ID}/suspend`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer scoped-admin",
+          "content-type": "application/json",
+          "x-device-id": DEVICE_ID,
+          "idempotency-key": "suspend-ordinary-user",
+        },
+        body: JSON.stringify({ reason: "support request" }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect((await database.identity.getProfileByUserId(USER_ID))?.status).toBe("suspended");
+  });
+
+  it("allows a superadmin to revoke another superadmin's sessions", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "owner@example.com" });
+    database.identity.seedActiveDevice?.(USER_ID, DEVICE_ID);
+    Object.assign(database.identity, {
+      adminRoles: () => Promise.resolve(["superadmin"] as const),
+    });
+    const app = createTestApp({
+      database,
+      authenticate: () =>
+        createFakePrincipal({
+          role: "admin",
+          accountId: OPERATOR_ID,
+          adminRoles: ["superadmin"],
+        }),
+    });
+
+    const response = await app.fetch(
+      new Request(`http://localhost/v1/admin/users/${USER_ID}/revoke-sessions`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer scoped-admin",
+          "content-type": "application/json",
+          "x-device-id": DEVICE_ID,
+          "idempotency-key": "superadmin-revoke-superadmin",
+        },
+        body: JSON.stringify({ reason: "security response" }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect((await database.identity.listDevices(USER_ID))[0]?.revoked).toBe(true);
+  });
+
+  it.each([
+    {
+      role: "support_readonly",
+      allowed: "/v1/admin/users",
+      denied: "/v1/admin/cache",
+      deniedMethod: "GET",
+    },
+    {
+      role: "operator",
+      allowed: "/v1/admin/jobs",
+      denied: "/v1/admin/llm/policies",
+      deniedMethod: "GET",
+    },
+    {
+      role: "privacy_officer",
+      allowed: "/v1/admin/privacy-requests",
+      denied: "/v1/admin/runtime-config",
+      deniedMethod: "GET",
+    },
+    {
+      role: "billing_operator",
+      allowed: "/v1/admin/quotas",
+      denied: "/v1/admin/users",
+      deniedMethod: "GET",
+    },
+  ])("enforces $role capabilities at the route boundary", async (scenario) => {
+    const database = createFakeDatabaseClient();
+    Object.assign(database.identity, {
+      adminRoles: () => Promise.resolve([scenario.role]),
+    });
+    const app = createTestApp({
+      database,
+      authenticate: () =>
+        createFakePrincipal({
+          role: "admin",
+          accountId: USER_ID,
+          adminRoles: [scenario.role as AdminRole],
+        }),
+    });
+
+    const allowed = await app.fetch(
+      new Request(`http://localhost${scenario.allowed}`, {
+        headers: { authorization: "Bearer scoped-admin" },
+      }),
+    );
+    expect(allowed.status).not.toBe(403);
+
+    const denied = await app.fetch(
+      new Request(`http://localhost${scenario.denied}`, {
+        method: scenario.deniedMethod,
+        headers: {
+          authorization: "Bearer scoped-admin",
+          "content-type": "application/json",
+        },
+        ...(scenario.deniedMethod === "GET" ? {} : { body: "{}" }),
+      }),
+    );
+    expect(denied.status).toBe(403);
+    expect(await readJson(denied)).toMatchObject({ code: "forbidden" });
+  });
+
+  it("reports the signed-in operator's effective roles and capabilities", async () => {
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      authenticate: () =>
+        createFakePrincipal({
+          role: "admin",
+          accountId: USER_ID,
+          adminRoles: ["support_readonly"],
+        }),
+    });
+
+    const response = await app.fetch(
+      new Request("http://localhost/v1/admin/capabilities", {
+        headers: { authorization: "Bearer scoped-admin" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await readJson(response)).toEqual({
+      roles: ["support_readonly"],
+      capabilities: ["access.read", "activity.read", "users.read"],
+    });
+  });
+
+  it.each([
+    [
+      "GET",
+      "/v1/admin/capabilities",
+      ["support_readonly", "operator", "privacy_officer", "billing_operator", "superadmin"],
+    ],
+    ["GET", "/v1/admin/users", ["support_readonly", "operator", "privacy_officer", "superadmin"]],
+    [
+      "GET",
+      `/v1/admin/users/${USER_ID}`,
+      ["support_readonly", "operator", "privacy_officer", "superadmin"],
+    ],
+    [
+      "GET",
+      `/v1/admin/users/${USER_ID}/progress`,
+      ["support_readonly", "operator", "privacy_officer", "superadmin"],
+    ],
+    ["POST", `/v1/admin/users/${USER_ID}/suspend`, ["operator", "superadmin"]],
+    ["POST", `/v1/admin/users/${USER_ID}/unsuspend`, ["operator", "superadmin"]],
+    ["POST", `/v1/admin/users/${USER_ID}/revoke-sessions`, ["operator", "superadmin"]],
+    ["POST", `/v1/admin/users/${USER_ID}/grant-admin`, ["superadmin"]],
+    ["GET", "/v1/admin/runtime-config", ["superadmin"]],
+    ["PUT", "/v1/admin/runtime-config", ["superadmin"]],
+    ["GET", "/v1/admin/llm/policies", ["superadmin"]],
+    ["PATCH", "/v1/admin/llm/policies/policy", ["superadmin"]],
+    ["POST", "/v1/admin/llm/policies/policy/preview", ["superadmin"]],
+    ["POST", "/v1/admin/llm/policies/policy/probe", ["superadmin"]],
+    ["GET", "/v1/admin/cache", ["superadmin"]],
+    ["GET", `/v1/admin/cache/${USER_ID}`, ["superadmin"]],
+    ["POST", `/v1/admin/cache/${USER_ID}/actions`, ["superadmin"]],
+    ["GET", "/v1/admin/jobs", ["operator", "superadmin"]],
+    ["POST", `/v1/admin/jobs/${USER_ID}/retry`, ["operator", "superadmin"]],
+    ["POST", `/v1/admin/jobs/${USER_ID}/cancel`, ["operator", "superadmin"]],
+    ["GET", "/v1/admin/metrics", ["operator", "billing_operator", "superadmin"]],
+    ["GET", "/v1/admin/product-analytics", ["operator", "billing_operator", "superadmin"]],
+    [
+      "GET",
+      "/v1/admin/audit-events",
+      ["support_readonly", "operator", "privacy_officer", "superadmin"],
+    ],
+    [
+      "GET",
+      "/v1/admin/product-events",
+      ["support_readonly", "operator", "privacy_officer", "superadmin"],
+    ],
+    ["GET", "/v1/admin/events", ["support_readonly", "operator", "privacy_officer", "superadmin"]],
+    ["GET", "/v1/admin/diagnostics", ["superadmin"]],
+    ["GET", "/v1/admin/feature-flags", ["operator", "superadmin"]],
+    ["PATCH", "/v1/admin/feature-flags/managed_qwen", ["operator", "superadmin"]],
+    ["GET", "/v1/admin/quotas", ["billing_operator", "superadmin"]],
+    ["PATCH", "/v1/admin/quotas/storage", ["billing_operator", "superadmin"]],
+    ["GET", "/v1/admin/privacy-requests", ["privacy_officer", "superadmin"]],
+    ["POST", `/v1/admin/privacy-requests/${USER_ID}/actions`, ["privacy_officer", "superadmin"]],
+  ] as const)("enforces the full role matrix for %s %s", async (method, path, allowedRoles) => {
+    const allRoles: AdminRole[] = [
+      "support_readonly",
+      "operator",
+      "privacy_officer",
+      "billing_operator",
+      "superadmin",
+    ];
+    for (const role of allRoles) {
+      const database = createFakeDatabaseClient();
+      const app = createTestApp({
+        database,
+        authenticate: () =>
+          createFakePrincipal({ role: "admin", accountId: USER_ID, adminRoles: [role] }),
+      });
+      const response = await app.fetch(
+        new Request(`http://localhost${path}`, {
+          method,
+          headers: {
+            authorization: "Bearer scoped-admin",
+            ...(method === "GET" ? {} : { "content-type": "application/json" }),
+          },
+          ...(method === "GET" ? {} : { body: "{}" }),
+        }),
+      );
+      if ((allowedRoles as readonly string[]).includes(role)) {
+        expect(response.status, `${role} should be allowed`).not.toBe(403);
+      } else {
+        expect(response.status, `${role} should be denied`).toBe(403);
+      }
+    }
+  });
+
+  it("returns an audited, consented per-user learning summary without synced content", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "learner@example.com" });
+    database.identity.seedActiveDevice?.(USER_ID, DEVICE_ID);
+    await database.identity.grantAdminRole(USER_ID);
+    const summary = {
+      generatedAt: "2026-08-30T04:00:00.000Z",
+      expiresAt: "2026-11-28T04:00:00.000Z",
+      sync: {
+        lastSuccessfulAt: "2026-08-30T03:58:00.000Z",
+        lastDevice: { id: DEVICE_ID, platform: "macos", name: "MacBook" },
+        entityCounts: [{ entityType: "vocabulary", count: 42 }],
+        pendingCount: 2,
+        conflictCount: 1,
+      },
+      reading: {
+        lastActivityAt: "2026-08-30T03:55:00.000Z",
+        activeBooks: 2,
+        completedBooks: 1,
+        currentChapter: 4,
+        completionPercent: 63,
+      },
+      review: {
+        due: 3,
+        new: 9,
+        learning: 7,
+        reviewsLast30Days: 48,
+        reviewsPerActiveDay: 6,
+        retentionRate: 0.88,
+        streakDays: 5,
+      },
+      learning: {
+        vocabulary: 42,
+        known: 18,
+        learning: 7,
+        aiUsesLast30Days: 12,
+        aiUsesByFeature: [{ feature: "translation", count: 9 }],
+      },
+    };
+    Object.assign(database.ops, {
+      userProgressSummary: () => Promise.resolve(summary),
+      analyticsPreference: () =>
+        Promise.resolve({ operatorLearningAnalyticsEnabled: true, updatedAt: summary.generatedAt }),
+    });
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin", accountId: USER_ID }),
+    });
+
+    const response = await app.fetch(
+      new Request(`http://localhost/v1/admin/users/${USER_ID}/progress`, {
+        headers: { authorization: "Bearer admin" },
+      }),
+    );
+    const body = await readJson(response);
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      consent: { operatorLearningAnalyticsEnabled: true },
+      sync: { pendingCount: 2, conflictCount: 1 },
+      reading: { activeBooks: 2, completionPercent: 63 },
+      review: { due: 3, retentionRate: 0.88 },
+      learning: { vocabulary: 42, aiUsesLast30Days: 12 },
+      activity: {
+        eventsPath: `/v1/admin/product-events?accountId=${USER_ID}`,
+        auditPath: `/v1/admin/audit-events?resourceId=${USER_ID}`,
+      },
+    });
+    expect(JSON.stringify(body)).not.toMatch(
+      /"(payload|context|definition|note|transcript|sourceText|translatedText)"\s*:/i,
+    );
+    const audits = await database.ops.listAudit({ action: "admin_user_progress_read" });
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      actorId: USER_ID,
+      resourceType: "user_progress",
+      resourceId: USER_ID,
+    });
+    expect(JSON.stringify(audits[0]?.metadata)).not.toContain("42");
+  });
+
+  it("withholds learning analytics without explicit user consent", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "learner@example.com" });
+    await database.identity.grantAdminRole(USER_ID);
+    Object.assign(database.ops, {
+      analyticsPreference: () =>
+        Promise.resolve({
+          operatorLearningAnalyticsEnabled: false,
+          updatedAt: "2026-08-30T04:00:00.000Z",
+        }),
+    });
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin", accountId: USER_ID }),
+    });
+    const response = await app.fetch(
+      new Request(`http://localhost/v1/admin/users/${USER_ID}/progress`, {
+        headers: { authorization: "Bearer admin" },
+      }),
+    );
+    const body = await readJson(response);
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      consent: { operatorLearningAnalyticsEnabled: false },
+      reading: null,
+      review: null,
+      learning: null,
+    });
+  });
+
+  it("returns a traceable dependency failure when progress materialization fails", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "learner@example.com" });
+    Object.assign(database.ops, {
+      userProgressSummary: () =>
+        Promise.reject(new RestPersistenceError(502, "progress RPC unavailable")),
+    });
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin", accountId: USER_ID }),
+    });
+
+    const response = await app.fetch(
+      new Request(`http://localhost/v1/admin/users/${USER_ID}/progress`, {
+        headers: { authorization: "Bearer admin", "x-request-id": "progress-trace" },
+      }),
+    );
+    const body = await readJson(response);
+
+    expect(response.status).toBe(502);
+    expect(body).toMatchObject({ code: "dependency_failed", traceId: "progress-trace" });
+    expect(JSON.stringify(body)).not.toContain("progress RPC unavailable");
+  });
+
+  it("requires a scoped support role for per-user progress", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "billing@example.com" });
+    Object.assign(database.identity, {
+      adminRoles: () => Promise.resolve(["billing_operator"]),
+    });
+    const app = createTestApp({
+      database,
+      authenticate: () =>
+        createFakePrincipal({
+          role: "admin",
+          accountId: USER_ID,
+          adminRoles: ["billing_operator"],
+        }),
+    });
+    const response = await app.fetch(
+      new Request(`http://localhost/v1/admin/users/${USER_ID}/progress`, {
+        headers: { authorization: "Bearer admin" },
+      }),
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it("lets a signed-in user explicitly control Operator learning analytics", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "learner@example.com" });
+    database.identity.seedActiveDevice?.(USER_ID, DEVICE_ID);
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ accountId: USER_ID }),
+    });
+    const response = await app.fetch(
+      new Request("http://localhost/v1/me/analytics-preferences", {
+        method: "PUT",
+        headers: {
+          authorization: "Bearer user",
+          "content-type": "application/json",
+          "x-device-id": DEVICE_ID,
+          "idempotency-key": "analytics-preference-opt-in",
+        },
+        body: JSON.stringify({ operatorLearningAnalyticsEnabled: true }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(await readJson(response)).toMatchObject({ operatorLearningAnalyticsEnabled: true });
+    const audits = await database.ops.listAudit({ action: "analytics_preference_changed" });
+    expect(audits).toHaveLength(1);
+
+    const unbound = await app.fetch(
+      new Request("http://localhost/v1/me/analytics-preferences", {
+        method: "PUT",
+        headers: {
+          authorization: "Bearer user",
+          "content-type": "application/json",
+          "x-device-id": "00000000-0000-4000-8000-000000000099",
+          "idempotency-key": "analytics-preference-unbound",
+        },
+        body: JSON.stringify({ operatorLearningAnalyticsEnabled: false }),
+      }),
+    );
+    expect(unbound.status).toBe(401);
+  });
+
+  it("previews every managed prompt layer from an unsaved policy draft", async () => {
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+    const response = await app.fetch(
+      new Request(
+        "http://localhost/v1/admin/llm/policies/00000000-0000-4000-8000-0000000000aa/preview",
+        {
+          method: "POST",
+          headers: { authorization: "Bearer admin", "content-type": "application/json" },
+          body: JSON.stringify({
+            subtask: "sentence",
+            draft: {
+              systemPrompt: "Unsaved operator layer.",
+              userPrompt: "Quoted source: {{source}}",
+              schemaVersion: "1",
+            },
+          }),
+        },
+      ),
+    );
+    const body = await readJson(response);
+    expect(response.status).toBe(200);
+    expect(isRecord(body) && isRecord(body.editable) ? body.editable.system : null).toBe(
+      "Unsaved operator layer.",
+    );
+    expect(isRecord(body) && isRecord(body.enforced) ? body.enforced.taskContract : "").toContain(
+      "exact source-language span",
+    );
+    expect(isRecord(body) && isRecord(body.effective) ? body.effective.user : "").toContain(
+      "Ada Author",
+    );
+    expect(isRecord(body) && isRecord(body.validation) ? body.validation.valid : false).toBe(true);
+
+    const heard = await app.fetch(
+      new Request(
+        "http://localhost/v1/admin/llm/policies/00000000-0000-4000-8000-0000000000ac/preview",
+        {
+          method: "POST",
+          headers: { authorization: "Bearer admin", "content-type": "application/json" },
+          body: JSON.stringify({ subtask: "heard_quiz" }),
+        },
+      ),
+    );
+    const heardBody = await readJson(heard);
+    expect(heard.status).toBe(200);
+    expect(
+      isRecord(heardBody) && isRecord(heardBody.enforced) ? heardBody.enforced.taskContract : "",
+    ).toContain("already-heard");
+    expect(
+      isRecord(heardBody) && isRecord(heardBody.outputSchema)
+        ? heardBody.outputSchema.properties
+        : null,
+    ).toBeTruthy();
+  });
+
+  it("rejects a heard_quiz probe that cites a segment outside the preview fixture", async () => {
+    const database = createFakeDatabaseClient();
+    const runtime = createRuntimeConfigService({
+      env: {
+        ENVIRONMENT: "test",
+        QWEN_API_KEY: "test-key",
+        QWEN_BASE_URL: "https://example.invalid/v1",
+        QWEN_MODEL: "qwen-test",
+      },
+      ops: database.ops,
+      wrappingSecret: "test-operator-secret-key",
+      fetch: () =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              model: "qwen-test",
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content:
+                      '{"questions":[{"id":"q1","kind":"comprehension","prompt":"What happened?","choices":["A","B","C","D"],"answerIndex":0,"rationale":"Because.","segmentID":"future"},{"id":"q2","kind":"sequencing","prompt":"Then?","choices":["A","B","C","D"],"answerIndex":1,"rationale":"Because.","segmentID":"s1"}]}',
+                  },
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        ),
+    });
+    const app = createTestApp({
+      database,
+      runtime,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+    const response = await app.fetch(
+      new Request(
+        "http://localhost/v1/admin/llm/policies/00000000-0000-4000-8000-0000000000ac/probe",
+        {
+          method: "POST",
+          headers: { authorization: "Bearer admin", "content-type": "application/json" },
+          body: JSON.stringify({ subtask: "heard_quiz" }),
+        },
+      ),
+    );
+    const body = await readJson(response);
+    expect(response.status).toBe(200);
+    expect(
+      isRecord(body) && isRecord(body.outputValidation) ? body.outputValidation.valid : true,
+    ).toBe(false);
+    expect(
+      isRecord(body) && isRecord(body.outputValidation) ? body.outputValidation.errors : [],
+    ).toContain("$.questions[0].segmentID is outside the heard passage.");
+  });
+
+  it("rejects policy prompt drift before save", async () => {
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+    const response = await app.fetch(
+      new Request("http://localhost/v1/admin/llm/policies/00000000-0000-4000-8000-0000000000aa", {
+        method: "PATCH",
+        headers: {
+          authorization: "Bearer admin",
+          "content-type": "application/json",
+          "x-device-id": DEVICE_ID,
+          "idempotency-key": "policy-contract-invalid",
+        },
+        body: JSON.stringify({
+          reason: "test invalid prompt",
+          userPrompt: "{{unknownPromptInput}}",
+          schemaVersion: "2",
+        }),
+      }),
+    );
+    const body = await readJson(response);
+    expect(response.status).toBe(422);
+    expect(
+      isRecord(body) && Array.isArray(body.fieldErrors)
+        ? body.fieldErrors.some(
+            (entry) =>
+              isRecord(entry) &&
+              entry.field === "userPrompt" &&
+              String(entry.message).includes("Unknown placeholder"),
+          )
+        : false,
+    ).toBe(true);
+  });
   it("returns privacy-preserving product analytics with granular filters", async () => {
     const database = createFakeDatabaseClient();
     await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
     await database.identity.grantAdminRole(USER_ID);
     for (const [index, platform] of ["macos", "macos", "ipados"].entries()) {
+      await database.ops.putAnalyticsPreference(`${USER_ID.slice(0, -1)}${String(index)}`, true);
       await database.ops.recordProductEvent({
         accountId: `${USER_ID.slice(0, -1)}${String(index)}`,
         deviceId: `${DEVICE_ID.slice(0, -1)}${String(index)}`,
@@ -56,10 +696,56 @@ describe("admin and privacy API", () => {
     expect(JSON.stringify(body)).not.toContain("content-0");
   });
 
+  it("includes filtered analytics events beyond the first 5,000 source rows", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
+    await database.identity.grantAdminRole(USER_ID);
+    await database.ops.putAnalyticsPreference(USER_ID, true);
+    await database.ops.recordProductEvent({
+      accountId: USER_ID,
+      deviceId: DEVICE_ID,
+      name: "review.completed",
+      outcome: "ok",
+      requestId: "older-matching-event",
+      properties: { platform: "macos", feature: "review" },
+      createdAt: "2026-08-30T01:00:00.000Z",
+    });
+    await Promise.all(
+      Array.from({ length: 5_000 }, (_, index) =>
+        database.ops.recordProductEvent({
+          accountId: USER_ID,
+          deviceId: DEVICE_ID,
+          name: "reader.opened",
+          outcome: "ok",
+          requestId: `newer-nonmatch-${String(index)}`,
+          properties: { platform: "ipados", feature: "reader" },
+          createdAt: "2026-08-30T12:00:00.000Z",
+        }),
+      ),
+    );
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+
+    const response = await app.fetch(
+      new Request(
+        "http://localhost/v1/admin/product-analytics?from=2026-08-30T00%3A00%3A00.000Z&to=2026-08-31T00%3A00%3A00.000Z&platform=macos&interval=day",
+        { headers: { authorization: "Bearer admin" } },
+      ),
+    );
+    const body = await readJson(response);
+
+    expect(response.status).toBe(200);
+    expect(isRecord(body) && isRecord(body.summary) ? body.summary.events : null).toBe(1);
+    expect(isRecord(body) ? body.sampled : null).toBe(false);
+  });
+
   it("filters product events by request id", async () => {
     const database = createFakeDatabaseClient();
     await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
     await database.identity.grantAdminRole(USER_ID);
+    await database.ops.putAnalyticsPreference(USER_ID, true);
     await database.ops.recordProductEvent({
       accountId: USER_ID,
       deviceId: DEVICE_ID,
@@ -100,6 +786,189 @@ describe("admin and privacy API", () => {
         ? String(body.items[0].subjectId).startsWith("learner-")
         : false,
     ).toBe(true);
+  });
+
+  it("paginates filtered product events without truncating later matches", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
+    await database.identity.grantAdminRole(USER_ID);
+    await database.ops.putAnalyticsPreference(USER_ID, true);
+    for (const index of [0, 1, 2]) {
+      await database.ops.recordProductEvent({
+        accountId: USER_ID,
+        deviceId: DEVICE_ID,
+        name: "review.completed",
+        outcome: "ok",
+        requestId: `review-page-${String(index)}`,
+        properties: {},
+        createdAt: "2026-08-30T03:00:00.000Z",
+      });
+    }
+    await database.ops.recordProductEvent({
+      accountId: USER_ID,
+      deviceId: DEVICE_ID,
+      name: "reader.opened",
+      outcome: "ok",
+      requestId: "not-a-review",
+      properties: {},
+      createdAt: "2026-08-30T04:00:00.000Z",
+    });
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+
+    const firstResponse = await app.fetch(
+      new Request("http://localhost/v1/admin/product-events?name=review.completed&limit=2", {
+        headers: { authorization: "Bearer admin" },
+      }),
+    );
+    const first = await readJson(firstResponse);
+    const nextCursor =
+      isRecord(first) && typeof first.nextCursor === "string" ? first.nextCursor : null;
+    expect(firstResponse.status).toBe(200);
+    expect(pageItems(first)).toHaveLength(2);
+    expect(nextCursor).not.toBeNull();
+    expect(nextCursor).not.toMatch(/^\d+$/);
+
+    const secondResponse = await app.fetch(
+      new Request(
+        `http://localhost/v1/admin/product-events?name=review.completed&limit=2&cursor=${encodeURIComponent(nextCursor ?? "")}`,
+        { headers: { authorization: "Bearer admin" } },
+      ),
+    );
+    const second = await readJson(secondResponse);
+    const allItems = [...pageItems(first), ...pageItems(second)];
+    expect(secondResponse.status).toBe(200);
+    expect(pageItems(second)).toHaveLength(1);
+    expect(new Set(allItems.map((item) => item.id)).size).toBe(3);
+    expect(allItems.every((item) => item.name === "review.completed")).toBe(true);
+  });
+
+  it("paginates filtered audit events beyond the storage read cap", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
+    await database.identity.grantAdminRole(USER_ID);
+    for (let index = 0; index < 102; index += 1) {
+      await database.ops.appendAudit({
+        actorId: USER_ID,
+        action: "review_schedule_changed",
+        resourceType: "review_schedule",
+        resourceId: `schedule-${String(index)}`,
+        reason: "pagination regression",
+        traceId: `audit-page-${String(index)}`,
+        metadata: {},
+      });
+    }
+    await database.ops.appendAudit({
+      actorId: USER_ID,
+      action: "unrelated_action",
+      resourceType: "review_schedule",
+      resourceId: "unrelated",
+      reason: "filter control",
+      traceId: "audit-unrelated",
+      metadata: {},
+    });
+    const listAudit = database.ops.listAudit.bind(database.ops);
+    Object.assign(database.ops, {
+      listAudit: async (filter?: Parameters<typeof listAudit>[0]) =>
+        (await listAudit(filter)).slice(0, 100),
+    });
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+
+    const firstResponse = await app.fetch(
+      new Request(
+        "http://localhost/v1/admin/audit-events?action=review_schedule_changed&limit=60",
+        { headers: { authorization: "Bearer admin" } },
+      ),
+    );
+    const first = await readJson(firstResponse);
+    const nextCursor =
+      isRecord(first) && typeof first.nextCursor === "string" ? first.nextCursor : null;
+    const secondResponse = await app.fetch(
+      new Request(
+        `http://localhost/v1/admin/audit-events?action=review_schedule_changed&limit=60&cursor=${encodeURIComponent(nextCursor ?? "")}`,
+        { headers: { authorization: "Bearer admin" } },
+      ),
+    );
+    const second = await readJson(secondResponse);
+    const allItems = [...pageItems(first), ...pageItems(second)];
+
+    expect(firstResponse.status).toBe(200);
+    expect(secondResponse.status).toBe(200);
+    expect(nextCursor).not.toBeNull();
+    expect(nextCursor).not.toMatch(/^\d+$/);
+    expect(allItems).toHaveLength(102);
+    expect(new Set(allItems.map((item) => item.id)).size).toBe(102);
+    expect(allItems.every((item) => item.action === "review_schedule_changed")).toBe(true);
+  });
+
+  it("withholds account-scoped product events after analytics opt-out", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
+    await database.identity.grantAdminRole(USER_ID);
+    await database.ops.putAnalyticsPreference(USER_ID, true);
+    await database.ops.recordProductEvent({
+      accountId: USER_ID,
+      deviceId: DEVICE_ID,
+      name: "review.completed",
+      outcome: "ok",
+      requestId: "pre-opt-out",
+      properties: {},
+    });
+    await database.ops.putAnalyticsPreference(USER_ID, false);
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+
+    const response = await app.fetch(
+      new Request(`http://localhost/v1/admin/product-events?accountId=${USER_ID}`, {
+        headers: { authorization: "Bearer admin" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ items: [] });
+  });
+
+  it("audits account-scoped product activity reads", async () => {
+    const database = createFakeDatabaseClient();
+    await database.identity.ensureProfile({ userId: USER_ID, email: "fake@example.com" });
+    await database.identity.grantAdminRole(USER_ID);
+    await database.ops.putAnalyticsPreference(USER_ID, true);
+    await database.ops.recordProductEvent({
+      accountId: USER_ID,
+      deviceId: DEVICE_ID,
+      name: "review.completed",
+      outcome: "ok",
+      requestId: "account-activity-read",
+      properties: {},
+    });
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+
+    const response = await app.fetch(
+      new Request(`http://localhost/v1/admin/product-events?accountId=${USER_ID}`, {
+        headers: { authorization: "Bearer admin", "x-request-id": "activity-read-trace" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const audits = await database.ops.listAudit({ action: "admin_user_activity_read" });
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      actorId: USER_ID,
+      resourceType: "user_activity",
+      resourceId: USER_ID,
+      traceId: "activity-read-trace",
+      metadata: { consented: true },
+    });
   });
 
   it("applies kind and task filters to persisted Trace fallback events", async () => {

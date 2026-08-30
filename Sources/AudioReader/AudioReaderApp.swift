@@ -4,6 +4,7 @@ import Foundation
 @main
 struct AudioReaderApp: App {
     @State private var state: AppState
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         let args = CommandLine.arguments
@@ -36,6 +37,7 @@ struct AudioReaderApp: App {
                 .background(Palette.bg)
                 .preferredColorScheme(AppAppearance(rawValue: state.settings.appearance)?.colorScheme)
                 .uiTestMotionEnvironment()
+                .onChange(of: scenePhase) { _, phase in handleScenePhase(phase) }
         }
         .windowStyle(.automatic)
         .defaultSize(width: 1280, height: 820)
@@ -71,7 +73,7 @@ struct AudioReaderApp: App {
                     set: { state.setSentenceLoop($0) }
                 ))
                     .keyboardShortcut("l", modifiers: [.command])
-                Toggle("Deep Reading", isOn: Binding(
+                Toggle("Listen First", isOn: Binding(
                     get: { state.settings.deepReadingMode },
                     set: { state.setDeepReadingMode($0) }
                 ))
@@ -121,8 +123,15 @@ struct AudioReaderApp: App {
             IPadRootView(state: state)
                 .preferredColorScheme(AppAppearance(rawValue: state.settings.appearance)?.colorScheme)
                 .uiTestMotionEnvironment()
+                .onChange(of: scenePhase) { _, phase in handleScenePhase(phase) }
         }
 #endif
+    }
+
+    private func handleScenePhase(_ phase: ScenePhase) {
+        if phase != .active {
+            state.flushReaderProgress()
+        }
     }
 }
 
@@ -185,6 +194,20 @@ enum UITestLaunchScenario {
         )
         let firstWord = TranscriptWord(id: "ui-word-1", text: "Listening ", start: 0, end: 0.8, confidence: 1)
         let secondWord = TranscriptWord(id: "ui-word-2", text: "changes us.", start: 0.8, end: 2.2, confidence: 1)
+        let transcriptSegments = [
+            TranscriptSegment(
+                id: "ui-sentence-1",
+                start: 0,
+                end: 2.2,
+                words: [firstWord, secondWord],
+                ebookText: nil,
+                alignmentScore: nil
+            ),
+            fixtureSegment(id: "ui-sentence-2", text: ["Careful ", "practice ", "builds ", "confidence."], start: 2.2),
+            fixtureSegment(id: "ui-sentence-3", text: ["Stories ", "make ", "new ", "phrases ", "memorable."], start: 4.4),
+            fixtureSegment(id: "ui-sentence-4", text: ["Active ", "recall ", "strengthens ", "understanding."], start: 6.6),
+            fixtureSegment(id: "ui-sentence-5", text: ["Tomorrow ", "brings ", "another ", "chapter."], start: 8.8),
+        ]
 
         state.books = scenario == "empty-library" ? [] : [book]
         state.selectedBookID = scenario == "empty-library" ? nil : book.id
@@ -194,16 +217,7 @@ enum UITestLaunchScenario {
             audioPath: chapter.audioPath,
             createdAt: Date(timeIntervalSince1970: 1),
             locale: "en-AU",
-            segments: [
-                TranscriptSegment(
-                    id: "ui-sentence-1",
-                    start: 0,
-                    end: 2.2,
-                    words: [firstWord, secondWord],
-                    ebookText: nil,
-                    alignmentScore: nil
-                )
-            ],
+            segments: transcriptSegments,
             source: "ui-test",
             ebookAligned: false
         )
@@ -222,10 +236,16 @@ enum UITestLaunchScenario {
                 addedAt: Date(timeIntervalSince1970: 1)
             )
         ]
+        if scenario == "words-rich" {
+            state.vocab = makeRichVocabularyFixture(book: book, chapter: chapter)
+        }
 
         switch scenario {
         case "reader": state.tab = .player
-        case "words": state.tab = .vocab
+        case "listen-first":
+            state.tab = .player
+            state.prepareUITestListenFirstPause(segmentID: "ui-sentence-4", time: 8.74)
+        case "words", "words-rich": state.tab = .vocab
         case "settings": state.tab = .settings
         default: state.tab = .library
         }
@@ -260,5 +280,67 @@ enum UITestLaunchScenario {
         try? data.write(to: url, options: .atomic)
         return url
     }
+
+    private static func fixtureSegment(
+        id: String,
+        text: [String],
+        start: TimeInterval
+    ) -> TranscriptSegment {
+        let duration = 2.2 / Double(text.count)
+        return TranscriptSegment(
+            id: id,
+            start: start,
+            end: start + 2.2,
+            words: text.enumerated().map { index, token in
+                TranscriptWord(
+                    id: "\(id)-word-\(index)",
+                    text: token,
+                    start: start + Double(index) * duration,
+                    end: start + Double(index + 1) * duration,
+                    confidence: 1
+                )
+            },
+            ebookText: nil,
+            alignmentScore: nil
+        )
+    }
+
+    /// A bounded rich fixture verifies the daily queue and the first/last
+    /// vocabulary pages without reading or modifying the user's library.
+    private static func makeRichVocabularyFixture(book: Book, chapter: Chapter) -> [VocabEntry] {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let due = (0..<4).map { index in
+            var entry = VocabEntry(
+                id: "ui-vocab-due-\(index)",
+                word: "due-\(index)",
+                context: "Due card \(index).",
+                bookID: book.id,
+                bookTitle: book.title,
+                chapterID: chapter.id,
+                chapterTitle: chapter.title,
+                timestamp: Double(index),
+                addedAt: now.addingTimeInterval(Double(index))
+            )
+            entry.reviewCount = 2
+            entry.reviewIntervalDays = 3
+            entry.nextReview = now.addingTimeInterval(-Double(4 - index))
+            return entry
+        }
+        let new = (0..<81).map { index in
+            VocabEntry(
+                id: "ui-vocab-new-\(index)",
+                word: "new-\(index)",
+                context: "New card \(index).",
+                bookID: book.id,
+                bookTitle: book.title,
+                chapterID: chapter.id,
+                chapterTitle: chapter.title,
+                timestamp: Double(index + 4),
+                addedAt: now.addingTimeInterval(Double(index + 4))
+            )
+        }
+        return due + new
+    }
 }
+
 #endif

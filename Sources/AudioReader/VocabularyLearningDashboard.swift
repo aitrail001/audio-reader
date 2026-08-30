@@ -9,7 +9,7 @@ struct VocabularyLearningDashboard: View {
             .init(id: "due", title: "Due", value: "\(snapshot.queue.due.count)", symbol: "clock"),
             .init(id: "new", title: "New", value: "\(snapshot.queue.new.count)", symbol: "sparkles"),
             .init(id: "learning", title: "Learning", value: "\(snapshot.queue.learning.count)", symbol: "brain.head.profile"),
-            .init(id: "today", title: "Today", value: "\(snapshot.todayReviewCount)", symbol: "checkmark.circle"),
+            .init(id: "reviewedToday", title: "Reviewed today", value: "\(snapshot.todayReviewCount)", symbol: "checkmark.circle"),
             .init(id: "streak", title: "Streak", value: "\(snapshot.streakDays) d", symbol: "calendar"),
             .init(id: "retention", title: "30-day retention", value: retentionLabel, symbol: "scope")
         ]
@@ -23,7 +23,7 @@ struct VocabularyLearningDashboard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             LearningDashboardHeader(
-                sessionCount: snapshot.queue.session.count,
+                session: snapshot.queue.sessionBreakdown,
                 onStartSession: onStartSession
             )
 
@@ -45,6 +45,13 @@ struct VocabularyLearningDashboard: View {
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Learning summary")
 
+            if !snapshot.queue.session.isEmpty {
+                VocabularyTodayCards(
+                    entries: snapshot.queue.session,
+                    dueCount: snapshot.queue.sessionBreakdown.dueCount
+                )
+            }
+
             if !snapshot.forecast.isEmpty {
                 VocabularyDueForecastRow(forecast: snapshot.forecast)
             }
@@ -56,56 +63,70 @@ struct VocabularyLearningDashboard: View {
         .padding(.horizontal, 24)
         .padding(.vertical, 14)
         .background(Palette.panel)
-        .accessibilityIdentifier("words.learningDashboard")
     }
 }
 
 private struct LearningDashboardHeader: View {
-    let sessionCount: Int
+    let session: VocabularyStudySessionBreakdown
     let onStartSession: () -> Void
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .center, spacing: 16) {
-                title
-                Spacer(minLength: 12)
-                startButton
-            }
-            VStack(alignment: .leading, spacing: 12) {
-                title
-                startButton
-            }
+        VStack(alignment: .leading, spacing: 12) {
+            title
+            startButton
         }
     }
 
     private var title: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("Learning")
+            Text("Today’s study")
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(Palette.ink)
-            Text("A daily queue from the words and sentences you saved while reading.")
+                .accessibilityIdentifier("words.learningDashboard")
+            Text("Due cards come first, followed by up to \(VocabularyLearningPolicy.dailyNewCardLimit) new cards.")
                 .font(.subheadline)
                 .foregroundStyle(Palette.dim)
                 .fixedSize(horizontal: false, vertical: true)
+            if session.totalCount > 0 {
+                Text(sessionSummary)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Palette.gold)
+                    .accessibilityLabel(sessionAccessibilitySummary)
+            }
         }
     }
 
     private var startButton: some View {
         Button(action: onStartSession) {
             Label(
-                sessionCount == 1 ? "Study 1 card" : "Study \(sessionCount) cards",
+                session.totalCount == 1 ? "Study 1 card today" : "Study \(session.totalCount) cards today",
                 systemImage: "play.fill"
             )
         }
         .buttonStyle(.borderedProminent)
         .tint(Palette.terracotta)
         .controlSize(.large)
-        .disabled(sessionCount == 0)
+        .disabled(session.totalCount == 0)
+        .accessibilityIdentifier("words.studyToday")
         .accessibilityHint(
-            sessionCount == 0
+            session.totalCount == 0
                 ? "There are no due or new cards."
-                : "Starts due learning cards, due reviews, then new cards."
+                : "Starts \(sessionAccessibilitySummary)."
         )
+    }
+
+    private var sessionSummary: String {
+        if session.dueCount == 0 { return "\(session.newCount) new" }
+        if session.newCount == 0 { return "\(session.dueCount) due" }
+        return "\(session.dueCount) due + \(session.newCount) new"
+    }
+
+    private var sessionAccessibilitySummary: String {
+        let due = session.dueCount == 1 ? "1 due card" : "\(session.dueCount) due cards"
+        let new = session.newCount == 1 ? "1 new card" : "\(session.newCount) new cards"
+        if session.dueCount == 0 { return new }
+        if session.newCount == 0 { return due }
+        return "\(due) and \(new)"
     }
 }
 
@@ -136,6 +157,75 @@ private struct VocabularyLearningMetricValue: View {
         .frame(minWidth: 104, minHeight: 44, alignment: .leading)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(metric.title), \(metric.value)")
+        .accessibilityIdentifier("words.metric.\(metric.id)")
+    }
+}
+
+private struct VocabularyTodayCards: View {
+    private static let previewLimit = 20
+
+    let entries: [VocabEntry]
+    let dueCount: Int
+
+    private var preview: ArraySlice<VocabEntry> {
+        entries.prefix(Self.previewLimit)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Today’s cards")
+                    .font(.headline)
+                    .foregroundStyle(Palette.ink)
+                    .accessibilityIdentifier("words.todayCards")
+                Spacer()
+                Text("\(entries.count) ready")
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(Palette.dim)
+            }
+
+            // The preview is capped at 20, so eagerly exposing every row keeps
+            // the complete daily preview reachable to VoiceOver and UI tests.
+            VStack(spacing: 0) {
+                ForEach(Array(preview.enumerated()), id: \.element.id) { index, entry in
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(index < dueCount ? "Due" : "New")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(index < dueCount ? Palette.terracotta : Palette.gold)
+                            .frame(width: 38, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.word)
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(Palette.ink)
+                                .lineLimit(1)
+                            Text("\(entry.bookTitle) · \(entry.chapterTitle)")
+                                .font(.caption)
+                                .foregroundStyle(Palette.dim)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 8)
+                    }
+                    .frame(minHeight: 44)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(
+                        "\(index < dueCount ? "Due" : "New") card, \(entry.word), \(entry.bookTitle), \(entry.chapterTitle)"
+                    )
+                    .accessibilityIdentifier("words.todayCard.\(entry.id)")
+
+                    if entry.id != preview.last?.id {
+                        Divider().overlay(Palette.line)
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .background(Palette.panel2, in: RoundedRectangle(cornerRadius: 12))
+
+            if entries.count > preview.count {
+                Text("The study session includes \(entries.count - preview.count) more cards after this preview.")
+                    .font(.caption)
+                    .foregroundStyle(Palette.dim)
+            }
+        }
     }
 }
 

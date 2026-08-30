@@ -93,6 +93,60 @@ describe("route-level idempotency middleware", () => {
     }
   });
 
+  it("uses a caller-provided content digest without weakening conflict detection", async () => {
+    const store = createMemoryIdempotencyStore();
+    let calls = 0;
+    const headers = {
+      "Idempotency-Key": "idempotency-key-digest",
+      "content-type": "application/json",
+    };
+    const first = await withIdempotency(
+      store,
+      new Request("http://localhost/v1/sync/push", {
+        method: "POST",
+        headers,
+        body: '{"large":"first"}',
+      }),
+      () => {
+        calls += 1;
+        return Promise.resolve(new Response("ok"));
+      },
+      "trace-digest",
+      createFakePrincipal({ subject: "reader" }),
+      "a".repeat(64),
+    );
+    const replay = await withIdempotency(
+      store,
+      new Request("http://localhost/v1/sync/push", {
+        method: "POST",
+        headers,
+        body: '{"large":"second"}',
+      }),
+      () => Promise.resolve(new Response("should-not-run")),
+      "trace-digest",
+      createFakePrincipal({ subject: "reader" }),
+      "a".repeat(64),
+    );
+    const conflict = await withIdempotency(
+      store,
+      new Request("http://localhost/v1/sync/push", {
+        method: "POST",
+        headers,
+        body: '{"large":"third"}',
+      }),
+      () => Promise.resolve(new Response("should-not-run")),
+      "trace-digest",
+      createFakePrincipal({ subject: "reader" }),
+      "b".repeat(64),
+    );
+
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(200);
+    expect(await replay.text()).toBe("ok");
+    expect(conflict.status).toBe(409);
+    expect(calls).toBe(1);
+  });
+
   it("requires an Idempotency-Key of 16 to 128 characters", async () => {
     const response = await withIdempotency(
       createMemoryIdempotencyStore(),

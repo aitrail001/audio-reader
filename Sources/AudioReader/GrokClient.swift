@@ -715,11 +715,28 @@ actor GrokClient {
         effort: String,
         enableThinking: Bool,
         grokAuthentication: GrokAuthentication = .apiKey,
-        openAIAuthentication: OpenAIAuthentication = .apiKey
+        openAIAuthentication: OpenAIAuthentication = .apiKey,
+        sourceLanguage: String = "en",
+        targetLanguage: String = "zh",
+        learnerLevel: String = "intermediate",
+        chapterID: String = ManagedAccountCredentials.unscopedChapterID,
+        bookTitle: String = "",
+        author: String = "",
+        chapterTitle: String = ""
     ) async throws -> String {
         if provider == .managedQwen {
             // Chat path. Translation/summary call ManagedProductLLM.translate/summarize from AppState.
-            return try await ManagedProductLLM.complete(system: system, user: user)
+            return try await ManagedProductLLM.complete(
+                system: system,
+                user: user,
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                learnerLevel: learnerLevel,
+                chapterID: chapterID,
+                bookTitle: bookTitle,
+                author: author,
+                chapterTitle: chapterTitle
+            )
         }
         if provider == .appleFoundation {
             return try await FoundationModelsClient.shared.complete(system: system, user: user)
@@ -794,10 +811,27 @@ actor GrokClient {
         effort: String,
         enableThinking: Bool,
         grokAuthentication: GrokAuthentication = .apiKey,
-        openAIAuthentication: OpenAIAuthentication = .apiKey
+        openAIAuthentication: OpenAIAuthentication = .apiKey,
+        sourceLanguage: String = "en",
+        targetLanguage: String = "zh",
+        learnerLevel: String = "intermediate",
+        chapterID: String = ManagedAccountCredentials.unscopedChapterID,
+        bookTitle: String = "",
+        author: String = "",
+        chapterTitle: String = ""
     ) async throws -> String {
         if provider == .managedQwen {
-            return try await ManagedProductLLM.complete(system: system, user: user)
+            return try await ManagedProductLLM.complete(
+                system: system,
+                user: user,
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                learnerLevel: learnerLevel,
+                chapterID: chapterID,
+                bookTitle: bookTitle,
+                author: author,
+                chapterTitle: chapterTitle
+            )
         }
         if provider == .appleFoundation {
             return try await FoundationModelsClient.shared.completeStructuredJSON(

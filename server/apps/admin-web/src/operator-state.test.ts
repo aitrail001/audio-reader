@@ -5,6 +5,7 @@ import {
   mutationSummary,
   policyDraftErrors,
   quotaReductionNeedsConfirmation,
+  isCurrentAdminLoad,
 } from "./operator-state";
 
 describe("operator URL state", () => {
@@ -80,5 +81,30 @@ describe("safe mutations", () => {
     });
     expect(errors.model).toBe("Model is required.");
     expect(errors.schemaVersion).toBe("Schema version is required.");
+  });
+
+  it("rejects unsupported schemas and unknown prompt placeholders inline", () => {
+    const errors = policyDraftErrors({
+      model: "qwen3.7-flash",
+      promptVersion: "v2",
+      systemPrompt: "Return JSON.",
+      userPrompt: "Translate {{ source }} with {{hiddenInstruction}}.",
+      schemaVersion: "2",
+      maxInputTokens: "8000",
+      maxOutputTokens: "2000",
+      timeoutMs: "30000",
+      canaryPercent: "100",
+    });
+    expect(errors.schemaVersion).toBe("Only schema version 1 is supported.");
+    expect(errors.userPrompt).toContain("hiddenInstruction");
+  });
+});
+
+describe("admin session transitions", () => {
+  it("rejects a response ticket after the access token generation changes", () => {
+    const request = { accessToken: "token-a", generation: 7 };
+    expect(isCurrentAdminLoad(request, { accessToken: "token-a", generation: 7 })).toBe(true);
+    expect(isCurrentAdminLoad(request, { accessToken: "token-b", generation: 8 })).toBe(false);
+    expect(isCurrentAdminLoad(request, { accessToken: "token-a", generation: 8 })).toBe(false);
   });
 });

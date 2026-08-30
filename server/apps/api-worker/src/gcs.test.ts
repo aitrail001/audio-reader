@@ -68,6 +68,20 @@ describe("GCS object store", () => {
           method === "GET" &&
           !url.includes("/o/")
         ) {
+          const parsed = new URL(url);
+          if (parsed.pathname.endsWith("/o")) {
+            const prefix = parsed.searchParams.get("prefix") ?? "";
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  items: [...objects.keys()]
+                    .filter((key) => key.startsWith(prefix))
+                    .map((name) => ({ name })),
+                }),
+                { status: 200 },
+              ),
+            );
+          }
           return Promise.resolve(new Response("{}", { status: 200 }));
         }
         if (url.includes("/upload/storage/v1/b/audio-reader-assets/o")) {
@@ -101,6 +115,7 @@ describe("GCS object store", () => {
     await expect(store.ping()).resolves.toBe("ok");
     await store.put("chapter/1.mp3", new Uint8Array([1, 2, 3]));
     await expect(store.get("chapter/1.mp3")).resolves.toEqual(new Uint8Array([1, 2, 3]));
+    await expect(store.list("chapter/")).resolves.toEqual(["chapter/1.mp3"]);
     const signed = await store.signedDownloadUrl?.("chapter/1.mp3", 900);
     expect(signed).toContain("https://storage.googleapis.com/audio-reader-assets/chapter/1.mp3");
     expect(signed).toContain("X-Goog-Algorithm=GOOG4-RSA-SHA256");

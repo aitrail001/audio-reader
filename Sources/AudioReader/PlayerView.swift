@@ -78,6 +78,9 @@ struct PlayerView: View {
             }
             lyricPane
             VStack(spacing: playbackChromeSpacing) {
+                if state.isDeepReadingPaused, let segment = state.currentSegment {
+                    ListenFirstCoachView(state: state, segment: segment)
+                }
                 PlaybackChrome(state: state)
 #if os(iOS)
                 iPadCompactPlaybackBar
@@ -646,6 +649,8 @@ struct PlayerView: View {
     private var sharedReadingMenu: some View {
         Menu {
             Toggle("Auto-scroll", isOn: $autoScroll)
+            Toggle("Listen First", isOn: deepReadingBinding)
+                .accessibilityHint("Hides unfinished and future sentences, then pauses and reveals each completed sentence.")
             Toggle("Play on tap", isOn: $state.settings.playOnSelect)
                 .onChange(of: state.settings.playOnSelect) { _, _ in state.persistSettings() }
             Toggle("Study overlay", isOn: $state.settings.showStudyOverlay)
@@ -1081,7 +1086,7 @@ struct PlayerView: View {
                 Image(systemName: "book.closed")
             }
             .toggleStyle(.button)
-            .help("Deep Reading: pause after each sentence")
+            .help("Listen First: hide text, then pause after each sentence")
             .foregroundStyle(state.settings.deepReadingMode ? Palette.gold : Palette.ink)
 
             Button { state.continueDeepReading() } label: {
@@ -1262,7 +1267,7 @@ struct PlayerView: View {
             }
             .toggleStyle(.button)
             .foregroundStyle(state.settings.deepReadingMode ? Palette.gold : Palette.ink)
-            .accessibilityLabel("Deep Reading")
+            .accessibilityLabel("Listen First")
             .accessibilityValue(state.settings.deepReadingMode ? "On" : "Off")
 
             Button { state.continueDeepReading() } label: {
@@ -1993,9 +1998,6 @@ private struct PlaybackChrome: View {
                 .foregroundStyle(Palette.dim)
                 .frame(width: 54, alignment: .trailing)
         }
-        .onChange(of: state.player.currentTime) { _, _ in
-            state.tickPlaybackModes()
-        }
     }
 }
 
@@ -2018,10 +2020,20 @@ private struct TranscriptTextColumn: View {
         let studyLanguageKey = state.studyIndex.language
         let studyLearning = state.studyIndex.learning
         let studyKnown = state.studyIndex.known
+        let orderedSegmentIDs = state.presentedTranscript?.segments.map(\.id) ?? []
         ScrollView {
             LazyVStack(alignment: .leading, spacing: type.paragraph) {
                 if let transcript = state.presentedTranscript {
                     ForEach(transcript.segments) { segment in
+                        let listenFirstVisibility = state.settings.deepReadingMode
+                            ? ListenFirstVisibility.resolve(
+                                segmentID: segment.id,
+                                orderedSegmentIDs: orderedSegmentIDs,
+                                currentSegmentID: cursor.segmentID,
+                                pausedSegmentID: state.deepReadingPausedSentenceID,
+                                replayRevealedSegmentID: state.listenFirstReplayRevealedSegmentID
+                            )
+                            : .revealed
                         SentenceRow(
                             segment: segment,
                             currentID: cursor.segmentID,
@@ -2055,6 +2067,8 @@ private struct TranscriptTextColumn: View {
                                 state.markKnown(word, known: !state.isMarkedKnown(word))
                             },
                             hasStoredCorrection: state.transcriptOverlay(for: segment.id) != nil,
+                            listenFirstVisibility: listenFirstVisibility,
+                            onReveal: { state.revealListenFirstSentence(segment.id) },
                             onEdit: { onEditSegment(segment) },
                             onTranslate: { state.translateSentence(segment) },
                             onAccept: { if let g = state.sentenceGloss(for: segment) { state.acceptGloss(g) } },
@@ -2180,6 +2194,8 @@ private struct SentenceRow: View {
     let onSave: (TranscriptWord) -> Void
     var onMarkKnown: (TranscriptWord) -> Void = { _ in }
     let hasStoredCorrection: Bool
+    let listenFirstVisibility: ListenFirstVisibility
+    let onReveal: () -> Void
     let onEdit: () -> Void
     let onTranslate: () -> Void
     let onAccept: () -> Void
@@ -2255,46 +2271,66 @@ private struct SentenceRow: View {
                 }
             }
 
-            if textSource == .spoken || textSource == .dual {
-                if isSelected || studyOverlayEnabled {
-                    wordTokens(StudyTokenIndex.tokens(in: segment), dimmed: !isSelected)
-                } else {
-                    Button { onSeek(segment.start) } label: {
-                        Text(segment.spokenText)
-                            .font(type.font.font(size: type.body, bold: type.bold))
-                            .foregroundStyle(Palette.dim)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .lineSpacing(type.line)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-
-            if textSource == .original || textSource == .dual {
-                let original = segment.trustedEbookText ?? (textSource == .original ? segment.spokenText : nil)
-                if let original {
-                    if textSource == .original, studyOverlayEnabled {
-                        wordTokens(
-                            StudyTokenIndex.tokens(in: segment, source: .original),
-                            dimmed: !isSelected
-                        )
+            if listenFirstVisibility == .revealed {
+                if textSource == .spoken || textSource == .dual {
+                    if isSelected || studyOverlayEnabled {
+                        wordTokens(StudyTokenIndex.tokens(in: segment), dimmed: !isSelected)
                     } else {
                         Button { onSeek(segment.start) } label: {
-                            Text(original)
-                                .font(type.font.font(size: textSource == .dual ? type.dual : type.body, bold: type.bold))
-                                .foregroundStyle(isSelected ? Palette.ink : Palette.dim)
-                                .italic(textSource == .dual)
+                            Text(segment.spokenText)
+                                .font(type.font.font(size: type.body, bold: type.bold))
+                                .foregroundStyle(Palette.dim)
+                                .fixedSize(horizontal: false, vertical: true)
                                 .lineSpacing(type.line)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .buttonStyle(.plain)
                     }
                 }
-            }
 
-            if isSelected {
-                translationBlock
+                if textSource == .original || textSource == .dual {
+                    let original = segment.trustedEbookText ?? (textSource == .original ? segment.spokenText : nil)
+                    if let original {
+                        if textSource == .original, studyOverlayEnabled {
+                            wordTokens(
+                                StudyTokenIndex.tokens(in: segment, source: .original),
+                                dimmed: !isSelected
+                            )
+                        } else {
+                            Button { onSeek(segment.start) } label: {
+                                Text(original)
+                                    .font(type.font.font(size: textSource == .dual ? type.dual : type.body, bold: type.bold))
+                                    .foregroundStyle(isSelected ? Palette.ink : Palette.dim)
+                                    .italic(textSource == .dual)
+                                    .lineSpacing(type.line)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                if isSelected {
+                    translationBlock
+                }
+            } else {
+                HStack(spacing: 10) {
+                    Image(systemName: listenFirstVisibility == .currentHidden ? "ear" : "text.redaction")
+                        .foregroundStyle(Palette.gold)
+                    Text(listenFirstVisibility == .currentHidden
+                         ? "Listen before revealing this sentence."
+                         : "Future sentence hidden in Listen First.")
+                        .font(.subheadline)
+                        .foregroundStyle(Palette.dim)
+                    Spacer()
+                    if listenFirstVisibility == .currentHidden {
+                        Button("Reveal sentence", action: onReveal)
+                            .buttonStyle(.bordered)
+                            .frame(minHeight: 44)
+                            .accessibilityIdentifier("reader.listenFirstReveal")
+                    }
+                }
+                .accessibilityElement(children: .contain)
             }
         }
         .padding(14)
@@ -2495,7 +2531,8 @@ private struct TranscriptCorrectionSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
-                ToolbarItemGroup(placement: .confirmationAction) {
+#if os(iOS)
+                ToolbarItemGroup(placement: .topBarTrailing) {
                     Button {
                         onPreview(correctedStart, correctedEnd)
                     } label: {
@@ -2505,16 +2542,30 @@ private struct TranscriptCorrectionSheet: View {
                     .accessibilityIdentifier("transcript.preview")
 
                     Button("Save") {
-                        do {
-                            try onSave(trimmedText, correctedStart, correctedEnd)
-                            dismiss()
-                        } catch {
-                            validationError = error.localizedDescription
-                        }
+                        saveCorrection()
                     }
                     .disabled(!hasValidDraft)
                     .accessibilityIdentifier("transcript.save")
                 }
+#else
+                ToolbarItem(placement: .confirmationAction) {
+                    HStack(spacing: 8) {
+                        Button {
+                            onPreview(correctedStart, correctedEnd)
+                        } label: {
+                            Label("Preview", systemImage: "play.fill")
+                        }
+                        .disabled(!hasValidDraft)
+                        .accessibilityIdentifier("transcript.preview")
+
+                        Button("Save") {
+                            saveCorrection()
+                        }
+                        .disabled(!hasValidDraft)
+                        .accessibilityIdentifier("transcript.save")
+                    }
+                }
+#endif
             }
         }
 #if os(macOS)
@@ -2528,6 +2579,15 @@ private struct TranscriptCorrectionSheet: View {
 
     private var hasValidDraft: Bool {
         !trimmedText.isEmpty && correctedStart >= 0 && correctedEnd - correctedStart >= 0.25
+    }
+
+    private func saveCorrection() {
+        do {
+            try onSave(trimmedText, correctedStart, correctedEnd)
+            dismiss()
+        } catch {
+            validationError = error.localizedDescription
+        }
     }
 }
 
@@ -2547,6 +2607,7 @@ extension SentenceRow: Equatable {
             && lhs.studyLearningLemmas == rhs.studyLearningLemmas
             && lhs.studyKnownLemmas == rhs.studyKnownLemmas
             && lhs.hasStoredCorrection == rhs.hasStoredCorrection
+            && lhs.listenFirstVisibility == rhs.listenFirstVisibility
             && lhs.type.body == rhs.type.body
             && lhs.type.word == rhs.type.word
             && lhs.type.line == rhs.type.line
@@ -2572,7 +2633,6 @@ private struct WordToken: View {
 
     var body: some View {
         Button {
-            onSeek()
             onInspect()
         } label: {
             Text(word.text)

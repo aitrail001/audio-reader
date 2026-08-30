@@ -544,6 +544,7 @@ async function handleRequest(
       authenticate,
       idempotencyStore,
       ops: options.database.ops,
+      identity: options.database.identity,
       objects: options.storage,
     });
     if (routed !== undefined) {

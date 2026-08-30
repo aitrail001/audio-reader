@@ -32,16 +32,28 @@ history, rejects persistence failures instead of acknowledging them, and keeps
 the review visible if its local transaction fails. This preserves the same due
 queue, interval, ease, retention statistics, and review history across devices.
 
+Before upload, the native client collapses legacy repeated pending snapshots to
+one mutation per entity and operation, retaining the latest payload and highest
+known server revision. Superseded rows are acknowledged transactionally. This
+prevents a large offline backlog from replaying obsolete copies as conflicts,
+and a conflict retry cannot be downgraded to revision zero by the next local
+snapshot.
+
 The service applies each upload batch in one account-scoped Postgres
 transaction. Mutation IDs remain replay-safe, entity revisions are checked in
 order, duplicate IDs are rejected before writes, and rejected/conflicted
 outcomes remain terminal on retry. A batch ID is bound to one canonical
 mutation fingerprint, and account sequence allocation is serialized. Downloads use an
-exclusive cursor and request only one bounded page plus a has-more sentinel;
-the Worker never loads an account's complete sync history to produce a page.
-The service-role-only batch RPC accepts at most 500 mutations, validates the
-active device, and keeps settings updates in the same transaction as their
-sync-log entry.
+exclusive cursor and request one page bounded by both row count and one MiB of
+encoded payload plus a has-more sentinel; the Worker never loads an account's
+complete sync history or a transcript-heavy multi-megabyte page.
+The native acknowledgement cursor advances only after every change in a pull
+page is applied locally. A push response's server high-water mark never advances
+that cursor because it may include unseen changes written by another device.
+The service-role-only batch RPC accepts at most 500 mutations, while native
+clients cap each request at 100 mutations and 2.625 MiB to bound both per-row
+CPU work and transcript-heavy memory use. The RPC validates the active device
+and keeps settings updates in the same transaction as their sync-log entry.
 
 ## Account export
 

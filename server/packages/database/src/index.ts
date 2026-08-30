@@ -50,6 +50,7 @@ export {
   defaultIdentitySettings,
 } from "./identity";
 export type {
+  IdentityAdminRole,
   IdentityAccountStatus,
   IdentityBootstrapInput,
   IdentityDevice,
@@ -79,6 +80,7 @@ export {
   DEFAULT_ASSISTANT_USER_PROMPTS,
   CHAPTER_BATCH_TRANSLATION_INSTRUCTIONS,
   CHAPTER_SUMMARY_INSTRUCTIONS,
+  CHAT_INSTRUCTIONS,
   SENTENCE_TRANSLATION_INSTRUCTIONS,
   WORD_IN_SENTENCE_INSTRUCTIONS,
   chapterBatchTranslationInstructions,
@@ -89,6 +91,7 @@ export {
   defaultAssistantUserPrompt,
   formatManagedChapterBatchContext,
   formatManagedSentenceContext,
+  HEARD_QUIZ_INSTRUCTIONS,
   isAssistantTask,
   isChapterBatchTask,
   isWordTranslationTask,
@@ -97,8 +100,17 @@ export {
   sentenceTranslationInstructions,
   stringList,
   wordInSentenceInstructions,
+  assembleManagedPrompt,
+  validateAssistantPromptDraft,
+  validateManagedPromptOutput,
 } from "./assistant-prompts";
-export type { AssistantTask } from "./assistant-prompts";
+export type {
+  AssistantTask,
+  AssistantPromptValidation,
+  ManagedPromptAssembly,
+  ManagedPromptSubtask,
+  ManagedPromptOutputValidation,
+} from "./assistant-prompts";
 export {
   RestPersistenceError,
   createMemoryOpsStore,
@@ -107,9 +119,12 @@ export {
 } from "./ops";
 export type {
   AdminUserRecord,
+  AnalyticsPreferenceRecord,
   CacheState,
   JobStatus,
+  ObjectWriteLease,
   OperatorSettingsRecord,
+  OperatorSettingsReadResult,
   OpsAsset,
   OpsAuditEvent,
   OpsCacheEntry,
@@ -121,6 +136,7 @@ export type {
   OpsProductEvent,
   OpsQuota,
   OpsStore,
+  UserProgressSummaryRecord,
 } from "./ops";
 export {
   DEFAULT_FEATURE_FLAGS,

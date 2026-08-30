@@ -18,7 +18,9 @@ describe("operator console coverage", () => {
       "/v1/auth/token/refresh",
       "/v1/auth/logout",
       "/v1/admin/runtime-config",
+      "/v1/admin/capabilities",
       "/v1/admin/users",
+      "/progress",
       "/suspend",
       "/unsuspend",
       "/revoke-sessions",
@@ -61,6 +63,10 @@ describe("operator console coverage", () => {
       "Account id",
       'label="account id"',
       "user.accountId",
+      "Progress and activity",
+      "Open filtered activity",
+      "consent required",
+      "Reading text, transcripts, definitions, translations, and notes are never shown here",
       "Find in this page",
       "OperatorTable",
       "Sentence context",
@@ -84,5 +90,41 @@ describe("operator console coverage", () => {
   it("renders change review only for an active mutation context", () => {
     expect(normalizedSource).toContain('mutationPreview !== "" ? (');
     expect(normalizedSource).toContain("setMutationPreview(summary)");
+  });
+
+  it("gates mutation controls with server-reported capabilities", () => {
+    for (const capability of [
+      "users.manage",
+      "roles.manage",
+      "policies.manage",
+      "ai.probe",
+      "runtime.manage",
+      "jobs.manage",
+      "cache.manage",
+      "flags.manage",
+      "quotas.manage",
+      "privacy.manage",
+    ]) {
+      expect(normalizedSource).toContain(capability);
+    }
+    expect(normalizedSource).toContain("disabled={props.busy || !props.canProbe}");
+  });
+
+  it("clears privileged data and secret drafts when the session changes", () => {
+    expect(normalizedSource).toContain("function clearSessionScopedState()");
+    for (const reset of [
+      "setPolicies([])",
+      "setCache([])",
+      "setRuntime(null)",
+      'setQwenKey("")',
+      'setGcsJson("")',
+      'setTurnstileSecret("")',
+    ]) {
+      expect(normalizedSource).toContain(reset);
+    }
+    expect(normalizedSource).toContain("activeAccessToken.current !== next.accessToken");
+    expect(normalizedSource).toContain("adminLoadGeneration.current += 1");
+    expect(normalizedSource).toContain("if (!isCurrentLoad()) return");
+    expect(normalizedSource).toContain("storeSession(null); try");
   });
 });

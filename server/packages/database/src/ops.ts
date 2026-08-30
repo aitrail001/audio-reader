@@ -123,12 +123,15 @@ export type OpsProductEvent = {
   id: string;
   accountId: string;
   deviceId: string | null;
+  purpose: "learning_analytics" | "operational";
   name: string;
   outcome: "ok" | "failed" | "cancelled" | "started";
   requestId: string | null;
   properties: Record<string, unknown>;
   createdAt: string;
 };
+
+export type OpsTimeIdCursor = { createdAt: string; id: string };
 
 export type UsageWindow = {
   userId: string;
@@ -181,6 +184,47 @@ export type AdminUserRecord = {
   lastSeenAt: string | null;
 };
 
+export type AnalyticsPreferenceRecord = {
+  operatorLearningAnalyticsEnabled: boolean;
+  updatedAt: string;
+};
+
+/** Safe aggregate only. Synced payload text must never cross this database boundary. */
+export type UserProgressSummaryRecord = {
+  generatedAt: string;
+  expiresAt: string | null;
+  sync: {
+    lastSuccessfulAt: string | null;
+    lastDevice: { id: string; platform: string; name: string | null } | null;
+    entityCounts: Array<{ entityType: string; count: number }>;
+    pendingCount: number | null;
+    conflictCount: number;
+  };
+  reading: {
+    lastActivityAt: string | null;
+    activeBooks: number;
+    completedBooks: number;
+    currentChapter: number | null;
+    completionPercent: number | null;
+  } | null;
+  review: {
+    due: number;
+    new: number;
+    learning: number;
+    reviewsLast30Days: number;
+    reviewsPerActiveDay: number;
+    retentionRate: number | null;
+    streakDays: number;
+  } | null;
+  learning: {
+    vocabulary: number;
+    known: number;
+    learning: number;
+    aiUsesLast30Days: number;
+    aiUsesByFeature: Array<{ feature: string; count: number }>;
+  } | null;
+};
+
 export type OperatorSettingsRecord = {
   id: string;
   payload: Record<string, unknown>;
@@ -189,6 +233,17 @@ export type OperatorSettingsRecord = {
   updatedAt: string;
   updatedBy: string | null;
 };
+
+export type ObjectWriteLease = {
+  id: string;
+  accountId: string;
+  objectKey: string;
+  expiresAt: string;
+};
+
+export type OperatorSettingsReadResult =
+  | { ok: true; value: OperatorSettingsRecord | undefined }
+  | { ok: false; error: "unavailable" | "invalid_response" };
 
 export type OpsStore = {
   createAsset(
@@ -231,6 +286,7 @@ export type OpsStore = {
   }): Promise<OpsJob>;
   getJob(id: string): Promise<OpsJob | undefined>;
   listJobs(filter?: { status?: string }): Promise<OpsJob[]>;
+  claimJobs(limit?: number): Promise<OpsJob[]>;
   updateJob(
     id: string,
     patch: Partial<
@@ -249,9 +305,15 @@ export type OpsStore = {
     action?: string;
     requestId?: string;
     resourceType?: string;
+    resourceId?: string;
+    cursor?: OpsTimeIdCursor;
+    limit?: number;
   }): Promise<OpsAuditEvent[]>;
   recordProductEvent(
-    event: Omit<OpsProductEvent, "id" | "createdAt"> & { createdAt?: string },
+    event: Omit<OpsProductEvent, "id" | "createdAt" | "purpose"> & {
+      createdAt?: string;
+      purpose?: OpsProductEvent["purpose"];
+    },
   ): Promise<OpsProductEvent>;
   listProductEvents(filter?: {
     accountId?: string;
@@ -259,8 +321,10 @@ export type OpsStore = {
     requestId?: string;
     from?: string;
     to?: string;
+    cursor?: OpsTimeIdCursor;
     limit?: number;
   }): Promise<OpsProductEvent[]>;
+  purgeExpiredProductEvents(): Promise<number>;
   createExport(userId: string, format: string): Promise<OpsExport>;
   getExport(userId: string, id: string): Promise<OpsExport | undefined>;
   completeExport(userId: string, id: string, assetId: string): Promise<OpsExport | undefined>;
@@ -291,6 +355,20 @@ export type OpsStore = {
     patch: Partial<Omit<OpsPrivacyRequest, "id" | "accountId" | "kind" | "createdAt">>,
   ): Promise<OpsPrivacyRequest | undefined>;
   adminUsers(): Promise<AdminUserRecord[]>;
+  analyticsPreference(userId: string): Promise<AnalyticsPreferenceRecord>;
+  putAnalyticsPreference(userId: string, enabled: boolean): Promise<AnalyticsPreferenceRecord>;
+  userProgressSummary(userId: string): Promise<UserProgressSummaryRecord | undefined>;
+  purgeExpiredUserProgressSummaries(): Promise<number>;
+  deleteAccountData(userId: string): Promise<boolean>;
+  requestAccountDeletion(
+    userId: string,
+    reason: string,
+    requestId: string,
+  ): Promise<{ request: OpsPrivacyRequest; job: OpsJob }>;
+  accountObjectKeys(userId: string): Promise<string[]>;
+  beginObjectWrite(userId: string, objectKey: string): Promise<ObjectWriteLease>;
+  finishObjectWrite(leaseId: string): Promise<void>;
+  accountObjectWriteLeases(userId: string): Promise<ObjectWriteLease[]>;
   recordAssistantUse(
     userId: string,
     input: { task: string; cacheEntryId: string | null; outputText: string },
@@ -318,6 +396,7 @@ export type OpsStore = {
     | undefined
   >;
   getOperatorSettings(): Promise<OperatorSettingsRecord | undefined>;
+  readOperatorSettings(): Promise<OperatorSettingsReadResult>;
   putOperatorSettings(
     input: Omit<OperatorSettingsRecord, "updatedAt">,
   ): Promise<OperatorSettingsRecord>;
@@ -340,6 +419,8 @@ export function createMemoryOpsStore(
   const flags = new Map<string, OpsFeatureFlag>();
   const quotaLimits = new Map<QuotaKey, number>();
   const privacyRequests = new Map<string, OpsPrivacyRequest>();
+  const analyticsPreferences = new Map<string, AnalyticsPreferenceRecord>();
+  const objectWriteLeases = new Map<string, ObjectWriteLease>();
   const chatMessages = new Map<
     string,
     {
@@ -521,6 +602,20 @@ export function createMemoryOpsStore(
       return Promise.resolve(items.map((job) => ({ ...job, payload: { ...job.payload } })));
     },
 
+    claimJobs(limit = 16) {
+      const claimed = [...jobs.values()]
+        .filter((job) => job.status === "queued" && job.attempts < job.maxAttempts)
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+        .slice(0, Math.max(1, Math.min(100, Math.trunc(limit))));
+      for (const job of claimed) {
+        job.status = "running";
+        job.attempts += 1;
+        job.startedAt ??= now();
+        job.updatedAt = now();
+      }
+      return Promise.resolve(claimed.map((job) => ({ ...job, payload: { ...job.payload } })));
+    },
+
     updateJob(id, patch) {
       const job = jobs.get(id);
       if (job === undefined) {
@@ -565,13 +660,19 @@ export function createMemoryOpsStore(
       const action = filter?.action?.trim() ?? "";
       const requestId = filter?.requestId?.trim() ?? "";
       const resourceType = filter?.resourceType?.trim() ?? "";
+      const resourceId = filter?.resourceId?.trim() ?? "";
+      const cursor = filter?.cursor;
+      const limit = Math.min(Math.max(filter?.limit ?? 100, 1), 5001);
       return Promise.resolve(
         [...audit]
-          .reverse()
           .filter((event) => (actorId === "" ? true : event.actorId === actorId))
           .filter((event) => (action === "" ? true : event.action === action))
           .filter((event) => (requestId === "" ? true : event.traceId === requestId))
           .filter((event) => (resourceType === "" ? true : event.resourceType === resourceType))
+          .filter((event) => (resourceId === "" ? true : event.resourceId === resourceId))
+          .sort(compareTimeIdDescending)
+          .filter((event) => cursor === undefined || timeIdPrecedesCursor(event, cursor))
+          .slice(0, limit)
           .map((event) => ({ ...event, metadata: { ...event.metadata } })),
       );
     },
@@ -581,6 +682,7 @@ export function createMemoryOpsStore(
         id: crypto.randomUUID(),
         accountId: event.accountId,
         deviceId: event.deviceId,
+        purpose: event.purpose ?? "learning_analytics",
         name: event.name,
         outcome: event.outcome,
         requestId: event.requestId,
@@ -588,9 +690,6 @@ export function createMemoryOpsStore(
         createdAt: event.createdAt ?? now(),
       };
       productEvents.unshift(created);
-      if (productEvents.length > 5000) {
-        productEvents.length = 5000;
-      }
       return Promise.resolve({ ...created, properties: { ...created.properties } });
     },
 
@@ -600,7 +699,8 @@ export function createMemoryOpsStore(
       const requestId = filter?.requestId?.trim() ?? "";
       const from = filter?.from?.trim() ?? "";
       const to = filter?.to?.trim() ?? "";
-      const limit = Math.min(Math.max(filter?.limit ?? 100, 1), 5000);
+      const cursor = filter?.cursor;
+      const limit = Math.min(Math.max(filter?.limit ?? 100, 1), 5001);
       return Promise.resolve(
         productEvents
           .filter((event) => (accountId === "" ? true : event.accountId === accountId))
@@ -608,6 +708,8 @@ export function createMemoryOpsStore(
           .filter((event) => (requestId === "" ? true : event.requestId === requestId))
           .filter((event) => (from === "" ? true : event.createdAt >= from))
           .filter((event) => (to === "" ? true : event.createdAt < to))
+          .sort(compareTimeIdDescending)
+          .filter((event) => cursor === undefined || timeIdPrecedesCursor(event, cursor))
           .slice(0, limit)
           .map((event) => ({ ...event, properties: { ...event.properties } })),
       );
@@ -782,6 +884,141 @@ export function createMemoryOpsStore(
       return rows;
     },
 
+    analyticsPreference(userId) {
+      return Promise.resolve(
+        analyticsPreferences.get(userId) ?? {
+          operatorLearningAnalyticsEnabled: false,
+          updatedAt: now(),
+        },
+      );
+    },
+
+    putAnalyticsPreference(userId, enabled) {
+      const value = {
+        operatorLearningAnalyticsEnabled: enabled,
+        updatedAt: now(),
+      };
+      analyticsPreferences.set(userId, value);
+      if (!enabled) {
+        for (let index = productEvents.length - 1; index >= 0; index -= 1) {
+          const event = productEvents[index];
+          if (event?.accountId === userId && event.purpose === "learning_analytics") {
+            productEvents.splice(index, 1);
+          }
+        }
+      }
+      return Promise.resolve({ ...value });
+    },
+
+    userProgressSummary() {
+      return Promise.resolve(undefined);
+    },
+
+    purgeExpiredUserProgressSummaries() {
+      return Promise.resolve(0);
+    },
+
+    purgeExpiredProductEvents() {
+      const cutoff = Date.now() - 90 * 86_400_000;
+      let purged = 0;
+      for (let index = productEvents.length - 1; index >= 0; index -= 1) {
+        const event = productEvents[index];
+        if (event !== undefined && Date.parse(event.createdAt) < cutoff) {
+          productEvents.splice(index, 1);
+          purged += 1;
+        }
+      }
+      return Promise.resolve(purged);
+    },
+
+    async deleteAccountData(userId) {
+      const profile = await options.identity?.setAccountStatus(userId, "deleted");
+      analyticsPreferences.delete(userId);
+      return profile !== undefined;
+    },
+
+    async requestAccountDeletion(userId, reason, requestId) {
+      const timestamp = now();
+      const request: OpsPrivacyRequest = {
+        id: crypto.randomUUID(),
+        accountId: userId,
+        kind: "deletion",
+        status: "queued",
+        format: null,
+        assetId: null,
+        error: null,
+        reason,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        completedAt: null,
+      };
+      const job: OpsJob = {
+        id: crypto.randomUUID(),
+        accountId: userId,
+        kind: "account_deletion",
+        status: "queued",
+        attempts: 0,
+        maxAttempts: 5,
+        lastError: null,
+        payload: {},
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        startedAt: null,
+        finishedAt: null,
+      };
+      privacyRequests.set(request.id, request);
+      jobs.set(job.id, job);
+      await options.identity?.setAccountStatus(userId, "deletion_pending");
+      audit.push({
+        id: crypto.randomUUID(),
+        actorId: userId,
+        action: "request_deletion",
+        resourceType: "account",
+        resourceId: userId,
+        reason: "User requested account deletion.",
+        traceId: requestId,
+        metadata: {},
+        createdAt: timestamp,
+      });
+      return { request: { ...request }, job: { ...job, payload: {} } };
+    },
+
+    accountObjectKeys(userId) {
+      return Promise.resolve(
+        [
+          ...new Set(
+            [...assets.values()]
+              .filter((asset) => asset.accountId === userId)
+              .map((asset) => asset.objectKey),
+          ),
+        ].sort(),
+      );
+    },
+
+    beginObjectWrite(userId, objectKey) {
+      const lease: ObjectWriteLease = {
+        id: crypto.randomUUID(),
+        accountId: userId,
+        objectKey,
+        expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+      };
+      objectWriteLeases.set(lease.id, lease);
+      return Promise.resolve({ ...lease });
+    },
+
+    finishObjectWrite(leaseId) {
+      objectWriteLeases.delete(leaseId);
+      return Promise.resolve();
+    },
+
+    accountObjectWriteLeases(userId) {
+      return Promise.resolve(
+        [...objectWriteLeases.values()]
+          .filter((lease) => lease.accountId === userId)
+          .map((lease) => ({ ...lease })),
+      );
+    },
+
     recordAssistantUse() {
       return Promise.resolve();
     },
@@ -807,6 +1044,10 @@ export function createMemoryOpsStore(
               payload: { ...operatorSettings.payload },
             },
       );
+    },
+
+    async readOperatorSettings() {
+      return { ok: true, value: await this.getOperatorSettings() };
     },
 
     putOperatorSettings(input) {
@@ -839,6 +1080,7 @@ export function createUnavailableOpsStore(): OpsStore {
     createJob: fail,
     getJob: () => Promise.resolve(undefined),
     listJobs: () => Promise.resolve([]),
+    claimJobs: fail,
     updateJob: () => Promise.resolve(undefined),
     listPolicies: () => Promise.resolve([]),
     getPolicy: () => Promise.resolve(undefined),
@@ -860,10 +1102,26 @@ export function createUnavailableOpsStore(): OpsStore {
     getPrivacyRequest: () => Promise.resolve(undefined),
     patchPrivacyRequest: () => Promise.resolve(undefined),
     adminUsers: () => Promise.resolve([]),
+    analyticsPreference: () =>
+      Promise.resolve({
+        operatorLearningAnalyticsEnabled: false,
+        updatedAt: new Date(0).toISOString(),
+      }),
+    putAnalyticsPreference: fail,
+    userProgressSummary: () => Promise.resolve(undefined),
+    purgeExpiredUserProgressSummaries: fail,
+    purgeExpiredProductEvents: fail,
+    deleteAccountData: fail,
+    requestAccountDeletion: fail,
+    accountObjectKeys: fail,
+    beginObjectWrite: fail,
+    finishObjectWrite: fail,
+    accountObjectWriteLeases: fail,
     recordAssistantUse: () => Promise.resolve(),
     putChatMessage: () => Promise.resolve(),
     getChatMessage: () => Promise.resolve(undefined),
     getOperatorSettings: () => Promise.resolve(undefined),
+    readOperatorSettings: () => Promise.resolve({ ok: false, error: "unavailable" }),
     putOperatorSettings: fail,
   };
 }
@@ -975,6 +1233,93 @@ export function createSupabaseOpsStore(
         restErrorDetail(response.body) ?? "Postgres did not update the cache entry.",
       );
     },
+    async createJob(input) {
+      const timestamp = new Date().toISOString();
+      const response = await rest.request({
+        method: "POST",
+        path: "/assistant_jobs",
+        prefer: "return=representation",
+        body: {
+          id: crypto.randomUUID(),
+          user_id: input.accountId,
+          kind: input.kind,
+          status: "queued",
+          attempts: 0,
+          max_attempts: 5,
+          last_error: null,
+          payload: input.payload ?? {},
+          created_at: timestamp,
+          updated_at: timestamp,
+        },
+      });
+      const mapped = mappedWriteRow(response, mapJobRow);
+      if (mapped === undefined) {
+        throw new RestPersistenceError(502, "Postgres did not create the job.");
+      }
+      return mapped;
+    },
+    async getJob(id) {
+      const response = await rest.request({
+        method: "GET",
+        path: "/assistant_jobs",
+        query: { id: `eq.${id}`, select: "*", limit: "1" },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(502, "Postgres could not load the job.");
+      }
+      return mapJobRow(restRow(response.body));
+    },
+    async listJobs(filter) {
+      const query: Record<string, string> = { select: "*", order: "created_at.asc,id.asc" };
+      if ((filter?.status?.trim() ?? "") !== "") {
+        query.status = `eq.${filter?.status?.trim() ?? ""}`;
+      }
+      const response = await rest.request({ method: "GET", path: "/assistant_jobs", query });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(502, "Postgres could not list jobs.");
+      }
+      return restRows(response.body).flatMap((row) => {
+        const mapped = mapJobRow(row);
+        return mapped === undefined ? [] : [mapped];
+      });
+    },
+    async claimJobs(limit = 16) {
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/claim_assistant_jobs",
+        body: { p_limit: Math.max(1, Math.min(100, Math.trunc(limit))) },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(502, "Postgres could not claim jobs.");
+      }
+      const rows = restRows(response.body);
+      const mapped = rows.map(mapJobRow);
+      if (mapped.some((job) => job === undefined)) {
+        throw new RestPersistenceError(502, "Postgres returned an invalid claimed job.");
+      }
+      return mapped.filter((job): job is OpsJob => job !== undefined);
+    },
+    async updateJob(id, patch) {
+      const body: Record<string, unknown> = { updated_at: new Date().toISOString() };
+      if (patch.status !== undefined) body.status = patch.status;
+      if (patch.attempts !== undefined) body.attempts = patch.attempts;
+      if (patch.lastError !== undefined) body.last_error = patch.lastError;
+      if (patch.startedAt !== undefined) body.started_at = patch.startedAt;
+      if (patch.finishedAt !== undefined) body.finished_at = patch.finishedAt;
+      if (patch.payload !== undefined) body.payload = patch.payload;
+      if (patch.status !== undefined && patch.status !== "running") body.lease_expires_at = null;
+      const response = await rest.request({
+        method: "PATCH",
+        path: "/assistant_jobs",
+        query: { id: `eq.${id}` },
+        prefer: "return=representation",
+        body,
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(502, "Postgres could not update the job.");
+      }
+      return mapJobRow(restRow(response.body));
+    },
     async recordAssistantUse(userId, input) {
       await rest.request({
         method: "POST",
@@ -1026,6 +1371,186 @@ export function createSupabaseOpsStore(
         });
       }
       return rows;
+    },
+    async analyticsPreference(userId) {
+      const response = await rest.request({
+        method: "GET",
+        path: "/user_analytics_preferences",
+        query: {
+          user_id: `eq.${userId}`,
+          select: "operator_learning_analytics_enabled,updated_at",
+          limit: "1",
+        },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        return memory.analyticsPreference(userId);
+      }
+      return mapAnalyticsPreference(restRow(response.body)) ?? memory.analyticsPreference(userId);
+    },
+    async putAnalyticsPreference(userId, enabled) {
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/set_user_analytics_preference",
+        body: { p_user_id: userId, p_enabled: enabled },
+      });
+      const mapped = mapAnalyticsPreference(isRecord(response.body) ? response.body : undefined);
+      if (!restOk(response) || mapped === undefined) {
+        throw new RestPersistenceError(
+          response.status === 0 ? 502 : response.status,
+          "Postgres did not store the analytics preference.",
+        );
+      }
+      return mapped;
+    },
+    async userProgressSummary(userId) {
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/admin_user_progress_summary",
+        body: { p_user_id: userId },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(
+          response.status === 0 ? 502 : response.status,
+          "Postgres could not load the user progress summary.",
+        );
+      }
+      if (response.body === null) {
+        return undefined;
+      }
+      const mapped = mapUserProgressSummary(response.body);
+      if (mapped === undefined) {
+        throw new RestPersistenceError(502, "Postgres returned an invalid user progress summary.");
+      }
+      return mapped;
+    },
+    async purgeExpiredUserProgressSummaries() {
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/purge_expired_user_progress_summaries",
+        body: {},
+      });
+      const count = finiteNumber(response.body);
+      if (!restOk(response) || count === undefined || count < 0) {
+        throw new RestPersistenceError(
+          response.status === 0 ? 502 : response.status,
+          "Postgres could not purge expired user progress summaries.",
+        );
+      }
+      return Math.floor(count);
+    },
+    async purgeExpiredProductEvents() {
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/purge_expired_product_events",
+        body: {},
+      });
+      const count = finiteNumber(response.body);
+      if (!restOk(response) || count === undefined || count < 0) {
+        throw new RestPersistenceError(
+          response.status === 0 ? 502 : response.status,
+          "Postgres could not purge expired product events.",
+        );
+      }
+      return Math.floor(count);
+    },
+    async deleteAccountData(userId) {
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/delete_account_data",
+        body: { p_user_id: userId },
+      });
+      if (!restOk(response) || typeof response.body !== "boolean") {
+        throw new RestPersistenceError(
+          response.status === 0 ? 502 : response.status,
+          "Postgres could not erase the account data.",
+        );
+      }
+      return response.body;
+    },
+    async requestAccountDeletion(userId, reason, requestId) {
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/request_account_deletion",
+        body: { p_user_id: userId, p_reason: reason, p_request_id: requestId },
+      });
+      if (!restOk(response) || !isRecord(response.body)) {
+        throw new RestPersistenceError(502, "Postgres did not queue account deletion.");
+      }
+      const request = mapPrivacyRow(
+        isRecord(response.body.privacy_request) ? response.body.privacy_request : undefined,
+      );
+      const job = mapJobRow(isRecord(response.body.job) ? response.body.job : undefined);
+      if (request === undefined || job === undefined) {
+        throw new RestPersistenceError(502, "Postgres returned an invalid deletion request.");
+      }
+      return { request, job };
+    },
+    async accountObjectKeys(userId) {
+      const [assets, transcripts] = await Promise.all([
+        rest.request({
+          method: "GET",
+          path: "/book_assets",
+          query: { user_id: `eq.${userId}`, select: "object_key" },
+        }),
+        rest.request({
+          method: "GET",
+          path: "/transcript_revisions",
+          query: { user_id: `eq.${userId}`, select: "object_key" },
+        }),
+      ]);
+      if (
+        !restOk(assets) ||
+        isErrorBody(assets.body) ||
+        !restOk(transcripts) ||
+        isErrorBody(transcripts.body)
+      ) {
+        throw new RestPersistenceError(502, "Postgres could not enumerate account objects.");
+      }
+      return [
+        ...new Set(
+          [...restRows(assets.body), ...restRows(transcripts.body)].flatMap((row) =>
+            typeof row.object_key === "string" && row.object_key !== "" ? [row.object_key] : [],
+          ),
+        ),
+      ].sort();
+    },
+    async beginObjectWrite(userId, objectKey) {
+      const response = await rest.request({
+        method: "POST",
+        path: "/object_write_leases",
+        prefer: "return=representation",
+        body: { user_id: userId, object_key: objectKey },
+      });
+      const lease = mapObjectWriteLease(restRow(response.body));
+      if (!restOk(response) || lease === undefined) {
+        throw new RestPersistenceError(502, "Postgres could not begin the object write.");
+      }
+      return lease;
+    },
+    async finishObjectWrite(leaseId) {
+      const response = await rest.request({
+        method: "DELETE",
+        path: "/object_write_leases",
+        query: { id: `eq.${leaseId}` },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(502, "Postgres could not finish the object write.");
+      }
+    },
+    async accountObjectWriteLeases(userId) {
+      const response = await rest.request({
+        method: "GET",
+        path: "/object_write_leases",
+        query: { user_id: `eq.${userId}`, select: "*", order: "created_at" },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(502, "Postgres could not enumerate object writes.");
+      }
+      const leases = restRows(response.body).map(mapObjectWriteLease);
+      if (leases.some((lease) => lease === undefined)) {
+        throw new RestPersistenceError(502, "Postgres returned an invalid object write lease.");
+      }
+      return leases.filter((lease): lease is ObjectWriteLease => lease !== undefined);
     },
     async listPolicies() {
       const response = await rest.request({
@@ -1186,14 +1711,32 @@ export function createSupabaseOpsStore(
       }
       return mapOperatorSettingsRow(restRow(response.body)) ?? memory.getOperatorSettings();
     },
+    async readOperatorSettings() {
+      const response = await rest.request({
+        method: "GET",
+        path: "/operator_settings",
+        query: { select: "*", id: "eq.default", limit: "1" },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        return { ok: false, error: "unavailable" };
+      }
+      if (!Array.isArray(response.body)) {
+        return { ok: false, error: "invalid_response" };
+      }
+      if (response.body.length === 0) {
+        return { ok: true, value: undefined };
+      }
+      const value = mapOperatorSettingsRow(restRow(response.body));
+      return value === undefined ? { ok: false, error: "invalid_response" } : { ok: true, value };
+    },
     async putOperatorSettings(input) {
       return persistOperatorSettings(rest, input);
     },
     async listAudit(filter) {
       const query: Record<string, string> = {
         select: "*",
-        order: "created_at.desc",
-        limit: "100",
+        order: "created_at.desc,id.desc",
+        limit: String(Math.min(Math.max(filter?.limit ?? 100, 1), 5001)),
       };
       if ((filter?.actorId?.trim() ?? "") !== "") {
         query.actor_id = `eq.${filter?.actorId?.trim() ?? ""}`;
@@ -1206,6 +1749,12 @@ export function createSupabaseOpsStore(
       }
       if ((filter?.resourceType?.trim() ?? "") !== "") {
         query.resource_type = `eq.${filter?.resourceType?.trim() ?? ""}`;
+      }
+      if ((filter?.resourceId?.trim() ?? "") !== "") {
+        query.resource_id = `eq.${filter?.resourceId?.trim() ?? ""}`;
+      }
+      if (filter?.cursor !== undefined) {
+        query.or = timeIdCursorQuery(filter.cursor);
       }
       const response = await rest.request({
         method: "GET",
@@ -1229,8 +1778,8 @@ export function createSupabaseOpsStore(
     async listProductEvents(filter) {
       const query: Record<string, string> = {
         select: "*",
-        order: "created_at.desc",
-        limit: String(Math.min(Math.max(filter?.limit ?? 100, 1), 5000)),
+        order: "created_at.desc,id.desc",
+        limit: String(Math.min(Math.max(filter?.limit ?? 100, 1), 5001)),
       };
       if ((filter?.accountId?.trim() ?? "") !== "") {
         query.user_id = `eq.${filter?.accountId?.trim() ?? ""}`;
@@ -1246,6 +1795,9 @@ export function createSupabaseOpsStore(
       if (from !== "" && to !== "") query.and = `(created_at.gte.${from},created_at.lt.${to})`;
       else if (from !== "") query.created_at = `gte.${from}`;
       else if (to !== "") query.created_at = `lt.${to}`;
+      if (filter?.cursor !== undefined) {
+        query.or = timeIdCursorQuery(filter.cursor);
+      }
       const response = await rest.request({
         method: "GET",
         path: "/product_events",
@@ -1337,6 +1889,120 @@ function mapChatRow(row: Record<string, unknown> | undefined):
   };
 }
 
+function mapAnalyticsPreference(
+  row: Record<string, unknown> | undefined,
+): AnalyticsPreferenceRecord | undefined {
+  const enabled = row?.operator_learning_analytics_enabled ?? row?.operatorLearningAnalyticsEnabled;
+  if (row === undefined || typeof enabled !== "boolean") {
+    return undefined;
+  }
+  return {
+    operatorLearningAnalyticsEnabled: enabled,
+    updatedAt:
+      typeof row.updated_at === "string"
+        ? row.updated_at
+        : typeof row.updatedAt === "string"
+          ? row.updatedAt
+          : new Date(0).toISOString(),
+  };
+}
+
+function mapUserProgressSummary(value: unknown): UserProgressSummaryRecord | undefined {
+  if (
+    !isRecord(value) ||
+    !isRecord(value.sync) ||
+    (value.reading !== null && !isRecord(value.reading)) ||
+    (value.review !== null && !isRecord(value.review)) ||
+    (value.learning !== null && !isRecord(value.learning))
+  ) {
+    return undefined;
+  }
+  const sync = value.sync;
+  const reading = isRecord(value.reading) ? value.reading : null;
+  const review = isRecord(value.review) ? value.review : null;
+  const learning = isRecord(value.learning) ? value.learning : null;
+  const device = isRecord(sync.lastDevice) ? sync.lastDevice : undefined;
+  return {
+    generatedAt:
+      typeof value.generatedAt === "string" ? value.generatedAt : new Date().toISOString(),
+    expiresAt: typeof value.expiresAt === "string" ? value.expiresAt : null,
+    sync: {
+      lastSuccessfulAt: typeof sync.lastSuccessfulAt === "string" ? sync.lastSuccessfulAt : null,
+      lastDevice:
+        device !== undefined && typeof device.id === "string" && typeof device.platform === "string"
+          ? {
+              id: device.id,
+              platform: device.platform,
+              name: typeof device.name === "string" ? device.name : null,
+            }
+          : null,
+      entityCounts: Array.isArray(sync.entityCounts)
+        ? sync.entityCounts.flatMap((item): Array<{ entityType: string; count: number }> =>
+            isRecord(item) && typeof item.entityType === "string"
+              ? [{ entityType: item.entityType, count: asNonNegativeInt(item.count) }]
+              : [],
+          )
+        : [],
+      pendingCount:
+        sync.pendingCount === null || sync.pendingCount === undefined
+          ? null
+          : asNonNegativeInt(sync.pendingCount),
+      conflictCount: asNonNegativeInt(sync.conflictCount),
+    },
+    reading:
+      reading === null
+        ? null
+        : {
+            lastActivityAt:
+              typeof reading.lastActivityAt === "string" ? reading.lastActivityAt : null,
+            activeBooks: asNonNegativeInt(reading.activeBooks),
+            completedBooks: asNonNegativeInt(reading.completedBooks),
+            currentChapter:
+              reading.currentChapter === null || reading.currentChapter === undefined
+                ? null
+                : asNonNegativeInt(reading.currentChapter),
+            completionPercent:
+              typeof reading.completionPercent === "number" &&
+              Number.isFinite(reading.completionPercent)
+                ? Math.min(100, Math.max(0, reading.completionPercent))
+                : null,
+          },
+    review:
+      review === null
+        ? null
+        : {
+            due: asNonNegativeInt(review.due),
+            new: asNonNegativeInt(review.new),
+            learning: asNonNegativeInt(review.learning),
+            reviewsLast30Days: asNonNegativeInt(review.reviewsLast30Days),
+            reviewsPerActiveDay:
+              typeof review.reviewsPerActiveDay === "number" ? review.reviewsPerActiveDay : 0,
+            retentionRate:
+              typeof review.retentionRate === "number"
+                ? Math.min(1, Math.max(0, review.retentionRate))
+                : null,
+            streakDays: asNonNegativeInt(review.streakDays),
+          },
+    learning:
+      learning === null
+        ? null
+        : {
+            vocabulary: asNonNegativeInt(learning.vocabulary),
+            known: asNonNegativeInt(learning.known),
+            learning: asNonNegativeInt(learning.learning),
+            aiUsesLast30Days: asNonNegativeInt(learning.aiUsesLast30Days),
+            aiUsesByFeature: Array.isArray(learning.aiUsesByFeature)
+              ? learning.aiUsesByFeature.flatMap(
+                  (item): Array<{ feature: string; count: number }> =>
+                    isRecord(item) && typeof item.feature === "string"
+                      ? [{ feature: item.feature, count: asNonNegativeInt(item.count) }]
+                      : [],
+                )
+              : [],
+          },
+  };
+}
+
 /** PostgREST may return bigint counters as numbers or decimal strings. */
 function asNonNegativeInt(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
@@ -1349,6 +2015,65 @@ function asNonNegativeInt(value: unknown): number {
     }
   }
   return 0;
+}
+
+function mapObjectWriteLease(
+  row: Record<string, unknown> | undefined,
+): ObjectWriteLease | undefined {
+  if (
+    row === undefined ||
+    isErrorBody(row) ||
+    typeof row.id !== "string" ||
+    typeof row.user_id !== "string" ||
+    typeof row.object_key !== "string" ||
+    typeof row.expires_at !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    id: row.id,
+    accountId: row.user_id,
+    objectKey: row.object_key,
+    expiresAt: row.expires_at,
+  };
+}
+
+function mapJobRow(row: Record<string, unknown> | undefined): OpsJob | undefined {
+  if (
+    row === undefined ||
+    isErrorBody(row) ||
+    typeof row.id !== "string" ||
+    typeof row.kind !== "string" ||
+    typeof row.status !== "string"
+  ) {
+    return undefined;
+  }
+  const status: JobStatus | undefined =
+    row.status === "queued" ||
+    row.status === "running" ||
+    row.status === "succeeded" ||
+    row.status === "failed" ||
+    row.status === "cancelled" ||
+    row.status === "dead_letter"
+      ? row.status
+      : undefined;
+  if (status === undefined) {
+    return undefined;
+  }
+  return {
+    id: row.id,
+    accountId: typeof row.user_id === "string" ? row.user_id : null,
+    kind: row.kind,
+    status,
+    attempts: asNonNegativeInt(row.attempts),
+    maxAttempts: Math.max(1, asNonNegativeInt(row.max_attempts)),
+    lastError: typeof row.last_error === "string" ? row.last_error : null,
+    payload: isRecord(row.payload) ? row.payload : {},
+    createdAt: typeof row.created_at === "string" ? row.created_at : new Date().toISOString(),
+    updatedAt: typeof row.updated_at === "string" ? row.updated_at : new Date().toISOString(),
+    startedAt: typeof row.started_at === "string" ? row.started_at : null,
+    finishedAt: typeof row.finished_at === "string" ? row.finished_at : null,
+  };
 }
 
 function mapCacheRow(row: Record<string, unknown> | undefined): OpsCacheEntry | undefined {
@@ -1571,6 +2296,23 @@ function productEventNameMatches(eventName: string, filter: string): boolean {
     return eventName.startsWith(filter);
   }
   return eventName === filter;
+}
+
+function compareTimeIdDescending(left: OpsTimeIdCursor, right: OpsTimeIdCursor): number {
+  const createdAt = right.createdAt.localeCompare(left.createdAt);
+  return createdAt === 0 ? right.id.localeCompare(left.id) : createdAt;
+}
+
+function timeIdPrecedesCursor(event: OpsTimeIdCursor, cursor: OpsTimeIdCursor): boolean {
+  return (
+    event.createdAt < cursor.createdAt ||
+    (event.createdAt === cursor.createdAt && event.id < cursor.id)
+  );
+}
+
+/** Mirrors the descending `(created_at, id)` keyset boundary used by the memory store. */
+function timeIdCursorQuery(cursor: OpsTimeIdCursor): string {
+  return `(created_at.lt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.lt.${cursor.id}))`;
 }
 
 function productEventNameQuery(filter: string): string {
@@ -1984,7 +2726,10 @@ async function persistAuditEvent(
 
 async function persistProductEvent(
   rest: RestClient,
-  event: Omit<OpsProductEvent, "id" | "createdAt"> & { createdAt?: string },
+  event: Omit<OpsProductEvent, "id" | "createdAt" | "purpose"> & {
+    createdAt?: string;
+    purpose?: OpsProductEvent["purpose"];
+  },
 ): Promise<OpsProductEvent> {
   logPersistence("product_event_append_start", {
     name: event.name,
@@ -1998,6 +2743,7 @@ async function persistProductEvent(
     body: {
       user_id: event.accountId,
       device_id: event.deviceId,
+      purpose: event.purpose ?? "learning_analytics",
       name: event.name,
       outcome: event.outcome,
       request_id: event.requestId,
@@ -2263,6 +3009,7 @@ function mapProductEventRow(row: Record<string, unknown> | undefined): OpsProduc
     id: row.id,
     accountId: typeof row.user_id === "string" ? row.user_id : "",
     deviceId: typeof row.device_id === "string" ? row.device_id : null,
+    purpose: row.purpose === "operational" ? "operational" : "learning_analytics",
     name: row.name,
     outcome,
     requestId: typeof row.request_id === "string" ? row.request_id : null,

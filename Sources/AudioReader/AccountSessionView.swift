@@ -100,6 +100,7 @@ struct AccountSessionView: View {
                 // "refreshToken must be at least 16 characters." Launch restore
                 // still refreshes. This only reloads the device list.
                 await session.refreshDevices()
+                await session.refreshAnalyticsPreference()
             }
         }
         .alert("Sign out of AudioReader?", isPresented: $confirmSignOut) {
@@ -258,6 +259,23 @@ struct AccountSessionView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             AccountSyncStatusView(session: session)
+
+            Toggle(isOn: Binding(
+                get: { session.operatorLearningAnalyticsEnabled ?? false },
+                set: { enabled in
+                    Task { await session.setOperatorLearningAnalyticsEnabled(enabled) }
+                }
+            )) {
+                Text("Share aggregate learning progress with Operator support")
+                    .font(.body)
+            }
+            .accessibilityLabel("Share aggregate learning progress with Operator support")
+            .disabled(session.isBusy)
+
+            Text("Optional. This shares counts and timestamps for sync, reading, review, vocabulary, and AI-feature use so support can diagnose trends. Reading text, transcripts, saved words, translations, notes, and prompts are never shared.")
+                .font(.body)
+                .foregroundStyle(Palette.dim)
+                .fixedSize(horizontal: false, vertical: true)
 
             if !session.devices.isEmpty {
                 Text("Devices")

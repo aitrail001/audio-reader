@@ -13,6 +13,7 @@ function event(
     id,
     accountId,
     deviceId: `device-${id}`,
+    purpose: "learning_analytics",
     name: "reading.session.completed",
     outcome,
     requestId: `request-${id}`,
@@ -79,8 +80,8 @@ describe("product analytics", () => {
       identifiersReturned: "pseudonymous",
       durableOwnershipKeysStored: true,
       profileDeletionCascadesEvents: true,
-      completedDeletionRequestPurgesEvents: false,
-      automaticRetentionDays: null,
+      completedDeletionRequestPurgesEvents: true,
+      automaticRetentionDays: 90,
     });
   });
 
@@ -97,6 +98,28 @@ describe("product analytics", () => {
     });
     expect(analytics.summary.events).toBe(1);
     expect(analytics.filters.platform).toBe("macos");
+  });
+
+  it("keeps required operational telemetry out of learner behavior analytics", () => {
+    const analytics = buildProductAnalytics(
+      [
+        event("learning", "2026-08-30T09:00:00.000Z", { feature: "review" }),
+        {
+          ...event("operational", "2026-08-30T10:00:00.000Z", { feature: "security" }),
+          purpose: "operational",
+          name: "security.session_revoked",
+        },
+      ],
+      {
+        from: "2026-08-30T00:00:00.000Z",
+        to: "2026-08-31T00:00:00.000Z",
+        interval: "day",
+        filters: {},
+      },
+    );
+
+    expect(analytics.summary.events).toBe(1);
+    expect(analytics.distributions.feature).toEqual([{ key: "review", count: 1, share: 1 }]);
   });
 
   it("excludes missing devices from platform shares and counts only ok terminal outcomes as successful", () => {

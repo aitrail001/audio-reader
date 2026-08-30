@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createSupabaseOpsStore, RestPersistenceError } from "./ops";
+import { createMemoryOpsStore, createSupabaseOpsStore, RestPersistenceError } from "./ops";
 import type { RestClient, RestRequest, RestResponse } from "./rest";
 
 const POLICY_ID = "00000000-0000-4000-8000-0000000000aa";
@@ -165,6 +165,34 @@ function opsRest(options: {
 }
 
 describe("supabase policy store", () => {
+  it("keeps object-write leases durable until the writer releases them", async () => {
+    const ops = createMemoryOpsStore();
+    const lease = await ops.beginObjectWrite("user-1", "user-1/audio.m4b");
+    await expect(ops.accountObjectWriteLeases("user-1")).resolves.toEqual([lease]);
+    await ops.finishObjectWrite(lease.id);
+    await expect(ops.accountObjectWriteLeases("user-1")).resolves.toEqual([]);
+  });
+
+  it("distinguishes absent Operator settings from a failed hosted read", async () => {
+    const absent = createSupabaseOpsStore(opsRest({ tables: { "/operator_settings": [] } }));
+    await expect(absent.readOperatorSettings()).resolves.toEqual({ ok: true, value: undefined });
+
+    const failed = createSupabaseOpsStore(
+      opsRest({
+        tables: { "/operator_settings": [] },
+        fail: {
+          method: "GET",
+          path: "/operator_settings",
+          response: { status: 503, body: { code: "PGRST000", message: "database unavailable" } },
+        },
+      }),
+    );
+    await expect(failed.readOperatorSettings()).resolves.toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+
   it("keeps a patched model after listPolicies reloads from Postgres", async () => {
     const rows = [seedPolicy()];
     const ops = createSupabaseOpsStore(opsRest({ tables: { "/model_policies": rows } }));
@@ -424,6 +452,72 @@ describe("supabase flag, quota, settings, and audit writes", () => {
     });
   });
 
+  it("pushes filtered product-event keyset pagination into PostgREST", async () => {
+    let captured: RestRequest | undefined;
+    const ops = createSupabaseOpsStore({
+      async request(input: RestRequest): Promise<RestResponse> {
+        await Promise.resolve();
+        captured = input;
+        return { status: 200, body: [] };
+      },
+    });
+    await ops.listProductEvents({
+      accountId: "00000000-0000-4000-8000-000000000002",
+      name: "review.",
+      requestId: "review-request",
+      cursor: {
+        createdAt: "2026-08-30T02:00:00.000Z",
+        id: "00000000-0000-4000-8000-000000000020",
+      },
+      limit: 3,
+    });
+    expect(captured).toMatchObject({
+      method: "GET",
+      path: "/product_events",
+      query: {
+        order: "created_at.desc,id.desc",
+        limit: "3",
+        user_id: "eq.00000000-0000-4000-8000-000000000002",
+        name: "like.review.*",
+        request_id: "eq.review-request",
+        or: "(created_at.lt.2026-08-30T02:00:00.000Z,and(created_at.eq.2026-08-30T02:00:00.000Z,id.lt.00000000-0000-4000-8000-000000000020))",
+      },
+    });
+  });
+
+  it("pushes filtered audit keyset pagination into PostgREST", async () => {
+    let captured: RestRequest | undefined;
+    const ops = createSupabaseOpsStore({
+      async request(input: RestRequest): Promise<RestResponse> {
+        await Promise.resolve();
+        captured = input;
+        return { status: 200, body: [] };
+      },
+    });
+    await ops.listAudit({
+      actorId: "00000000-0000-4000-8000-000000000003",
+      action: "review_schedule_changed",
+      resourceType: "review_schedule",
+      cursor: {
+        createdAt: "2026-08-30T02:00:00.000Z",
+        id: "00000000-0000-4000-8000-000000000020",
+      },
+      limit: 61,
+    });
+    expect(captured).toMatchObject({
+      method: "GET",
+      path: "/audit_events",
+      query: {
+        order: "created_at.desc,id.desc",
+        limit: "61",
+        actor_id: "eq.00000000-0000-4000-8000-000000000003",
+        action: "eq.review_schedule_changed",
+        resource_type: "eq.review_schedule",
+        or: "(created_at.lt.2026-08-30T02:00:00.000Z,and(created_at.eq.2026-08-30T02:00:00.000Z,id.lt.00000000-0000-4000-8000-000000000020))",
+      },
+    });
+  });
+
   it("returns an empty flag list when GET fails instead of default seeds", async () => {
     const ops = createSupabaseOpsStore(
       opsRest({
@@ -525,6 +619,163 @@ describe("supabase flag, quota, settings, and audit writes", () => {
       }),
     ).rejects.toBeInstanceOf(RestPersistenceError);
     expect(await ops.listCache()).toEqual([]);
+  });
+});
+
+describe("supabase progress privacy operations", () => {
+  it("distinguishes an absent progress summary from a persistence failure", async () => {
+    const absent = createSupabaseOpsStore({
+      request: () => Promise.resolve({ status: 200, body: null }),
+    });
+    await expect(absent.userProgressSummary("user-a")).resolves.toBeUndefined();
+
+    const failed = createSupabaseOpsStore({
+      request: () =>
+        Promise.resolve({ status: 500, body: { code: "PGRST500", message: "database failed" } }),
+    });
+    await expect(failed.userProgressSummary("user-a")).rejects.toBeInstanceOf(RestPersistenceError);
+
+    const malformed = createSupabaseOpsStore({
+      request: () => Promise.resolve({ status: 200, body: {} }),
+    });
+    await expect(malformed.userProgressSummary("user-a")).rejects.toBeInstanceOf(
+      RestPersistenceError,
+    );
+  });
+
+  it("persists jobs so a separate hosted worker store can claim them", async () => {
+    const rows: Row[] = [];
+    const rest = opsRest({ tables: { "/assistant_jobs": rows } });
+    const apiStore = createSupabaseOpsStore(rest);
+    const workerStore = createSupabaseOpsStore(rest);
+
+    const created = await apiStore.createJob({
+      accountId: "00000000-0000-4000-8000-000000000002",
+      kind: "account_deletion",
+      payload: {},
+    });
+    await expect(workerStore.listJobs({ status: "queued" })).resolves.toEqual([
+      expect.objectContaining({ id: created.id, kind: "account_deletion", status: "queued" }),
+    ]);
+    await workerStore.updateJob(created.id, { status: "running", attempts: 1 });
+    await expect(apiStore.getJob(created.id)).resolves.toMatchObject({
+      status: "running",
+      attempts: 1,
+    });
+  });
+
+  it("requests deletion atomically and enumerates every stored object key", async () => {
+    const calls: RestRequest[] = [];
+    const ops = createSupabaseOpsStore({
+      request(input) {
+        calls.push(input);
+        if (input.path === "/rpc/request_account_deletion") {
+          return Promise.resolve({
+            status: 200,
+            body: {
+              privacy_request: {
+                id: "11111111-1111-4111-8111-111111111111",
+                user_id: "00000000-0000-4000-8000-000000000002",
+                kind: "deletion",
+                status: "queued",
+                format: null,
+                asset_id: null,
+                error: null,
+                reason: "private reason",
+                created_at: "2026-08-30T05:00:00.000Z",
+                updated_at: "2026-08-30T05:00:00.000Z",
+                completed_at: null,
+              },
+              job: {
+                id: "22222222-2222-4222-8222-222222222222",
+                user_id: "00000000-0000-4000-8000-000000000002",
+                kind: "account_deletion",
+                status: "queued",
+                attempts: 0,
+                max_attempts: 5,
+                payload: {},
+                created_at: "2026-08-30T05:00:00.000Z",
+                updated_at: "2026-08-30T05:00:00.000Z",
+              },
+            },
+          });
+        }
+        if (input.path === "/book_assets") {
+          return Promise.resolve({ status: 200, body: [{ object_key: "account/audio.m4b" }] });
+        }
+        if (input.path === "/transcript_revisions") {
+          return Promise.resolve({
+            status: 200,
+            body: [{ object_key: "account/transcript.json" }],
+          });
+        }
+        return Promise.resolve({ status: 404, body: { message: "not found" } });
+      },
+    });
+
+    await expect(
+      ops.requestAccountDeletion(
+        "00000000-0000-4000-8000-000000000002",
+        "private reason",
+        "request-delete",
+      ),
+    ).resolves.toMatchObject({
+      request: { kind: "deletion", status: "queued" },
+      job: { kind: "account_deletion", status: "queued" },
+    });
+    await expect(ops.accountObjectKeys("00000000-0000-4000-8000-000000000002")).resolves.toEqual([
+      "account/audio.m4b",
+      "account/transcript.json",
+    ]);
+    expect(calls[0]).toMatchObject({
+      path: "/rpc/request_account_deletion",
+      body: {
+        p_user_id: "00000000-0000-4000-8000-000000000002",
+        p_reason: "private reason",
+        p_request_id: "request-delete",
+      },
+    });
+  });
+
+  it("uses transaction RPCs for opt-out cleanup, retention purges, and account erasure", async () => {
+    const paths: string[] = [];
+    const ops = createSupabaseOpsStore({
+      request(input) {
+        paths.push(input.path);
+        if (input.path === "/rpc/set_user_analytics_preference") {
+          return Promise.resolve({
+            status: 200,
+            body: {
+              operatorLearningAnalyticsEnabled: false,
+              updatedAt: "2026-08-30T04:00:00.000Z",
+            },
+          });
+        }
+        if (input.path === "/rpc/purge_expired_user_progress_summaries") {
+          return Promise.resolve({ status: 200, body: 3 });
+        }
+        if (input.path === "/rpc/purge_expired_product_events") {
+          return Promise.resolve({ status: 200, body: 9 });
+        }
+        if (input.path === "/rpc/delete_account_data") {
+          return Promise.resolve({ status: 200, body: true });
+        }
+        return Promise.resolve({ status: 404, body: { message: "not found" } });
+      },
+    });
+
+    await expect(ops.putAnalyticsPreference("user-a", false)).resolves.toMatchObject({
+      operatorLearningAnalyticsEnabled: false,
+    });
+    await expect(ops.purgeExpiredUserProgressSummaries()).resolves.toBe(3);
+    await expect(ops.purgeExpiredProductEvents()).resolves.toBe(9);
+    await expect(ops.deleteAccountData("user-a")).resolves.toBe(true);
+    expect(paths).toEqual([
+      "/rpc/set_user_analytics_preference",
+      "/rpc/purge_expired_user_progress_summaries",
+      "/rpc/purge_expired_product_events",
+      "/rpc/delete_account_data",
+    ]);
   });
 });
 

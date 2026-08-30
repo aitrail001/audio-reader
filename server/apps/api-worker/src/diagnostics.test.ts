@@ -61,6 +61,7 @@ describe("operator diagnostics helpers", () => {
       model: "qwen3.7-flash",
       source: "desk",
       promptVersion: "qwen-managed-v1",
+      schemaVersion: "1",
       systemPrompt: DEFAULT_ASSISTANT_PROMPTS.translation,
       userPrompt: DEFAULT_ASSISTANT_USER_PROMPTS.translation,
     });
@@ -78,6 +79,7 @@ describe("operator diagnostics helpers", () => {
       model: "qwen3.7-plus",
       source: "policy",
       promptVersion: "qwen-managed-v1",
+      schemaVersion: "1",
       systemPrompt: DEFAULT_ASSISTANT_PROMPTS.translation,
       userPrompt: DEFAULT_ASSISTANT_USER_PROMPTS.translation,
     });
@@ -95,6 +97,7 @@ describe("operator diagnostics helpers", () => {
       model: "qwen3.7-flash",
       source: "desk",
       promptVersion: "qwen-managed-v1",
+      schemaVersion: "1",
       systemPrompt: DEFAULT_ASSISTANT_PROMPTS.chat,
       userPrompt: DEFAULT_ASSISTANT_USER_PROMPTS.chat,
     });

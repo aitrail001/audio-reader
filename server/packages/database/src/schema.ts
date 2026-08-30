@@ -34,6 +34,9 @@ export const CORE_TABLES = [
   "passwordless_cooldowns",
   "passwordless_blocked_attempts",
   "product_events",
+  "user_analytics_preferences",
+  "user_progress_summaries",
+  "object_write_leases",
 ] as const;
 
 export type CoreTable = (typeof CORE_TABLES)[number];
@@ -64,6 +67,7 @@ export const PRIVATE_TABLES = [
   "idempotency_records",
   "admin_roles",
   "privacy_requests",
+  "object_write_leases",
 ] as const;
 
 export const OPTIONAL_OWNER_TABLES = ["assistant_jobs"] as const;
@@ -108,6 +112,9 @@ export const JWT_DENIED_TABLES = [
   "passwordless_cooldowns",
   "passwordless_blocked_attempts",
   "product_events",
+  "user_analytics_preferences",
+  "user_progress_summaries",
+  "object_write_leases",
 ] as const;
 
 /** RLS enabled, no authenticated policies. Includes JWT-denied tables. */
@@ -128,12 +135,19 @@ export const TRANSACTION_FUNCTIONS = [
   "record_idempotency_response",
   "abort_idempotency_record",
   "push_sync_batch",
+  "pull_sync_page",
   "append_sync_change",
   "claim_assistant_generation",
   "attach_user_assistant_result",
   "complete_assistant_job",
   "fail_assistant_job",
   "append_audit_event",
+  "admin_user_progress_summary",
+  "purge_expired_user_progress_summaries",
+  "set_user_analytics_preference",
+  "delete_account_data",
+  "request_account_deletion",
+  "claim_assistant_jobs",
 ] as const;
 
 export const AUDIT_ACTOR_TYPES = ["user", "admin", "system"] as const;

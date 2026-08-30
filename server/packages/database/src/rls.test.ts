@@ -417,6 +417,21 @@ describe("row level isolation (postgres)", () => {
     );
     expect(quota.ok, quota.stderr).toBe(true);
     expect(parseMarker(quota.stdout)).toBe(1);
+    const progressPrivileges = countAsRole(
+      session,
+      "service_role",
+      undefined,
+      `SELECT 'AR_RLS:' || (
+        case when
+          has_function_privilege('service_role', 'public.admin_user_progress_summary(uuid)', 'execute')
+          and has_function_privilege('service_role', 'public.request_account_deletion(uuid,text,text)', 'execute')
+          and has_function_privilege('service_role', 'public.claim_assistant_jobs(integer)', 'execute')
+          and not has_function_privilege('service_role', 'public.admin_user_progress_summary_unchecked(uuid)', 'execute')
+        then 1 else 0 end
+      )::text`,
+    );
+    expect(progressPrivileges.ok, progressPrivileges.stderr).toBe(true);
+    expect(parseMarker(progressPrivileges.stdout)).toBe(1);
   });
 });
 
@@ -445,6 +460,7 @@ type TenantIds = {
   idempotencyId: string;
   adminRoleId: string;
   privacyId: string;
+  objectWriteLeaseId: string;
 };
 
 function idKey(table: string): keyof TenantIds {
@@ -471,6 +487,7 @@ function idKey(table: string): keyof TenantIds {
     idempotency_records: "idempotencyId",
     admin_roles: "adminRoleId",
     privacy_requests: "privacyId",
+    object_write_leases: "objectWriteLeaseId",
   };
   const key = keys[table];
   if (key === undefined) {
@@ -539,6 +556,7 @@ function loadTenantIds(db: PostgresSession, userId: string): TenantIds {
     idempotencyId: one("idempotency_records"),
     adminRoleId: one("admin_roles"),
     privacyId: one("privacy_requests"),
+    objectWriteLeaseId: one("object_write_leases"),
   };
 }
 
@@ -720,6 +738,9 @@ function insertSql(table: string, owner: TenantIds): string {
     case "privacy_requests":
       return `insert into privacy_requests (user_id, kind, status)
         values (${u}, 'deletion', 'queued')`;
+    case "object_write_leases":
+      return `insert into object_write_leases (user_id, object_key)
+        values (${u}, '${owner.userId}/private-object')`;
     default:
       throw new Error(`no insert for ${table}`);
   }
@@ -815,6 +836,9 @@ begin
 
   insert into public.privacy_requests (user_id, kind, status)
   values (p_user, 'export', 'queued');
+
+  insert into public.object_write_leases (user_id, object_key)
+  values (p_user, p_user::text || '/seed-object');
 end;
 $$;
 

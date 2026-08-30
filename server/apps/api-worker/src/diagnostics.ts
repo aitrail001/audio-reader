@@ -22,6 +22,7 @@ export type TaskPolicyInput = {
   systemPrompt?: string;
   userPrompt?: string;
   canaryPercent?: number;
+  schemaVersion?: string;
 };
 
 export type TaskModelResolution = {
@@ -31,6 +32,7 @@ export type TaskModelResolution = {
   promptVersion: string;
   systemPrompt: string;
   userPrompt: string;
+  schemaVersion: string;
 };
 
 export function canaryBucket(accountId: string, task: string): number {
@@ -54,6 +56,7 @@ export function resolveTaskModel(
   const promptVersion = enabled?.promptVersion?.trim() || "qwen-managed-v1";
   const systemPrompt = enabled?.systemPrompt?.trim() || defaultAssistantPrompt(task);
   const userPrompt = enabled?.userPrompt?.trim() || defaultAssistantUserPrompt(task);
+  const schemaVersion = enabled?.schemaVersion?.trim() || "1";
   if (matching.length > 0 && matching.every((policy) => !policy.enabled)) {
     return {
       disabled: true,
@@ -62,6 +65,7 @@ export function resolveTaskModel(
       promptVersion,
       systemPrompt: defaultAssistantPrompt(task),
       userPrompt: defaultAssistantUserPrompt(task),
+      schemaVersion,
     };
   }
   const policyModel = enabled?.model.trim() ?? "";
@@ -76,6 +80,7 @@ export function resolveTaskModel(
     promptVersion,
     systemPrompt,
     userPrompt,
+    schemaVersion,
   };
 }
 

@@ -140,6 +140,9 @@ struct AccountSessionFlowTests {
         #expect(view.contains("AccountExportDocument"))
         #expect(view.contains(".accessibilityLabel(\"Delete AudioReader account\")"))
         #expect(view.contains(".accessibilityLabel(\"Sync learning data across devices\")"))
+        #expect(view.contains("Share aggregate learning progress with Operator support"))
+        #expect(view.contains("Reading text, transcripts, saved words, translations, notes, and prompts are never shared"))
+        #expect(view.contains("setOperatorLearningAnalyticsEnabled"))
         #expect(view.contains("AccountSyncStatusView(session: session)"))
         #expect(view.contains(".accessibilityLabel(\"Sync status\")"))
         #expect(view.contains(".accessibilityValue(session.syncStatusAccessibilityDescription)"))
@@ -208,6 +211,18 @@ struct AccountSessionFlowTests {
         #expect(view.contains("Sign in with Microsoft"))
         #expect(!view.contains("#if os(macOS)"))
         #expect(!settings.contains("#if os(macOS)\n                    accountSection"))
+    }
+
+    @Test("macOS activity banner does not invalidate NavigationSplitView safe areas")
+    func macActivityBannerAvoidsSplitViewSafeAreaFeedback() throws {
+        let macRoot = try source("Sources/AudioReader/RootView.swift")
+        let iPadRoot = try source("Sources/AudioReader/IPadRootView.swift")
+
+        #expect(macRoot.contains("VStack(spacing: 0)"))
+        #expect(macRoot.contains(".frame(maxWidth: .infinity, maxHeight: .infinity)"))
+        #expect(macRoot.contains(".layoutPriority(1)"))
+        #expect(!macRoot.contains(".safeAreaInset(edge: .top"))
+        #expect(iPadRoot.contains(".safeAreaInset(edge: .top"))
     }
 
     @Test("Product account auth stays separate from OpenAI API-key and ChatGPT-plan paths")
@@ -530,6 +545,171 @@ struct AccountSessionFlowTests {
         stored = try #require(try store.loadVocabulary().first)
         #expect(stored.lastReviewedAt == ISO8601DateFormatter().date(from: "2026-08-31T02:10:00Z"))
         #expect(try store.loadReviewEvents().count == 1)
+    }
+
+    @Test("Vocabulary deletion enqueues a tombstone and removes the durable learning graph")
+    func vocabularyDeletionIsDurableAndSyncable() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-delete-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("library.sqlite")
+        let legacy = LibraryStore(fileURL: url)
+        let repository = LibraryStoreVocabularyRepository(store: legacy)
+        let relational = LocalSQLiteStore(fileURL: url)
+        let vocabularyID = VocabularyOccurrenceID(rawValue: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        let item = StoredVocabularyOccurrence(
+            id: vocabularyID,
+            surface: "ice",
+            category: VocabCategory.word.rawValue,
+            context: "The ice closed over.",
+            bookID: BookID(rawValue: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            bookTitle: "Moby-Dick",
+            chapterID: ChapterID(rawValue: "cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+            chapterTitle: "Loomings",
+            timestamp: 3,
+            addedAt: Date(timeIntervalSince1970: 1_777_000_000)
+        )
+        try repository.saveVocabulary([item])
+        try relational.upsertVocabulary(item)
+        try relational.appendReviewEvent(
+            StoredReviewEvent(
+                id: ReviewEventID(rawValue: "dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+                vocabularyID: vocabularyID,
+                face: "recognition",
+                rating: VocabReviewQuality.remember.rawValue,
+                reviewedAt: Date(timeIntervalSince1970: 1_777_000_100)
+            ),
+            vocabulary: item
+        )
+
+        try repository.deleteVocabulary(id: vocabularyID)
+
+        let tombstone = try #require(try relational.pendingMutations().first)
+        #expect(tombstone.entityType == .vocabulary)
+        #expect(tombstone.entityID == vocabularyID.rawValue)
+        #expect(tombstone.operation == .delete)
+        #expect(
+            try JSONDecoder().decode([String: SyncJSONValue].self, from: tombstone.payload)["_deleted"]
+                == .bool(true)
+        )
+        #expect(
+            try JSONDecoder().decode([String: SyncJSONValue].self, from: tombstone.payload)["localId"]
+                == .string(vocabularyID.rawValue)
+        )
+        #expect(try repository.loadVocabulary().isEmpty)
+        #expect(try relational.loadVocabulary().isEmpty)
+        #expect(try relational.loadReviewCards().isEmpty)
+        #expect(try relational.loadReviewEvents().isEmpty)
+    }
+
+    @Test("A vocabulary tombstone deletes the second device and blocks dependent resurrection")
+    func vocabularyDeletionRoundTripsAcrossDevices() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-delete-device-b-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LocalSQLiteStore(fileURL: url)
+        let vocabularyID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let item = StoredVocabularyOccurrence(
+            id: VocabularyOccurrenceID(rawValue: vocabularyID),
+            surface: "ice",
+            category: VocabCategory.word.rawValue,
+            context: "The ice closed over.",
+            bookID: BookID(rawValue: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            bookTitle: "Moby-Dick",
+            chapterID: ChapterID(rawValue: "cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+            chapterTitle: "Loomings",
+            timestamp: 3,
+            addedAt: Date(timeIntervalSince1970: 1_777_000_000)
+        )
+        try store.upsertVocabulary(item)
+        let deletion = SyncPulledChange(
+            sequence: 8,
+            entityType: OutboxEntityType.vocabulary.rawValue,
+            entityId: vocabularyID,
+            operation: OutboxOperation.delete.rawValue,
+            revision: 2,
+            changedAt: "2026-08-30T03:00:00Z",
+            payload: [:]
+        )
+
+        _ = try AccountSyncApplicator.applyLearning(deletion, to: store)
+        try store.saveVersion(
+            SyncEntityVersion(
+                entityType: deletion.entityType,
+                entityID: deletion.entityId,
+                serverVersion: Int64(deletion.revision),
+                payload: Data("{\"_deleted\":true}".utf8)
+            )
+        )
+        let staleReview = SyncPulledChange(
+            sequence: 9,
+            entityType: OutboxEntityType.reviewEvent.rawValue,
+            entityId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            operation: OutboxOperation.append.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T03:01:00Z",
+            payload: [
+                "vocabularyId": .string(vocabularyID),
+                "face": .string("recognition"),
+                "rating": .string(VocabReviewQuality.remember.rawValue),
+                "reviewedAt": .string("2026-08-30T03:01:00Z")
+            ]
+        )
+
+        _ = try AccountSyncApplicator.applyLearning(staleReview, to: store)
+
+        #expect(try store.loadVocabulary().isEmpty)
+        #expect(try store.loadReviewEvents().isEmpty)
+        #expect(try !AccountSyncApplicator.snapshot(
+            settings: .default,
+            vocabulary: try store.loadVocabulary().map(VocabEntry.init),
+            lemmas: []
+        ).contains(where: { $0.entityType == .vocabulary && $0.entityID == vocabularyID }))
+    }
+
+    @Test("A non-UUID vocabulary tombstone deletes the original local identifier on another device")
+    func legacyVocabularyDeletionRoundTripsAcrossDevices() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-delete-legacy-device-b-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LocalSQLiteStore(fileURL: url)
+        let localID = "legacy-vocabulary-ice"
+        let entityID = AccountSyncApplicator.syncEntityID(localID, kind: "vocab")
+        let item = StoredVocabularyOccurrence(
+            id: VocabularyOccurrenceID(rawValue: localID),
+            surface: "ice",
+            category: VocabCategory.word.rawValue,
+            context: "The ice closed over.",
+            bookID: BookID(rawValue: "book"),
+            bookTitle: "Moby-Dick",
+            chapterID: ChapterID(rawValue: "chapter"),
+            chapterTitle: "Loomings",
+            timestamp: 3,
+            addedAt: Date(timeIntervalSince1970: 1_777_000_000)
+        )
+        try store.upsertVocabulary(item)
+        let deletion = SyncPulledChange(
+            sequence: 8,
+            entityType: OutboxEntityType.vocabulary.rawValue,
+            entityId: entityID,
+            operation: OutboxOperation.delete.rawValue,
+            revision: 2,
+            changedAt: "2026-08-30T03:00:00Z",
+            payload: [
+                "_deleted": .bool(true),
+                "localId": .string(localID)
+            ]
+        )
+
+        var mismatchedDeletion = deletion
+        mismatchedDeletion.payload["localId"] = .string("another-local-vocabulary")
+        _ = try AccountSyncApplicator.applyLearning(mismatchedDeletion, to: store)
+        #expect(try store.loadVocabulary().map(\.id.rawValue) == [localID])
+
+        _ = try AccountSyncApplicator.applyLearning(deletion, to: store)
+
+        #expect(try store.loadVocabulary().isEmpty)
     }
 
     @Test("A review without its durable vocabulary parent remains retriable")

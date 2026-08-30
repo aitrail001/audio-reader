@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   CHAPTER_BATCH_TRANSLATION_INSTRUCTIONS,
   CHAPTER_SUMMARY_INSTRUCTIONS,
@@ -21,6 +22,9 @@ import {
   sentenceTranslationInstructions,
   stringList,
   wordInSentenceInstructions,
+  assembleManagedPrompt,
+  validateAssistantPromptDraft,
+  validateManagedPromptOutput,
 } from "./assistant-prompts";
 
 describe("assistant prompts", () => {
@@ -196,5 +200,286 @@ describe("assistant prompts", () => {
     expect(promptLanguageName("")).toBe("");
     expect(promptLanguageName("xx-YY")).toBe("xx-YY");
     expect(promptLanguageName("zh")).toBe("Simplified Chinese (简体中文)");
+  });
+
+  it.each(["sentence", "word", "chapter_batch", "chapter_summary", "chat", "heard_quiz"] as const)(
+    "assembles visible editable and enforced layers for %s",
+    (subtask) => {
+      const assembled = assembleManagedPrompt({
+        subtask,
+        policySystemPrompt: "Editable operator policy.",
+        policyUserPrompt: "Operator layer: {{task}} / {{source}}",
+        schemaVersion: "1",
+        fields: {
+          task: subtask,
+          source: "She broke the ice.",
+          context: "PREVIOUS: The room was quiet.",
+          segments: "s1: She broke the ice.",
+          question: "Why did she do that?",
+          chapterId: "chapter-7",
+          bookTitle: "The Example Book",
+          author: "Ada Author",
+          chapterTitle: "An Arrival",
+          sourceLanguage: "English",
+          targetLanguage: "Simplified Chinese",
+          learnerLevel: "B1",
+          targetIds: "s1",
+        },
+      });
+
+      expect(assembled.validation.valid).toBe(true);
+      expect(assembled.editable.system).toBe("Editable operator policy.");
+      expect(assembled.enforced.taskContract.length).toBeGreaterThan(80);
+      expect(assembled.effective.system).toContain("Editable operator policy.");
+      for (const expected of [
+        "The Example Book",
+        "Ada Author",
+        "An Arrival",
+        "English",
+        "Simplified Chinese",
+        "B1",
+      ]) {
+        expect(assembled.effective.user).toContain(expected);
+      }
+      expect(assembled.outputSchema.type).toBe("object");
+      expect(assembled.contractFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    },
+  );
+
+  it.each([
+    ["sentence", "Quoted source (required):", "She broke the ice."],
+    ["word", "Sentence context (required):", "TARGET: She broke the ice."],
+    ["chapter_batch", "Target sentence block (required):", "TARGET: She broke the ice."],
+    ["chapter_summary", "Chapter segments (required):", "She broke the ice."],
+    ["chat", "Reader question (required):", "Why did she do that?"],
+    ["heard_quiz", "Already-heard segments (required):", "HEARD id=s1"],
+  ] as const)(
+    "enforces required %s runtime input even when the editable template omits it",
+    (subtask, label, expectedValue) => {
+      const assembled = assembleManagedPrompt({
+        subtask,
+        policySystemPrompt: "Editable operator policy.",
+        policyUserPrompt: "Operator guidance only.",
+        schemaVersion: "1",
+        fields: {
+          task: subtask,
+          source: "She broke the ice.",
+          context: "TARGET: She broke the ice.",
+          segments: "HEARD id=s1: She broke the ice.",
+          question: "Why did she do that?",
+          chapterId: "chapter-7",
+          bookTitle: "The Example Book",
+          author: "Ada Author",
+          chapterTitle: "An Arrival",
+          sourceLanguage: "English",
+          targetLanguage: "Simplified Chinese",
+          learnerLevel: "B1",
+          targetIds: "s1",
+        },
+      });
+
+      expect(assembled.validation.valid).toBe(true);
+      expect(assembled.enforced.requestContext).toContain(label);
+      expect(assembled.effective.user).toContain(expectedValue);
+    },
+  );
+
+  it.each([
+    ["sentence", "source"],
+    ["word", "context"],
+    ["chapter_batch", "context"],
+    ["chapter_summary", "segments"],
+    ["chat", "question"],
+    ["heard_quiz", "segments"],
+  ] as const)("fails %s runtime validation when required %s input is absent", (subtask, field) => {
+    const fields: Record<string, string> = {
+      task: subtask,
+      source: "She broke the ice.",
+      context: "TARGET: She broke the ice.",
+      segments: "HEARD id=s1: She broke the ice.",
+      question: "Why did she do that?",
+      sourceLanguage: "English",
+      targetLanguage: "Simplified Chinese",
+      learnerLevel: "B1",
+      targetIds: "s1",
+    };
+    fields[field] = "  ";
+
+    const assembled = assembleManagedPrompt({
+      subtask,
+      policySystemPrompt: "Editable operator policy.",
+      policyUserPrompt: "Operator guidance only.",
+      schemaVersion: "1",
+      fields,
+    });
+
+    expect(assembled.validation.valid).toBe(false);
+    expect(assembled.validation.fieldErrors[`inputs.${field}`]).toContain("required");
+  });
+
+  it("keeps the complete sentence-learning contract enforced", () => {
+    const assembled = assembleManagedPrompt({
+      subtask: "sentence",
+      policySystemPrompt: "Keep it short.",
+      policyUserPrompt: "{{source}}",
+      schemaVersion: "1",
+      fields: {
+        source: "She broke the ice.",
+        bookTitle: "Book",
+        author: "Author",
+        chapterTitle: "Chapter",
+        sourceLanguage: "English",
+        targetLanguage: "Chinese",
+        learnerLevel: "B1",
+      },
+    });
+    for (const requirement of [
+      "phrasal verbs",
+      "idioms",
+      "level-appropriate phrases",
+      "challenging words",
+      "challenging combinations",
+      "book-specific concepts",
+      "exact source-language span",
+      "cultural",
+      "grammatical",
+      "figurative",
+      "names",
+      "dialogue",
+      "register",
+    ]) {
+      expect(assembled.enforced.taskContract.toLowerCase()).toContain(requirement);
+    }
+  });
+
+  it("keeps direct-provider and Managed Qwen learning-note semantics aligned", () => {
+    const direct = JSON.parse(
+      readFileSync("../Sources/AudioReader/Resources/ReadingAssistantPrompts.json", "utf8"),
+    ) as { sentenceTranslationSystem: string };
+    const managed = SENTENCE_TRANSLATION_INSTRUCTIONS.toLowerCase();
+    const directSystem = direct.sentenceTranslationSystem.toLowerCase();
+    for (const [directRequirement, managedRequirement] of [
+      ["phrasal verbs", "phrasal verbs"],
+      ["idioms", "idioms"],
+      ["level-appropriate useful phrases", "level-appropriate phrases"],
+      ["challenging words", "challenging words"],
+      ["challenging combinations", "challenging combinations"],
+      ["key concepts", "book-specific concepts"],
+      ["exact {{sourcelanguage}} text", "exact source-language span"],
+      ["cultural", "cultural"],
+      ["grammatical", "grammatical"],
+      ["figurative", "figurative"],
+    ]) {
+      expect(directSystem).toContain(directRequirement);
+      expect(managed).toContain(managedRequirement);
+    }
+  });
+
+  it("rejects unknown placeholders and unsupported schemas before save", () => {
+    expect(
+      validateAssistantPromptDraft({
+        task: "translation",
+        userPrompt: "Translate {{source}} and {{secretInstruction}}",
+        schemaVersion: "2",
+      }),
+    ).toEqual({
+      valid: false,
+      fieldErrors: {
+        schemaVersion: "Only schema version 1 is supported.",
+        userPrompt: "Unknown placeholder: {{secretInstruction}}.",
+      },
+    });
+  });
+
+  it("validates provider JSON against the server-owned output contract", () => {
+    expect(
+      validateManagedPromptOutput(
+        "sentence",
+        '{"translation":"你好","notes":[{"source":"broke the ice","category":"idiom","explanation":"打破沉默"}]}',
+      ).valid,
+    ).toBe(true);
+    expect(validateManagedPromptOutput("sentence", "not json").valid).toBe(false);
+    expect(
+      validateManagedPromptOutput(
+        "word",
+        '{"translation":"动词 — 打破沉默","connection":"","examples":[],"notes":[]}',
+      ).errors,
+    ).toContain("$.examples must contain at least 2 items.");
+  });
+
+  it("includes chapter-batch target IDs in the effective message and its fingerprint", () => {
+    const fields = {
+      task: "chapter_batch",
+      source: "One.\nTwo.",
+      context: "TARGET id=s1: One.\nTARGET id=s2: Two.",
+      targetIds: "s1, s2",
+      sourceLanguage: "en",
+      targetLanguage: "zh-Hans",
+      learnerLevel: "B1",
+    };
+    const assembled = assembleManagedPrompt({
+      subtask: "chapter_batch",
+      policySystemPrompt: "Editable operator policy.",
+      policyUserPrompt: "Translate the supplied targets.",
+      schemaVersion: "1",
+      fields,
+    });
+    const changedTargets = assembleManagedPrompt({
+      subtask: "chapter_batch",
+      policySystemPrompt: "Editable operator policy.",
+      policyUserPrompt: "Translate the supplied targets.",
+      schemaVersion: "1",
+      fields: { ...fields, targetIds: "s2" },
+    });
+
+    expect(assembled.effective.user).toContain("Requested target IDs (required):\ns1, s2");
+    expect(assembled.contractFingerprint).not.toBe(changedTargets.contractFingerprint);
+  });
+
+  it("enforces a heard-only quiz contract and validates every cited sentence", () => {
+    const assembled = assembleManagedPrompt({
+      subtask: "heard_quiz",
+      policySystemPrompt: "Editable chapter tutor policy.",
+      policyUserPrompt: "{{question}}",
+      schemaVersion: "1",
+      fields: {
+        task: "heard_quiz",
+        question: "Quiz this completed passage.",
+        segments: "HEARD id=s1: First.\nHEARD id=s2: Second.",
+        chapterId: "chapter-7",
+        bookTitle: "The Example Book",
+        author: "Ada Author",
+        chapterTitle: "An Arrival",
+        sourceLanguage: "en",
+        targetLanguage: "zh-Hans",
+        learnerLevel: "B1",
+      },
+    });
+    expect(assembled.enforced.taskContract).toContain("already-heard");
+    expect(assembled.enforced.taskContract).toContain("exactly four distinct choices");
+    expect(assembled.effective.user).toContain("HEARD id=s2");
+    expect(assembled.effective.user).toContain("The Example Book");
+    expect(assembled.outputSchema).toMatchObject({
+      properties: { questions: { minItems: 2, maxItems: 4 } },
+    });
+
+    const valid = validateManagedPromptOutput(
+      "heard_quiz",
+      '{"questions":[{"id":"q1","kind":"comprehension","prompt":"What happened?","choices":["A","B","C","D"],"answerIndex":0,"rationale":"A follows s1.","segmentID":"s1"},{"id":"q2","kind":"sequencing","prompt":"What came next?","choices":["A","B","C","D"],"answerIndex":1,"rationale":"B follows s2.","segmentID":"s2"}]}',
+      { allowedSegmentIDs: new Set(["s1", "s2"]) },
+    );
+    expect(valid.valid).toBe(true);
+
+    for (const invalid of [
+      '{"questions":[{"id":"q1","kind":"comprehension","prompt":"What?","choices":["A","A","C","D"],"answerIndex":0,"rationale":"Because.","segmentID":"s1"},{"id":"q2","kind":"sequencing","prompt":"Then?","choices":["A","B","C","D"],"answerIndex":1,"rationale":"Because.","segmentID":"s2"}]}',
+      '{"questions":[{"id":"q1","kind":"comprehension","prompt":"What?","choices":["A","B","C","D"],"answerIndex":4,"rationale":"Because.","segmentID":"s1"},{"id":"q2","kind":"sequencing","prompt":"Then?","choices":["A","B","C","D"],"answerIndex":1,"rationale":"Because.","segmentID":"s2"}]}',
+      '{"questions":[{"id":"q1","kind":"comprehension","prompt":"What?","choices":["A","B","C","D"],"answerIndex":0,"rationale":"","segmentID":"future"},{"id":"q2","kind":"sequencing","prompt":"Then?","choices":["A","B","C","D"],"answerIndex":1,"rationale":"Because.","segmentID":"s2"}]}',
+    ]) {
+      expect(
+        validateManagedPromptOutput("heard_quiz", invalid, {
+          allowedSegmentIDs: new Set(["s1", "s2"]),
+        }).valid,
+      ).toBe(false);
+    }
   });
 });

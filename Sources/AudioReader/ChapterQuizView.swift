@@ -19,8 +19,8 @@ struct ChapterQuizView: View {
                     )
                 }
             }
-            .frame(minWidth: 420, minHeight: 480)
-            .navigationTitle("Chapter quiz")
+            .frame(minHeight: 480)
+            .navigationTitle(state.chapterQuizTitle)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { dismiss() }
@@ -70,6 +70,12 @@ struct ChapterQuizView: View {
                         .buttonStyle(.plain)
                         .disabled(session.isRevealed)
                         .accessibilityLabel(choice.text)
+                    }
+                    if let rationale = session.visibleRationale(for: index) {
+                        Label(rationale, systemImage: "quote.bubble")
+                            .font(.subheadline)
+                            .foregroundStyle(Palette.dim)
+                            .accessibilityLabel("Answer explanation: \(rationale)")
                     }
                 }
             }

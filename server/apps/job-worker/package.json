@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@audio-reader/api-worker": "workspace:*",
     "@audio-reader/database": "workspace:*",
     "@audio-reader/domain": "workspace:*",
     "@audio-reader/observability": "workspace:*",

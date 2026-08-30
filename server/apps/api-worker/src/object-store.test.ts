@@ -11,6 +11,7 @@ describe("fake object store", () => {
     await expect(store.ping()).resolves.toBe("ok");
     await store.put("chapter/1.mp3", new Uint8Array([1, 2, 3]));
     await expect(store.get("chapter/1.mp3")).resolves.toEqual(new Uint8Array([1, 2, 3]));
+    await expect(store.list("chapter/")).resolves.toEqual(["chapter/1.mp3"]);
     await store.delete("chapter/1.mp3");
     await expect(store.get("chapter/1.mp3")).resolves.toBeUndefined();
   });
@@ -41,6 +42,13 @@ describe("supabase object store", () => {
         const method = init?.method ?? "GET";
         if (url.endsWith("/storage/v1/bucket/audio-reader-assets") && method === "GET") {
           return Promise.resolve(new Response("{}", { status: 200 }));
+        }
+        if (url.endsWith("/storage/v1/object/list/audio-reader-assets") && method === "POST") {
+          return Promise.resolve(
+            new Response(JSON.stringify(objects.size === 0 ? [] : [{ name: "1.mp3" }]), {
+              status: 200,
+            }),
+          );
         }
         if (url.includes("/storage/v1/object/audio-reader-assets/") && method === "POST") {
           objects.set(url, init?.body instanceof Uint8Array ? init.body : new Uint8Array([9]));
@@ -78,6 +86,7 @@ describe("supabase object store", () => {
     await expect(store.ping()).resolves.toBe("ok");
     await store.put("chapter/1.mp3", new Uint8Array([1, 2, 3]));
     await expect(store.get("chapter/1.mp3")).resolves.toEqual(new Uint8Array([1, 2, 3]));
+    await expect(store.list("chapter/")).resolves.toEqual(["chapter/1.mp3"]);
     const signed = await store.signedDownloadUrl?.("chapter/1.mp3");
     expect(signed).toContain("https://example.supabase.co/storage/v1/object/sign/");
     await store.delete("chapter/1.mp3");

@@ -11,13 +11,15 @@ The Operator Metrics view reads `GET /v1/admin/product-analytics`. The endpoint 
 
 Country, region, language, level, content, and content-category distributions count distinct active learners and use a minimum bucket size of three learners. Smaller cohorts are combined into `Other`. Platform/app-version distributions count only events with registered device IDs; feature and outcome distributions count events. A learner can belong to more than one group during a window. Content IDs are hashed before aggregation. Activity rows re-sanitize both current and legacy properties and expose stable pseudonymous subject/device references rather than raw account or device IDs.
 
-## Storage and deletion
+## Consent, storage, and deletion
 
 `product_events` stores the server-owned account ID and optional device ID needed for ownership, deletion, and device-level aggregation. These durable keys are not returned by Activity or product-analytics responses. Country and first-level region are stored, but raw IP and precise location are not collected.
 
-No automatic product-event retention window is currently configured. Events remain until an operational retention process removes them or the owning profile row is physically deleted. The `product_events.user_id` foreign key uses `ON DELETE CASCADE`, so deleting the profile row deletes its product events.
+Learner behavior and learning events require the signed-in learner's explicit Operator analytics preference. The API fails closed when the preference is absent or cannot be read, and a database trigger independently rejects a learner-analytics insert without active consent. Disabling analytics atomically purges that learner's prior learning events and progress snapshot. Account-scoped Product Events queries return no rows while consent is disabled.
 
-Completing the current Operator deletion-request action marks the profile `deleted` and revokes its devices; it does not physically delete the profile or purge product events. The analytics privacy metadata reports both the database cascade and this current deletion-workflow limitation explicitly. Operators must not tell users that event erasure is complete until a separate purge has removed the profile or its events.
+Required operational and security telemetry uses the separate `operational` purpose and does not contribute to learner behavior dashboards. Operator probes and privacy-export completion are operational; AI use, reading, review, and client-submitted events are learner analytics.
+
+Scheduled Job Worker maintenance deletes all product-event purposes after 90 days. Account deletion physically cascades both event purposes before retaining the anonymous deleted tombstone.
 
 ## Anomaly indicators
 
@@ -26,4 +28,4 @@ Indicators are deterministic prompts for investigation, not automatic incident d
 - `failure_rate`: among terminal `ok`, `failed`, and `cancelled` events, at least 10 terminal events and at least 25% failed. It is critical at 50%. `started` events are excluded from the success-rate denominator; cancelled events are not successful.
 - `volume_spike`: at least three buckets, with the latest bucket at least 10 events and at least twice the earlier-bucket mean (and five events above it). It is critical at three times the mean.
 
-The response reports whether its 5,000-event source window may be sampled. Operators should correlate an anomaly with Activity and Trace before acting.
+The Worker reads the complete retained time window with stable keyset pages before applying dashboard filters. The response therefore reports `sampled: false`; operators should still correlate an anomaly with Activity and Trace before acting.

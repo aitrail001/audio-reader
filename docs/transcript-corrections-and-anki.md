@@ -35,7 +35,7 @@ local provenance, but is hidden until the corrected sentence is translated.
 
 In **Words**, select entries and choose **Export to Anki**. With no explicit
 selection, AudioReader exports the current filtered result. The scope menu also
-offers **Learning List** and **All Vocabulary**.
+offers **My List** and **All Vocabulary**.
 
 The exported ZIP contains:
 

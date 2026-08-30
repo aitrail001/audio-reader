@@ -2,20 +2,18 @@ import { LOCAL_PASSWORDLESS_HMAC_SECRET, type Principal } from "@audio-reader/au
 import type { components } from "@audio-reader/contract";
 import {
   CHAPTER_SUMMARY_INSTRUCTIONS,
+  assembleManagedPrompt,
   composeAssistantSystemPrompt,
   isWordTranslationTask,
-  renderAssistantUserPrompt,
   SENTENCE_TRANSLATION_INSTRUCTIONS,
   WORD_IN_SENTENCE_INSTRUCTIONS,
-  chapterBatchTranslationInstructions,
-  chapterSummaryInstructions,
   formatManagedChapterBatchContext,
   formatManagedSentenceContext,
-  promptLanguageName,
-  sentenceTranslationInstructions,
   stringList,
-  wordInSentenceInstructions,
+  validateManagedPromptOutput,
   type IdentityStore,
+  type ManagedPromptAssembly,
+  type ManagedPromptSubtask,
   type OpsStore,
 } from "@audio-reader/database";
 import {
@@ -41,6 +39,7 @@ type TranslationBatchResult = components["schemas"]["TranslationBatchResult"];
 type ChapterSummary = components["schemas"]["ChapterSummary"];
 type ChatAccepted = components["schemas"]["ChatAccepted"];
 type ChatMessage = components["schemas"]["ChatMessage"];
+type HeardQuizResponse = components["schemas"]["HeardQuizResponse"];
 type TranslationSentence = { id: string; text: string };
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -51,6 +50,7 @@ const ASSISTANT_METHODS: Record<string, readonly string[]> = {
   "/v1/ai/translation-batches": ["POST"],
   "/v1/ai/chapter-summaries": ["POST"],
   "/v1/ai/chat": ["POST"],
+  "/v1/ai/heard-quizzes": ["POST"],
 };
 
 export type AssistantRouteContext = {
@@ -132,6 +132,9 @@ export async function handleAssistantRoute(
   if (path === "/v1/ai/chapter-summaries") {
     return createSummary(context);
   }
+  if (path === "/v1/ai/heard-quizzes") {
+    return createHeardQuiz(context);
+  }
   return createChat(context);
 }
 
@@ -187,6 +190,10 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
       const contextNext = stringList(body.value.contextNext);
       const learnerLevel =
         typeof body.value.learnerLevel === "string" ? body.value.learnerLevel : "intermediate";
+      const bookTitle = typeof body.value.bookTitle === "string" ? body.value.bookTitle : "";
+      const author = typeof body.value.author === "string" ? body.value.author : "";
+      const chapterTitle =
+        typeof body.value.chapterTitle === "string" ? body.value.chapterTitle : "";
       const sentenceContextCount =
         (await context.runtime?.view())?.assistant.sentenceContextCount ?? 1;
       const managedContext = formatManagedSentenceContext({
@@ -196,9 +203,6 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
         radius: sentenceContextCount,
         fallback: contextBefore,
       });
-      const bookTitle = typeof body.value.bookTitle === "string" ? body.value.bookTitle : "";
-      const chapterTitle =
-        typeof body.value.chapterTitle === "string" ? body.value.chapterTitle : "";
       const targetId = typeof body.value.targetId === "string" ? body.value.targetId : "";
       const editionFingerprint =
         typeof body.value.editionFingerprint === "string" ? body.value.editionFingerprint : "";
@@ -266,39 +270,25 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
         if (!allowed) {
           return quotaExceeded(context.requestId);
         }
-        const extraInstructions = wordTask
-          ? wordInSentenceInstructions({
-              sourceLanguage,
-              targetLanguage,
-              learnerLevel,
-            })
-          : sentenceTranslationInstructions({
-              sourceLanguage,
-              targetLanguage,
-              learnerLevel,
-            });
-        let userContent = renderAssistantUserPrompt(policy.userPrompt, {
+        const promptFields = {
           task: taskKind,
-          sourceLanguage: promptLanguageName(sourceLanguage),
-          targetLanguage: promptLanguageName(targetLanguage),
+          sourceLanguage,
+          targetLanguage,
           learnerLevel,
           source,
           context: managedContext,
-          payload: JSON.stringify({
-            task: taskKind,
-            sourceLanguage,
-            targetLanguage,
-            learnerLevel,
-            source,
-            context: managedContext,
-            bookTitle,
-            chapterTitle,
-          }),
+          bookTitle,
+          author,
+          chapterTitle,
+          chapterId: typeof body.value.chapterId === "string" ? body.value.chapterId : "",
+        };
+        const assembled = assembleManagedPrompt({
+          subtask: wordTask ? "word" : "sentence",
+          policySystemPrompt: policy.systemPrompt,
+          policyUserPrompt: policy.userPrompt,
+          schemaVersion: policy.schemaVersion,
+          fields: promptFields,
         });
-        // Hosted policies created before {{context}} still need neighbor sentences.
-        if (managedContext !== "" && !userContent.includes(managedContext)) {
-          userContent += `\n\nSentence context (untrusted):\n${managedContext}`;
-        }
         console.warn(
           JSON.stringify({
             level: "info",
@@ -312,23 +302,33 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
             managedContextChars: managedContext.length,
           }),
         );
-        const completed = await completeWithPolicy(context, "translation", principal.accountId, {
-          jsonObject: true,
-          messages: [
-            {
-              role: "system",
-              content: extraInstructions,
-            },
-            {
-              role: "user",
-              content: userContent,
-            },
-          ],
-        });
+        const completed = await completeWithPolicy(
+          context,
+          "translation",
+          principal.accountId,
+          {
+            jsonObject: true,
+            messages: [
+              { role: "system", content: assembled.effective.system },
+              { role: "user", content: assembled.effective.user },
+            ],
+          },
+          assembled,
+          "translation",
+          false,
+        );
         if (completed === "disabled" || !completed.ok) {
           return qwenFailure(context, "translation", completed);
         }
-        const parsed = parseObject(completed.text);
+        const parsed = await validateManagedRouteOutput(context, {
+          accountId: principal.accountId,
+          eventTask: "translation",
+          outputSubtask: wordTask ? "word" : "sentence",
+          text: completed.text,
+          model: completed.model,
+          promptVersion: policy.promptVersion,
+        });
+        if (parsed instanceof Response) return parsed;
         const translationCore = stringField(parsed, "translation") ?? completed.text;
         const connection = stringField(parsed, "connection") ?? "";
         const translation =
@@ -440,6 +440,7 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
       const chapterFingerprint =
         typeof body.value.chapterFingerprint === "string" ? body.value.chapterFingerprint : "";
       const bookTitle = typeof body.value.bookTitle === "string" ? body.value.bookTitle : "";
+      const author = typeof body.value.author === "string" ? body.value.author : "";
       const chapterTitle =
         typeof body.value.chapterTitle === "string" ? body.value.chapterTitle : "";
       const contextBefore =
@@ -564,39 +565,27 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
           radius: sentenceContextCount,
           targetIds: targetIDs,
         });
-        const extraInstructions = chapterBatchTranslationInstructions({
+        const promptFields = {
+          task: "chapter_batch",
           sourceLanguage,
           targetLanguage,
           learnerLevel,
-        });
-        let userContent = renderAssistantUserPrompt(policy.userPrompt, {
-          task: "chapter_batch",
-          sourceLanguage: promptLanguageName(sourceLanguage),
-          targetLanguage: promptLanguageName(targetLanguage),
-          learnerLevel,
           source: stillMissing.map((item) => item.sentence.text).join("\n"),
-          context: managedContext,
-          payload: JSON.stringify({
-            task: "chapter_batch",
-            sourceLanguage,
-            targetLanguage,
-            learnerLevel,
-            sentences: stillMissing.map((item) => item.sentence),
-            context: managedContext,
-            bookTitle,
-            chapterTitle,
-            targetIDs,
-          }),
+          context: [contextBefore, managedContext].filter((part) => part.trim() !== "").join("\n"),
+          segments: contextBefore,
+          bookTitle,
+          author,
+          chapterTitle,
+          chapterId: typeof body.value.chapterId === "string" ? body.value.chapterId : "",
+          targetIds: targetIDs.join(", "),
+        };
+        const assembled = assembleManagedPrompt({
+          subtask: "chapter_batch",
+          policySystemPrompt: policy.systemPrompt,
+          policyUserPrompt: policy.userPrompt,
+          schemaVersion: policy.schemaVersion,
+          fields: promptFields,
         });
-        if (managedContext !== "" && !userContent.includes(managedContext)) {
-          userContent += `\n\nSentence context (untrusted):\n${managedContext}`;
-        }
-        // Native sends the full PREVIOUS/TARGET/NEXT block, including in-block
-        // neighbors that are not in `sentences`.
-        if (contextBefore.trim() !== "" && !userContent.includes(contextBefore)) {
-          userContent += `\n\nSentence context (untrusted):\n${contextBefore}`;
-        }
-        userContent += `\n\nReturn results only for these target IDs: ${targetIDs.join(", ")}`;
         console.warn(
           JSON.stringify({
             level: "info",
@@ -608,16 +597,34 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
             managedContextChars: managedContext.length,
           }),
         );
-        const completed = await completeWithPolicy(context, "translation", principal.accountId, {
-          jsonObject: true,
-          messages: [
-            { role: "system", content: extraInstructions },
-            { role: "user", content: userContent },
-          ],
-        });
+        const completed = await completeWithPolicy(
+          context,
+          "translation",
+          principal.accountId,
+          {
+            jsonObject: true,
+            messages: [
+              { role: "system", content: assembled.effective.system },
+              { role: "user", content: assembled.effective.user },
+            ],
+          },
+          assembled,
+          "translation",
+          false,
+        );
         if (completed === "disabled" || !completed.ok) {
           return qwenFailure(context, "translation", completed);
         }
+        const output = await validateManagedRouteOutput(context, {
+          accountId: principal.accountId,
+          eventTask: "translation",
+          outputSubtask: "chapter_batch",
+          text: completed.text,
+          model: completed.model,
+          promptVersion: policy.promptVersion,
+          expectedTargetIDs: new Set(targetIDs),
+        });
+        if (output instanceof Response) return output;
         const parsedUnits = parseBatchTranslations(completed.text, targetIDs);
         const createdAt = new Date().toISOString();
         const generatedResults: TranslationResult[] = [...replayed];
@@ -725,6 +732,10 @@ async function createSummary(context: AssistantRouteContext): Promise<Response> 
         typeof body.value.targetLanguage === "string" ? body.value.targetLanguage : "en";
       const learnerLevel =
         typeof body.value.learnerLevel === "string" ? body.value.learnerLevel : "intermediate";
+      const bookTitle = typeof body.value.bookTitle === "string" ? body.value.bookTitle : "";
+      const author = typeof body.value.author === "string" ? body.value.author : "";
+      const chapterTitle =
+        typeof body.value.chapterTitle === "string" ? body.value.chapterTitle : "";
       const cacheKey = await cacheKeyFor(context, {
         taskType: "chapter_summary",
         sourceLanguage,
@@ -780,6 +791,25 @@ async function createSummary(context: AssistantRouteContext): Promise<Response> 
         if (!allowed) {
           return quotaExceeded(context.requestId);
         }
+        const assembled = assembleManagedPrompt({
+          subtask: "chapter_summary",
+          policySystemPrompt: policy.systemPrompt,
+          policyUserPrompt: policy.userPrompt,
+          schemaVersion: policy.schemaVersion,
+          fields: {
+            task: "chapter_summary",
+            chapterId,
+            sourceLanguage,
+            targetLanguage,
+            learnerLevel,
+            segments: segments.join("\n"),
+            source: segments.join("\n"),
+            context: segments.join("\n"),
+            bookTitle,
+            author,
+            chapterTitle,
+          },
+        });
         const completed = await completeWithPolicy(
           context,
           "chapter_summary",
@@ -787,38 +817,26 @@ async function createSummary(context: AssistantRouteContext): Promise<Response> 
           {
             jsonObject: true,
             messages: [
-              {
-                role: "system",
-                content: chapterSummaryInstructions({
-                  sourceLanguage,
-                  targetLanguage,
-                  learnerLevel,
-                }),
-              },
-              {
-                role: "user",
-                content: renderAssistantUserPrompt(policy.userPrompt, {
-                  chapterId,
-                  sourceLanguage: promptLanguageName(sourceLanguage),
-                  targetLanguage: promptLanguageName(targetLanguage),
-                  learnerLevel,
-                  segments: segments.join("\n"),
-                  payload: JSON.stringify({
-                    chapterId,
-                    sourceLanguage: body.value.sourceLanguage,
-                    targetLanguage: body.value.targetLanguage,
-                    learnerLevel,
-                    segments,
-                  }),
-                }),
-              },
+              { role: "system", content: assembled.effective.system },
+              { role: "user", content: assembled.effective.user },
             ],
           },
+          assembled,
+          "chapter_summary",
+          false,
         );
         if (completed === "disabled" || !completed.ok) {
           return qwenFailure(context, "chapter_summary", completed);
         }
-        const parsed = parseObject(completed.text);
+        const parsed = await validateManagedRouteOutput(context, {
+          accountId: principal.accountId,
+          eventTask: "chapter_summary",
+          outputSubtask: "chapter_summary",
+          text: completed.text,
+          model: completed.model,
+          promptVersion: policy.promptVersion,
+        });
+        if (parsed instanceof Response) return parsed;
         const id = crypto.randomUUID();
         const payload: ChapterSummary = {
           id,
@@ -918,25 +936,59 @@ async function createChat(context: AssistantRouteContext): Promise<Response> {
         ? body.value.contextSegments.filter((item): item is string => typeof item === "string")
         : [];
       const policy = await resolveAssistantPolicy(context, "chat", principal.accountId);
-      const completed = await completeWithPolicy(context, "chat", principal.accountId, {
-        messages: [
-          {
-            role: "system",
-            content: contextSegments[0] ?? "",
-          },
-          {
-            role: "user",
-            content: renderAssistantUserPrompt(policy.userPrompt, {
-              question: message,
-              context: contextSegments.slice(1).join("\n"),
-              payload: JSON.stringify({ question: message, contextSegments }),
-            }),
-          },
-        ],
+      const sourceLanguage =
+        typeof body.value.sourceLanguage === "string" ? body.value.sourceLanguage : "en";
+      const targetLanguage =
+        typeof body.value.targetLanguage === "string" ? body.value.targetLanguage : "en";
+      const learnerLevel =
+        typeof body.value.learnerLevel === "string" ? body.value.learnerLevel : "intermediate";
+      const assembled = assembleManagedPrompt({
+        subtask: "chat",
+        policySystemPrompt: policy.systemPrompt,
+        policyUserPrompt: policy.userPrompt,
+        schemaVersion: policy.schemaVersion,
+        fields: {
+          task: "chat",
+          question: message,
+          context: contextSegments.join("\n"),
+          source: contextSegments.join("\n"),
+          chapterId,
+          bookTitle: typeof body.value.bookTitle === "string" ? body.value.bookTitle : "",
+          author: typeof body.value.author === "string" ? body.value.author : "",
+          chapterTitle: typeof body.value.chapterTitle === "string" ? body.value.chapterTitle : "",
+          sourceLanguage,
+          targetLanguage,
+          learnerLevel,
+        },
       });
+      const completed = await completeWithPolicy(
+        context,
+        "chat",
+        principal.accountId,
+        {
+          jsonObject: true,
+          messages: [
+            { role: "system", content: assembled.effective.system },
+            { role: "user", content: assembled.effective.user },
+          ],
+        },
+        assembled,
+        "chat",
+        false,
+      );
       if (completed === "disabled" || !completed.ok) {
         return qwenFailure(context, "chat", completed);
       }
+      const parsed = await validateManagedRouteOutput(context, {
+        accountId: principal.accountId,
+        eventTask: "chat",
+        outputSubtask: "chat",
+        text: completed.text,
+        model: completed.model,
+        promptVersion: policy.promptVersion,
+      });
+      if (parsed instanceof Response) return parsed;
+      const answer = stringField(parsed, "answer") ?? "";
       const threadId =
         typeof body.value.threadId === "string" && UUID_PATTERN.test(body.value.threadId)
           ? body.value.threadId
@@ -948,16 +1000,173 @@ async function createChat(context: AssistantRouteContext): Promise<Response> {
         threadId,
         messageId,
         role: "assistant",
-        text: completed.text,
+        text: answer,
         createdAt,
       });
-      await recordUse(context, principal.accountId, "chat", null, completed.text);
+      await recordUse(context, principal.accountId, "chat", null, answer);
       const payload: ChatAccepted = {
         threadId,
         messageId,
         streamUrl: `/v1/ai/chat/${threadId}/messages/${messageId}`,
       };
       return jsonResponse(payload, 202);
+    },
+    context.requestId,
+    principal,
+  );
+}
+
+/** Generates a quiz from an explicit, bounded list; the Worker never reads chapter-wide context here. */
+async function createHeardQuiz(context: AssistantRouteContext): Promise<Response> {
+  const principal = await requirePrincipal(context);
+  if (principal instanceof Response) return principal;
+  const gated = await requireAssistantEnabled(context);
+  if (gated !== undefined) return gated;
+  const bound = await requireBoundProductDevice(context, principal);
+  if (bound instanceof Response) return bound;
+  return withIdempotency(
+    context.idempotencyStore,
+    context.request,
+    async () => {
+      const body = await readJsonObject(context.request, context.requestId);
+      if (!body.ok) return body.response;
+      if (body.value.task !== "heard_quiz") {
+        return badRequestField(context.requestId, "task", "task must be heard_quiz.");
+      }
+      const chapterId = requiredString(body.value.chapterId, "chapterId", context.requestId);
+      if (chapterId instanceof Response) return chapterId;
+      const sourceLanguage = requiredString(
+        body.value.sourceLanguage,
+        "sourceLanguage",
+        context.requestId,
+      );
+      if (sourceLanguage instanceof Response) return sourceLanguage;
+      const targetLanguage = requiredString(
+        body.value.targetLanguage,
+        "targetLanguage",
+        context.requestId,
+      );
+      if (targetLanguage instanceof Response) return targetLanguage;
+      const learnerLevel = requiredString(
+        body.value.learnerLevel,
+        "learnerLevel",
+        context.requestId,
+      );
+      if (learnerLevel instanceof Response) return learnerLevel;
+      if (!Array.isArray(body.value.segments) || body.value.segments.length === 0) {
+        return badRequestField(context.requestId, "segments", "segments must not be empty.");
+      }
+      if (body.value.segments.length > 12) {
+        return badRequestField(
+          context.requestId,
+          "segments",
+          "segments must contain at most 12 heard sentences.",
+        );
+      }
+      const segments: Array<{ id: string; text: string }> = [];
+      for (const value of body.value.segments) {
+        if (typeof value !== "object" || value === null || Array.isArray(value)) {
+          return badRequestField(context.requestId, "segments", "Every segment needs id and text.");
+        }
+        const record = value as Record<string, unknown>;
+        const id = typeof record.id === "string" ? record.id.trim() : "";
+        const text = typeof record.text === "string" ? record.text.trim() : "";
+        if (id === "" || text === "") {
+          return badRequestField(context.requestId, "segments", "Every segment needs id and text.");
+        }
+        segments.push({ id, text: text.slice(0, 2000) });
+      }
+      const allowedSegmentIDs = new Set(segments.map((segment) => segment.id));
+      if (allowedSegmentIDs.size !== segments.length) {
+        return badRequestField(context.requestId, "segments", "Segment ids must be distinct.");
+      }
+      const allowed = await consumeQuota(context, principal.accountId, "chat");
+      if (!allowed) return quotaExceeded(context.requestId);
+      const policy = await resolveAssistantPolicy(context, "chat", principal.accountId);
+      const heardContext = segments
+        .map((segment) => `HEARD id=${segment.id}: ${segment.text}`)
+        .join("\n");
+      const assembled = assembleManagedPrompt({
+        subtask: "heard_quiz",
+        policySystemPrompt: policy.systemPrompt,
+        policyUserPrompt: policy.userPrompt,
+        schemaVersion: policy.schemaVersion,
+        fields: {
+          task: "heard_quiz",
+          question: "Create a quick retrieval quiz for this completed passage.",
+          source: heardContext,
+          context: heardContext,
+          segments: heardContext,
+          chapterId,
+          bookTitle: typeof body.value.bookTitle === "string" ? body.value.bookTitle : "",
+          author: typeof body.value.author === "string" ? body.value.author : "",
+          chapterTitle: typeof body.value.chapterTitle === "string" ? body.value.chapterTitle : "",
+          sourceLanguage,
+          targetLanguage,
+          learnerLevel,
+        },
+      });
+      const completed = await completeWithPolicy(
+        context,
+        "chat",
+        principal.accountId,
+        {
+          jsonObject: true,
+          messages: [
+            { role: "system", content: assembled.effective.system },
+            { role: "user", content: assembled.effective.user },
+          ],
+        },
+        assembled,
+        "heard_quiz",
+        false,
+      );
+      if (completed === "disabled" || !completed.ok) {
+        return qwenFailure(context, "heard_quiz", completed);
+      }
+      const output = validateManagedPromptOutput("heard_quiz", completed.text, {
+        allowedSegmentIDs,
+      });
+      if (!output.valid) {
+        recordOperatorEvent({
+          kind: "managed_qwen_failed",
+          requestId: context.requestId,
+          task: "heard_quiz",
+          status: "invalid_output",
+          summary: "Managed Qwen heard_quiz returned invalid structured output.",
+          metadata: { model: completed.model, promptVersion: policy.promptVersion },
+        });
+        await captureProductEvent(context.ops, {
+          accountId: principal.accountId,
+          name: "ai.heard_quiz.failed",
+          outcome: "failed",
+          requestId: context.requestId,
+          properties: { reason: "invalid_output" },
+        });
+        return problemResponse({
+          status: 502,
+          code: "invalid_upstream_response",
+          title: "Invalid upstream response",
+          detail: "Managed Qwen returned an invalid heard quiz.",
+          traceId: context.requestId,
+        });
+      }
+      recordOperatorEvent({
+        kind: "managed_qwen_ok",
+        requestId: context.requestId,
+        task: "heard_quiz",
+        status: "ok",
+        summary: `Managed Qwen heard_quiz succeeded with ${completed.model}.`,
+        metadata: { model: completed.model, promptVersion: policy.promptVersion },
+      });
+      await captureProductEvent(context.ops, {
+        accountId: principal.accountId,
+        name: "ai.heard_quiz.succeeded",
+        requestId: context.requestId,
+        properties: { model: completed.model },
+      });
+      const response: HeardQuizResponse = { raw: completed.text };
+      return jsonResponse(response);
     },
     context.requestId,
     principal,
@@ -1039,6 +1248,17 @@ function requiredString(value: unknown, field: string, requestId: string): strin
   });
 }
 
+function badRequestField(requestId: string, field: string, message: string): Response {
+  return problemResponse({
+    status: 400,
+    code: "bad_request",
+    title: "Bad request",
+    detail: message,
+    traceId: requestId,
+    fieldErrors: [{ field, message }],
+  });
+}
+
 async function resolveAssistantPolicy(
   context: AssistantRouteContext,
   task: string,
@@ -1054,6 +1274,7 @@ async function resolveAssistantPolicy(
       promptVersion: policy.promptVersion,
       systemPrompt: policy.systemPrompt,
       userPrompt: policy.userPrompt,
+      schemaVersion: policy.schemaVersion,
       canaryPercent: policy.canaryPercent,
     })),
     task,
@@ -1083,7 +1304,23 @@ async function completeWithPolicy(
   task: string,
   accountId: string,
   request: QwenCompletionRequest,
+  assembled?: ManagedPromptAssembly,
+  eventTask = task,
+  recordSuccessfulCompletion = true,
 ): Promise<QwenCompletionResult | "disabled"> {
+  if (assembled !== undefined && !assembled.validation.valid) {
+    const detail = `Managed prompt contract validation failed: ${Object.values(assembled.validation.fieldErrors).join(" ")}`;
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: "managed_prompt_contract_invalid",
+        requestId: context.requestId,
+        task: eventTask,
+        fieldErrors: Object.keys(assembled.validation.fieldErrors),
+      }),
+    );
+    return { ok: false, code: "rejected", usedModel: "", httpStatus: 422, detail };
+  }
   const resolved = await resolveAssistantPolicy(context, task, accountId);
   const view = await context.runtime?.view();
   console.warn(
@@ -1091,7 +1328,7 @@ async function completeWithPolicy(
       level: "warn",
       message: "managed_qwen_request",
       requestId: context.requestId,
-      task,
+      task: eventTask,
       configured: view?.qwen.apiKeyConfigured === true,
       source: view?.qwen.source ?? "none",
       deskModel: view?.qwen.model ?? "",
@@ -1110,11 +1347,11 @@ async function completeWithPolicy(
   recordOperatorEvent({
     kind: "managed_qwen_request",
     requestId: context.requestId,
-    task,
+    task: eventTask,
     status: resolved.disabled ? "disabled" : "started",
     summary: resolved.disabled
-      ? `Managed Qwen ${task} blocked by policy.`
-      : `Managed Qwen ${task} using ${resolved.model || "default"} (${resolved.source}).`,
+      ? `Managed Qwen ${eventTask} blocked by policy.`
+      : `Managed Qwen ${eventTask} using ${resolved.model || "default"} (${resolved.source}).`,
     metadata: {
       model: resolved.model,
       modelSource: resolved.source,
@@ -1125,7 +1362,7 @@ async function completeWithPolicy(
   });
   await captureProductEvent(context.ops, {
     accountId,
-    name: `ai.${task === "chapter_summary" ? "summary" : task}.started`,
+    name: `ai.${eventTask === "chapter_summary" ? "summary" : eventTask}.started`,
     outcome: "started",
     requestId: context.requestId,
     properties: { model: resolved.model, modelSource: resolved.source },
@@ -1133,7 +1370,7 @@ async function completeWithPolicy(
   if (resolved.disabled) {
     await captureProductEvent(context.ops, {
       accountId,
-      name: `ai.${task === "chapter_summary" ? "summary" : task}.failed`,
+      name: `ai.${eventTask === "chapter_summary" ? "summary" : eventTask}.failed`,
       outcome: "failed",
       requestId: context.requestId,
       properties: { reason: "disabled" },
@@ -1142,28 +1379,31 @@ async function completeWithPolicy(
   }
   const completed = await context.qwen.complete({
     ...request,
-    messages: withPolicySystemPrompt(task, resolved.systemPrompt, request.messages),
+    messages:
+      assembled === undefined
+        ? withPolicySystemPrompt(task, resolved.systemPrompt, request.messages)
+        : request.messages,
     ...(resolved.model === "" ? {} : { model: resolved.model }),
   });
-  if (completed.ok) {
+  if (completed.ok && recordSuccessfulCompletion) {
     recordOperatorEvent({
       kind: "managed_qwen_ok",
       requestId: context.requestId,
-      task,
+      task: eventTask,
       status: "ok",
-      summary: `Managed Qwen ${task} succeeded with ${completed.model}.`,
+      summary: `Managed Qwen ${eventTask} succeeded with ${completed.model}.`,
       metadata: { model: completed.model, promptVersion: resolved.promptVersion },
     });
     await captureProductEvent(context.ops, {
       accountId,
-      name: `ai.${task === "chapter_summary" ? "summary" : task}.succeeded`,
+      name: `ai.${eventTask === "chapter_summary" ? "summary" : eventTask}.succeeded`,
       requestId: context.requestId,
       properties: { model: completed.model },
     });
-  } else {
+  } else if (!completed.ok) {
     await captureProductEvent(context.ops, {
       accountId,
-      name: `ai.${task === "chapter_summary" ? "summary" : task}.failed`,
+      name: `ai.${eventTask === "chapter_summary" ? "summary" : eventTask}.failed`,
       outcome: "failed",
       requestId: context.requestId,
       properties: { code: completed.code },
@@ -1192,6 +1432,11 @@ async function qwenFailure(
   let detail: string;
   if (completed === "disabled") {
     detail = `Managed Qwen policy for ${task} is disabled.`;
+  } else if (
+    failure?.httpStatus === 422 &&
+    failure.detail?.startsWith("Managed prompt contract validation failed:") === true
+  ) {
+    detail = failure.detail;
   } else if (!configured) {
     detail =
       "Managed Qwen has no API key. Save a Qwen key on operator Desk, or set Worker secret QWEN_API_KEY.";
@@ -1255,6 +1500,75 @@ async function qwenFailure(
     detail,
     traceId: context.requestId,
   });
+}
+
+/** Reject malformed provider content before it can reach a response, cache, or chat history. */
+async function validateManagedRouteOutput(
+  context: AssistantRouteContext,
+  input: {
+    accountId: string;
+    eventTask: string;
+    outputSubtask: ManagedPromptSubtask;
+    text: string;
+    model: string;
+    promptVersion: string;
+    expectedTargetIDs?: ReadonlySet<string>;
+  },
+): Promise<Record<string, unknown> | Response> {
+  const output = validateManagedPromptOutput(input.outputSubtask, input.text, {
+    ...(input.expectedTargetIDs === undefined
+      ? {}
+      : { expectedTargetIDs: input.expectedTargetIDs }),
+  });
+  if (!output.valid || output.parsed === null) {
+    recordOperatorEvent({
+      kind: "managed_qwen_failed",
+      requestId: context.requestId,
+      task: input.outputSubtask,
+      status: "invalid_output",
+      summary: `Managed Qwen ${input.outputSubtask} returned invalid structured output.`,
+      metadata: { model: input.model, promptVersion: input.promptVersion },
+    });
+    await captureProductEvent(context.ops, {
+      accountId: input.accountId,
+      name: `ai.${input.eventTask === "chapter_summary" ? "summary" : input.eventTask}.failed`,
+      outcome: "failed",
+      requestId: context.requestId,
+      properties: { code: "invalid_output" },
+    });
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: "managed_qwen_invalid_output",
+        requestId: context.requestId,
+        task: input.outputSubtask,
+        model: input.model,
+        errors: output.errors,
+      }),
+    );
+    return problemResponse({
+      status: 502,
+      code: "invalid_upstream_response",
+      title: "Invalid upstream response",
+      detail: `Managed Qwen returned invalid ${input.outputSubtask} output.`,
+      traceId: context.requestId,
+    });
+  }
+  recordOperatorEvent({
+    kind: "managed_qwen_ok",
+    requestId: context.requestId,
+    task: input.outputSubtask,
+    status: "ok",
+    summary: `Managed Qwen ${input.outputSubtask} succeeded with ${input.model}.`,
+    metadata: { model: input.model, promptVersion: input.promptVersion },
+  });
+  await captureProductEvent(context.ops, {
+    accountId: input.accountId,
+    name: `ai.${input.eventTask === "chapter_summary" ? "summary" : input.eventTask}.succeeded`,
+    requestId: context.requestId,
+    properties: { model: input.model },
+  });
+  return output.parsed;
 }
 
 function quotaExceeded(requestId: string): Response {

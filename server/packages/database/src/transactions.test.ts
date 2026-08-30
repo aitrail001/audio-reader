@@ -383,6 +383,230 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
     ).toBe("4");
   });
 
+  it("materializes a bounded progress summary without returning synced reading content", () => {
+    const session = requireDb(db);
+    const batchId = "12121212-1212-4212-8212-121212121212";
+    const mutations = [
+      {
+        mutationId: "13131313-1313-4313-8313-131313131311",
+        entityType: "book",
+        entityId: "book-safe-summary",
+        operation: "upsert",
+        baseRevision: 0,
+        occurredAt: "2026-08-30T10:00:00Z",
+        payload: {
+          localId: "book-local",
+          title: "PRIVATE BOOK TITLE",
+          chapters: [
+            { localId: "chapter-one", title: "PRIVATE CHAPTER", duration: 100 },
+            { localId: "chapter-two", title: "PRIVATE CHAPTER TWO", duration: 200 },
+          ],
+        },
+      },
+      {
+        mutationId: "13131313-1313-4313-8313-131313131312",
+        entityType: "progress",
+        entityId: "reader-progress-safe-summary",
+        operation: "upsert",
+        baseRevision: 0,
+        occurredAt: "2026-08-30T10:01:00Z",
+        payload: {
+          progressKind: "reader",
+          localBookId: "book-local",
+          localChapterId: "chapter-two",
+          relativeSeconds: 100,
+        },
+      },
+      {
+        mutationId: "13131313-1313-4313-8313-131313131313",
+        entityType: "vocabulary",
+        entityId: "vocab-safe-summary",
+        operation: "upsert",
+        baseRevision: 0,
+        occurredAt: "2026-08-30T10:02:00Z",
+        payload: {
+          context: "PRIVATE SENTENCE CONTEXT",
+          definition: "PRIVATE DEFINITION",
+          state: "learning",
+        },
+      },
+      {
+        mutationId: "13131313-1313-4313-8313-131313131314",
+        entityType: "progress",
+        entityId: "vocab-safe-summary",
+        operation: "upsert",
+        baseRevision: 0,
+        occurredAt: "2026-08-30T10:03:00Z",
+        payload: {
+          vocabularyId: "vocab-safe-summary",
+          reviewCount: 2,
+          nextReview: "2026-08-29T10:03:00Z",
+          reviewIntervalDays: 2,
+        },
+      },
+      {
+        mutationId: "13131313-1313-4313-8313-131313131315",
+        entityType: "review_event",
+        entityId: "review-safe-summary",
+        operation: "append",
+        baseRevision: 0,
+        occurredAt: "2026-08-30T10:04:00Z",
+        payload: { vocabularyId: "vocab-safe-summary", rating: "remember" },
+      },
+      {
+        mutationId: "13131313-1313-4313-8313-131313131316",
+        entityType: "lexeme_state",
+        entityId: "lemma-safe-summary",
+        operation: "upsert",
+        baseRevision: 0,
+        occurredAt: "2026-08-30T10:05:00Z",
+        payload: { lemma: "PRIVATE WORD", state: "known" },
+      },
+    ];
+    callJson(
+      session,
+      `select public.push_sync_batch(
+        ${sqlString(USER_A)}::uuid,
+        ${sqlString(DEVICE_A)}::uuid,
+        ${sqlString(batchId)}::uuid,
+        ${sqlJson(mutations)}::jsonb
+      )`,
+    );
+    execOk(
+      session,
+      `update public.sync_batches set device_id = ${sqlString(DEVICE_A)}::uuid
+       where user_id = ${sqlString(USER_A)}::uuid and batch_id = ${sqlString(batchId)}::uuid`,
+    );
+    callJson(
+      session,
+      `select public.set_user_analytics_preference(${sqlString(USER_A)}::uuid, true)`,
+    );
+
+    const summary = callJson(
+      session,
+      `select public.admin_user_progress_summary(${sqlString(USER_A)}::uuid)`,
+    );
+    expect(summary).toMatchObject({
+      sync: { lastDevice: { id: DEVICE_A, platform: "macos" } },
+      reading: { activeBooks: 1, completedBooks: 0, currentChapter: 2 },
+      review: { due: 1, learning: 1, reviewsLast30Days: 1, retentionRate: 1 },
+      learning: { vocabulary: 1, known: 1 },
+    });
+    expect(JSON.stringify(summary)).not.toMatch(/PRIVATE|context|definition|title/i);
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.user_progress_summaries
+         where user_id = ${sqlString(USER_A)}::uuid and expires_at > generated_at`,
+      ),
+    ).toBe("1");
+  });
+
+  it("does not materialize detailed analytics without consent and deletes snapshots on opt-out", () => {
+    const session = requireDb(db);
+    const disabled = callJson(
+      session,
+      `select public.set_user_analytics_preference(${sqlString(USER_A)}::uuid, false)`,
+    );
+    expect(disabled.operatorLearningAnalyticsEnabled).toBe(false);
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.user_analytics_preferences
+         where user_id = ${sqlString(USER_A)}::uuid`,
+      ),
+    ).toBe("1");
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.user_progress_summaries
+         where user_id = ${sqlString(USER_A)}::uuid`,
+      ),
+    ).toBe("0");
+    const safe = callJson(
+      session,
+      `select public.admin_user_progress_summary(${sqlString(USER_A)}::uuid)`,
+    );
+    expect(safe).toMatchObject({ reading: null, review: null, learning: null });
+    expect(safe.sync).toEqual(expect.any(Object));
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.user_progress_summaries
+         where user_id = ${sqlString(USER_A)}::uuid`,
+      ),
+    ).toBe("0");
+  });
+
+  it("purges expired progress snapshots independently", () => {
+    const session = requireDb(db);
+    execOk(
+      session,
+      `insert into public.user_progress_summaries (user_id, expires_at)
+       values (${sqlString(USER_B)}::uuid, clock_timestamp() - interval '1 second')
+       on conflict (user_id) do update set expires_at = excluded.expires_at`,
+    );
+    expect(scalar(session, "select public.purge_expired_user_progress_summaries()::text")).toBe(
+      "1",
+    );
+  });
+
+  it("requires analytics consent, purges learner rows on opt-out, and retains events for 90 days", () => {
+    const session = requireDb(db);
+    execOk(session, `delete from public.product_events where user_id = ${sqlString(USER_B)}::uuid`);
+    callJson(
+      session,
+      `select public.set_user_analytics_preference(${sqlString(USER_B)}::uuid, false)`,
+    );
+
+    const denied = session.exec(
+      `insert into public.product_events (user_id, name, purpose)
+       values (${sqlString(USER_B)}::uuid, 'reading.session.completed', 'learning_analytics')`,
+    );
+    expect(denied.ok).toBe(false);
+    expect(`${denied.stderr}${denied.stdout}`).toContain("learning analytics consent is required");
+
+    execOk(
+      session,
+      `insert into public.product_events (user_id, name, purpose, created_at)
+       values (${sqlString(USER_B)}::uuid, 'security.session_revoked', 'operational',
+               clock_timestamp() - interval '91 days')`,
+    );
+    callJson(
+      session,
+      `select public.set_user_analytics_preference(${sqlString(USER_B)}::uuid, true)`,
+    );
+    execOk(
+      session,
+      `insert into public.product_events (user_id, name, purpose, created_at)
+       values
+         (${sqlString(USER_B)}::uuid, 'review.completed', 'learning_analytics',
+          clock_timestamp() - interval '91 days'),
+         (${sqlString(USER_B)}::uuid, 'reading.session.completed', 'learning_analytics',
+          clock_timestamp())`,
+    );
+
+    callJson(
+      session,
+      `select public.set_user_analytics_preference(${sqlString(USER_B)}::uuid, false)`,
+    );
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.product_events
+         where user_id = ${sqlString(USER_B)}::uuid and purpose = 'learning_analytics'`,
+      ),
+    ).toBe("0");
+    expect(scalar(session, "select public.purge_expired_product_events()::text")).toBe("1");
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.product_events
+         where user_id = ${sqlString(USER_B)}::uuid`,
+      ),
+    ).toBe("0");
+  });
+
   it("keeps rejected mutation IDs terminal across later entity revisions", () => {
     const session = requireDb(db);
     const rejectedId = "88888888-8888-4888-8888-888888888881";
@@ -483,6 +707,38 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
            and entity_id = 'duplicate-in-batch'`,
       ),
     ).toBe("0");
+  });
+
+  it("pulls at least one change while bounding each database page by encoded payload bytes", () => {
+    const session = requireDb(db);
+    execOk(
+      session,
+      `insert into public.sync_changes (
+         user_id, sequence, entity_type, entity_id, operation, revision, mutation_id, payload, changed_at
+       ) values
+       (${sqlString(USER_A)}::uuid, 9001, 'transcript', 'byte-page-1', 'upsert', 1,
+        'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1'::uuid,
+        jsonb_build_object('text', repeat('a', 700000)), now()),
+       (${sqlString(USER_A)}::uuid, 9002, 'transcript', 'byte-page-2', 'upsert', 1,
+        'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2'::uuid,
+        jsonb_build_object('text', repeat('b', 700000)), now())`,
+    );
+
+    const first = callJson(
+      session,
+      `select public.pull_sync_page(${sqlString(USER_A)}::uuid, 9000, 100, 1048576)`,
+    );
+    expect(first.changes).toHaveLength(1);
+    expect(first.cursor).toBe("9001");
+    expect(first.hasMore).toBe(true);
+
+    const second = callJson(
+      session,
+      `select public.pull_sync_page(${sqlString(USER_A)}::uuid, 9001, 100, 1048576)`,
+    );
+    expect(second.changes).toHaveLength(1);
+    expect(second.cursor).toBe("9002");
+    expect(second.hasMore).toBe(false);
   });
 
   it("claims one assistant generation per cache key and attaches another user", () => {
@@ -862,6 +1118,268 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
     );
     expect(deleted.ok).toBe(false);
     expect(`${deleted.stderr} ${deleted.stdout}`).toMatch(/immutable/i);
+  });
+
+  it("rolls back deletion_pending and the privacy request when atomic job creation fails", () => {
+    const session = requireDb(db);
+    const beforeRequests = scalar(
+      session,
+      `select count(*)::text from public.privacy_requests where user_id = ${sqlString(USER_A)}::uuid`,
+    );
+    execOk(
+      session,
+      `create or replace function public._fail_deletion_job_for_test()
+       returns trigger language plpgsql as $$
+       begin
+         if new.kind = 'account_deletion' then raise exception 'forced job failure'; end if;
+         return new;
+       end $$;
+       create trigger fail_deletion_job_for_test before insert on public.assistant_jobs
+       for each row execute function public._fail_deletion_job_for_test()`,
+    );
+    const failed = session.exec(
+      `select public.request_account_deletion(
+        ${sqlString(USER_A)}::uuid, 'rollback test', 'rollback-trace'
+      )`,
+    );
+    execOk(
+      session,
+      `drop trigger fail_deletion_job_for_test on public.assistant_jobs;
+       drop function public._fail_deletion_job_for_test()`,
+    );
+    expect(failed.ok).toBe(false);
+    expect(
+      scalar(
+        session,
+        `select account_status from public.profiles where user_id = ${sqlString(USER_A)}::uuid`,
+      ),
+    ).toBe("active");
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.privacy_requests where user_id = ${sqlString(USER_A)}::uuid`,
+      ),
+    ).toBe(beforeRequests);
+  });
+
+  it("serializes a concurrent child write behind account deletion and rejects it", async () => {
+    const session = requireDb(db);
+    const racingUser = "16161616-1616-4616-8616-161616161616";
+    execOk(
+      session,
+      `insert into public.profiles (user_id, account_status)
+       values (${sqlString(racingUser)}::uuid, 'active')`,
+    );
+    const deletion = session.start(
+      `begin;
+       select 1 from public.profiles where user_id = ${sqlString(racingUser)}::uuid for update;
+       select pg_sleep(0.3);
+       update public.profiles
+       set account_status = 'deletion_pending', deletion_pending_at = clock_timestamp()
+       where user_id = ${sqlString(racingUser)}::uuid;
+       commit;`,
+    );
+    await delay(50);
+    const racedWrite = session.start(
+      `insert into public.devices (user_id, platform, app_version)
+       values (${sqlString(racingUser)}::uuid, 'ios', '9.9.9')`,
+    );
+    const [deleted, written] = await Promise.all([deletion, racedWrite]);
+    expect(deleted.ok, deleted.stderr).toBe(true);
+    expect(written.ok).toBe(false);
+    expect(`${written.stderr} ${written.stdout}`).toMatch(/not writable/i);
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.devices where user_id = ${sqlString(racingUser)}::uuid`,
+      ),
+    ).toBe("0");
+  });
+
+  it("cascades private account data and retains only an anonymous deletion tombstone", () => {
+    const session = requireDb(db);
+    const deletionJobId = "15151515-1515-4515-8515-151515151515";
+    const legacyJobId = "17171717-1717-4717-8717-171717171717";
+    const otherUserJobId = "18181818-1818-4818-8818-181818181818";
+    execOk(
+      session,
+      `update public.assistant_jobs set status = 'cancelled' where status = 'queued';
+       insert into public.assistant_jobs (id, user_id, kind, status, payload)
+       values
+         (
+           ${sqlString(deletionJobId)}::uuid,
+           ${sqlString(USER_B)}::uuid,
+           'account_deletion',
+           'running',
+           '{"reason":"PRIVATE DELETION REASON"}'::jsonb
+         ),
+         (
+           ${sqlString(legacyJobId)}::uuid,
+           ${sqlString(USER_B)}::uuid,
+           'translate',
+           'queued',
+           '{"private":"PRIVATE TRANSLATION INPUT"}'::jsonb
+         ),
+         (
+           ${sqlString(otherUserJobId)}::uuid,
+           ${sqlString(USER_A)}::uuid,
+           'translate',
+           'queued',
+           '{}'::jsonb
+         );
+       insert into public.object_write_leases (user_id, object_key)
+       values (${sqlString(USER_B)}::uuid, ${sqlString(`${USER_B}/late-audio.m4b`)})`,
+    );
+    callJson(
+      session,
+      `select public.set_user_analytics_preference(${sqlString(USER_B)}::uuid, true)`,
+    );
+    callJson(session, `select public.admin_user_progress_summary(${sqlString(USER_B)}::uuid)`);
+    const requested = callJson(
+      session,
+      `select public.request_account_deletion(
+        ${sqlString(USER_B)}::uuid, 'PRIVATE REQUEST REASON', 'delete-request-trace'
+      )`,
+    );
+    expect(requested).toMatchObject({
+      privacy_request: { kind: "deletion", status: "queued" },
+      job: { kind: "account_deletion", status: "queued", attempts: 0 },
+    });
+    expect(
+      scalar(
+        session,
+        `select account_status from public.profiles where user_id = ${sqlString(USER_B)}::uuid`,
+      ),
+    ).toBe("deletion_pending");
+    expect(
+      callJson(
+        session,
+        `select jsonb_build_object(
+           'status', status,
+           'userIdRemoved', user_id is null,
+           'payload', payload,
+           'cacheKeyRemoved', cache_key is null,
+           'lastErrorRemoved', last_error is null
+         ) from public.assistant_jobs where id = ${sqlString(legacyJobId)}::uuid`,
+      ),
+    ).toEqual({
+      status: "cancelled",
+      userIdRemoved: true,
+      payload: {},
+      cacheKeyRemoved: true,
+      lastErrorRemoved: true,
+    });
+    const blockedWhilePending = session.exec(
+      `insert into public.devices (user_id, platform, app_version)
+       values (${sqlString(USER_B)}::uuid, 'ios', '9.9.9')`,
+    );
+    expect(blockedWhilePending.ok).toBe(false);
+    expect(`${blockedWhilePending.stderr} ${blockedWhilePending.stdout}`).toMatch(/not writable/i);
+    const firstClaim = callJson(
+      session,
+      `select jsonb_build_object('items', coalesce(jsonb_agg(to_jsonb(claimed)), '[]'::jsonb))
+       from public.claim_assistant_jobs(10) claimed`,
+    );
+    expect(Array.isArray(firstClaim.items)).toBe(true);
+    if (!Array.isArray(firstClaim.items)) return;
+    expect(firstClaim.items).toHaveLength(2);
+    expect(firstClaim.items.map((item: { kind: string }) => item.kind).sort()).toEqual([
+      "account_deletion",
+      "translate",
+    ]);
+    for (const item of firstClaim.items) {
+      expect(item).toMatchObject({ status: "running", attempts: 1 });
+    }
+    expect(
+      callJson(
+        session,
+        `select jsonb_build_object('items', coalesce(jsonb_agg(to_jsonb(claimed)), '[]'::jsonb))
+         from public.claim_assistant_jobs(10) claimed`,
+      ),
+    ).toEqual({ items: [] });
+    expect(
+      scalar(session, `select public.delete_account_data(${sqlString(USER_B)}::uuid)::text`),
+    ).toBe("true");
+    expect(
+      callJson(
+        session,
+        `select jsonb_build_object(
+           'status', account_status,
+           'email', email,
+           'displayName', display_name,
+           'avatarUrl', avatar_url,
+           'deleted', deleted_at is not null
+         ) from public.profiles where user_id = ${sqlString(USER_B)}::uuid`,
+      ),
+    ).toEqual({
+      status: "deleted",
+      email: null,
+      displayName: null,
+      avatarUrl: null,
+      deleted: true,
+    });
+    for (const sql of [
+      `insert into public.devices (user_id, platform, app_version)
+       values (${sqlString(USER_B)}::uuid, 'ios', '9.9.9')`,
+      `insert into public.user_settings (user_id) values (${sqlString(USER_B)}::uuid)`,
+      `insert into public.object_write_leases (user_id, object_key)
+       values (${sqlString(USER_B)}::uuid, ${sqlString(`${USER_B}/too-late.m4b`)})`,
+    ]) {
+      const blocked = session.exec(sql);
+      expect(blocked.ok).toBe(false);
+      expect(`${blocked.stderr} ${blocked.stdout}`).toMatch(/not writable/i);
+    }
+    for (const table of [
+      "devices",
+      "user_settings",
+      "books",
+      "book_assets",
+      "chapters",
+      "reading_progress",
+      "transcript_revisions",
+      "transcript_segments",
+      "vocabulary_occurrences",
+      "known_lemmas",
+      "review_cards",
+      "review_events",
+      "user_assistant_results",
+      "usage_ledger",
+      "sync_changes",
+      "sync_batches",
+      "sync_mutation_outcomes",
+      "idempotency_records",
+      "admin_roles",
+      "chat_messages",
+      "privacy_requests",
+      "product_events",
+      "user_analytics_preferences",
+      "user_progress_summaries",
+      "object_write_leases",
+    ]) {
+      expect(
+        scalar(
+          session,
+          `select count(*)::text from public.${table} where user_id = ${sqlString(USER_B)}::uuid`,
+        ),
+        `${table} retained rows for the deleted account`,
+      ).toBe("0");
+    }
+    expect(
+      callJson(
+        session,
+        `select jsonb_build_object(
+           'userIdRemoved', user_id is null,
+           'payload', payload,
+           'cacheKeyRemoved', cache_key is null,
+           'lastErrorRemoved', last_error is null
+         ) from public.assistant_jobs where id = ${sqlString(deletionJobId)}::uuid`,
+      ),
+    ).toEqual({
+      userIdRemoved: true,
+      payload: {},
+      cacheKeyRemoved: true,
+      lastErrorRemoved: true,
+    });
   });
 });
 

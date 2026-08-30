@@ -156,6 +156,30 @@ public struct ProductAuthClient: AuthClient, Sendable {
         )
     }
 
+    public func analyticsPreference(
+        accessToken: String,
+        deviceID: String
+    ) async throws -> AccountAnalyticsPreference {
+        try await send(
+            method: "GET",
+            path: "/v1/me/analytics-preferences",
+            headers: authenticatedHeaders(accessToken: accessToken, deviceID: deviceID)
+        )
+    }
+
+    public func setAnalyticsPreference(
+        accessToken: String,
+        deviceID: String,
+        enabled: Bool
+    ) async throws -> AccountAnalyticsPreference {
+        try await send(
+            method: "PUT",
+            path: "/v1/me/analytics-preferences",
+            headers: authenticatedHeaders(accessToken: accessToken, deviceID: deviceID),
+            body: AnalyticsPreferenceBody(operatorLearningAnalyticsEnabled: enabled)
+        )
+    }
+
     public func requestAccountDeletion(accessToken: String, deviceID: String, reason: String) async throws {
         try await sendVoid(
             method: "POST",
@@ -269,6 +293,10 @@ private struct EmailOTPVerifyBody: Encodable {
 
 private struct ProductEventBatch: Encodable {
     var events: [ProductUsageEvent]
+}
+
+private struct AnalyticsPreferenceBody: Encodable {
+    var operatorLearningAnalyticsEnabled: Bool
 }
 
 private struct OAuthAuthorizeBody: Encodable {

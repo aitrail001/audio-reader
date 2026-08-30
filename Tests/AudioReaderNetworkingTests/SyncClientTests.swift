@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import AudioReaderLocalStore
@@ -69,6 +70,9 @@ struct SyncClientTests {
         #expect(pushed.cursor == "1")
         #expect(pushed.results.first?.status == "applied")
         #expect(http.requests.first?.path == "/v1/sync/push")
+        let pushBody = try #require(http.requests.first?.body)
+        let expectedDigest = SHA256.hash(data: pushBody).map { String(format: "%02x", $0) }.joined()
+        #expect(http.requests.first?.headers["X-Content-SHA256"] == expectedDigest)
 
         let pulled = try await client.pull(
             accessToken: "access",
@@ -157,9 +161,9 @@ struct AccountSessionSyncTests {
     }
 
     @MainActor
-    @Test("push batches stay below the sync request allowance even with large transcripts")
+    @Test("push batches keep each real-world transcript below the Worker-safe request allowance")
     func pushBatchesRespectEncodedByteLimit() throws {
-        let payload = Data("{\"text\":\"\(String(repeating: "a", count: 2_400_000))\"}".utf8)
+        let payload = Data("{\"text\":\"\(String(repeating: "a", count: 2_600_000))\"}".utf8)
         let pending = (0..<3).map { index in
             OutboxMutation(
                 id: MutationID(rawValue: "00000000-0000-4000-8000-\(String(format: "%012d", index + 1))"),
@@ -174,15 +178,166 @@ struct AccountSessionSyncTests {
 
         let batches = try AccountSession.syncPushBatches(pending)
 
-        #expect(batches.map(\.count) == [2, 1])
+        #expect(batches.map(\.count) == [1, 1, 1])
         for batch in batches {
             let request = SyncPushRequest(
                 deviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
                 batchId: "7c9e6679-7425-40de-944b-e07fc1f90ae7",
                 mutations: try batch.map { try $0.productMutation() }
             )
-            #expect(try JSONEncoder().encode(request).count < 8 * 1_024 * 1_024)
+            #expect(try JSONEncoder().encode(request).count < 4 * 1_024 * 1_024)
         }
+    }
+
+    @MainActor
+    @Test("a transcript larger than the native batch budget fails before upload")
+    func oversizedTranscriptFailsBeforeUpload() {
+        let payload = Data("{\"text\":\"\(String(repeating: "a", count: 3_200_000))\"}".utf8)
+        let mutation = OutboxMutation(
+            id: MutationID(rawValue: "00000000-0000-4000-8000-000000000001"),
+            entityType: .transcript,
+            entityID: "10000000-0000-4000-8000-000000000001",
+            operation: .upsert,
+            baseRevision: .zero,
+            occurredAt: Date(timeIntervalSince1970: 1_777_000_000),
+            payload: payload
+        )
+
+        #expect(throws: (any Error).self) {
+            _ = try AccountSession.syncPushBatches([mutation])
+        }
+    }
+
+    @MainActor
+    @Test("mixed transcripts split before the Worker resource threshold")
+    func mixedTranscriptsSplitBeforeWorkerThreshold() throws {
+        let sizes = [1_616_000, 1_350_000]
+        let pending = sizes.enumerated().map { index, size in
+            OutboxMutation(
+                id: MutationID(rawValue: "00000000-0000-4000-8000-\(String(format: "%012d", index + 1))"),
+                entityType: .transcript,
+                entityID: "10000000-0000-4000-8000-\(String(format: "%012d", index + 1))",
+                operation: .upsert,
+                baseRevision: .zero,
+                occurredAt: Date(timeIntervalSince1970: 1_777_000_000 + Double(index)),
+                payload: Data("{\"text\":\"\(String(repeating: "a", count: size))\"}".utf8)
+            )
+        }
+
+        #expect(try AccountSession.syncPushBatches(pending).map(\.count) == [1, 1])
+    }
+
+    @MainActor
+    @Test("small sync rows split before the Worker CPU threshold")
+    func smallRowsRespectWorkerCPUCountLimit() throws {
+        let pending = (0..<101).map { index in
+            OutboxMutation(
+                id: MutationID(rawValue: "00000000-0000-4000-8000-\(String(format: "%012d", index + 1))"),
+                entityType: .vocabulary,
+                entityID: "10000000-0000-4000-8000-\(String(format: "%012d", index + 1))",
+                operation: .upsert,
+                baseRevision: .zero,
+                occurredAt: Date(timeIntervalSince1970: 1_777_000_000 + Double(index)),
+                payload: Data("{\"surface\":\"word-\(index)\"}".utf8)
+            )
+        }
+
+        #expect(try AccountSession.syncPushBatches(pending).map(\.count) == [100, 1])
+    }
+
+    @MainActor
+    @Test("sync coalesces repeated pending rows for the same entity")
+    func synchronizeCoalescesRepeatedPendingEntities() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        let outbox = InMemorySyncOutboxRepository()
+        let entityID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        for index in 0..<3 {
+            try outbox.enqueue(
+                OutboxMutation(
+                    id: MutationID(rawValue: "00000000-0000-4000-8000-\(String(format: "%012d", index + 1))"),
+                    entityType: .vocabulary,
+                    entityID: entityID,
+                    operation: .upsert,
+                    baseRevision: ServerVersion(Int64(index)),
+                    occurredAt: Date(timeIntervalSince1970: 1_777_000_000 + Double(index)),
+                    payload: Data("{\"surface\":\"version-\(index)\"}".utf8)
+                )
+            )
+        }
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(client: sync, outbox: outbox, cursor: InMemorySyncCursorStore())
+        )
+        await session.requestEmailCode("coalesce@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        #expect(sync.pushed.flatMap(\.mutations).count == 1)
+        #expect(sync.pushed.first?.mutations.first?.baseRevision == 2)
+        #expect(sync.pushed.first?.mutations.first?.payload["surface"]?.stringValue == "version-2")
+        #expect(try outbox.pendingMutations().isEmpty)
+    }
+
+    @MainActor
+    @Test("a re-added entity replaces its pending delete intent")
+    func synchronizeReplacesPendingDeleteWithReAdd() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        let outbox = InMemorySyncOutboxRepository()
+        let entityID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        try outbox.enqueue(
+            OutboxMutation(
+                id: MutationID(rawValue: "00000000-0000-4000-8000-000000000001"),
+                entityType: .vocabulary,
+                entityID: entityID,
+                operation: .delete,
+                baseRevision: ServerVersion(3),
+                occurredAt: Date(timeIntervalSince1970: 1_777_000_000),
+                payload: Data("{\"_deleted\":true}".utf8)
+            )
+        )
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: outbox,
+                cursor: InMemorySyncCursorStore(),
+                snapshot: {
+                    [
+                        OutboxMutation(
+                            id: MutationID.generate(),
+                            entityType: .vocabulary,
+                            entityID: entityID,
+                            operation: .upsert,
+                            baseRevision: .zero,
+                            occurredAt: Date(timeIntervalSince1970: 1_777_000_100),
+                            payload: Data("{\"surface\":\"restored\"}".utf8)
+                        )
+                    ]
+                }
+            )
+        )
+        await session.requestEmailCode("restore@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        let pushed = try #require(sync.pushed.first?.mutations.first)
+        #expect(pushed.operation == OutboxOperation.upsert.rawValue)
+        #expect(pushed.baseRevision == 3)
+        #expect(pushed.payload["surface"]?.stringValue == "restored")
     }
 
     @MainActor
@@ -295,6 +450,65 @@ struct AccountSessionSyncTests {
         #expect(session.syncStatus.conflictCount == 1)
         #expect(session.syncStatus.pendingCount == 1)
         #expect(session.syncStatus.requiresAttention)
+    }
+
+    @MainActor
+    @Test("a dirty snapshot does not reset the server revision of a conflict retry")
+    func synchronizePreservesConflictRetryRevision() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        sync.pushStatus = "conflict"
+        sync.conflictRevision = 7
+        let outbox = InMemorySyncOutboxRepository()
+        let payload = Data("{\"targetLanguage\":\"zh\"}".utf8)
+        let entityID = "00000000-0000-4000-8000-00000000000a"
+        try outbox.enqueue(
+            OutboxMutation(
+                id: MutationID(rawValue: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"),
+                entityType: .settings,
+                entityID: entityID,
+                operation: .upsert,
+                baseRevision: .zero,
+                occurredAt: Date(timeIntervalSince1970: 1_777_000_000),
+                payload: payload
+            )
+        )
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: outbox,
+                cursor: InMemorySyncCursorStore(),
+                snapshot: {
+                    [
+                        OutboxMutation(
+                            id: MutationID.generate(),
+                            entityType: .settings,
+                            entityID: entityID,
+                            operation: .upsert,
+                            baseRevision: .zero,
+                            occurredAt: Date(timeIntervalSince1970: 1_777_000_100),
+                            payload: payload
+                        )
+                    ]
+                }
+            )
+        )
+        await session.requestEmailCode("retry-revision@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+        await session.synchronize()
+        sync.pushStatus = "applied"
+
+        await session.synchronize()
+
+        #expect(sync.pushed.count == 2)
+        #expect(sync.pushed[1].mutations.first?.baseRevision == 7)
+        #expect(try outbox.pendingMutations().isEmpty)
     }
 
     @MainActor
@@ -452,6 +666,51 @@ struct AccountSessionSyncTests {
     }
 
     @MainActor
+    @Test("a push does not skip an unseen change written by another device")
+    func synchronizePullsFromLastAcknowledgedCursorAfterInterleavedPush() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = TwoDeviceInterleavingSyncClient()
+        let outbox = InMemorySyncOutboxRepository()
+        let cursor = InMemorySyncCursorStore()
+        let applied = LockingBox<[SyncPulledChange]>([])
+        try outbox.enqueue(
+            OutboxMutation(
+                id: MutationID(rawValue: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"),
+                entityType: .vocabulary,
+                entityID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                operation: .upsert,
+                baseRevision: .zero,
+                occurredAt: Date(timeIntervalSince1970: 1_777_000_001),
+                payload: Data("{\"surface\":\"ice\"}".utf8)
+            )
+        )
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: outbox,
+                cursor: cursor,
+                applyChange: { change in applied.value.append(change) }
+            )
+        )
+        await session.requestEmailCode("interleaved@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        #expect(await sync.pushedBaseCursors() == ["0"])
+        #expect(await sync.pulledCursors() == ["0"])
+        #expect(applied.value.map(\.sequence).sorted() == [1, 2])
+        #expect(try cursor.loadCursor() == "2")
+        #expect(try outbox.pendingMutations().isEmpty)
+    }
+
+    @MainActor
     @Test("a failed local apply does not advance entity version or pull cursor")
     func synchronizeDoesNotAcknowledgeFailedApply() async throws {
         let client = FakeAuthClient()
@@ -496,6 +755,65 @@ struct AccountSessionSyncTests {
             entityType: OutboxEntityType.vocabulary.rawValue,
             entityID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
         ) == nil)
+    }
+
+    @MainActor
+    @Test("pulled deletes store an explicit tombstone marker and apply after dependent rows")
+    func synchronizePersistsDeletionMarker() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        let vocabularyID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let deletion = SyncPulledChange(
+            sequence: 2,
+            entityType: OutboxEntityType.vocabulary.rawValue,
+            entityId: vocabularyID,
+            operation: OutboxOperation.delete.rawValue,
+            revision: 2,
+            changedAt: "2026-08-30T00:01:00Z",
+            payload: [:]
+        )
+        let review = SyncPulledChange(
+            sequence: 1,
+            entityType: OutboxEntityType.reviewEvent.rawValue,
+            entityId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            operation: OutboxOperation.append.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T00:00:00Z",
+            payload: ["vocabularyId": .string(vocabularyID)]
+        )
+        sync.pullChanges = [deletion, review]
+        sync.pullCursor = "2"
+        let versions = InMemorySyncEntityVersionStore()
+        let applied = LockingBox<[SyncPulledChange]>([])
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: InMemorySyncOutboxRepository(),
+                cursor: InMemorySyncCursorStore(),
+                versions: versions,
+                applyChange: { applied.value.append($0) }
+            )
+        )
+        await session.requestEmailCode("delete-marker@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        #expect(applied.value.map(\.entityType) == [review.entityType, deletion.entityType])
+        let version = try #require(try versions.loadVersion(
+            entityType: deletion.entityType,
+            entityID: deletion.entityId
+        ))
+        #expect(
+            try JSONDecoder().decode([String: SyncJSONValue].self, from: version.payload)["_deleted"]
+                == .bool(true)
+        )
     }
 
     @MainActor
@@ -562,6 +880,71 @@ struct AccountSessionSyncTests {
         await second.value
         #expect(await sync.pullCount == 1)
         #expect(session.syncStatus.phase == .completed)
+    }
+
+    @MainActor
+    @Test("reverting to the last applied payload cancels a stale pending mutation")
+    func synchronizeCancelsRevertedSnapshotMutation() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        let outbox = InMemorySyncOutboxRepository()
+        let versions = InMemorySyncEntityVersionStore()
+        let entityID = "00000000-0000-4000-8000-00000000000a"
+        let appliedPayload = Data("{\"targetLanguage\":\"zh\"}".utf8)
+        try versions.saveVersion(
+            SyncEntityVersion(
+                entityType: OutboxEntityType.settings.rawValue,
+                entityID: entityID,
+                serverVersion: 4,
+                payload: appliedPayload
+            )
+        )
+        try outbox.enqueue(
+            OutboxMutation(
+                id: MutationID(rawValue: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"),
+                entityType: .settings,
+                entityID: entityID,
+                operation: .upsert,
+                baseRevision: ServerVersion(4),
+                occurredAt: Date(timeIntervalSince1970: 1_777_000_000),
+                payload: Data("{\"targetLanguage\":\"ja\"}".utf8)
+            )
+        )
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: outbox,
+                cursor: InMemorySyncCursorStore(),
+                versions: versions,
+                snapshot: {
+                    [
+                        OutboxMutation(
+                            id: MutationID.generate(),
+                            entityType: .settings,
+                            entityID: entityID,
+                            operation: .upsert,
+                            baseRevision: .zero,
+                            occurredAt: Date(timeIntervalSince1970: 1_777_000_100),
+                            payload: appliedPayload
+                        )
+                    ]
+                }
+            )
+        )
+        await session.requestEmailCode("reverted@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        #expect(sync.pushed.isEmpty)
+        #expect(try outbox.pendingMutations().isEmpty)
+        #expect(session.syncStatus.pendingCount == 0)
     }
 
     @MainActor
@@ -663,6 +1046,75 @@ private actor SuspendedSyncClient: SyncClient {
         let waiters = releaseWaiters
         releaseWaiters.removeAll()
         waiters.forEach { $0.resume() }
+    }
+}
+
+/// Models device B writing sequence 1 before device A pushes sequence 2. The push cursor is
+/// the server high-water mark, not proof that device A has applied either sequence locally.
+private actor TwoDeviceInterleavingSyncClient: SyncClient {
+    private var changes = [
+        SyncPulledChange(
+            sequence: 1,
+            entityType: OutboxEntityType.settings.rawValue,
+            entityId: "00000000-0000-4000-8000-00000000000a",
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T00:00:00Z",
+            payload: ["targetLanguage": .string("ja")]
+        )
+    ]
+    private var baseCursors: [String] = []
+    private var pullHistory: [String] = []
+
+    func push(accessToken: String, deviceID: String, request: SyncPushRequest) async throws -> SyncPushResponse {
+        _ = accessToken
+        _ = deviceID
+        baseCursors.append(request.baseCursor ?? "")
+        let mutation = try #require(request.mutations.first)
+        changes.append(
+            SyncPulledChange(
+                sequence: 2,
+                entityType: mutation.entityType,
+                entityId: mutation.entityId,
+                operation: mutation.operation,
+                revision: 1,
+                changedAt: mutation.occurredAt,
+                payload: mutation.payload
+            )
+        )
+        return SyncPushResponse(
+            batchId: request.batchId,
+            results: [
+                SyncMutationResult(
+                    mutationId: mutation.mutationId,
+                    status: "applied",
+                    entityRevision: 1
+                )
+            ],
+            cursor: "2"
+        )
+    }
+
+    func pull(accessToken: String, deviceID: String, cursor: String, limit: Int) async throws -> SyncPullResponse {
+        _ = accessToken
+        _ = deviceID
+        pullHistory.append(cursor)
+        let after = Int(cursor) ?? 0
+        let page = Array(changes.filter { $0.sequence > after }.prefix(limit))
+        let nextCursor = page.last.map { String($0.sequence) } ?? cursor
+        return SyncPullResponse(
+            changes: page,
+            cursor: nextCursor,
+            hasMore: changes.contains { $0.sequence > (Int(nextCursor) ?? after) }
+        )
+    }
+
+    func pushedBaseCursors() -> [String] {
+        baseCursors
+    }
+
+    func pulledCursors() -> [String] {
+        pullHistory
     }
 }
 

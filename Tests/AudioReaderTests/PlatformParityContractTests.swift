@@ -34,6 +34,7 @@ struct PlatformParityContractTests {
     func vocabularyReviewIsShared() throws {
         let vocabularyView = try source("Sources/AudioReader/VocabularyView.swift")
         let learningDashboard = try source("Sources/AudioReader/VocabularyLearningDashboard.swift")
+        let vocabularyLearning = try source("Sources/AudioReader/VocabularyLearning.swift")
         let reviewSetupView = try source("Sources/AudioReader/VocabularyReviewSetupView.swift")
         let reviewView = try source("Sources/AudioReader/VocabularyReviewView.swift")
         let appState = try source("Sources/AudioReader/AppState.swift")
@@ -46,7 +47,14 @@ struct PlatformParityContractTests {
         #expect(vocabularyView.contains("VocabularyReviewSetupView("))
         #expect(vocabularyView.contains("VocabularyReviewView(state: state, entryIDs: request.entryIDs)"))
         #expect(vocabularyView.contains("VocabularyLearningDashboard("))
+        #expect(vocabularyView.contains("VocabularyWorkspaceSection"))
+        #expect(vocabularyView.contains("words.section.\\(section.rawValue)"))
+        #expect(vocabularyView.contains("case .today:"))
+        #expect(vocabularyView.contains("case .library:"))
         #expect(learningDashboard.contains("words.learningDashboard"))
+        #expect(learningDashboard.contains("words.studyToday"))
+        #expect(learningDashboard.contains("words.metric.\\(metric.id)"))
+        #expect(learningDashboard.contains("words.todayCards"))
         #expect(learningDashboard.contains("Study "))
         #expect(vocabularyView.contains("state.setVocabularyLearnList("))
         #expect(reviewSetupView.contains("VocabReviewScope.book("))
@@ -54,8 +62,9 @@ struct PlatformParityContractTests {
         #expect(reviewSetupView.contains("VocabReviewScope.learnList"))
         #expect(reviewSetupView.contains("VocabReviewScope.learnListBook("))
         #expect(reviewSetupView.contains(".accessibilityLabel("))
-        #expect(reviewSetupView.contains(#"\(bookID)::\(category.rawValue)"#))
-        #expect(reviewView.contains("Button(\"Show answer\")"))
+        #expect(reviewSetupView.contains("ForEach(projection.categoryOptions(in: book.id))"))
+        #expect(vocabularyLearning.contains(#"\(bookID)::\(category.rawValue)"#))
+        #expect(reviewView.contains("Text(\"Show answer\")"))
         #expect(reviewSetupView.contains("Card face"))
         #expect(reviewSetupView.contains("VocabReviewPrompt.allCases"))
         #expect(reviewView.contains("VocabCloze.blankedSentence"))
@@ -65,10 +74,11 @@ struct PlatformParityContractTests {
         #expect(reviewView.contains("reviewCardMinimumHeight"))
         #expect(reviewView.contains("if isRevealed {\n                        back(of: entry)"))
         #expect(reviewView.contains("Next round"))
-        #expect(vocabularyView.contains("Label(\"Review due — "))
+        #expect(vocabularyView.contains("due in this view"))
         #expect(vocabularyView.contains(".navigationTitle(\"Vocabulary\")"))
         #expect(vocabularyView.contains(".navigationBarTitleDisplayMode(.inline)"))
-        #expect(vocabularyView.contains("in learn list"))
+        #expect(vocabularyView.contains("VocabularyListFilter.allCases"))
+        #expect(vocabularyView.contains("My list is the list you control."))
         #expect(reviewView.contains("entry.bookTitle"))
         #expect(reviewView.contains("entry.chapterTitle"))
         #expect(vocabularyView.contains("VocabOriginalPlayButton(state: state, entry: entry"))
@@ -76,28 +86,48 @@ struct PlatformParityContractTests {
         #expect(appState.contains("func playVocabSentence("))
         #expect(appState.contains("playingVocabEntryID"))
         #expect(appState.contains("func reviewVocabulary("))
-        #expect(appState.contains("reviewEventRepository.appendReviewEvent("))
+        #expect(appState.contains("reviewRepository.appendReviewEvent("))
         #expect(appState.contains("func setVocabularyLearnList("))
         #expect(appState.contains("quality: VocabReviewQuality"))
         #expect(!reviewSetupView.contains("#if os("))
+        #expect(reviewSetupView.contains(".task(id: refreshRequest)"))
+        #expect(!reviewSetupView.contains("let projection = VocabularyReviewSetupProjection.make"))
         #expect(!reviewView.contains("#if os("))
         #expect(!learningDashboard.contains("#if os("))
+        #expect(macRoot.contains(".layoutPriority(1)"))
+        #expect(!macRoot.contains(".safeAreaInset(edge: .top"))
     }
 
-    @Test("Learn-list action shares the vocabulary header with Open in text")
+    @Test("My-list action shares the vocabulary header with Open in text")
     func vocabularyLearnListActionSharesHeader() throws {
         let vocabularyView = try source("Sources/AudioReader/VocabularyView.swift")
-        let cardHeader = try section(
+        let cardActions = try section(
             in: vocabularyView,
-            from: "            HStack(alignment: .firstTextBaseline)",
-            to: "            Text(\"\\(entry.bookTitle)"
+            from: "    private var cardActions: some View",
+            to: "    private func labeled<Content: View>"
         )
 
-        #expect(cardHeader.contains("Label(\"Open in text\", systemImage: \"text.alignleft\")"))
-        #expect(cardHeader.contains("Button(action: onToggleLearnList)"))
-        #expect(cardHeader.contains("entry.isInLearnList ? \"In learn list\" : \"Add to learn list\""))
+        #expect(cardActions.contains("Label(\"Open in text\", systemImage: \"text.alignleft\")"))
+        #expect(cardActions.contains("Button(action: onToggleLearnList)"))
+        #expect(cardActions.contains("entry.isInLearnList ? \"In My list\" : \"Add to My list\""))
         #expect(vocabularyView.components(separatedBy: "Button(action: onToggleLearnList)").count - 1 == 1)
-        #expect(cardHeader.contains(".frame(minWidth: 44, minHeight: 44)"))
+        #expect(cardActions.components(separatedBy: ".frame(minWidth: 44, minHeight: 44)").count - 1 >= 3)
+        #expect(cardActions.contains("ViewThatFits(in: .horizontal)"))
+    }
+
+    @Test("Words controls adapt to narrow iPad columns without shrinking touch targets")
+    func vocabularyControlsAdaptToNarrowColumns() throws {
+        let vocabularyView = try source("Sources/AudioReader/VocabularyView.swift")
+        let learningDashboard = try source("Sources/AudioReader/VocabularyLearningDashboard.swift")
+
+        #expect(vocabularyView.contains("private var categoryFilters: some View"))
+        #expect(vocabularyView.contains("ScrollView(.horizontal)"))
+        #expect(vocabularyView.contains("private var compactPaginationControls: some View"))
+        #expect(vocabularyView.contains("words.pageRange"))
+        #expect(vocabularyView.contains("words.pageLast"))
+        #expect(vocabularyView.contains("words.card.\\(entry.id)"))
+        #expect(learningDashboard.contains("words.todayCard.\\(entry.id)"))
+        #expect(vocabularyView.contains("#if os(iOS)\n        .frame(minWidth: 44, minHeight: 44)"))
     }
 
     @Test("Learn lists remain manageable when no cards are due on both platforms")
@@ -111,12 +141,12 @@ struct PlatformParityContractTests {
         )
 
         #expect(setupView.contains("VocabularyLearnListView("))
-        #expect(learnListNavigation.contains("VocabReviewScheduler.scopedEntries"))
-        #expect(learnListNavigation.contains(".disabled(scopedEntries.isEmpty)"))
-        #expect(!learnListNavigation.contains(".disabled(dueEntries.isEmpty)"))
-        #expect(learnListView.contains("Nothing is due for review. Browse or remove items below."))
+        #expect(learnListNavigation.contains("summary.itemCount"))
+        #expect(learnListNavigation.contains(".disabled(summary.itemCount == 0)"))
+        #expect(!learnListNavigation.contains(".disabled(summary.dueIDs.isEmpty)"))
+        #expect(learnListView.contains("Nothing is due for review. Browse or remove saved items below."))
         #expect(learnListView.contains("state.setVocabularyLearnList(entry.id, included: false)"))
-        #expect(learnListView.contains("onReviewDue(dueEntries.map(\\.id))"))
+        #expect(learnListView.contains("onReviewDue(sessionIDs)"))
         #expect(!learnListView.contains("#if os("))
     }
 
@@ -136,18 +166,18 @@ struct PlatformParityContractTests {
         #expect(sharedLogic.contains("func resetDeepReadingAfterSeek()"))
     }
 
-    @Test("Both platforms expose Deep Reading and a continue action")
+    @Test("Both platforms expose Listen First and a continue action")
     func bothPlatformsExposeDeepReadingControls() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
         let app = try source("Sources/AudioReader/AudioReaderApp.swift")
 
         #expect(playerView.components(separatedBy: "Toggle(isOn: deepReadingBinding)").count - 1 == 2)
         #expect(playerView.components(separatedBy: "Button { state.continueDeepReading() }").count - 1 == 2)
-        #expect(playerView.contains(".accessibilityLabel(\"Deep Reading\")"))
+        #expect(playerView.contains(".accessibilityLabel(\"Listen First\")"))
         #expect(playerView.contains(".accessibilityLabel(\"Continue with next sentence\")"))
         #expect(playerView.contains(".keyboardShortcut(.return, modifiers: [.command])"))
 
-        #expect(app.contains("Toggle(\"Deep Reading\""))
+        #expect(app.contains("Toggle(\"Listen First\""))
         #expect(app.contains(".keyboardShortcut(\"d\", modifiers: [.command])"))
         #expect(app.contains("Button(\"Continue with next sentence\") { state.continueDeepReading() }"))
         #expect(app.contains(".keyboardShortcut(.return, modifiers: [.command])"))
@@ -442,8 +472,8 @@ struct PlatformParityContractTests {
 
         #expect(playerView.contains(".frame(maxWidth: .infinity, alignment: .leading)"))
         #expect(!playerView.contains("AssistantTypography.maximumLineWidth"))
-        #expect(vocabularyView.contains("DictionarySummaryView(lines: dictionarySummary)"))
-        #expect(reviewView.contains("DictionarySummaryView(lines: dictionarySummary(for: entry))"))
+        #expect(vocabularyView.contains("DictionarySummaryView(lines: dictionary.summary)"))
+        #expect(reviewView.contains("DictionarySummaryView(lines: dictionaryPresentation.summary)"))
         #expect(dictionarySummaryView.contains("ForEach(Array(lines.enumerated())"))
         #expect(dictionarySummaryView.contains(".frame(maxWidth: .infinity, alignment: .leading)"))
         #expect(!dictionarySummaryView.contains("#if os("))

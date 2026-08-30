@@ -125,7 +125,8 @@ struct ReadingAssistantPromptTests {
         let appState = try source("Sources/AudioReader/AppState.swift")
 
         #expect(appState.components(separatedBy: "ReadingAssistantPrompt.sentenceTranslation(").count - 1 == 2)
-        #expect(appState.components(separatedBy: "completeStructuredJSON(").count - 1 == 2)
+        #expect(appState.components(separatedBy: "completeStructuredJSON(").count - 1 == 3)
+        #expect(appState.contains("structuredJSON: true"))
         #expect(appState.contains("translateSentenceBlock("))
         #expect(appState.contains("alignedBlock("))
         #expect(appState.contains("ManagedProductLLM.translateBatch"))

@@ -7,6 +7,14 @@
     ".": {
       "types": "./src/packageId.ts",
       "default": "./src/packageId.ts"
+    },
+    "./object-store": {
+      "types": "./src/object-store.ts",
+      "default": "./src/object-store.ts"
+    },
+    "./env": {
+      "types": "./src/env.ts",
+      "default": "./src/env.ts"
     }
   },
   "scripts": {

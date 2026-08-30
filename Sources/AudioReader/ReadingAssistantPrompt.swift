@@ -130,6 +130,7 @@ struct PromptTemplateCatalog: Codable, Equatable, Sendable {
     let wordSystem: String
     let chapterSummarySystem: String
     let chapterChatSystem: String
+    let heardQuizSystem: String
 
     static func load() throws -> PromptTemplateCatalog {
         let fileName = "ReadingAssistantPrompts.json"
@@ -318,6 +319,29 @@ enum ReadingAssistantPrompt {
             language: language,
             sourceLanguage: sourceLanguage,
             readerLevel: readerLevel
+        )
+    }
+
+    /// Builds a retrieval-first quiz from only the resolved sentences the learner has completed.
+    static func heardQuiz(
+        passage: HeardPassage,
+        language: StudyLanguage,
+        sourceLanguage: TranscriptionLanguage = .englishUS,
+        readerLevel: ReaderLanguageLevel = .intermediate
+    ) -> LLMTaskPrompt {
+        LLMTaskPrompt(
+            system: render(
+                PromptTemplateCatalog.shared.heardQuizSystem,
+                language: language,
+                sourceLanguage: sourceLanguage,
+                readerLevel: readerLevel
+            ),
+            user: """
+            Create a short Quick Quiz from this already-heard passage only:
+            \(passage.promptInput)
+
+            Do not reveal the answer outside the JSON. Use only supplied HEARD ids as segmentID values.
+            """
         )
     }
 

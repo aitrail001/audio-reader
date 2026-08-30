@@ -144,6 +144,31 @@ export function createGcsObjectStore(options: GcsStoreOptions): ObjectStore {
       }
       return new Uint8Array(await response.arrayBuffer());
     },
+    async list(prefix) {
+      const keys: string[] = [];
+      let pageToken = "";
+      do {
+        const url = new URL(
+          `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o`,
+        );
+        url.searchParams.set("prefix", prefix);
+        url.searchParams.set("maxResults", "1000");
+        if (pageToken !== "") url.searchParams.set("pageToken", pageToken);
+        const response = await authorized(url.toString());
+        if (!response.ok) throw new Error("GCS list failed.");
+        const payload: unknown = await response.json();
+        if (!isRecord(payload)) throw new Error("GCS list response was invalid.");
+        if (Array.isArray(payload.items)) {
+          keys.push(
+            ...payload.items.flatMap((item) =>
+              isRecord(item) && typeof item.name === "string" ? [item.name] : [],
+            ),
+          );
+        }
+        pageToken = typeof payload.nextPageToken === "string" ? payload.nextPageToken : "";
+      } while (pageToken !== "");
+      return [...new Set(keys)].sort();
+    },
     async delete(key) {
       const objectPath = encodeURIComponent(key);
       const response = await authorized(

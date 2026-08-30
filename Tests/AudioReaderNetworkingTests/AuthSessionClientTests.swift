@@ -113,6 +113,44 @@ struct AuthSessionClientTests {
         }
     }
 
+    @Test("Analytics preference uses the authenticated self-service endpoint")
+    func analyticsPreferenceOverHTTP() async throws {
+        let http = StubHTTPClient()
+        let client = ProductAuthClient(http: http, baseURL: ProductAPI.defaultBaseURL)
+        http.enqueue(
+            status: 200,
+            json: """
+            {"operatorLearningAnalyticsEnabled":false,"updatedAt":"2026-08-30T04:00:00Z"}
+            """
+        )
+        http.enqueue(
+            status: 200,
+            json: """
+            {"operatorLearningAnalyticsEnabled":true,"updatedAt":"2026-08-30T04:01:00Z"}
+            """
+        )
+
+        let initial = try await client.analyticsPreference(
+            accessToken: "access-1",
+            deviceID: deviceID
+        )
+        let updated = try await client.setAnalyticsPreference(
+            accessToken: "access-1",
+            deviceID: deviceID,
+            enabled: true
+        )
+
+        #expect(initial.operatorLearningAnalyticsEnabled == false)
+        #expect(updated.operatorLearningAnalyticsEnabled)
+        #expect(http.requests.map(\.path) == [
+            "/v1/me/analytics-preferences",
+            "/v1/me/analytics-preferences",
+        ])
+        #expect(http.requests.map(\.method) == ["GET", "PUT"])
+        #expect(http.requests.allSatisfy { $0.headers["X-Device-Id"] == deviceID })
+        #expect(String(data: http.requests[1].body ?? Data(), encoding: .utf8)?.contains("true") == true)
+    }
+
     @MainActor
     @Test("refresh rotates tokens and logout rejects the previous refresh token")
     func refreshAndLogout() async throws {
@@ -390,6 +428,34 @@ struct AuthSessionClientTests {
         session.markExportSaved()
         #expect(session.pendingExport == nil)
         #expect(session.lastExportStatus?.hasPrefix("Saved ") == true)
+    }
+
+    @MainActor
+    @Test("Learner controls Operator aggregate analytics and the choice reloads")
+    func learnerControlsAnalyticsPreference() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: deviceID)
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test
+        )
+        await session.requestEmailCode(email)
+        await session.verifyEmailCode("123456")
+
+        #expect(session.operatorLearningAnalyticsEnabled == false)
+        await session.setOperatorLearningAnalyticsEnabled(true)
+        #expect(session.operatorLearningAnalyticsEnabled == true)
+
+        let restored = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test
+        )
+        await restored.restore()
+        #expect(restored.operatorLearningAnalyticsEnabled == true)
     }
 
     @MainActor

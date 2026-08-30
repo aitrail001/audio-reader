@@ -178,26 +178,6 @@ export function createMemorySyncStore(options: { identity?: IdentityStore } = {}
 }
 
 export function createSupabaseSyncStore(rest: RestClient): SyncStore {
-  async function loadChanges(input: SyncPullInput): Promise<SyncChange[]> {
-    const after = parseCursor(input.cursor);
-    const pageLimit = Math.min(500, Math.max(1, Math.floor(input.limit)));
-    const response = await rest.request({
-      method: "GET",
-      path: "/sync_changes",
-      query: {
-        user_id: `eq.${input.userId}`,
-        sequence: `gt.${String(after)}`,
-        select: "sequence,entity_type,entity_id,operation,revision,changed_at,payload",
-        order: "sequence.asc",
-        limit: String(pageLimit + 1),
-      },
-    });
-    if (response.status >= 400 || response.status === 0) {
-      throw new Error("sync pull failed");
-    }
-    return restRows(response.body).map(changeFromRow);
-  }
-
   return {
     async push(input) {
       const response = await rest.request({
@@ -214,19 +194,55 @@ export function createSupabaseSyncStore(rest: RestClient): SyncStore {
       if (response.status < 200 || response.status >= 300 || pushed === undefined) {
         throw new Error("sync batch write failed");
       }
+      const timestamp = new Date().toISOString();
+      const [batchAttribution, deviceTouch] = await Promise.all([
+        rest.request({
+          method: "PATCH",
+          path: "/sync_batches",
+          query: {
+            user_id: `eq.${input.userId}`,
+            batch_id: `eq.${input.batchId}`,
+          },
+          body: { device_id: input.deviceId },
+        }),
+        rest.request({
+          method: "PATCH",
+          path: "/devices",
+          query: { user_id: `eq.${input.userId}`, id: `eq.${input.deviceId}` },
+          body: { last_sync_at: timestamp, last_seen_at: timestamp, updated_at: timestamp },
+        }),
+      ]);
+      if (batchAttribution.status >= 400 || deviceTouch.status >= 400) {
+        console.warn(
+          JSON.stringify({
+            level: "warn",
+            message: "sync_device_attribution_failed",
+            component: "database",
+            batchStatus: batchAttribution.status,
+            deviceStatus: deviceTouch.status,
+          }),
+        );
+      }
       return pushed;
     },
 
     async pull(input) {
       const pageLimit = Math.min(500, Math.max(1, Math.floor(input.limit)));
-      const rows = await loadChanges(input);
-      const sliced = rows.slice(0, pageLimit);
-      const last = sliced.at(-1)?.sequence ?? parseCursor(input.cursor);
-      return {
-        changes: sliced,
-        cursor: String(last),
-        hasMore: rows.length > pageLimit,
-      };
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/pull_sync_page",
+        body: {
+          p_user_id: input.userId,
+          p_cursor: parseCursor(input.cursor),
+          p_limit: pageLimit,
+          p_max_payload_bytes: 1_048_576,
+        },
+      });
+      const pulled = syncPullResultFromRpc(response.body, input, pageLimit);
+      if (response.status < 200 || response.status >= 300 || pulled === undefined) {
+        throw new Error("sync pull failed");
+      }
+      return pulled;
     },
 
     async latestCursor(userId) {
@@ -250,6 +266,31 @@ export function createSupabaseSyncStore(rest: RestClient): SyncStore {
       return String(numericValue(row.sequence, 0));
     },
   };
+}
+
+function syncPullResultFromRpc(
+  value: unknown,
+  input: SyncPullInput,
+  pageLimit: number,
+): SyncPullResult | undefined {
+  if (!isRecord(value) || !Array.isArray(value.changes) || typeof value.hasMore !== "boolean") {
+    return undefined;
+  }
+  const cursorNumber = numericValue(value.cursor, -1);
+  const inputCursor = parseCursor(input.cursor);
+  if (
+    !Number.isSafeInteger(cursorNumber) ||
+    cursorNumber < inputCursor ||
+    value.changes.length > pageLimit ||
+    !value.changes.every(isRecord)
+  ) {
+    return undefined;
+  }
+  const changes = value.changes.map(changeFromRow);
+  if (changes.some((change) => change.sequence <= inputCursor || change.sequence > cursorNumber)) {
+    return undefined;
+  }
+  return { changes, cursor: String(cursorNumber), hasMore: value.hasMore };
 }
 
 function syncPushResultFromRpc(value: unknown, input: SyncPushInput): SyncPushResult | undefined {
