@@ -116,35 +116,73 @@ final class MacAppleBooksLibrary {
     }
 
     nonisolated private static func readDownloadedEbooks() -> [MacAppleBookItem] {
-        let root = FileManager.default.homeDirectoryForCurrentUser
+        var byPath: [String: MacAppleBookItem] = [:]
+        let booksRoot = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Containers/com.apple.BKAgentService/Data/Documents/iBooks/Books")
+        let plistURL = booksRoot.appendingPathComponent("Books.plist")
+        if let data = try? Data(contentsOf: plistURL),
+           let records = try? AppleBooksEbookCatalog.records(fromPlist: data) {
+            for record in records {
+                byPath[record.path.path] = ebookItem(from: record)
+            }
+        }
+        for url in ebookPackageURLs(in: booksRoot) {
+            if byPath[url.path] == nil {
+                byPath[url.path] = ebookItem(at: url, id: url.path, title: nil, author: nil)
+            }
+        }
+        let iCloud = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Mobile Documents/iCloud~com~apple~iBooks/Documents")
+        for url in ebookPackageURLs(in: iCloud) {
+            if byPath[url.path] == nil {
+                byPath[url.path] = ebookItem(at: url, id: url.path, title: nil, author: nil)
+            }
+        }
+        return byPath.values.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+
+    nonisolated private static func ebookPackageURLs(in root: URL) -> [URL] {
         guard FileManager.default.fileExists(atPath: root.path) else { return [] }
         guard let enumerator = FileManager.default.enumerator(
             at: root,
-            includingPropertiesForKeys: [.isRegularFileKey],
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
             options: [.skipsHiddenFiles]
         ) else { return [] }
-
-        var found: [MacAppleBookItem] = []
+        var urls: [URL] = []
         for case let url as URL in enumerator {
             if url.path.contains("/Audiobooks/") { continue }
             guard url.pathExtension.lowercased() == "epub" else { continue }
-            let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
-            guard isFile else { continue }
-            guard let document = EPUBParser.document(from: url.path) else { continue }
-            found.append(MacAppleBookItem(
-                id: url.path,
-                title: document.title ?? url.deletingPathExtension().lastPathComponent,
-                author: document.author ?? "Unknown author",
-                duration: 0,
-                location: url,
-                artworkData: nil,
-                isProtected: false,
-                isCloud: false,
-                kind: .ebook
-            ))
+            urls.append(url)
+            if EPUBParser.isPackage(at: url) {
+                enumerator.skipDescendants()
+            }
         }
-        return found.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        return urls
+    }
+
+    nonisolated private static func ebookItem(from record: AppleBooksEbookRecord) -> MacAppleBookItem {
+        ebookItem(at: record.path, id: record.id, title: record.title, author: record.author)
+    }
+
+    nonisolated private static func ebookItem(
+        at url: URL,
+        id: String,
+        title: String?,
+        author: String?
+    ) -> MacAppleBookItem {
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        let document = exists ? EPUBParser.document(from: url.path) : nil
+        return MacAppleBookItem(
+            id: id,
+            title: title ?? document?.title ?? url.deletingPathExtension().lastPathComponent,
+            author: author ?? document?.author ?? "Unknown author",
+            duration: 0,
+            location: url,
+            artworkData: nil,
+            isProtected: exists && document == nil,
+            isCloud: !exists,
+            kind: .ebook
+        )
     }
 
     func importAudiobook(_ item: MacAppleBookItem, into libraryRoot: URL) throws {

@@ -102,25 +102,25 @@ enum AudiobookImportService {
             let folder = try newBookFolder(title: title, in: root)
             try writeMarkers(source: .files, title: title, author: nil, to: folder)
             for url in urls where isSupportedImport(url) {
-                try FileManager.default.copyItem(at: url, to: folder.appendingPathComponent(url.lastPathComponent))
+                try copyImportedFile(url, to: folder.appendingPathComponent(url.lastPathComponent))
             }
             try writeMarker(fingerprint, named: fingerprintMarker, to: folder)
-            try writeEbookFingerprint(from: ebooks, to: folder)
+            try writeEbookFingerprint(from: ebookFiles(in: folder), to: folder)
             return .init(folder: folder, createdBook: true, addedFileNames: urls.map(\.lastPathComponent))
         }
 
-        let ebookFingerprint = try ebookFingerprint(for: ebooks)
-        if let existing = try existingBookFolder(matchingEbookFingerprint: ebookFingerprint, in: root) {
+        if let existing = try existingBookFolder(matchingEbookFiles: ebooks, in: root) {
             let added = try copyCompanionFiles(from: urls, to: existing)
             return .init(folder: existing, createdBook: false, addedFileNames: added)
         }
+        let incomingEbookFingerprint = try ebookFingerprint(for: ebooks)
         let title = ebooks.first?.deletingPathExtension().lastPathComponent ?? "Imported Book"
         let folder = try newBookFolder(title: title, in: root)
         try writeMarkers(source: .files, title: title, author: nil, to: folder)
         for url in urls where isSupportedImport(url) {
-            try FileManager.default.copyItem(at: url, to: folder.appendingPathComponent(url.lastPathComponent))
+            try copyImportedFile(url, to: folder.appendingPathComponent(url.lastPathComponent))
         }
-        try writeMarker(ebookFingerprint, named: ebookFingerprintMarker, to: folder)
+        try writeMarker(incomingEbookFingerprint, named: ebookFingerprintMarker, to: folder)
         return .init(folder: folder, createdBook: true, addedFileNames: urls.map(\.lastPathComponent))
     }
 
@@ -165,15 +165,15 @@ enum AudiobookImportService {
                 return .init(folder: destination, createdBook: true, addedFileNames: allFiles(in: source).map(\.lastPathComponent))
             }
             guard !ebooks.isEmpty else { throw AudiobookImportError.noImportableMedia }
-            let ebookFingerprint = try ebookFingerprint(for: ebooks)
-            if let existing = try existingBookFolder(matchingEbookFingerprint: ebookFingerprint, in: root) {
+            let incomingEbookFingerprint = try ebookFingerprint(for: ebooks)
+            if let existing = try existingBookFolder(matchingEbookFingerprint: incomingEbookFingerprint, in: root) {
                 let added = try copyCompanionFiles(from: allFiles(in: source), to: existing)
                 return .init(folder: existing, createdBook: false, addedFileNames: added)
             }
             let destination = try newBookFolder(title: source.lastPathComponent, in: root)
             try copyDirectoryContents(from: source, to: destination)
             try writeMarkers(source: .localFolder, title: source.lastPathComponent, author: nil, to: destination)
-            try writeMarker(ebookFingerprint, named: ebookFingerprintMarker, to: destination)
+            try writeMarker(incomingEbookFingerprint, named: ebookFingerprintMarker, to: destination)
             return .init(folder: destination, createdBook: true, addedFileNames: allFiles(in: source).map(\.lastPathComponent))
         }
     }
@@ -350,20 +350,31 @@ enum AudiobookImportService {
     private static func existingBookFolder(matchingEbookFiles urls: [URL], in root: URL) throws -> URL? {
         let ebooks = urls.filter { LibraryScanner.ebookExt.contains($0.pathExtension.lowercased()) }
         guard !ebooks.isEmpty else { return nil }
-        return try existingBookFolder(matchingEbookFingerprint: ebookFingerprint(for: ebooks), in: root)
+        let fingerprint = try ebookFingerprint(for: ebooks)
+        if let existing = try existingBookFolder(matchingEbookFingerprint: fingerprint, in: root) {
+            return existing
+        }
+        let incomingRaw = Set(try ebooks.map { try fileDigest($0) })
+        for folder in existingBookFolders(in: root) {
+            for ebook in ebookFiles(in: folder) {
+                if incomingRaw.contains(try fileDigest(ebook)) {
+                    return folder
+                }
+            }
+        }
+        return nil
     }
 
     private static func audioFingerprint(for urls: [URL]) throws -> String {
-        try contentFingerprint(for: urls)
+        try contentFingerprint(for: urls.map { try fileDigest($0) })
     }
 
     private static func ebookFingerprint(for urls: [URL]) throws -> String {
-        try contentFingerprint(for: urls)
+        try contentFingerprint(for: urls.map { try ebookPackageDigest($0) })
     }
 
-    private static func contentFingerprint(for urls: [URL]) throws -> String {
-        let digests = try urls.map(fileDigest).sorted()
-        return SHA256.hash(data: Data(digests.joined(separator: "|").utf8))
+    private static func contentFingerprint(for digests: [String]) throws -> String {
+        SHA256.hash(data: Data(digests.sorted().joined(separator: "|").utf8))
             .map { String(format: "%02x", $0) }
             .joined()
     }
@@ -390,13 +401,25 @@ enum AudiobookImportService {
                 continue
             }
             guard let destination = try uniqueDestination(for: source, in: folder) else { continue }
-            try FileManager.default.copyItem(at: source, to: destination)
+            try copyImportedFile(source, to: destination)
             added.append(destination.lastPathComponent)
         }
         return added
     }
 
+    private static func copyImportedFile(_ source: URL, to destination: URL) throws {
+        if EPUBParser.isPackage(at: source) {
+            try EPUBParser.packageFile(from: source, to: destination)
+            return
+        }
+        try FileManager.default.copyItem(at: source, to: destination)
+    }
+
     private static func fileDigest(_ url: URL) throws -> String {
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return try directoryContentDigest(url)
+        }
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
@@ -406,11 +429,37 @@ enum AudiobookImportService {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
+    private static func ebookPackageDigest(_ url: URL) throws -> String {
+        if EPUBParser.isPackage(at: url) {
+            return try directoryContentDigest(url)
+        }
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioReader-epub-hash-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.unzipItem(at: url, to: tmp)
+            return try directoryContentDigest(tmp)
+        } catch {
+            return try fileDigest(url)
+        }
+    }
+
+    private static func directoryContentDigest(_ root: URL) throws -> String {
+        let files = allFiles(in: root).sorted { $0.path < $1.path }
+        var hasher = SHA256()
+        for file in files {
+            hasher.update(data: Data(file.path.dropFirst(root.path.count).utf8))
+            hasher.update(data: try Data(contentsOf: file))
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     private static func copyCompanionFiles(from urls: [URL], to folder: URL) throws -> [String] {
         var added: [String] = []
         for source in urls where isSupportedImport(source) && !LibraryScanner.audioExt.contains(source.pathExtension.lowercased()) {
             guard let destination = try uniqueDestination(for: source, in: folder) else { continue }
-            try FileManager.default.copyItem(at: source, to: destination)
+            try copyImportedFile(source, to: destination)
             added.append(destination.lastPathComponent)
         }
         return added
@@ -420,7 +469,7 @@ enum AudiobookImportService {
         let fm = FileManager.default
         let initial = folder.appendingPathComponent(source.lastPathComponent)
         if !fm.fileExists(atPath: initial.path) { return initial }
-        if try fileDigest(source) == fileDigest(initial) { return nil }
+        if try sameImportedContent(source, initial) { return nil }
         let stem = source.deletingPathExtension().lastPathComponent
         let ext = source.pathExtension
         var suffix = 2
@@ -428,7 +477,7 @@ enum AudiobookImportService {
             let name = ext.isEmpty ? "\(stem) \(suffix)" : "\(stem) \(suffix).\(ext)"
             let candidate = folder.appendingPathComponent(name)
             if !fm.fileExists(atPath: candidate.path) { return candidate }
-            if try fileDigest(source) == fileDigest(candidate) { return nil }
+            if try sameImportedContent(source, candidate) { return nil }
             suffix += 1
         }
     }
@@ -490,7 +539,16 @@ enum AudiobookImportService {
             options: [.skipsHiddenFiles]
         )
         for entry in entries {
-            try FileManager.default.copyItem(at: entry, to: destination.appendingPathComponent(entry.lastPathComponent))
+            let target = destination.appendingPathComponent(entry.lastPathComponent)
+            try copyImportedFile(entry, to: target)
         }
+    }
+
+    private static func sameImportedContent(_ lhs: URL, _ rhs: URL) throws -> Bool {
+        if lhs.pathExtension.lowercased() == "epub" || rhs.pathExtension.lowercased() == "epub"
+            || EPUBParser.isPackage(at: lhs) || EPUBParser.isPackage(at: rhs) {
+            return try ebookPackageDigest(lhs) == ebookPackageDigest(rhs)
+        }
+        return try fileDigest(lhs) == fileDigest(rhs)
     }
 }

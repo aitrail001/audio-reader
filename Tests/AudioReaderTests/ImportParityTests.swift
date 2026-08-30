@@ -21,6 +21,88 @@ struct ImportParityTests {
         #expect(extracted?.contains("shared EPUB extraction") == true)
     }
 
+    @Test("EPUB parser reads an exploded Apple Books package directory")
+    func extractsTextFromExplodedEPUBPackage() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let package = try fixture.makeExplodedEPUB(
+            named: "ABC123.epub",
+            in: fixture.root,
+            title: "Exploded Book",
+            author: "Package Author",
+            paragraph: "Apple Books stores many ebooks as unpacked EPUB folders instead of zip files, and AudioReader must read those packages."
+        )
+
+        #expect(EPUBParser.isPackage(at: package))
+        let document = try #require(EPUBParser.document(from: package.path))
+        #expect(document.title == "Exploded Book")
+        #expect(document.author == "Package Author")
+        #expect(document.text.contains("unpacked EPUB folders"))
+    }
+
+    @Test("Apple Books catalog lists exploded EPUB packages from Books.plist")
+    func appleBooksCatalogListsExplodedEpubs() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let package = try fixture.makeExplodedEPUB(
+            named: "54C9E2BD.epub",
+            in: fixture.root,
+            title: "Quiet Book",
+            author: "Catalog Author",
+            paragraph: "Catalog metadata should surface exploded Apple Books ebooks that are not zip files."
+        )
+        let plist: [String: Any] = [
+            "Books": [
+                [
+                    "BKBookType": "epub",
+                    "itemName": "Quiet Book",
+                    "artistName": "Catalog Author",
+                    "path": package.path,
+                    "BKGeneratedItemId": "54C9E2BD"
+                ],
+                [
+                    "BKBookType": "audiobook",
+                    "itemName": "Skip Me",
+                    "artistName": "Narrator",
+                    "path": "/tmp/audio.m4b",
+                    "BKGeneratedItemId": "audio-1"
+                ]
+            ]
+        ]
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+
+        let records = try AppleBooksEbookCatalog.records(fromPlist: data)
+
+        #expect(records.count == 1)
+        #expect(records[0].title == "Quiet Book")
+        #expect(records[0].author == "Catalog Author")
+        #expect(records[0].path == package)
+        #expect(EPUBParser.document(from: records[0].path.path) != nil)
+    }
+
+    @Test("Importing an exploded Apple Books package stores a zipped EPUB")
+    func importsExplodedAppleBooksPackage() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
+        let package = try fixture.makeExplodedEPUB(
+            named: "210131D0.epub",
+            in: fixture.root,
+            title: "Imported Package",
+            author: "Package Author",
+            paragraph: "Import should zip an unpacked Apple Books EPUB so the library scanner can keep it."
+        )
+
+        try AudiobookImportService.importFiles([package], into: library)
+        let book = try #require(LibraryScanner.scan(root: library).first)
+        let ebook = try #require(book.ebookPath.map(URL.init(fileURLWithPath:)))
+        var isDirectory: ObjCBool = false
+        #expect(FileManager.default.fileExists(atPath: ebook.path, isDirectory: &isDirectory))
+        #expect(isDirectory.boolValue == false)
+        #expect(EPUBParser.document(from: ebook.path)?.text.contains("unpacked Apple Books EPUB") == true)
+    }
+
     @Test("File import copies audio and companion ebook with source metadata")
     func importsFiles() throws {
         let fixture = try TemporaryFixture()
@@ -1542,12 +1624,12 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.57")
-        #expect(plist["CFBundleVersion"] as? String == "58")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.57")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "58")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.57;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 58;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.58")
+        #expect(plist["CFBundleVersion"] as? String == "59")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.58")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "59")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.58;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 59;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
     }
@@ -1596,5 +1678,47 @@ private struct TemporaryFixture {
         try FileManager.default.zipItem(at: source, to: epub, shouldKeepParent: false, compressionMethod: .deflate)
         try FileManager.default.removeItem(at: source)
         return epub
+    }
+
+    func makeExplodedEPUB(
+        named: String,
+        in directory: URL,
+        title: String,
+        author: String,
+        paragraph: String
+    ) throws -> URL {
+        let package = directory.appendingPathComponent(named, isDirectory: true)
+        let meta = package.appendingPathComponent("META-INF", isDirectory: true)
+        let oebps = package.appendingPathComponent("OEBPS", isDirectory: true)
+        try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: oebps, withIntermediateDirectories: true)
+        try Data("application/epub+zip".utf8).write(to: package.appendingPathComponent("mimetype"))
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">
+          <rootfiles>
+            <rootfile media-type="application/oebps-package+xml" full-path="OEBPS/content.opf"/>
+          </rootfiles>
+        </container>
+        """.utf8).write(to: meta.appendingPathComponent("container.xml"))
+        try Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="3.0">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <dc:title>\(title)</dc:title>
+            <dc:creator>\(author)</dc:creator>
+            <dc:identifier id="bookid">urn:uuid:\(UUID().uuidString)</dc:identifier>
+          </metadata>
+          <manifest>
+            <item id="ch1" href="chapter.xhtml" media-type="application/xhtml+xml"/>
+          </manifest>
+          <spine>
+            <itemref idref="ch1"/>
+          </spine>
+        </package>
+        """.utf8).write(to: oebps.appendingPathComponent("content.opf"))
+        try Data("<html><body><p>\(paragraph)</p></body></html>".utf8)
+            .write(to: oebps.appendingPathComponent("chapter.xhtml"))
+        return package
     }
 }

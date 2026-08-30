@@ -60,7 +60,7 @@ xcrun simctl launch booted com.johnsonzhang.AudioReader
 
 ### Import a book
 
-On macOS, use **Import** to select audio files, EPUB files, a book folder, or an accessible downloaded title from Apple Books. You can also choose a library folder containing one subfolder per book.
+On macOS, use **Import** to select audio files, EPUB files, a book folder, or an accessible downloaded title from Apple Books. Apple Books ebooks are often stored as unpacked EPUB packages rather than `.epub` zip files; AudioReader lists those packages and imports them as EPUB files. You can also choose a library folder containing one subfolder per book.
 
 On iPad, use **Import Files** or **Import Folder** to choose audio and/or EPUB resources from Files or iCloud Drive. The **Apple Books & Device** source lists audiobooks exposed through the device media library; EPUBs on iPad are imported through Files.
 

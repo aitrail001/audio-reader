@@ -20,9 +20,23 @@ enum EPUBParser {
         document(from: epubPath)?.text
     }
 
+    static func isPackage(at url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              isDirectory.boolValue
+        else { return false }
+        let meta = url.appendingPathComponent("META-INF/container.xml")
+        let mimetype = url.appendingPathComponent("mimetype")
+        return FileManager.default.fileExists(atPath: meta.path)
+            || FileManager.default.fileExists(atPath: mimetype.path)
+    }
+
     static func document(from epubPath: String) -> EPUBDocument? {
         let epub = URL(fileURLWithPath: epubPath)
         guard FileManager.default.fileExists(atPath: epub.path) else { return nil }
+        if isPackage(at: epub) {
+            return document(fromPackageRoot: epub)
+        }
 
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("AudioReader-epub-\(UUID().uuidString)", isDirectory: true)
@@ -30,8 +44,27 @@ enum EPUBParser {
         try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
 
         guard (try? FileManager.default.unzipItem(at: epub, to: tmp)) != nil else { return nil }
+        return document(fromPackageRoot: tmp)
+    }
 
-        let htmls = contentDocuments(in: tmp)
+    static func packageFile(from source: URL, to destination: URL) throws {
+        if isPackage(at: source) {
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
+            try FileManager.default.zipItem(
+                at: source,
+                to: destination,
+                shouldKeepParent: false,
+                compressionMethod: .deflate
+            )
+            return
+        }
+        try FileManager.default.copyItem(at: source, to: destination)
+    }
+
+    private static func document(fromPackageRoot root: URL) -> EPUBDocument? {
+        let htmls = contentDocuments(in: root)
         var parts: [String] = []
         for file in htmls {
             let raw = (try? String(contentsOf: file, encoding: .utf8))
@@ -43,7 +76,7 @@ enum EPUBParser {
         }
         let joined = parts.joined(separator: "\n\n")
         guard !joined.isEmpty else { return nil }
-        let metadata = packageMetadata(in: tmp)
+        let metadata = packageMetadata(in: root)
         return EPUBDocument(text: joined, title: metadata.title, author: metadata.author)
     }
 
