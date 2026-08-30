@@ -73,14 +73,25 @@ final class DeviceAudiobookLibrary {
             : "Found \(available) audiobooks on this iPad."
     }
 
-    func importAudiobook(_ item: DeviceAudiobookItem) async throws -> AudiobookImportResult {
+    func importAudiobook(
+        _ item: DeviceAudiobookItem,
+        existing existingPolicy: ExistingBookImport = .skip
+    ) async throws -> AudiobookImportResult {
         guard item.canImport, let assetURL = item.assetURL else {
             throw AudiobookImportError.protectedOrUnavailable
         }
         let chapters = await M4BChapterExtractor.extract(from: assetURL)
         if let existing = AudiobookImportService.existingBookFolder(deviceID: item.id) {
-            try updateMetadata(for: item, chapters: chapters, in: existing)
-            return .init(folder: existing, createdBook: false, addedFileNames: [])
+            if existingPolicy == .skip {
+                try updateMetadata(for: item, chapters: chapters, in: existing)
+                return .init(
+                    folder: existing,
+                    createdBook: false,
+                    addedFileNames: [],
+                    outcome: .alreadyImported,
+                    title: item.title
+                )
+            }
         }
 
         let staging = Persistence.importedBooksURL
@@ -102,9 +113,31 @@ final class DeviceAudiobookLibrary {
         }
 
         if let existing = try AudiobookImportService.existingBookFolder(matchingAudioAt: stagedAudio) {
-            try AudiobookImportService.writeDeviceID(item.id, to: existing)
-            try updateMetadata(for: item, chapters: chapters, in: existing)
-            return .init(folder: existing, createdBook: false, addedFileNames: [])
+            if existingPolicy == .skip {
+                try AudiobookImportService.writeDeviceID(item.id, to: existing)
+                try updateMetadata(for: item, chapters: chapters, in: existing)
+                return .init(
+                    folder: existing,
+                    createdBook: false,
+                    addedFileNames: [],
+                    outcome: .alreadyImported,
+                    title: item.title
+                )
+            }
+            let result = try AudiobookImportService.importFiles(
+                [stagedAudio],
+                into: Persistence.importedBooksURL,
+                existing: .replace
+            )
+            try AudiobookImportService.writeDeviceID(item.id, to: result.folder)
+            try updateMetadata(for: item, chapters: chapters, in: result.folder)
+            return .init(
+                folder: result.folder,
+                createdBook: false,
+                addedFileNames: result.addedFileNames,
+                outcome: .replaced,
+                title: item.title
+            )
         }
 
         let folder = try AudiobookImportService.newBookFolder(title: item.title)
@@ -114,7 +147,13 @@ final class DeviceAudiobookLibrary {
         try FileManager.default.moveItem(at: stagedAudio, to: destination)
         try AudiobookImportService.recordAudioFingerprint(for: destination, in: folder)
         try updateMetadata(for: item, chapters: chapters, in: folder)
-        return .init(folder: folder, createdBook: true, addedFileNames: [destination.lastPathComponent])
+        return .init(
+            folder: folder,
+            createdBook: true,
+            addedFileNames: [destination.lastPathComponent],
+            outcome: .created,
+            title: item.title
+        )
     }
 
     private func updateMetadata(

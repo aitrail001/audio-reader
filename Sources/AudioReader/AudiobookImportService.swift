@@ -1,10 +1,100 @@
 import CryptoKit
 import Foundation
 
+enum ExistingBookImport: Equatable, Sendable {
+    case skip
+    case replace
+}
+
+enum BookImportOutcome: Equatable, Sendable {
+    case created
+    case enriched
+    case alreadyImported
+    case replaced
+}
+
+enum BookImportConfirmation {
+    static func title(count: Int = 1) -> String {
+        count <= 1 ? "Already in Library" : "Books Already in Library"
+    }
+
+    static func message(bookTitle: String) -> String {
+        "“\(bookTitle)” is already in your library. Re-import and replace the existing files?"
+    }
+
+    static func message(count: Int) -> String {
+        "\(count) of these books are already in your library. Re-import them and replace the existing files?"
+    }
+
+    static func summary(_ result: AudiobookImportResult) -> String {
+        switch result.outcome {
+        case .created:
+            return "Imported \(result.title)."
+        case .enriched:
+            return result.addedFileNames.isEmpty
+                ? "Updated \(result.title)."
+                : "Added \(result.addedFileNames.joined(separator: ", ")) to \(result.title)."
+        case .alreadyImported:
+            return "“\(result.title)” is already in your library."
+        case .replaced:
+            return "Re-imported \(result.title)."
+        }
+    }
+
+    static func summary(_ results: [AudiobookImportResult]) -> String {
+        if results.count == 1 { return summary(results[0]) }
+        let created = results.filter { $0.outcome == .created }.count
+        let replaced = results.filter { $0.outcome == .replaced }.count
+        let enriched = results.filter { $0.outcome == .enriched }.count
+        let skipped = results.filter { $0.outcome == .alreadyImported }.count
+        var parts: [String] = []
+        if created > 0 { parts.append("imported \(created)") }
+        if replaced > 0 { parts.append("re-imported \(replaced)") }
+        if enriched > 0 { parts.append("updated \(enriched)") }
+        if skipped > 0 { parts.append("skipped \(skipped) already in the library") }
+        guard !parts.isEmpty else { return "No books were imported." }
+        let sentence = parts.joined(separator: ", ")
+        return sentence.prefix(1).uppercased() + sentence.dropFirst() + "."
+    }
+}
+
+struct PendingBookReimport: Identifiable, Equatable, Sendable {
+    var id = UUID()
+    var title: String
+    var count: Int = 1
+    var files: [URL] = []
+    var folder: URL?
+    var appleBookID: String?
+    var deviceID: UInt64?
+
+    var dialogTitle: String { BookImportConfirmation.title(count: count) }
+    var message: String {
+        count <= 1
+            ? BookImportConfirmation.message(bookTitle: title)
+            : BookImportConfirmation.message(count: count)
+    }
+}
+
 struct AudiobookImportResult: Sendable {
     var folder: URL
     var createdBook: Bool
     var addedFileNames: [String]
+    var outcome: BookImportOutcome
+    var title: String
+
+    init(
+        folder: URL,
+        createdBook: Bool,
+        addedFileNames: [String],
+        outcome: BookImportOutcome? = nil,
+        title: String = ""
+    ) {
+        self.folder = folder
+        self.createdBook = createdBook
+        self.addedFileNames = addedFileNames
+        self.outcome = outcome ?? (createdBook ? .created : (addedFileNames.isEmpty ? .alreadyImported : .enriched))
+        self.title = title
+    }
 }
 
 final class EbookReplacementTransaction {
@@ -76,56 +166,71 @@ enum AudiobookImportService {
     private static let ebookFingerprintMarker = ".audioreader-ebook-fingerprint"
 
     @discardableResult
-    static func importFiles(_ urls: [URL], into root: URL = Persistence.importedBooksURL) throws -> AudiobookImportResult {
+    static func importFiles(
+        _ urls: [URL],
+        into root: URL = Persistence.importedBooksURL,
+        existing existingPolicy: ExistingBookImport = .skip
+    ) throws -> AudiobookImportResult {
         let accessed = urls.filter { $0.startAccessingSecurityScopedResource() }
         defer { accessed.forEach { $0.stopAccessingSecurityScopedResource() } }
         let audio = urls.filter { LibraryScanner.audioExt.contains($0.pathExtension.lowercased()) }
         let ebooks = urls.filter { LibraryScanner.ebookExt.contains($0.pathExtension.lowercased()) }
         guard !audio.isEmpty || !ebooks.isEmpty else { throw AudiobookImportError.noImportableMedia }
+        let guessedTitle = audio.first?.deletingPathExtension().lastPathComponent
+            ?? ebooks.first?.deletingPathExtension().lastPathComponent
+            ?? "Imported Book"
+
+        if let match = try matchingExistingFolder(audio: audio, ebooks: ebooks, in: root) {
+            return try applyExisting(
+                urls,
+                audio: audio,
+                ebooks: ebooks,
+                to: match,
+                title: bookTitle(in: match.folder) ?? guessedTitle,
+                existingPolicy: existingPolicy
+            )
+        }
 
         if !audio.isEmpty {
             let fingerprint = try audioFingerprint(for: audio)
-            if let existing = try existingBookFolder(matchingAudioFingerprint: fingerprint, in: root) {
-                let added = try copyCompanionFiles(from: urls, to: existing)
-                try writeEbookFingerprint(from: ebooks, to: existing)
-                return .init(folder: existing, createdBook: false, addedFileNames: added)
-            }
-            if let existing = try existingBookFolder(matchingEbookFiles: ebooks, in: root) {
-                let added = try copyImportFiles(urls, to: existing, excludingExistingAudio: true)
-                try writeMarker(fingerprint, named: fingerprintMarker, to: existing)
-                try writeEbookFingerprint(from: ebookFiles(in: existing), to: existing)
-                return .init(folder: existing, createdBook: false, addedFileNames: added)
-            }
-            let title = audio.first?.deletingPathExtension().lastPathComponent
-                ?? ebooks.first?.deletingPathExtension().lastPathComponent
-                ?? "Imported Book"
-            let folder = try newBookFolder(title: title, in: root)
-            try writeMarkers(source: .files, title: title, author: nil, to: folder)
+            let folder = try newBookFolder(title: guessedTitle, in: root)
+            try writeMarkers(source: .files, title: guessedTitle, author: nil, to: folder)
             for url in urls where isSupportedImport(url) {
                 try copyImportedFile(url, to: folder.appendingPathComponent(url.lastPathComponent))
             }
             try writeMarker(fingerprint, named: fingerprintMarker, to: folder)
             try writeEbookFingerprint(from: ebookFiles(in: folder), to: folder)
-            return .init(folder: folder, createdBook: true, addedFileNames: urls.map(\.lastPathComponent))
+            return .init(
+                folder: folder,
+                createdBook: true,
+                addedFileNames: urls.map(\.lastPathComponent),
+                outcome: .created,
+                title: guessedTitle
+            )
         }
 
-        if let existing = try existingBookFolder(matchingEbookFiles: ebooks, in: root) {
-            let added = try copyCompanionFiles(from: urls, to: existing)
-            return .init(folder: existing, createdBook: false, addedFileNames: added)
-        }
         let incomingEbookFingerprint = try ebookFingerprint(for: ebooks)
-        let title = ebooks.first?.deletingPathExtension().lastPathComponent ?? "Imported Book"
-        let folder = try newBookFolder(title: title, in: root)
-        try writeMarkers(source: .files, title: title, author: nil, to: folder)
+        let folder = try newBookFolder(title: guessedTitle, in: root)
+        try writeMarkers(source: .files, title: guessedTitle, author: nil, to: folder)
         for url in urls where isSupportedImport(url) {
             try copyImportedFile(url, to: folder.appendingPathComponent(url.lastPathComponent))
         }
         try writeMarker(incomingEbookFingerprint, named: ebookFingerprintMarker, to: folder)
-        return .init(folder: folder, createdBook: true, addedFileNames: urls.map(\.lastPathComponent))
+        return .init(
+            folder: folder,
+            createdBook: true,
+            addedFileNames: urls.map(\.lastPathComponent),
+            outcome: .created,
+            title: guessedTitle
+        )
     }
 
     @discardableResult
-    static func importFolder(_ url: URL, into root: URL = Persistence.importedBooksURL) throws -> [AudiobookImportResult] {
+    static func importFolder(
+        _ url: URL,
+        into root: URL = Persistence.importedBooksURL,
+        existing existingPolicy: ExistingBookImport = .skip
+    ) throws -> [AudiobookImportResult] {
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
         let children = (try? FileManager.default.contentsOfDirectory(
@@ -144,37 +249,46 @@ enum AudiobookImportService {
         return try sources.map { source in
             let audio = audioFiles(in: source)
             let ebooks = ebookFiles(in: source)
+            let incoming = allFiles(in: source)
+            let guessedTitle = source.lastPathComponent
+            if let match = try matchingExistingFolder(audio: audio, ebooks: ebooks, in: root) {
+                return try applyExisting(
+                    incoming,
+                    audio: audio,
+                    ebooks: ebooks,
+                    to: match,
+                    title: bookTitle(in: match.folder) ?? guessedTitle,
+                    existingPolicy: existingPolicy
+                )
+            }
             if !audio.isEmpty {
                 let fingerprint = try audioFingerprint(for: audio)
-                if let existing = try existingBookFolder(matchingAudioFingerprint: fingerprint, in: root) {
-                    let added = try copyCompanionFiles(from: allFiles(in: source), to: existing)
-                    try writeEbookFingerprint(from: ebooks, to: existing)
-                    return .init(folder: existing, createdBook: false, addedFileNames: added)
-                }
-                if let existing = try existingBookFolder(matchingEbookFiles: ebooks, in: root) {
-                    let added = try copyImportFiles(allFiles(in: source), to: existing, excludingExistingAudio: true)
-                    try writeMarker(fingerprint, named: fingerprintMarker, to: existing)
-                    try writeEbookFingerprint(from: ebookFiles(in: existing), to: existing)
-                    return .init(folder: existing, createdBook: false, addedFileNames: added)
-                }
-                let destination = try newBookFolder(title: source.lastPathComponent, in: root)
+                let destination = try newBookFolder(title: guessedTitle, in: root)
                 try copyDirectoryContents(from: source, to: destination)
-                try writeMarkers(source: .localFolder, title: source.lastPathComponent, author: nil, to: destination)
+                try writeMarkers(source: .localFolder, title: guessedTitle, author: nil, to: destination)
                 try writeMarker(fingerprint, named: fingerprintMarker, to: destination)
                 try writeEbookFingerprint(from: ebookFiles(in: destination), to: destination)
-                return .init(folder: destination, createdBook: true, addedFileNames: allFiles(in: source).map(\.lastPathComponent))
+                return .init(
+                    folder: destination,
+                    createdBook: true,
+                    addedFileNames: incoming.map(\.lastPathComponent),
+                    outcome: .created,
+                    title: guessedTitle
+                )
             }
             guard !ebooks.isEmpty else { throw AudiobookImportError.noImportableMedia }
             let incomingEbookFingerprint = try ebookFingerprint(for: ebooks)
-            if let existing = try existingBookFolder(matchingEbookFingerprint: incomingEbookFingerprint, in: root) {
-                let added = try copyCompanionFiles(from: allFiles(in: source), to: existing)
-                return .init(folder: existing, createdBook: false, addedFileNames: added)
-            }
-            let destination = try newBookFolder(title: source.lastPathComponent, in: root)
+            let destination = try newBookFolder(title: guessedTitle, in: root)
             try copyDirectoryContents(from: source, to: destination)
-            try writeMarkers(source: .localFolder, title: source.lastPathComponent, author: nil, to: destination)
+            try writeMarkers(source: .localFolder, title: guessedTitle, author: nil, to: destination)
             try writeMarker(incomingEbookFingerprint, named: ebookFingerprintMarker, to: destination)
-            return .init(folder: destination, createdBook: true, addedFileNames: allFiles(in: source).map(\.lastPathComponent))
+            return .init(
+                folder: destination,
+                createdBook: true,
+                addedFileNames: incoming.map(\.lastPathComponent),
+                outcome: .created,
+                title: guessedTitle
+            )
         }
     }
 
@@ -321,6 +435,112 @@ enum AudiobookImportService {
         return LibraryScanner.audioExt.contains(ext)
             || LibraryScanner.ebookExt.contains(ext)
             || LibraryScanner.coverExt.contains(ext)
+    }
+
+    private struct ExistingBookMatch {
+        var folder: URL
+        var matchedAudio: Bool
+        var matchedEbook: Bool
+    }
+
+    private static func matchingExistingFolder(audio: [URL], ebooks: [URL], in root: URL) throws -> ExistingBookMatch? {
+        let audioFolder: URL?
+        if audio.isEmpty {
+            audioFolder = nil
+        } else {
+            audioFolder = try existingBookFolder(
+                matchingAudioFingerprint: audioFingerprint(for: audio),
+                in: root
+            )
+        }
+        let ebookFolder = try existingBookFolder(matchingEbookFiles: ebooks, in: root)
+        if let audioFolder {
+            return ExistingBookMatch(
+                folder: audioFolder,
+                matchedAudio: true,
+                matchedEbook: ebookFolder == audioFolder
+            )
+        }
+        if let ebookFolder {
+            return ExistingBookMatch(folder: ebookFolder, matchedAudio: false, matchedEbook: true)
+        }
+        return nil
+    }
+
+    private static func applyExisting(
+        _ urls: [URL],
+        audio: [URL],
+        ebooks: [URL],
+        to match: ExistingBookMatch,
+        title: String,
+        existingPolicy: ExistingBookImport
+    ) throws -> AudiobookImportResult {
+        let folder = match.folder
+        if existingPolicy == .replace {
+            let replaced = try replaceImportedFiles(urls, in: folder)
+            if !audioFiles(in: folder).isEmpty {
+                try writeMarker(try audioFingerprint(for: audioFiles(in: folder)), named: fingerprintMarker, to: folder)
+            }
+            try writeEbookFingerprint(from: ebookFiles(in: folder), to: folder)
+            return .init(
+                folder: folder,
+                createdBook: false,
+                addedFileNames: replaced,
+                outcome: .replaced,
+                title: title
+            )
+        }
+        if addsMissingCompanion(to: match, audio: audio, ebooks: ebooks) {
+            let added: [String]
+            if !match.matchedAudio, audioFiles(in: folder).isEmpty, !audio.isEmpty {
+                added = try copyImportFiles(urls, to: folder, excludingExistingAudio: true)
+                try writeMarker(try audioFingerprint(for: audioFiles(in: folder)), named: fingerprintMarker, to: folder)
+            } else {
+                added = try copyCompanionFiles(from: urls, to: folder)
+            }
+            try writeEbookFingerprint(from: ebookFiles(in: folder), to: folder)
+            return .init(
+                folder: folder,
+                createdBook: false,
+                addedFileNames: added,
+                outcome: added.isEmpty ? .alreadyImported : .enriched,
+                title: title
+            )
+        }
+        return .init(
+            folder: folder,
+            createdBook: false,
+            addedFileNames: [],
+            outcome: .alreadyImported,
+            title: title
+        )
+    }
+
+    private static func addsMissingCompanion(
+        to match: ExistingBookMatch,
+        audio: [URL],
+        ebooks: [URL]
+    ) -> Bool {
+        let addAudio = !audio.isEmpty && audioFiles(in: match.folder).isEmpty && !match.matchedAudio
+        let addEbook = !ebooks.isEmpty && ebookFiles(in: match.folder).isEmpty && !match.matchedEbook
+        return addAudio || addEbook
+    }
+
+    private static func replaceImportedFiles(_ urls: [URL], in folder: URL) throws -> [String] {
+        var replaced: [String] = []
+        for source in urls where isSupportedImport(source) {
+            let destination = folder.appendingPathComponent(source.lastPathComponent)
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
+            try copyImportedFile(source, to: destination)
+            replaced.append(destination.lastPathComponent)
+        }
+        return replaced
+    }
+
+    private static func bookTitle(in folder: URL) -> String? {
+        textMarker(named: ".audioreader-title", in: folder) ?? folder.lastPathComponent
     }
 
     private static func existingBookFolder(matchingAudioFingerprint fingerprint: String, in root: URL) throws -> URL? {

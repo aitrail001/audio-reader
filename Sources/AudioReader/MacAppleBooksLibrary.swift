@@ -185,11 +185,29 @@ final class MacAppleBooksLibrary {
         )
     }
 
-    func importAudiobook(_ item: MacAppleBookItem, into libraryRoot: URL) throws {
+    @discardableResult
+    func importAudiobook(
+        _ item: MacAppleBookItem,
+        into libraryRoot: URL,
+        existing: ExistingBookImport = .skip
+    ) throws -> AudiobookImportResult {
         guard item.canImport, let location = item.location else {
             throw AudiobookImportError.protectedOrUnavailable
         }
-        let result = try AudiobookImportService.importFiles([location], into: libraryRoot)
+        let result = try AudiobookImportService.importFiles(
+            [location],
+            into: libraryRoot,
+            existing: existing
+        )
+        if result.outcome == .alreadyImported {
+            return .init(
+                folder: result.folder,
+                createdBook: false,
+                addedFileNames: [],
+                outcome: .alreadyImported,
+                title: item.title
+            )
+        }
         let folder = result.folder
         try AudiobookImportService.writeMarkers(
             source: .deviceAudiobooks,
@@ -200,6 +218,13 @@ final class MacAppleBooksLibrary {
         if let artworkData = item.artworkData {
             try artworkData.write(to: folder.appendingPathComponent("cover.jpg"), options: .atomic)
         }
+        return .init(
+            folder: folder,
+            createdBook: result.createdBook,
+            addedFileNames: result.addedFileNames,
+            outcome: result.outcome,
+            title: item.title
+        )
     }
 
     func openBooks() {

@@ -128,6 +128,7 @@ struct IPadRootView: View {
     @State private var importMessage: String?
     @State private var importError: String?
     @State private var pendingBookDelete: Book?
+    @State private var pendingReimport: PendingBookReimport?
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -201,6 +202,19 @@ struct IPadRootView: View {
                 }
                 importRequest = nil
             }
+        }
+        .confirmationDialog(
+            pendingReimport?.dialogTitle ?? BookImportConfirmation.title(),
+            isPresented: Binding(
+                get: { pendingReimport != nil },
+                set: { if !$0 { pendingReimport = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Re-Import") { confirmReimport() }
+            Button("Keep Existing", role: .cancel) { pendingReimport = nil }
+        } message: {
+            Text(pendingReimport?.message ?? "")
         }
         .alert("Import failed", isPresented: Binding(
             get: { importError != nil },
@@ -315,7 +329,7 @@ struct IPadRootView: View {
                 importingID: importingDeviceID,
                 importMessage: importMessage,
                 onRefresh: { Task { await deviceLibrary.requestAccessAndReload() } },
-                onImport: importDeviceAudiobook,
+                onImport: { importDeviceAudiobook($0) },
                 onDelete: { pendingBookDelete = $0 }
             )
             .navigationTitle("Apple Books & Device")
@@ -447,19 +461,20 @@ struct IPadRootView: View {
 
     private func importFiles(_ result: Result<[URL], any Error>) {
         do {
-            let urls = try result.get()
-            let imported = try AudiobookImportService.importFiles(urls)
-            if imported.createdBook {
-                importMessage = "Imported \(urls.count) selected files."
-            } else if !imported.addedFileNames.isEmpty {
-                importMessage = "Audiobook already imported; added \(imported.addedFileNames.joined(separator: ", "))."
-            } else {
-                importMessage = "This exact audiobook is already imported."
-            }
-            Task { await state.rescan() }
+            try finishFileImport(try result.get(), existing: .skip)
         } catch {
             importError = error.localizedDescription
         }
+    }
+
+    private func finishFileImport(_ urls: [URL], existing: ExistingBookImport) throws {
+        let imported = try AudiobookImportService.importFiles(urls, existing: existing)
+        if existing == .skip, imported.outcome == .alreadyImported {
+            pendingReimport = PendingBookReimport(title: imported.title, files: urls)
+            return
+        }
+        importMessage = BookImportConfirmation.summary(imported)
+        Task { await state.rescan() }
     }
 
     private func importAudio(_ result: Result<[URL], any Error>, bookID: String) {
@@ -505,24 +520,61 @@ struct IPadRootView: View {
     private func importFolder(_ result: Result<[URL], any Error>) {
         do {
             guard let url = try result.get().first else { return }
-            try AudiobookImportService.importFolder(url)
-            importMessage = "Imported \(url.lastPathComponent)."
-            Task { await state.rescan() }
+            try finishFolderImport(url, existing: .skip)
         } catch {
             importError = error.localizedDescription
         }
     }
 
-    private func importDeviceAudiobook(_ item: DeviceAudiobookItem) {
+    private func finishFolderImport(_ url: URL, existing: ExistingBookImport) throws {
+        let results = try AudiobookImportService.importFolder(url, existing: existing)
+        let skipped = results.filter { $0.outcome == .alreadyImported }
+        if existing == .skip, !skipped.isEmpty, skipped.count == results.count {
+            pendingReimport = PendingBookReimport(
+                title: skipped[0].title,
+                count: skipped.count,
+                folder: url
+            )
+            return
+        }
+        importMessage = BookImportConfirmation.summary(results)
+        Task { await state.rescan() }
+    }
+
+    private func confirmReimport() {
+        guard let pending = pendingReimport else { return }
+        pendingReimport = nil
+        if let deviceID = pending.deviceID,
+           let item = deviceLibrary.items.first(where: { $0.id == deviceID }) {
+            importDeviceAudiobook(item, existing: .replace)
+            return
+        }
+        do {
+            if let folder = pending.folder {
+                try finishFolderImport(folder, existing: .replace)
+            } else if !pending.files.isEmpty {
+                try finishFileImport(pending.files, existing: .replace)
+            }
+        } catch {
+            importError = error.localizedDescription
+        }
+    }
+
+    private func importDeviceAudiobook(_ item: DeviceAudiobookItem, existing: ExistingBookImport = .skip) {
         guard importingDeviceID == nil else { return }
         importingDeviceID = item.id
         Task {
             defer { importingDeviceID = nil }
             do {
-                let result = try await deviceLibrary.importAudiobook(item)
-                importMessage = result.createdBook
-                    ? "Imported \(item.title)."
-                    : "\(item.title) is already imported; its metadata was updated."
+                let result = try await deviceLibrary.importAudiobook(item, existing: existing)
+                if existing == .skip, result.outcome == .alreadyImported {
+                    pendingReimport = PendingBookReimport(
+                        title: item.title,
+                        deviceID: item.id
+                    )
+                    return
+                }
+                importMessage = BookImportConfirmation.summary(result)
                 await state.rescan()
                 state.selectedBookID = state.books.last {
                     $0.source == .deviceAudiobooks && $0.title == item.title

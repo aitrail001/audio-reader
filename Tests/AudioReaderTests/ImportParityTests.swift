@@ -180,9 +180,13 @@ struct ImportParityTests {
         try bytes.write(to: secondAudio)
 
         try AudiobookImportService.importFiles([firstAudio], into: library)
-        try AudiobookImportService.importFiles([secondAudio], into: library)
+        let skipped = try AudiobookImportService.importFiles([secondAudio], into: library)
 
         #expect(LibraryScanner.scan(root: library).count == 1)
+        #expect(skipped.outcome == .alreadyImported)
+        #expect(skipped.addedFileNames.isEmpty)
+        #expect(BookImportConfirmation.message(bookTitle: skipped.title).contains("already in your library"))
+        #expect(BookImportConfirmation.message(bookTitle: skipped.title).contains("Re-import"))
     }
 
     @Test("Books with the same name but different audio content remain distinct")
@@ -218,12 +222,13 @@ struct ImportParityTests {
         try Data("later ebook content".utf8).write(to: ebook)
 
         try AudiobookImportService.importFiles([audio], into: library)
-        try AudiobookImportService.importFiles([audio, ebook], into: library)
+        let enriched = try AudiobookImportService.importFiles([audio, ebook], into: library)
 
         let books = LibraryScanner.scan(root: library)
         let book = try #require(books.first)
         #expect(books.count == 1)
         #expect(book.ebookPath != nil)
+        #expect(enriched.outcome == .enriched)
     }
 
     @Test("EPUB-only file import creates a readable book without audio")
@@ -290,8 +295,65 @@ struct ImportParityTests {
         try FileManager.default.copyItem(at: firstEbook, to: secondEbook)
 
         try AudiobookImportService.importFiles([firstEbook], into: library)
-        try AudiobookImportService.importFiles([secondEbook], into: library)
+        let skipped = try AudiobookImportService.importFiles([secondEbook], into: library)
 
+        #expect(LibraryScanner.scan(root: library).count == 1)
+        #expect(skipped.outcome == .alreadyImported)
+        #expect(skipped.addedFileNames.isEmpty)
+    }
+
+    @Test("An already imported book is not copied again until re-import is confirmed")
+    func reimportsExistingBookOnlyWhenConfirmed() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let incoming = fixture.root.appendingPathComponent("incoming", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+        let audio = incoming.appendingPathComponent("Study Book.m4b")
+        try Data("stable audiobook content for reimport".utf8).write(to: audio)
+
+        let first = try AudiobookImportService.importFiles([audio], into: library)
+        let folder = first.folder
+        let stored = folder.appendingPathComponent("Study Book.m4b")
+        try FileManager.default.removeItem(at: stored)
+        #expect(!FileManager.default.fileExists(atPath: stored.path))
+
+        let skipped = try AudiobookImportService.importFiles([audio], into: library)
+        #expect(skipped.outcome == .alreadyImported)
+        #expect(!FileManager.default.fileExists(atPath: stored.path))
+        #expect(FileManager.default.fileExists(atPath: folder.path))
+
+        let replaced = try AudiobookImportService.importFiles(
+            [audio],
+            into: library,
+            existing: .replace
+        )
+        #expect(replaced.outcome == .replaced)
+        #expect(FileManager.default.fileExists(atPath: stored.path))
+        #expect(LibraryScanner.scan(root: library).count == 1)
+        #expect(try Data(contentsOf: stored) == Data("stable audiobook content for reimport".utf8))
+    }
+
+    @Test("Folder import skips an already imported book until re-import is confirmed")
+    func folderImportSkipsUntilReimportConfirmed() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let source = fixture.root.appendingPathComponent("Study Folder", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try Data("folder audiobook bytes".utf8).write(to: source.appendingPathComponent("chapter.m4b"))
+
+        let created = try AudiobookImportService.importFolder(source, into: library)
+        #expect(created.map(\.outcome) == [.created])
+        try FileManager.default.removeItem(at: created[0].folder.appendingPathComponent("chapter.m4b"))
+
+        let skipped = try AudiobookImportService.importFolder(source, into: library)
+        #expect(skipped.map(\.outcome) == [.alreadyImported])
+        #expect(!FileManager.default.fileExists(atPath: created[0].folder.appendingPathComponent("chapter.m4b").path))
+
+        let replaced = try AudiobookImportService.importFolder(source, into: library, existing: .replace)
+        #expect(replaced.map(\.outcome) == [.replaced])
+        #expect(FileManager.default.fileExists(atPath: created[0].folder.appendingPathComponent("chapter.m4b").path))
         #expect(LibraryScanner.scan(root: library).count == 1)
     }
 
@@ -311,7 +373,7 @@ struct ImportParityTests {
         try Data("later narration bytes".utf8).write(to: audio)
 
         try AudiobookImportService.importFiles([ebook], into: library)
-        try AudiobookImportService.importFiles([audio, ebook], into: library)
+        let enriched = try AudiobookImportService.importFiles([audio, ebook], into: library)
         let books = LibraryScanner.scan(root: library)
         let book = try #require(books.first)
 
@@ -319,6 +381,7 @@ struct ImportParityTests {
         #expect(book.hasEbook)
         #expect(book.hasAudio)
         #expect(book.chapters.contains { $0.hasAudio })
+        #expect(enriched.outcome == .enriched)
     }
 
     @Test("Audio can be added later to an EPUB-only book folder")
@@ -1624,12 +1687,12 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.60")
-        #expect(plist["CFBundleVersion"] as? String == "61")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.60")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "61")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.60;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 61;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.61")
+        #expect(plist["CFBundleVersion"] as? String == "62")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.61")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "62")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.61;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 62;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
     }

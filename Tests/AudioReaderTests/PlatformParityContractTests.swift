@@ -645,6 +645,14 @@ struct PlatformParityContractTests {
         #expect(!scanner.contains("#if os("))
         #expect(importer.contains("static func importFiles("))
         #expect(importer.contains("static func importFolder("))
+        #expect(importer.contains("enum ExistingBookImport"))
+        #expect(importer.contains("alreadyImported"))
+        #expect(importer.contains("BookImportConfirmation"))
+        let rootView = try source("Sources/AudioReader/RootView.swift")
+        #expect(rootView.contains("Button(\"Re-Import\")"))
+        #expect(rootView.contains("Keep Existing"))
+        #expect(iPadRoot.contains("Button(\"Re-Import\")"))
+        #expect(iPadRoot.contains("Keep Existing"))
     }
 
     @Test("Both platforms share EPUB status and the same recovery actions")

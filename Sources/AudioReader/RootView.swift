@@ -4,6 +4,7 @@ struct RootView: View {
     @Bindable var state: AppState
     @State private var importResult: String?
 #if os(macOS)
+    @State private var pendingReimport: PendingBookReimport?
     @State private var showMacAppleBooks = false
     @State private var macAppleBooks = MacAppleBooksLibrary()
     @State private var importingAppleBookID: String?
@@ -114,6 +115,19 @@ struct RootView: View {
         } message: {
             Text(importResult ?? "")
         }
+        .confirmationDialog(
+            pendingReimport?.dialogTitle ?? BookImportConfirmation.title(),
+            isPresented: Binding(
+                get: { pendingReimport != nil },
+                set: { if !$0 { pendingReimport = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Re-Import") { confirmReimport() }
+            Button("Keep Existing", role: .cancel) { pendingReimport = nil }
+        } message: {
+            Text(pendingReimport?.message ?? "")
+        }
         .alert("Move book to Trash?", isPresented: Binding(
             get: { pendingMacBookDelete != nil },
             set: { if !$0 { pendingMacBookDelete = nil } }
@@ -223,9 +237,8 @@ struct RootView: View {
 
     private func importFiles() {
         do {
-            guard let count = try MacAudiobookImporter.chooseFiles(libraryRoot: libraryRoot) else { return }
-            importResult = "Imported \(count) selected file\(count == 1 ? "" : "s") into the library."
-            Task { await state.rescan() }
+            guard let urls = MacAudiobookImporter.chooseFiles() else { return }
+            try finishFileImport(urls, existing: .skip)
         } catch {
             importResult = error.localizedDescription
         }
@@ -233,9 +246,50 @@ struct RootView: View {
 
     private func importFolder() {
         do {
-            guard let name = try MacAudiobookImporter.chooseFolder(libraryRoot: libraryRoot) else { return }
-            importResult = "Imported \(name) into the library."
-            Task { await state.rescan() }
+            guard let url = MacAudiobookImporter.chooseFolder() else { return }
+            try finishFolderImport(url, existing: .skip)
+        } catch {
+            importResult = error.localizedDescription
+        }
+    }
+
+    private func finishFileImport(_ urls: [URL], existing: ExistingBookImport) throws {
+        let result = try AudiobookImportService.importFiles(urls, into: libraryRoot, existing: existing)
+        if existing == .skip, result.outcome == .alreadyImported {
+            pendingReimport = PendingBookReimport(title: result.title, files: urls)
+            return
+        }
+        importResult = BookImportConfirmation.summary(result)
+        Task { await state.rescan() }
+    }
+
+    private func finishFolderImport(_ url: URL, existing: ExistingBookImport) throws {
+        let results = try AudiobookImportService.importFolder(url, into: libraryRoot, existing: existing)
+        let skipped = results.filter { $0.outcome == .alreadyImported }
+        if existing == .skip, !skipped.isEmpty, skipped.count == results.count {
+            pendingReimport = PendingBookReimport(
+                title: skipped[0].title,
+                count: skipped.count,
+                folder: url
+            )
+            return
+        }
+        importResult = BookImportConfirmation.summary(results)
+        Task { await state.rescan() }
+    }
+
+    private func confirmReimport() {
+        guard let pending = pendingReimport else { return }
+        pendingReimport = nil
+        do {
+            if let folder = pending.folder {
+                try finishFolderImport(folder, existing: .replace)
+            } else if !pending.files.isEmpty {
+                try finishFileImport(pending.files, existing: .replace)
+            } else if let appleID = pending.appleBookID,
+                      let item = macAppleBooks.items.first(where: { $0.id == appleID }) {
+                try finishAppleBookImport(item, existing: .replace)
+            }
         } catch {
             importResult = error.localizedDescription
         }
@@ -271,14 +325,22 @@ struct RootView: View {
         Task {
             defer { importingAppleBookID = nil }
             do {
-                try macAppleBooks.importAudiobook(item, into: libraryRoot)
-                macAppleBooks.message = "Imported \(item.title) into AudioReader."
-                importResult = "Imported \(item.title) from Apple Books."
-                await state.rescan()
+                try finishAppleBookImport(item, existing: .skip)
             } catch {
                 importResult = error.localizedDescription
             }
         }
+    }
+
+    private func finishAppleBookImport(_ item: MacAppleBookItem, existing: ExistingBookImport) throws {
+        let result = try macAppleBooks.importAudiobook(item, into: libraryRoot, existing: existing)
+        if existing == .skip, result.outcome == .alreadyImported {
+            pendingReimport = PendingBookReimport(title: item.title, appleBookID: item.id)
+            return
+        }
+        macAppleBooks.message = BookImportConfirmation.summary(result)
+        importResult = BookImportConfirmation.summary(result)
+        Task { await state.rescan() }
     }
 #endif
 }

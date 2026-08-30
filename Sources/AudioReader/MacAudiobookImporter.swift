@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 @MainActor
 enum MacAudiobookImporter {
-    static func chooseFiles(libraryRoot: URL) throws -> Int? {
+    static func chooseFiles() -> [URL]? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
@@ -13,20 +13,18 @@ enum MacAudiobookImporter {
         panel.prompt = "Import"
         panel.message = "Choose audiobook audio and/or EPUB files, and optionally a cover image."
         guard panel.runModal() == .OK else { return nil }
-        try AudiobookImportService.importFiles(panel.urls, into: libraryRoot)
-        return panel.urls.count
+        return panel.urls
     }
 
-    static func chooseFolder(libraryRoot: URL) throws -> String? {
+    static func chooseFolder() -> URL? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.prompt = "Import Folder"
         panel.message = "Choose one book folder, or a folder containing audiobook and/or EPUB folders."
-        guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        try AudiobookImportService.importFolder(url, into: libraryRoot)
-        return url.lastPathComponent
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
     }
 
     static func chooseCompanionFiles(for book: Book) throws -> [String]? {
