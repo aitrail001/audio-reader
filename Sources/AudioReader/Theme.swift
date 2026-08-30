@@ -44,6 +44,38 @@ final class CoverImageCache: @unchecked Sendable {
     }
 }
 
+enum ReaderTheme: String, CaseIterable, Identifiable, Codable {
+    case original
+    case quiet
+    case night
+
+    var id: String { rawValue }
+
+    var menuLabel: String {
+        switch self {
+        case .original: "Original"
+        case .quiet: "Quiet"
+        case .night: "Night"
+        }
+    }
+
+    var forcedColorScheme: ColorScheme? {
+        switch self {
+        case .original: nil
+        case .quiet: .light
+        case .night: .dark
+        }
+    }
+
+    var pageColor: Color? {
+        switch self {
+        case .original: nil
+        case .quiet: Color(red: 0.96, green: 0.91, blue: 0.78)
+        case .night: Color(red: 0.09, green: 0.09, blue: 0.10)
+        }
+    }
+}
+
 enum AppAppearance: String, CaseIterable, Identifiable {
     case system
     case light

@@ -16,14 +16,11 @@ struct LibraryView: View {
                         transcribedCount: state.transcribedChapterCount(in: book)
                     )
                         .onTapGesture {
-                            state.selectedBookID = book.id
-                            state.selectedChapterID = book.chapters.first?.id
+                            state.selectBook(book)
                         }
 #if os(macOS)
                         .onTapGesture(count: 2) {
-                            if let chapter = book.chapters.first(where: { $0.id == state.selectedChapterID }) ?? book.chapters.first {
-                                state.open(chapter: chapter, in: book, autoplay: false)
-                            }
+                            state.openBook(book, autoplay: false)
                         }
 #endif
                         .contextMenu {
@@ -253,9 +250,7 @@ private struct ChapterStrip: View {
                 }
                 Spacer()
                 Button("Open player") {
-                    if let ch = book.chapters.first(where: { $0.id == state.selectedChapterID }) ?? book.chapters.first {
-                        state.open(chapter: ch, in: book, autoplay: false)
-                    }
+                    state.openBook(book, autoplay: false)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Palette.terracotta)

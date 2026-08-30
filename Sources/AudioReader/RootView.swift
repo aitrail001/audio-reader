@@ -204,11 +204,13 @@ struct RootView: View {
         Binding(
             get: { state.selectedBookID },
             set: { id in
-                state.selectedBookID = id
                 guard let id,
                       let book = state.books.first(where: { $0.id == id })
-                else { return }
-                state.selectedChapterID = book.chapters.first?.id
+                else {
+                    state.selectedBookID = id
+                    return
+                }
+                state.selectBook(book)
                 state.tab = .library
             }
         )

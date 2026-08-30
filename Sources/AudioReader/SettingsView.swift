@@ -107,6 +107,15 @@ struct SettingsView: View {
                     .labelsHidden()
                     .pickerStyle(.segmented)
                 }
+                settingRow("Reading pages") {
+                    Picker("Reading pages", selection: $draft.readerTheme) {
+                        ForEach(ReaderTheme.allCases) { theme in
+                            Text(theme.menuLabel).tag(theme.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
                 settingRow("Text size") {
                     HStack(spacing: 12) {
                         Slider(value: $draft.readerFontScale, in: 0.65...1.6, step: 0.05)

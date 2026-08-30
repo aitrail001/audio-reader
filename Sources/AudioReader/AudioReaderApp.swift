@@ -61,6 +61,19 @@ struct AudioReaderApp: App {
                     .keyboardShortcut(.return, modifiers: [.command])
                     .disabled(!state.canContinueDeepReading)
             }
+            CommandMenu("Book") {
+                Button("Contents") { state.presentBookContents(tab: .contents) }
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                    .disabled(state.selectedBook == nil)
+                Button("Find in Book…") { state.presentBookContents(tab: .search) }
+                    .keyboardShortcut("f", modifiers: [.command])
+                    .disabled(state.selectedBook == nil)
+                Button(state.isCurrentLocationBookmarked ? "Remove Bookmark" : "Bookmark") {
+                    state.toggleBookmark()
+                }
+                    .keyboardShortcut("b", modifiers: [.command, .shift])
+                    .disabled(state.selectedChapter == nil)
+            }
             CommandMenu("Study") {
                 Toggle("Study overlay", isOn: Binding(
                     get: { state.settings.showStudyOverlay },

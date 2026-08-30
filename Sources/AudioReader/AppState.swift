@@ -86,6 +86,11 @@ final class AppState {
     var focusedWordID: String?
     var scrollSegmentID: String?
     var revealToken: Int = 0
+    var readingPositions: [String: ReadingPosition] = [:]
+    var bookmarks: [ReadingBookmark] = []
+    var showBookContents = false
+    var bookContentsTab: BookContentsTab = .contents
+    var bookSearchQuery = ""
 
     private var transcriber = Transcriber()
     private var transcriptionTask: Task<Void, Never>?
@@ -690,6 +695,11 @@ final class AppState {
         glosses = Persistence.loadGlosses()
         chapterTranslationCheckpoints = Persistence.loadChapterTranslationCheckpoints()
         chapterSummaries = Persistence.loadChapterSummaries()
+        readingPositions = Dictionary(
+            Persistence.loadReadingPositions().map { ($0.bookID, $0) },
+            uniquingKeysWith: { lhs, rhs in lhs.updatedAt >= rhs.updatedAt ? lhs : rhs }
+        )
+        bookmarks = Persistence.loadBookmarks()
         selectedDictionaryName = settings.preferredDictionary
         if let raw = TextSource(rawValue: settings.textSource) {
             textSource = raw
@@ -704,9 +714,11 @@ final class AppState {
 
     func boot() async {
         await rescan()
-        if let first = books.first {
-            selectedBookID = first.id
-            selectedChapterID = first.chapters.first?.id
+        if let last = Persistence.mostRecentReadingPosition(in: Array(readingPositions.values)),
+           let book = books.first(where: { $0.id == last.bookID }) {
+            selectBook(book)
+        } else if let first = books.first {
+            selectBook(first)
         }
         if llmProvider == .openAI, openAIAuthentication == .chatGPT {
             Task { await self.refreshCodexLoginStatus() }
@@ -804,7 +816,31 @@ final class AppState {
         refreshStudyIndex()
     }
 
-    func open(chapter: Chapter, in book: Book, autoplay: Bool) {
+    func selectBook(_ book: Book) {
+        selectedBookID = book.id
+        if let position = readingPositions[book.id],
+           book.chapters.contains(where: { $0.id == position.chapterID }) {
+            selectedChapterID = position.chapterID
+        } else {
+            selectedChapterID = book.chapters.first?.id
+        }
+    }
+
+    func openBook(_ book: Book, autoplay: Bool = false) {
+        selectBook(book)
+        let chapter = book.chapters.first { $0.id == selectedChapterID } ?? book.chapters.first
+        guard let chapter else { return }
+        open(
+            chapter: chapter,
+            in: book,
+            autoplay: autoplay,
+            restoreSegmentID: readingPositions[book.id]?.chapterID == chapter.id
+                ? readingPositions[book.id]?.segmentID
+                : nil
+        )
+    }
+
+    func open(chapter: Chapter, in book: Book, autoplay: Bool, restoreSegmentID: String? = nil) {
         selectedBookID = book.id
         selectedChapterID = chapter.id
         tab = .player
@@ -838,11 +874,21 @@ final class AppState {
             focusedWordID = nil
             scrollSegmentID = nil
         }
+        if pendingReveal == nil, let restoreSegmentID,
+           let segment = transcript?.segments.first(where: { $0.id == restoreSegmentID }) {
+            focusedSegmentID = segment.id
+            scrollSegmentID = segment.id
+            revealToken += 1
+            if chapter.hasAudio {
+                player.seek(segment.start)
+            }
+        }
         if autoplay, chapter.hasAudio { player.play() }
         if let pending = pendingReveal, transcript != nil {
             applyReveal(pending)
             pendingReveal = nil
         }
+        recordReadingPosition()
     }
 
     private func ebookTranscriptIfNeeded(for chapter: Chapter, in book: Book) -> Transcript? {
@@ -928,6 +974,133 @@ final class AppState {
         let destination = index + offset
         guard book.chapters.indices.contains(destination) else { return nil }
         return book.chapters[destination]
+    }
+
+    var nextChapterTitle: String? { adjacentChapter(offset: 1)?.title }
+
+    var isAtEndOfChapter: Bool {
+        if selectedChapter?.isCover == true { return true }
+        guard let segments = transcript?.segments, let last = segments.last else { return false }
+        return (focusedSegmentID ?? currentSegment?.id) == last.id
+    }
+
+    var readingProgress: ReadingProgress? {
+        guard let book = selectedBook else { return nil }
+        let chapterIndex = book.chapters.firstIndex { $0.id == selectedChapterID } ?? 0
+        let segments = transcript?.segments ?? []
+        let currentID = focusedSegmentID ?? currentSegment?.id
+        let segmentIndex = currentID.flatMap { id in segments.firstIndex { $0.id == id } } ?? 0
+        return ReadingProgress.make(
+            chapterIndex: chapterIndex,
+            chapterCount: book.chapters.count,
+            segmentIndex: segmentIndex,
+            segmentCount: segments.count
+        )
+    }
+
+    var currentReaderTheme: ReaderTheme {
+        get { ReaderTheme(rawValue: settings.readerTheme) ?? .original }
+        set {
+            settings.readerTheme = newValue.rawValue
+            persistSettings()
+        }
+    }
+
+    var bookmarksForSelectedBook: [ReadingBookmark] {
+        guard let bookID = selectedBookID else { return [] }
+        return bookmarks
+            .filter { $0.bookID == bookID }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    var isCurrentLocationBookmarked: Bool {
+        guard let book = selectedBook, let chapter = selectedChapter else { return false }
+        let segmentID = focusedSegmentID ?? currentSegment?.id
+        return bookmarks.contains { $0.matches(bookID: book.id, chapterID: chapter.id, segmentID: segmentID) }
+    }
+
+    func recordReadingPosition() {
+        guard let book = selectedBook, let chapter = selectedChapter else { return }
+        let position = ReadingPosition(
+            bookID: book.id,
+            chapterID: chapter.id,
+            segmentID: focusedSegmentID ?? currentSegment?.id,
+            updatedAt: Date()
+        )
+        readingPositions[book.id] = position
+        Persistence.saveReadingPositions(Array(readingPositions.values))
+    }
+
+    func toggleBookmark() {
+        guard let book = selectedBook, let chapter = selectedChapter else { return }
+        let segmentID = focusedSegmentID ?? currentSegment?.id
+        if let existing = bookmarks.first(where: {
+            $0.matches(bookID: book.id, chapterID: chapter.id, segmentID: segmentID)
+        }) {
+            bookmarks.removeAll { $0.id == existing.id }
+        } else {
+            let snippet = currentSegment?.displayText
+                ?? (chapter.isCover ? book.title : chapter.title)
+            bookmarks.append(
+                ReadingBookmark(
+                    id: ReadingBookmark.makeID(bookID: book.id, chapterID: chapter.id, segmentID: segmentID),
+                    bookID: book.id,
+                    chapterID: chapter.id,
+                    chapterTitle: chapter.title,
+                    segmentID: segmentID,
+                    snippet: snippet,
+                    createdAt: Date()
+                )
+            )
+        }
+        Persistence.saveBookmarks(bookmarks)
+    }
+
+    func presentBookContents(tab: BookContentsTab = .contents) {
+        bookContentsTab = tab
+        if tab != .search { bookSearchQuery = "" }
+        showBookContents = true
+    }
+
+    func searchHits(in book: Book) -> [BookSearchHit] {
+        let query = bookSearchQuery
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+        var transcripts: [String: Transcript] = [:]
+        for chapter in book.chapters {
+            if let current = transcript, current.chapterID == chapter.id {
+                transcripts[chapter.id] = current
+            } else if let loaded = Persistence.loadTranscript(for: chapter) {
+                transcripts[chapter.id] = loaded
+            }
+        }
+        var epubText: [String: String] = [:]
+        if let ebookPath = book.ebookPath, let structure = EPUBParser.structure(from: ebookPath) {
+            for part in structure.chapters where !part.isCover {
+                epubText[part.locator] = part.text
+            }
+        }
+        return BookSearch.hits(
+            query: query,
+            chapters: book.chapters,
+            transcriptsByChapterID: transcripts,
+            epubTextByLocator: epubText
+        )
+    }
+
+    func openBookmark(_ bookmark: ReadingBookmark) {
+        guard let book = books.first(where: { $0.id == bookmark.bookID }),
+              let chapter = book.chapters.first(where: { $0.id == bookmark.chapterID })
+        else { return }
+        showBookContents = false
+        open(chapter: chapter, in: book, autoplay: false, restoreSegmentID: bookmark.segmentID)
+    }
+
+    func openSearchHit(_ hit: BookSearchHit) {
+        guard let book = selectedBook,
+              let chapter = book.chapters.first(where: { $0.id == hit.chapterID })
+        else { return }
+        showBookContents = false
+        open(chapter: chapter, in: book, autoplay: false, restoreSegmentID: hit.segmentID)
     }
 
     func transcribeSelected(force: Bool = false) {
@@ -1118,8 +1291,10 @@ final class AppState {
 
     func seekToSentence(_ sentence: TranscriptSegment, time: TimeInterval, autoplay: Bool) {
         player.seek(time)
+        focusedSegmentID = sentence.id
         armDeepReadingSentence(sentence)
         if autoplay, selectedChapter?.hasAudio == true, !player.isPlaying { player.play() }
+        recordReadingPosition()
     }
 
     func seekPlayback(to time: TimeInterval) {

@@ -21,6 +21,8 @@ enum Persistence {
     static var glossesURL: URL { root.appendingPathComponent("glosses.json") }
     static var chapterTranslationCheckpointsURL: URL { root.appendingPathComponent("chapter-translation-checkpoints.json") }
     static var chapterSummariesURL: URL { root.appendingPathComponent("chapter-summaries.json") }
+    static var readingPositionsURL: URL { root.appendingPathComponent("reading-positions.json") }
+    static var bookmarksURL: URL { root.appendingPathComponent("reading-bookmarks.json") }
     static var importedBooksURL: URL {
 #if os(iOS)
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -196,6 +198,36 @@ enum Persistence {
         try? data.write(to: url, options: .atomic)
     }
 
+    static func loadReadingPositions(from url: URL = readingPositionsURL) -> [ReadingPosition] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        return (try? JSONDecoder.iso.decode([ReadingPosition].self, from: data)) ?? []
+    }
+
+    static func saveReadingPositions(
+        _ items: [ReadingPosition],
+        to url: URL = readingPositionsURL
+    ) {
+        guard let data = try? JSONEncoder.iso.encode(items) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    static func mostRecentReadingPosition(in items: [ReadingPosition]? = nil) -> ReadingPosition? {
+        (items ?? loadReadingPositions()).max(by: { $0.updatedAt < $1.updatedAt })
+    }
+
+    static func loadBookmarks(from url: URL = bookmarksURL) -> [ReadingBookmark] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        return (try? JSONDecoder.iso.decode([ReadingBookmark].self, from: data)) ?? []
+    }
+
+    static func saveBookmarks(
+        _ items: [ReadingBookmark],
+        to url: URL = bookmarksURL
+    ) {
+        guard let data = try? JSONEncoder.iso.encode(items) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
     static func loadSettings() -> AppSettings {
         guard let data = try? Data(contentsOf: settingsURL),
               let settings = try? JSONDecoder().decode(AppSettings.self, from: data)
@@ -310,6 +342,7 @@ struct AppSettings: Codable, Equatable {
     var readerLineSpacing: Double
     var readerWordSpacing: Double
     var readerMargin: Double
+    var readerTheme: String
 
     static var `default`: AppSettings {
         AppSettings(
@@ -351,7 +384,8 @@ struct AppSettings: Codable, Equatable {
             readerBold: false,
             readerLineSpacing: 1.0,
             readerWordSpacing: 2.0,
-            readerMargin: 32
+            readerMargin: 32,
+            readerTheme: ReaderTheme.original.rawValue
         )
     }
 
@@ -402,7 +436,8 @@ struct AppSettings: Codable, Equatable {
         readerBold: Bool,
         readerLineSpacing: Double,
         readerWordSpacing: Double,
-        readerMargin: Double
+        readerMargin: Double,
+        readerTheme: String
     ) {
         self.libraryPath = libraryPath
         self.playbackRate = playbackRate
@@ -443,6 +478,7 @@ struct AppSettings: Codable, Equatable {
         self.readerLineSpacing = readerLineSpacing
         self.readerWordSpacing = readerWordSpacing
         self.readerMargin = readerMargin
+        self.readerTheme = readerTheme
     }
 
     init(from decoder: Decoder) throws {
@@ -490,6 +526,7 @@ struct AppSettings: Codable, Equatable {
         readerLineSpacing = try c.decodeIfPresent(Double.self, forKey: .readerLineSpacing) ?? d.readerLineSpacing
         readerWordSpacing = try c.decodeIfPresent(Double.self, forKey: .readerWordSpacing) ?? d.readerWordSpacing
         readerMargin = try c.decodeIfPresent(Double.self, forKey: .readerMargin) ?? d.readerMargin
+        readerTheme = try c.decodeIfPresent(String.self, forKey: .readerTheme) ?? d.readerTheme
     }
 
     func endpoint(for provider: LLMProvider) -> String {

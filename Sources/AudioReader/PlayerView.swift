@@ -20,6 +20,17 @@ struct ReaderScrollTarget: Equatable {
     }
 }
 
+private extension View {
+    @ViewBuilder
+    func readerColorScheme(_ scheme: ColorScheme?) -> some View {
+        if let scheme {
+            self.environment(\.colorScheme, scheme)
+        } else {
+            self
+        }
+    }
+}
+
 struct PlayerView: View {
     @Bindable var state: AppState
     @State private var autoScroll = true
@@ -79,6 +90,7 @@ struct PlayerView: View {
                 .background(Palette.goldSoft)
             }
             lyricPane
+            readingProgressFooter
             VStack(spacing: playbackChromeSpacing) {
                 PlaybackChrome(state: state)
 #if os(iOS)
@@ -122,6 +134,28 @@ struct PlayerView: View {
         }
         .sheet(item: $state.chapterQuizSession) { _ in
             ChapterQuizView(state: state)
+        }
+        .sheet(isPresented: $state.showBookContents) {
+            BookContentsView(state: state)
+        }
+    }
+
+    private var readingProgressFooter: some View {
+        Group {
+            if let progress = state.readingProgress {
+                VStack(spacing: 4) {
+                    ProgressView(value: progress.bookFraction)
+                        .tint(Palette.gold)
+                    Text(progress.caption)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Palette.dim)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 6)
+                .background(Palette.panel)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(progress.caption)
+            }
         }
     }
 
@@ -312,6 +346,8 @@ struct PlayerView: View {
 
     private var desktopExpandedHeaderControls: some View {
         HStack(spacing: 14) {
+            bookContentsButton
+            bookmarkButton
             textSourcePicker
                 .labelsHidden()
                 .frame(width: 220)
@@ -379,6 +415,8 @@ struct PlayerView: View {
 
     private var desktopCompactHeaderControls: some View {
         HStack(spacing: 10) {
+            bookContentsButton
+            bookmarkButton
             textSourcePicker
                 .labelsHidden()
                 .frame(width: 220)
@@ -518,6 +556,12 @@ struct PlayerView: View {
 #if os(iOS)
     @ToolbarContentBuilder
     private var iPadReaderToolbar: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            bookContentsButton
+        }
+        ToolbarItem(placement: .primaryAction) {
+            bookmarkButton
+        }
         ToolbarItem(placement: .primaryAction) {
             Menu {
                 Picker("Text", selection: $state.textSource) {
@@ -737,8 +781,40 @@ struct PlayerView: View {
         }
     }
 
+    private var bookContentsButton: some View {
+        Button {
+            state.presentBookContents()
+        } label: {
+#if os(iOS)
+            Image(systemName: "list.bullet")
+#else
+            Label("Contents", systemImage: "list.bullet")
+#endif
+        }
+        .disabled(state.selectedBook == nil)
+        .accessibilityLabel("Contents")
+        .help("Contents, bookmarks, and search")
+    }
+
+    private var bookmarkButton: some View {
+        Button {
+            state.toggleBookmark()
+        } label: {
+            Image(systemName: state.isCurrentLocationBookmarked ? "bookmark.fill" : "bookmark")
+        }
+        .disabled(state.selectedChapter == nil)
+        .foregroundStyle(state.isCurrentLocationBookmarked ? Palette.gold : Palette.ink)
+        .accessibilityLabel(state.isCurrentLocationBookmarked ? "Remove bookmark" : "Bookmark")
+        .help(state.isCurrentLocationBookmarked ? "Remove bookmark" : "Bookmark this place")
+    }
+
     @ViewBuilder
     private var readingAppearanceMenuContent: some View {
+        Picker("Theme", selection: readerThemeBinding) {
+            ForEach(ReaderTheme.allCases) { theme in
+                Text(theme.menuLabel).tag(theme)
+            }
+        }
         Menu("Typeface") {
             Picker("Typeface", selection: $state.settings.readerFont) {
                 ForEach(ReaderFontChoice.allCases) { font in
@@ -857,6 +933,8 @@ struct PlayerView: View {
                 )
             }
         }
+        .background(state.currentReaderTheme.pageColor ?? Palette.bg)
+        .readerColorScheme(state.currentReaderTheme.forcedColorScheme)
         .onAppear {
             if lookupWidth <= 0 {
                 lookupWidth = CGFloat(state.settings.lookupPanelWidth)
@@ -1130,6 +1208,13 @@ struct PlayerView: View {
         }
     }
 #endif
+
+    private var readerThemeBinding: Binding<ReaderTheme> {
+        Binding(
+            get: { state.currentReaderTheme },
+            set: { state.currentReaderTheme = $0 }
+        )
+    }
 
     private var playbackSpeedBinding: Binding<Double> {
         Binding(
@@ -2000,7 +2085,7 @@ private struct TranscriptTextColumn: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: type.paragraph) {
                 if state.selectedChapter?.isCover == true, let book = state.selectedBook {
-                    EbookCoverPage(book: book)
+                    EbookCoverPage(state: state, book: book)
                 } else if let transcript = state.transcript {
                     ForEach(transcript.segments) { segment in
                         SentenceRow(
@@ -2044,6 +2129,7 @@ private struct TranscriptTextColumn: View {
                         .equatable()
                         .id(segment.id)
                     }
+                    nextChapterLink
                 } else if state.selectedChapter != nil {
                     emptyTranscript
                 } else {
@@ -2115,6 +2201,20 @@ private struct TranscriptTextColumn: View {
         )
     }
 
+    @ViewBuilder
+    private var nextChapterLink: some View {
+        if state.isAtEndOfChapter, state.canOpenNextChapter, let title = state.nextChapterTitle {
+            Button {
+                state.openNextChapter()
+            } label: {
+                Label("Next: \(title)", systemImage: "arrow.right")
+            }
+            .buttonStyle(.bordered)
+            .padding(.top, 16)
+            .accessibilityLabel("Next chapter, \(title)")
+        }
+    }
+
     private var emptyTranscript: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Prepare this chapter")
@@ -2154,6 +2254,7 @@ private struct TranscriptTextColumn: View {
 }
 
 private struct EbookCoverPage: View {
+    @Bindable var state: AppState
     let book: Book
 
     var body: some View {
@@ -2183,6 +2284,16 @@ private struct EbookCoverPage: View {
                 Text(author)
                     .font(.system(size: 16))
                     .foregroundStyle(Palette.dim)
+            }
+            if state.canOpenNextChapter, let title = state.nextChapterTitle {
+                Button {
+                    state.openNextChapter()
+                } label: {
+                    Label("Next: \(title)", systemImage: "arrow.right")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.terracotta)
+                .padding(.top, 8)
             }
         }
         .frame(maxWidth: .infinity)

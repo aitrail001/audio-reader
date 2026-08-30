@@ -131,6 +131,37 @@ struct PlatformParityContractTests {
         #expect(app.contains(".keyboardShortcut(.return, modifiers: [.command])"))
     }
 
+    @Test("Both platforms share Contents, bookmarks, search, and reader themes")
+    func sharesAppleBooksReadingChrome() throws {
+        let playerView = try source("Sources/AudioReader/PlayerView.swift")
+        let appState = try source("Sources/AudioReader/AppState.swift")
+        let contents = try source("Sources/AudioReader/BookContentsView.swift")
+        let session = try source("Sources/AudioReader/ReadingSession.swift")
+        let libraryView = try source("Sources/AudioReader/LibraryView.swift")
+        let iPadRoot = try source("Sources/AudioReader/IPadRootView.swift")
+        let app = try source("Sources/AudioReader/AudioReaderApp.swift")
+
+        #expect(playerView.contains("bookContentsButton"))
+        #expect(playerView.contains("bookmarkButton"))
+        #expect(playerView.contains("BookContentsView(state: state)"))
+        #expect(playerView.contains("readingProgressFooter"))
+        #expect(playerView.contains("Next: \\(title)"))
+        #expect(playerView.contains("ForEach(ReaderTheme.allCases)"))
+        #expect(appState.contains("func openBook("))
+        #expect(appState.contains("func toggleBookmark()"))
+        #expect(appState.contains("func searchHits(in book: Book)"))
+        #expect(appState.contains("func recordReadingPosition()"))
+        #expect(!session.contains("#if os("))
+        #expect(contents.contains("BookContentsTab.allCases"))
+        #expect(contents.contains("Search this book"))
+        #expect(libraryView.contains("state.openBook(book, autoplay: false)"))
+        #expect(iPadRoot.contains("state.openBook(book, autoplay: false)"))
+        #expect(iPadRoot.contains("bookContentsButton") == false)
+        #expect(playerView.contains("iPadReaderToolbar"))
+        #expect(app.contains("Find in Book"))
+        #expect(app.contains(".keyboardShortcut(\"f\", modifiers: [.command])"))
+    }
+
     @MainActor
     @Test("Deep Reading and sentence loop stay mutually exclusive")
     func readingModesStayMutuallyExclusive() {

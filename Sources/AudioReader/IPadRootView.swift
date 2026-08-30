@@ -155,6 +155,12 @@ struct IPadRootView: View {
                 }
         }
         .navigationSplitViewStyle(.prominentDetail)
+        .onChange(of: state.selectedBookID) { _, id in
+            guard let id, let book = state.books.first(where: { $0.id == id }) else { return }
+            if !book.chapters.contains(where: { $0.id == state.selectedChapterID }) {
+                state.selectBook(book)
+            }
+        }
         .tint(Palette.terracotta)
         .overlay {
             if state.isScanning, let progress = state.libraryScanProgress {
@@ -713,9 +719,7 @@ private struct IPadBookDetail: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    if let chapter = book.chapters.first(where: { $0.id == state.selectedChapterID }) ?? book.chapters.first {
-                        state.open(chapter: chapter, in: book, autoplay: false)
-                    }
+                    state.openBook(book, autoplay: false)
                 } label: {
                     Label("Open Book", systemImage: "book.pages")
                 }
