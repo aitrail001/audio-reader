@@ -29,6 +29,7 @@ struct PlayerView: View {
     @State private var editingTranscriptSegment: TranscriptSegment?
     @State private var readerProgressError: String?
     @State private var correctionPreviewTask: Task<Void, Never>?
+    @State private var showsBookNavigation = false
 #if os(iOS)
     @State private var showSpeedPicker = false
     @State private var showReplaceEbookImporter = false
@@ -145,6 +146,9 @@ struct PlayerView: View {
         }
         .sheet(item: $state.chapterQuizSession) { _ in
             ChapterQuizView(state: state)
+        }
+        .sheet(isPresented: $showsBookNavigation) {
+            EbookNavigationSheet(state: state)
         }
         .sheet(item: $editingTranscriptSegment) { segment in
             TranscriptCorrectionSheet(
@@ -366,6 +370,7 @@ struct PlayerView: View {
                 .labelsHidden()
                 .frame(width: 220)
             Spacer(minLength: 0)
+            bookNavigationButton
             sharedLLMMenu
             sharedReadingMenu
             Button {
@@ -503,9 +508,30 @@ struct PlayerView: View {
         )
     }
 
+    private var bookNavigationButton: some View {
+        Button {
+            if let bookID = state.selectedBookID {
+                state.account.recordUsage(
+                    name: "reading.book_navigation_opened",
+                    properties: ["bookId": bookID]
+                )
+            }
+            showsBookNavigation = true
+        } label: {
+            Image(systemName: "list.bullet")
+        }
+        .disabled(state.selectedBook?.ebookPath == nil)
+        .accessibilityLabel("Contents and search")
+        .accessibilityIdentifier("reader.bookNavigation")
+        .help("Contents and Search Book")
+    }
+
 #if os(iOS)
     @ToolbarContentBuilder
     private var iPadReaderToolbar: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            bookNavigationButton
+        }
         ToolbarItem(placement: .primaryAction) {
             Menu {
                 Picker("Text", selection: $state.textSource) {
@@ -1981,6 +2007,233 @@ private struct ChapterSummaryView: View {
     }
 }
 
+private struct EbookNavigationSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var state: AppState
+    @State private var document: EPUBDocument?
+    @State private var query = ""
+    @State private var searchResults: [EPUBSearchResult] = []
+    @State private var isLoading = true
+    @State private var loadError: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(Palette.dim)
+                            .accessibilityHidden(true)
+                        TextField("Search Book", text: $query)
+                            .textFieldStyle(.plain)
+                            .accessibilityLabel("Search Book")
+                            .accessibilityIdentifier("reader.bookSearch")
+                        if !query.isEmpty {
+                            Button {
+                                query = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(Palette.dim)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Clear book search")
+                        }
+                    }
+                }
+                if isLoading {
+                    HStack {
+                        Spacer()
+                        ProgressView("Reading contents…")
+                        Spacer()
+                    }
+                } else if let loadError {
+                    ContentUnavailableView(
+                        "Contents Unavailable",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text(loadError)
+                    )
+                } else if let document {
+                    if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        contents(document)
+                    } else if searchResults.isEmpty {
+                        ContentUnavailableView.search(text: query)
+                    } else {
+                        searchMatches(searchResults)
+                    }
+                }
+            }
+            .navigationTitle(query.isEmpty ? "Contents" : "Search Book")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+        .frame(minWidth: 360, minHeight: 480)
+        .accessibilityIdentifier("reader.bookNavigation.sheet")
+        .task(id: state.selectedBook?.ebookPath) {
+            await loadDocument()
+        }
+        .task(id: searchTaskID) {
+            await updateSearchResults()
+        }
+    }
+
+    private var searchTaskID: String {
+        "\(document?.sections.count ?? -1)|\(query)"
+    }
+
+    @ViewBuilder
+    private func contents(_ document: EPUBDocument) -> some View {
+        Section("Contents") {
+            ForEach(document.sections.indices, id: \.self) { index in
+                let section = document.sections[index]
+                Button {
+                    open(sectionIndex: index, matching: nil)
+                } label: {
+                    HStack {
+                        Text(section.title)
+                            .foregroundStyle(Palette.ink)
+                        Spacer()
+                        if state.selectedChapter?.ebookSectionIndex == index {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(Palette.gold)
+                                .accessibilityLabel("Current chapter")
+                        }
+                    }
+                    .padding(.leading, CGFloat(section.navigationLevel) * 16)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(section.title)
+                .accessibilityAddTraits(state.selectedChapter?.ebookSectionIndex == index ? .isSelected : [])
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func searchMatches(_ results: [EPUBSearchResult]) -> some View {
+        Section("Search Results") {
+            ForEach(results) { result in
+                Button {
+                    open(sectionIndex: result.sectionIndex, matching: query)
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(result.sectionTitle)
+                            .font(.headline)
+                            .foregroundStyle(Palette.ink)
+                        Text(result.snippet)
+                            .font(.subheadline)
+                            .foregroundStyle(Palette.dim)
+                            .lineLimit(3)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(result.sectionTitle). \(result.snippet)")
+            }
+        }
+    }
+
+    private func loadDocument() async {
+        guard let path = state.selectedBook?.ebookPath else {
+            document = nil
+            isLoading = false
+            loadError = "This book does not have an EPUB file."
+            return
+        }
+        isLoading = true
+        loadError = nil
+        let parsed = await Task.detached(priority: .userInitiated) {
+            EPUBParser.document(from: path)
+        }.value
+        guard !Task.isCancelled, state.selectedBook?.ebookPath == path else { return }
+        document = parsed
+        isLoading = false
+        if parsed == nil { loadError = "The EPUB could not be read." }
+    }
+
+    private func updateSearchResults() async {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let document else {
+            searchResults = []
+            return
+        }
+        do {
+            try await Task.sleep(for: .milliseconds(150))
+        } catch {
+            return
+        }
+        let results = await Task.detached(priority: .userInitiated) {
+            EPUBParser.search(trimmed, in: document)
+        }.value
+        guard !Task.isCancelled,
+              query.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed
+        else { return }
+        searchResults = results
+    }
+
+    private func open(sectionIndex: Int, matching query: String?) {
+        guard let book = state.selectedBook,
+              state.openEbookSection(at: sectionIndex, in: book, matching: query)
+        else { return }
+        if query != nil {
+            state.account.recordUsage(
+                name: "reading.book_search_result_opened",
+                properties: ["bookId": book.id, "sectionIndex": "\(sectionIndex)"]
+            )
+        }
+        dismiss()
+    }
+}
+
+private struct EPUBReaderCoverPage: View {
+    let book: Book
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Group {
+                if let path = book.coverPath,
+                   let image = CoverImageCache.shared.image(for: path) {
+                    Image(platformImage: image)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Palette.panel2)
+                        .overlay {
+                            Image(systemName: "book.closed")
+                                .font(.system(size: 52, weight: .light))
+                                .foregroundStyle(Palette.gold)
+                        }
+                }
+            }
+            .frame(maxWidth: 320)
+            .aspectRatio(2.0 / 3.0, contentMode: .fit)
+            .compositingGroup()
+            .clipShape(.rect(cornerRadius: 12))
+            .shadow(color: .black.opacity(0.14), radius: 12, y: 6)
+
+            VStack(spacing: 5) {
+                Text(book.title)
+                    .font(.system(.title, design: .serif, weight: .semibold))
+                    .multilineTextAlignment(.center)
+                if let author = book.author, !author.isEmpty {
+                    Text(author)
+                        .font(.subheadline)
+                        .foregroundStyle(Palette.dim)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 32)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Cover of \(book.title)" + (book.author.map { ", by \($0)" } ?? ""))
+        .accessibilityIdentifier("reader.epubCover")
+    }
+}
+
 private struct PlaybackChrome: View {
     @Bindable var state: AppState
 
@@ -2029,6 +2282,10 @@ private struct TranscriptTextColumn: View {
         let orderedSegmentIDs = state.presentedTranscript?.segments.map(\.id) ?? []
         ScrollView {
             LazyVStack(alignment: .leading, spacing: type.paragraph) {
+                if let book = state.selectedBook,
+                   state.selectedChapter?.ebookSectionIndex == 0 {
+                    EPUBReaderCoverPage(book: book)
+                }
                 if let transcript = state.presentedTranscript {
                     ForEach(transcript.segments) { segment in
                         let listenFirstVisibility = state.settings.deepReadingMode

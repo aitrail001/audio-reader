@@ -104,6 +104,30 @@ final class AudioReaderMacOSUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Why this answer"].exists)
     }
 
+    func testEPUBCoverContentsSearchAndChapterJump() {
+        let app = launch(scenario: "epub-reader")
+
+        XCTAssertTrue(element("reader.epubCover", in: app).waitForExistence(timeout: 5))
+        element("reader.bookNavigation", in: app).tap()
+        XCTAssertTrue(element("reader.bookNavigation.sheet", in: app).waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["The Arrival"].exists)
+        let search = element("reader.bookSearch", in: app)
+        XCTAssertTrue(search.waitForExistence(timeout: 3))
+        search.tap()
+        search.typeText("paper lantern")
+        XCTAssertTrue(app.staticTexts["The Lantern Room"].waitForExistence(timeout: 3))
+        let matchingChapters = app.staticTexts.matching(
+            NSPredicate(format: "label == %@", "The Lantern Room")
+        )
+        matchingChapters.element(boundBy: matchingChapters.count - 1).tap()
+        let chapterHeader = app.navigationBars.matching(
+            NSPredicate(format: "identifier CONTAINS %@", "The Lantern Room")
+        ).firstMatch
+        XCTAssertTrue(chapterHeader.waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["paper"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["lantern"].exists)
+    }
+
     private func launch(scenario: String, reduceMotion: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         // UI runs must not inherit a previously closed or off-screen SwiftUI window.

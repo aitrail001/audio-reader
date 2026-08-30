@@ -1,5 +1,8 @@
 import SwiftUI
 import Foundation
+#if DEBUG
+import ZIPFoundation
+#endif
 
 @main
 struct AudioReaderApp: App {
@@ -124,6 +127,9 @@ struct AudioReaderApp: App {
                 .preferredColorScheme(AppAppearance(rawValue: state.settings.appearance)?.colorScheme)
                 .uiTestMotionEnvironment()
                 .onChange(of: scenePhase) { _, phase in handleScenePhase(phase) }
+                .onOpenURL { url in
+                    Task { await state.importExternalEPUB(url) }
+                }
         }
 #endif
     }
@@ -209,6 +215,12 @@ enum UITestLaunchScenario {
             fixtureSegment(id: "ui-sentence-5", text: ["Tomorrow ", "brings ", "another ", "chapter."], start: 8.8),
         ]
 
+        if scenario == "epub-reader", let ebook = makeEbookFixture() {
+            state.books = [ebook]
+            state.open(chapter: ebook.chapters[0], in: ebook, autoplay: false)
+            return
+        }
+
         state.books = scenario == "empty-library" ? [] : [book]
         state.selectedBookID = scenario == "empty-library" ? nil : book.id
         state.selectedChapterID = scenario == "empty-library" ? nil : chapter.id
@@ -279,6 +291,96 @@ enum UITestLaunchScenario {
         data.append(Data(count: sampleCount * 2))
         try? data.write(to: url, options: .atomic)
         return url
+    }
+
+    /// A real EPUB archive keeps reader UI automation on the same parsing and
+    /// chapter-navigation path used by imported books without touching user data.
+    private static func makeEbookFixture() -> Book? {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(
+            "audioreader-ui-epub",
+            isDirectory: true
+        )
+        let source = root.appendingPathComponent("source", isDirectory: true)
+        let meta = source.appendingPathComponent("META-INF", isDirectory: true)
+        let content = source.appendingPathComponent("OEBPS", isDirectory: true)
+        let epub = root.appendingPathComponent("The Paper Lantern.epub")
+        do {
+            try? fileManager.removeItem(at: root)
+            try fileManager.createDirectory(at: meta, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: content, withIntermediateDirectories: true)
+            try Data("application/epub+zip".utf8).write(
+                to: source.appendingPathComponent("mimetype"),
+                options: .atomic
+            )
+            try Data("""
+            <?xml version="1.0"?>
+            <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">
+              <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+            </container>
+            """.utf8).write(to: meta.appendingPathComponent("container.xml"), options: .atomic)
+            try Data("""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+              <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+                <dc:title>The Paper Lantern</dc:title><dc:creator>AudioReader</dc:creator>
+              </metadata>
+              <manifest>
+                <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+                <item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>
+                <item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/>
+              </manifest>
+              <spine><itemref idref="chapter"/></spine>
+            </package>
+            """.utf8).write(to: content.appendingPathComponent("content.opf"), options: .atomic)
+            try Data("""
+            <html xmlns="http://www.w3.org/1999/xhtml"><body><nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops"><ol>
+              <li><a href="chapter.xhtml#one">The Arrival</a></li>
+              <li><a href="chapter.xhtml#two">The Lantern Room</a></li>
+            </ol></nav></body></html>
+            """.utf8).write(to: content.appendingPathComponent("nav.xhtml"), options: .atomic)
+            try Data("""
+            <html xmlns="http://www.w3.org/1999/xhtml"><body>
+              <section id="one"><h1>The Arrival</h1><p>Mara arrived beside the quiet harbour before dawn.</p></section>
+              <section id="two"><h1>The Lantern Room</h1><p>The paper lantern revealed a careful message above the desk.</p></section>
+            </body></html>
+            """.utf8).write(to: content.appendingPathComponent("chapter.xhtml"), options: .atomic)
+            let cover = Data(base64Encoded:
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            )!
+            let embeddedCover = content.appendingPathComponent("cover.png")
+            try cover.write(to: embeddedCover, options: .atomic)
+            try fileManager.zipItem(
+                at: source,
+                to: epub,
+                shouldKeepParent: false,
+                compressionMethod: .deflate
+            )
+            guard let document = EPUBParser.document(from: epub.path) else { return nil }
+            let coverPath = root.appendingPathComponent("cover.png")
+            try cover.write(to: coverPath, options: .atomic)
+            return Book(
+                id: "ui-epub-book",
+                title: document.title ?? "The Paper Lantern",
+                author: document.author,
+                folderPath: root.path,
+                coverPath: coverPath.path,
+                ebookPath: epub.path,
+                chapters: document.sections.enumerated().map { index, section in
+                    Chapter(
+                        id: "ui-epub-chapter-\(index)",
+                        index: index,
+                        title: section.title,
+                        audioPath: "",
+                        duration: nil,
+                        ebookSectionIndex: index
+                    )
+                },
+                source: .files
+            )
+        } catch {
+            return nil
+        }
     }
 
     private static func fixtureSegment(

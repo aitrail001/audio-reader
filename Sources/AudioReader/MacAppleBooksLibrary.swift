@@ -116,7 +116,7 @@ final class MacAppleBooksLibrary {
             author: document?.author ?? "Unknown author",
             duration: 0,
             location: url,
-            artworkData: nil,
+            artworkData: document?.cover?.data,
             isProtected: document == nil,
             isCloud: false,
             kind: .ebook

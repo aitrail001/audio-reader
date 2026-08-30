@@ -132,6 +132,11 @@ struct ReaderChromeLayoutTests {
         )
 
         #expect(playerView.contains("private var iPadReaderToolbar"))
+        #expect(playerView.contains("EbookNavigationSheet"))
+        #expect(playerView.contains("reader.bookNavigation"))
+        #expect(playerView.contains("reader.epubCover"))
+        #expect(playerView.contains("Search Book"))
+        #expect(playerView.contains("Contents"))
         #expect(playerView.contains("SplitterPanHandle"))
         #expect(playerView.contains("ReaderSplitGeometry("))
         #expect(playerView.contains(".accessibilityLabel(\"Resize lookup panel\")"))

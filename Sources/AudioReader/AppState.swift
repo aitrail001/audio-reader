@@ -1096,6 +1096,39 @@ final class AppState {
         readyChapterIDs = Persistence.readyChapterIDs(in: books, transcripts: transcripts)
     }
 
+    /// Handles the system document-open route used by Files and Apple Books
+    /// exports; copying and EPUB validation stay off the main actor.
+    func importExternalEPUB(_ url: URL) async {
+        guard LibraryScanner.ebookExt.contains(url.pathExtension.lowercased()) else {
+            errorMessage = "AudioReader can open DRM-free EPUB documents."
+            return
+        }
+        account.recordUsage(name: "book_import.started", properties: ["source": "open_url"])
+        do {
+            let result = try await Task.detached(priority: .userInitiated) {
+                try AudiobookImportService.importFiles([url])
+            }.value
+            await rescan()
+            guard let book = books.first(where: {
+                URL(fileURLWithPath: $0.folderPath).standardizedFileURL == result.folder.standardizedFileURL
+            }) else {
+                errorMessage = "The EPUB was imported, but the new library item could not be opened."
+                return
+            }
+            _ = continueReading(book)
+            account.recordUsage(
+                name: "book_import.finished",
+                properties: ["source": "open_url", "outcome": "success", "bookId": book.id]
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            account.recordUsage(
+                name: "book_import.finished",
+                properties: ["source": "open_url", "outcome": "failure"]
+            )
+        }
+    }
+
     private func migrateVocabularySourceLanguages() {
         let migrated = VocabSourceLanguageMigration.migrated(vocab, books: books) { book in
             StudyTokenIndex.languageKey(for: audiobookLanguage(for: book))
@@ -1165,6 +1198,25 @@ final class AppState {
         }
         ensureCachedChapterSummary()
         ensureAutoTranslation()
+    }
+
+    /// Contents and search navigation use the persisted chapter identity rather
+    /// than a transient EPUB title, so resume and cross-device progress stay stable.
+    @discardableResult
+    func openEbookSection(at sectionIndex: Int, in book: Book, matching query: String? = nil) -> Bool {
+        guard let chapter = book.chapters.first(where: { $0.ebookSectionIndex == sectionIndex }) else {
+            return false
+        }
+        open(chapter: chapter, in: book, autoplay: false)
+        if let query,
+           !query.isEmpty,
+           let match = transcript?.segments.first(where: {
+               $0.displayText.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+           }) {
+            scrollSegmentID = match.id
+            revealToken += 1
+        }
+        return true
     }
 
     /// Opens the exact chapter-relative account position when one exists.

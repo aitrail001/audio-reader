@@ -48,6 +48,71 @@ struct ImportParityTests {
         #expect(document.sections[1].text.contains("another complete passage"))
     }
 
+    @Test("EPUB 3 contents split nested chapters within one spine document")
+    func splitsEPUB3NavigationChapters() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let epub = try makeNavigationEPUB(in: fixture.root, usesNCX: false)
+
+        let document = try #require(EPUBParser.document(from: epub.path))
+
+        #expect(document.sections.map(\.title) == ["Part One", "The Arrival", "The Crossing"])
+        #expect(document.sections.map(\.navigationLevel) == [0, 1, 1])
+        #expect(document.cover?.data == navigationEPUBCoverData)
+        #expect(document.sections[0].text.contains("opening passage"))
+        #expect(!document.sections[0].text.contains("arrival chapter"))
+        #expect(document.sections[1].text.contains("arrival chapter"))
+        #expect(!document.sections[1].text.contains("crossing chapter"))
+        #expect(document.sections[2].text.contains("crossing chapter"))
+    }
+
+    @Test("EPUB 2 NCX remains a chapter-title fallback")
+    func usesEPUB2NCXNavigationFallback() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let epub = try makeNavigationEPUB(in: fixture.root, usesNCX: true)
+
+        let document = try #require(EPUBParser.document(from: epub.path))
+
+        #expect(document.sections.map(\.title) == ["Part One", "The Arrival", "The Crossing"])
+        #expect(document.sections.map(\.navigationLevel) == [0, 1, 1])
+        #expect(document.cover?.data == navigationEPUBCoverData)
+    }
+
+    @Test("EPUB cover metadata is extracted and imported as library artwork")
+    func importsEPUBCoverArtwork() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let incoming = fixture.root.appendingPathComponent("incoming", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+        let epub = try makeNavigationEPUB(in: incoming, usesNCX: false)
+
+        let document = try #require(EPUBParser.document(from: epub.path))
+        _ = try AudiobookImportService.importFiles([epub], into: library)
+        let book = try #require(LibraryScanner.scan(root: library).first)
+        let coverPath = try #require(book.coverPath)
+
+        #expect(document.cover?.fileExtension == "png")
+        #expect(document.cover?.data == navigationEPUBCoverData)
+        #expect(URL(fileURLWithPath: coverPath).pathExtension.lowercased() == "png")
+        #expect(try Data(contentsOf: URL(fileURLWithPath: coverPath)) == navigationEPUBCoverData)
+    }
+
+    @Test("EPUB search reports matching contents sections with readable snippets")
+    func searchesAcrossEPUBSections() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let epub = try makeNavigationEPUB(in: fixture.root, usesNCX: false)
+        let document = try #require(EPUBParser.document(from: epub.path))
+
+        let results = EPUBParser.search("lantern", in: document)
+
+        #expect(results.map(\.sectionIndex) == [1, 2])
+        #expect(results.map(\.sectionTitle) == ["The Arrival", "The Crossing"])
+        #expect(results.allSatisfy { $0.snippet.localizedCaseInsensitiveContains("lantern") })
+    }
+
     @Test("EPUB reader preserves short published sentences between longer prose")
     func readerPreservesAllPublishedSentences() throws {
         let fixture = try TemporaryFixture()
@@ -281,6 +346,26 @@ struct ImportParityTests {
         #expect(epub.resolvingSymlinksInPath().path == book.ebookPath.map {
             URL(fileURLWithPath: $0).resolvingSymlinksInPath().path
         })
+    }
+
+    @MainActor
+    @Test("Contents and search results open the matching EPUB chapter")
+    func opensEPUBNavigationResult() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let bookFolder = fixture.root.appendingPathComponent("Navigation Book", isDirectory: true)
+        try FileManager.default.createDirectory(at: bookFolder, withIntermediateDirectories: true)
+        _ = try makeNavigationEPUB(in: bookFolder, usesNCX: false)
+        let book = try #require(LibraryScanner.scan(root: fixture.root).first)
+        let state = AppState()
+        state.books = [book]
+
+        let opened = state.openEbookSection(at: 2, in: book, matching: "lantern")
+
+        #expect(opened)
+        #expect(state.selectedChapter?.title == "The Crossing")
+        #expect(state.transcript?.segments.contains { $0.displayText.contains("crossing chapter") } == true)
+        #expect(state.scrollSegmentID != nil)
     }
 
 #if os(macOS)
@@ -1485,13 +1570,17 @@ struct ImportParityTests {
             contentsOf: repository.appendingPathComponent("Xcode/Info-iOS.plist"),
             encoding: .utf8
         )
+        let appSource = try String(
+            contentsOf: repository.appendingPathComponent("Sources/AudioReader/AudioReaderApp.swift"),
+            encoding: .utf8
+        )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.5.0")
-        #expect(plist["CFBundleVersion"] as? String == "89")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.5.0")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "89")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.5.0;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 89;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.6.0")
+        #expect(plist["CFBundleVersion"] as? String == "90")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.6.0")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "90")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.6.0;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 90;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
         #expect(plist["ProductAPIBaseURL"] as? String == ProductAPI.hostedProductionBaseURL.absoluteString)
@@ -1501,6 +1590,13 @@ struct ImportParityTests {
         #expect(iPadPlist["UIBackgroundModes"] as? [String] == ["audio"])
         #expect(xcodeIOS.contains("UIBackgroundModes"))
         #expect(xcodeIOS.contains("audio"))
+        let iPadDocumentTypes = try #require(iPadPlist["CFBundleDocumentTypes"] as? [[String: Any]])
+        #expect(iPadDocumentTypes.contains { documentType in
+            (documentType["LSItemContentTypes"] as? [String])?.contains("org.idpf.epub-container") == true
+        })
+        #expect(xcodeIOS.contains("org.idpf.epub-container"))
+        #expect(appSource.contains(".onOpenURL"))
+        #expect(appSource.contains("importExternalEPUB"))
         let macATS = try #require(plist["NSAppTransportSecurity"] as? [String: Any])
         let iPadATS = try #require(iPadPlist["NSAppTransportSecurity"] as? [String: Any])
         #expect(macATS["NSAllowsLocalNetworking"] as? Bool == true)
@@ -1586,6 +1682,83 @@ private func makeEPUB(
             .write(to: content.appendingPathComponent("s\(index).xhtml"))
     }
     let epub = directory.appendingPathComponent("\(name).epub")
+    try FileManager.default.zipItem(at: source, to: epub, shouldKeepParent: false, compressionMethod: .deflate)
+    try FileManager.default.removeItem(at: source)
+    return epub
+}
+
+private let navigationEPUBCoverData = Data(base64Encoded:
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)!
+
+private func makeNavigationEPUB(in directory: URL, usesNCX: Bool) throws -> URL {
+    let source = directory.appendingPathComponent(".navigation-epub-source", isDirectory: true)
+    let meta = source.appendingPathComponent("META-INF", isDirectory: true)
+    let content = source.appendingPathComponent("OEBPS", isDirectory: true)
+    try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: content, withIntermediateDirectories: true)
+    try Data("application/epub+zip".utf8).write(to: source.appendingPathComponent("mimetype"))
+    try Data("""
+    <?xml version="1.0"?>
+    <container><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>
+    """.utf8).write(to: meta.appendingPathComponent("container.xml"))
+
+    let navigationManifest = usesNCX
+        ? #"<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>"#
+        : #"<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>"#
+    let spineTOC = usesNCX ? #" toc="ncx""# : ""
+    let legacyCoverMetadata = usesNCX ? #"<meta name="cover" content="cover"/>"# : ""
+    let coverProperties = usesNCX ? "" : #" properties="cover-image""#
+    try Data("""
+    <package xmlns:dc="http://purl.org/dc/elements/1.1/">
+      <metadata>
+        <dc:title>Navigation Book</dc:title>
+        <dc:creator>Page Turner</dc:creator>
+        \(legacyCoverMetadata)
+      </metadata>
+      <manifest>
+        <item id="content" href="content.xhtml" media-type="application/xhtml+xml"/>
+        <item id="cover" href="images/cover.png" media-type="image/png"\(coverProperties)/>
+        \(navigationManifest)
+      </manifest>
+      <spine\(spineTOC)><itemref idref="content"/></spine>
+    </package>
+    """.utf8).write(to: content.appendingPathComponent("content.opf"))
+
+    try Data("""
+    <html><body>
+      <h1 id="part-one">Part One</h1><p>This opening passage introduces the setting with enough published words for a reader.</p>
+      <h2 id="arrival">Arrival Heading</h2><p>The arrival chapter carries a lantern through the rain for careful language study.</p>
+      <h2 id="crossing">Crossing Heading</h2><p>The crossing chapter raises the lantern beside the river and finishes the journey.</p>
+    </body></html>
+    """.utf8).write(to: content.appendingPathComponent("content.xhtml"))
+
+    if usesNCX {
+        try Data("""
+        <ncx><navMap>
+          <navPoint id="part"><navLabel><text>Part One</text></navLabel><content src="content.xhtml#part-one"/>
+            <navPoint id="arrival"><navLabel><text>The Arrival</text></navLabel><content src="content.xhtml#arrival"/></navPoint>
+            <navPoint id="crossing"><navLabel><text>The Crossing</text></navLabel><content src="content.xhtml#crossing"/></navPoint>
+          </navPoint>
+        </navMap></ncx>
+        """.utf8).write(to: content.appendingPathComponent("toc.ncx"))
+    } else {
+        try Data("""
+        <html xmlns:epub="http://www.idpf.org/2007/ops"><body>
+          <nav epub:type="toc"><ol>
+            <li><a href="content.xhtml#part-one">Part One</a><ol>
+              <li><a href="content.xhtml#arrival">The Arrival</a></li>
+              <li><a href="content.xhtml#crossing">The Crossing</a></li>
+            </ol></li>
+          </ol></nav>
+        </body></html>
+        """.utf8).write(to: content.appendingPathComponent("nav.xhtml"))
+    }
+
+    let images = content.appendingPathComponent("images", isDirectory: true)
+    try FileManager.default.createDirectory(at: images, withIntermediateDirectories: true)
+    try navigationEPUBCoverData.write(to: images.appendingPathComponent("cover.png"))
+    let epub = directory.appendingPathComponent(usesNCX ? "Navigation EPUB 2.epub" : "Navigation EPUB 3.epub")
     try FileManager.default.zipItem(at: source, to: epub, shouldKeepParent: false, compressionMethod: .deflate)
     try FileManager.default.removeItem(at: source)
     return epub

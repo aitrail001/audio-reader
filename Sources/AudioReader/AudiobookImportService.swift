@@ -101,6 +101,7 @@ enum AudiobookImportService {
         for url in urls where isSupportedImport(url) {
             try FileManager.default.copyItem(at: url, to: folder.appendingPathComponent(url.lastPathComponent))
         }
+        try storeEmbeddedEbookCoverIfNeeded(in: folder)
         if let fingerprint { try writeMarker(fingerprint, named: fingerprintMarker, to: folder) }
         if audio.isEmpty { try writeMarker("1", named: ebookSectionsMarker, to: folder) }
         log.info("book_import_finished source=files outcome=created audio_count=\(audio.count, privacy: .public) ebook_count=\(ebooks.count, privacy: .public)")
@@ -132,6 +133,7 @@ enum AudiobookImportService {
             }
             let destination = try newBookFolder(title: source.lastPathComponent, in: root)
             try copyDirectoryContents(from: source, to: destination)
+            try storeEmbeddedEbookCoverIfNeeded(in: destination)
             try writeMarkers(source: .localFolder, title: source.lastPathComponent, author: nil, to: destination)
             if let fingerprint { try writeMarker(fingerprint, named: fingerprintMarker, to: destination) }
             if audio.isEmpty { try writeMarker("1", named: ebookSectionsMarker, to: destination) }
@@ -323,7 +325,21 @@ enum AudiobookImportService {
         if !audio.isEmpty {
             try writeMarker(audioFingerprint(for: audio), named: fingerprintMarker, to: folder)
         }
+        try storeEmbeddedEbookCoverIfNeeded(in: folder)
         return added
+    }
+
+    /// EPUB cover metadata is materialized once so library grids and the reader
+    /// never have to unzip a publication while rendering SwiftUI views.
+    private static func storeEmbeddedEbookCoverIfNeeded(in folder: URL) throws {
+        let files = allFiles(in: folder)
+        guard !files.contains(where: { LibraryScanner.coverExt.contains($0.pathExtension.lowercased()) }),
+              let epub = files.first(where: { LibraryScanner.ebookExt.contains($0.pathExtension.lowercased()) }),
+              let cover = EPUBParser.document(from: epub.path)?.cover
+        else { return }
+        let destination = folder.appendingPathComponent("cover.\(cover.fileExtension)")
+        try cover.data.write(to: destination, options: .atomic)
+        log.info("book_import_cover_materialized format=\(cover.fileExtension, privacy: .public)")
     }
 
     private static func uniqueDestination(for source: URL, in folder: URL) throws -> URL? {
