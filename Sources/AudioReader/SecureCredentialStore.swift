@@ -96,10 +96,19 @@ struct LegacyCredentialMigrationSession {
     }
 }
 
-enum CredentialVaultKeyError: Error {
+enum CredentialVaultKeyError: Error, Equatable {
     case unavailable
     case missingForExistingVault
     case invalidStoredKey
+
+    var isSessionCached: Bool {
+        switch self {
+        case .missingForExistingVault:
+            false
+        case .unavailable, .invalidStoredKey:
+            true
+        }
+    }
 }
 
 final class KeychainCredentialVaultKeyProvider: CredentialVaultKeyProvider, @unchecked Sendable {
@@ -123,7 +132,9 @@ final class KeychainCredentialVaultKeyProvider: CredentialVaultKeyProvider, @unc
             cachedKey = key
             return key
         } catch let error as CredentialVaultKeyError {
-            cachedError = error
+            if error.isSessionCached {
+                cachedError = error
+            }
             throw error
         } catch {
             cachedError = .unavailable
@@ -160,7 +171,13 @@ final class KeychainCredentialVaultKeyProvider: CredentialVaultKeyProvider, @unc
         var item = baseQuery()
         item[kSecValueData as String] = data
         item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else {
+        let addStatus = SecItemAdd(item as CFDictionary, nil)
+        if addStatus == errSecSuccess { return }
+        guard addStatus == errSecDuplicateItem else {
+            throw CredentialVaultKeyError.unavailable
+        }
+        let update = [kSecValueData as String: data]
+        guard SecItemUpdate(baseQuery() as CFDictionary, update as CFDictionary) == errSecSuccess else {
             throw CredentialVaultKeyError.unavailable
         }
     }
@@ -212,7 +229,7 @@ final class EncryptedFileCredentialVault: CredentialVault, @unchecked Sendable {
     func save(_ secret: String, account: String) -> Bool {
         withLock {
             do {
-                var values = try loadValues()
+                var values = try loadValuesForUpdate()
                 values[account] = secret
                 try saveValues(values)
                 return try loadValues()[account] == secret
@@ -256,10 +273,35 @@ final class EncryptedFileCredentialVault: CredentialVault, @unchecked Sendable {
         return try JSONDecoder().decode(CredentialDocument.self, from: plaintext).values
     }
 
+    private func loadValuesForUpdate() throws -> [String: String] {
+        do {
+            return try loadValues()
+        } catch let error as CredentialVaultKeyError {
+            switch error {
+            case .missingForExistingVault:
+                return [:]
+            case .unavailable, .invalidStoredKey:
+                throw error
+            }
+        } catch {
+            return [:]
+        }
+    }
+
+    private func wrappingKeyForUpdate() throws -> SymmetricKey {
+        let exists = FileManager.default.fileExists(atPath: fileURL.path)
+        do {
+            return try keyProvider.key(vaultExists: exists)
+        } catch CredentialVaultKeyError.missingForExistingVault {
+            if exists {
+                try FileManager.default.removeItem(at: fileURL)
+            }
+            return try keyProvider.key(vaultExists: false)
+        }
+    }
+
     private func saveValues(_ values: [String: String]) throws {
-        let key = try keyProvider.key(
-            vaultExists: FileManager.default.fileExists(atPath: fileURL.path)
-        )
+        let key = try wrappingKeyForUpdate()
         let plaintext = try JSONEncoder().encode(CredentialDocument(values: values))
         let sealedBox = try AES.GCM.seal(plaintext, using: key)
         guard let combined = sealedBox.combined else { throw CredentialVaultKeyError.unavailable }

@@ -119,6 +119,66 @@ struct ProviderCredentialTests {
         #expect(fixture.vault.read(account: LLMProvider.openAI.rawValue) == nil)
     }
 
+    @Test("Reading an unreadable existing vault does not mint a wrapping key")
+    func readingUnreadableVaultDoesNotReplaceWrappingKey() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioReader-Orphan-Vault-Read-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = root.appendingPathComponent("llm-credentials.vault")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("orphaned-ciphertext".utf8).write(to: fileURL)
+        let provider = MissingThenCreateKeyProvider()
+        let vault = EncryptedFileCredentialVault(fileURL: fileURL, keyProvider: provider)
+
+        #expect(vault.read(account: LLMProvider.openAI.rawValue) == nil)
+        #expect(provider.createCount == 0)
+        #expect(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    @Test("Saving a key replaces an existing vault that cannot be unlocked")
+    func savingReplacesUnreadableExistingVault() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioReader-Orphan-Vault-Save-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = root.appendingPathComponent("llm-credentials.vault")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("orphaned-ciphertext".utf8).write(to: fileURL)
+        let provider = MissingThenCreateKeyProvider()
+        let vault = EncryptedFileCredentialVault(fileURL: fileURL, keyProvider: provider)
+
+        #expect(vault.save("sk-new-secret", account: LLMProvider.openAI.rawValue))
+        #expect(provider.createCount == 1)
+        #expect(vault.read(account: LLMProvider.openAI.rawValue) == "sk-new-secret")
+        #expect(vault.save("sk-qwen-secret", account: LLMProvider.qwenCloud.rawValue))
+        #expect(vault.read(account: LLMProvider.openAI.rawValue) == "sk-new-secret")
+        #expect(vault.read(account: LLMProvider.qwenCloud.rawValue) == "sk-qwen-secret")
+
+        let stored = try Data(contentsOf: fileURL)
+        #expect(!String(decoding: stored, as: UTF8.self).contains("sk-new-secret"))
+    }
+
+    @Test("Saving a key replaces a vault that the wrapping key cannot decrypt")
+    func savingReplacesUndecryptableVault() throws {
+        let fixture = try CredentialVaultFixture()
+        defer { fixture.remove() }
+        #expect(fixture.vault.save("sk-old-secret", account: LLMProvider.grok.rawValue))
+
+        var stored = try Data(contentsOf: fixture.fileURL)
+        stored[stored.index(before: stored.endIndex)] ^= 0x01
+        try stored.write(to: fixture.fileURL, options: .atomic)
+
+        #expect(fixture.vault.save("sk-new-secret", account: LLMProvider.openAI.rawValue))
+        #expect(fixture.vault.read(account: LLMProvider.openAI.rawValue) == "sk-new-secret")
+        #expect(fixture.vault.read(account: LLMProvider.grok.rawValue) == nil)
+    }
+
+    @Test("A missing wrapping key is not cached as a permanent session failure")
+    func missingWrappingKeyIsNotSessionCached() {
+        #expect(!CredentialVaultKeyError.missingForExistingVault.isSessionCached)
+        #expect(CredentialVaultKeyError.unavailable.isSessionCached)
+        #expect(CredentialVaultKeyError.invalidStoredKey.isSessionCached)
+    }
+
     @Test("Existing settings migrate all provider endpoints and Grok authentication")
     func migratesProviderSettings() throws {
         let encoded = try JSONEncoder().encode(AppSettings.default)
@@ -265,6 +325,20 @@ private struct FixedCredentialVaultKeyProvider: CredentialVaultKeyProvider {
 
     func key(vaultExists: Bool) throws -> SymmetricKey {
         wrappingKey
+    }
+}
+
+private final class MissingThenCreateKeyProvider: CredentialVaultKeyProvider, @unchecked Sendable {
+    private var wrappingKey: SymmetricKey?
+    private(set) var createCount = 0
+
+    func key(vaultExists: Bool) throws -> SymmetricKey {
+        if let wrappingKey { return wrappingKey }
+        guard !vaultExists else { throw CredentialVaultKeyError.missingForExistingVault }
+        createCount += 1
+        let key = SymmetricKey(data: Data(repeating: 0x3C, count: 32))
+        wrappingKey = key
+        return key
     }
 }
 
