@@ -337,6 +337,22 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
       expect.objectContaining({ status: "duplicate", entityRevision: 4 }),
     ]);
 
+    const mismatchedReplay = session.exec(
+      `select public.push_sync_batch(
+        ${sqlString(USER_A)}::uuid,
+        ${sqlString(DEVICE_A)}::uuid,
+        ${sqlString(batchId)}::uuid,
+        ${sqlJson([
+          {
+            ...mutations[0],
+            mutationId: "55555555-5555-4555-8555-555555555559",
+          },
+        ])}::jsonb
+      )`,
+    );
+    expect(mismatchedReplay.ok).toBe(false);
+    expect(mismatchedReplay.stderr).toContain("batchId was already used for different mutations");
+
     const rejectedDelete = callJson(
       session,
       `select public.push_sync_batch(
@@ -365,6 +381,108 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
         `select server_version::text from user_settings where user_id = ${sqlString(USER_A)}::uuid`,
       ),
     ).toBe("4");
+  });
+
+  it("keeps rejected mutation IDs terminal across later entity revisions", () => {
+    const session = requireDb(db);
+    const rejectedId = "88888888-8888-4888-8888-888888888881";
+    const entityId = "terminal-replay";
+    const rejectedMutation = {
+      mutationId: rejectedId,
+      entityType: "progress",
+      entityId,
+      operation: "upsert",
+      baseRevision: 2,
+      occurredAt: "2026-08-30T09:46:00Z",
+      payload: { positionSeconds: 30 },
+    };
+    const rejected = callJson(
+      session,
+      `select public.push_sync_batch(
+        ${sqlString(USER_A)}::uuid,
+        ${sqlString(DEVICE_A)}::uuid,
+        '88888888-8888-4888-8888-888888888882'::uuid,
+        ${sqlJson([rejectedMutation])}::jsonb
+      )`,
+    );
+    expect(rejected.results).toEqual([
+      expect.objectContaining({ status: "rejected", entityRevision: null }),
+    ]);
+
+    for (const [index, baseRevision] of [0, 1].entries()) {
+      callJson(
+        session,
+        `select public.push_sync_batch(
+          ${sqlString(USER_A)}::uuid,
+          ${sqlString(DEVICE_A)}::uuid,
+          ${sqlString(`88888888-8888-4888-8888-88888888889${String(index)}`)}::uuid,
+          ${sqlJson([
+            {
+              mutationId: `99999999-9999-4999-8999-99999999999${String(index)}`,
+              entityType: "progress",
+              entityId,
+              operation: "upsert",
+              baseRevision,
+              occurredAt: `2026-08-30T09:46:0${String(index + 1)}Z`,
+              payload: { positionSeconds: 40 + index },
+            },
+          ])}::jsonb
+        )`,
+      );
+    }
+
+    const replay = callJson(
+      session,
+      `select public.push_sync_batch(
+        ${sqlString(USER_A)}::uuid,
+        ${sqlString(DEVICE_A)}::uuid,
+        '88888888-8888-4888-8888-888888888883'::uuid,
+        ${sqlJson([rejectedMutation])}::jsonb
+      )`,
+    );
+    expect(replay.results).toEqual([
+      expect.objectContaining({ status: "duplicate", entityRevision: null }),
+    ]);
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from sync_changes
+         where user_id = ${sqlString(USER_A)}::uuid
+           and entity_type = 'progress'
+           and entity_id = ${sqlString(entityId)}`,
+      ),
+    ).toBe("2");
+  });
+
+  it("rejects duplicate mutation IDs before committing any batch rows", () => {
+    const session = requireDb(db);
+    const mutation = {
+      mutationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa8",
+      entityType: "progress",
+      entityId: "duplicate-in-batch",
+      operation: "upsert",
+      baseRevision: 0,
+      occurredAt: "2026-08-30T09:47:00Z",
+      payload: { positionSeconds: 1 },
+    };
+    const result = session.exec(
+      `select public.push_sync_batch(
+        ${sqlString(USER_A)}::uuid,
+        ${sqlString(DEVICE_A)}::uuid,
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa9'::uuid,
+        ${sqlJson([mutation, { ...mutation, payload: { positionSeconds: 2 } }])}::jsonb
+      )`,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("mutationId must be unique within the batch");
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from sync_changes
+         where user_id = ${sqlString(USER_A)}::uuid
+           and entity_id = 'duplicate-in-batch'`,
+      ),
+    ).toBe("0");
   });
 
   it("claims one assistant generation per cache key and attaches another user", () => {

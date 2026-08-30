@@ -1,3 +1,31 @@
+create table public.sync_batches (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles (user_id) on delete cascade,
+  batch_id uuid not null,
+  mutation_fingerprint text not null,
+  created_at timestamptz not null default now(),
+  unique (user_id, batch_id)
+);
+
+create table public.sync_mutation_outcomes (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles (user_id) on delete cascade,
+  mutation_id uuid not null,
+  status text not null,
+  entity_revision bigint,
+  problem jsonb not null,
+  created_at timestamptz not null default now(),
+  unique (user_id, mutation_id),
+  constraint sync_mutation_outcomes_status_check check (status in ('conflict', 'rejected')),
+  constraint sync_mutation_outcomes_revision_check
+    check (entity_revision is null or entity_revision >= 0)
+);
+
+alter table public.sync_batches enable row level security;
+alter table public.sync_batches force row level security;
+alter table public.sync_mutation_outcomes enable row level security;
+alter table public.sync_mutation_outcomes force row level security;
+
 create function public.push_sync_batch(
   p_user_id uuid,
   p_device_id uuid,
@@ -20,7 +48,11 @@ declare
   v_entity_revision bigint;
   v_sequence bigint;
   v_existing public.sync_changes%rowtype;
+  v_outcome public.sync_mutation_outcomes%rowtype;
   v_settings public.user_settings%rowtype;
+  v_batch_fingerprint text;
+  v_existing_batch_fingerprint text;
+  v_problem jsonb;
   v_results jsonb := '[]'::jsonb;
 begin
   if jsonb_typeof(p_mutations) <> 'array' then
@@ -28,6 +60,12 @@ begin
   end if;
   if jsonb_array_length(p_mutations) > 500 then
     raise exception 'p_mutations exceeds the 500 item limit';
+  end if;
+  if (
+    select count(*) <> count(distinct value ->> 'mutationId')
+    from jsonb_array_elements(p_mutations)
+  ) then
+    raise exception 'mutationId must be unique within the batch';
   end if;
 
   -- One profile lock serializes sequence allocation and entity revision checks for this account.
@@ -41,6 +79,20 @@ begin
   where user_id = p_user_id and id = p_device_id and revoked = false;
   if not found then
     raise exception 'active device not found';
+  end if;
+
+  v_batch_fingerprint := md5(p_mutations::text);
+  select mutation_fingerprint
+  into v_existing_batch_fingerprint
+  from public.sync_batches
+  where user_id = p_user_id and batch_id = p_batch_id;
+  if found then
+    if v_existing_batch_fingerprint <> v_batch_fingerprint then
+      raise exception 'batchId was already used for different mutations';
+    end if;
+  else
+    insert into public.sync_batches (user_id, batch_id, mutation_fingerprint)
+    values (p_user_id, p_batch_id, v_batch_fingerprint);
   end if;
 
   select coalesce(max(sequence), 0)
@@ -66,19 +118,6 @@ begin
     if v_operation not in ('upsert', 'delete', 'append') then
       raise exception 'unknown sync operation: %', v_operation;
     end if;
-    if v_entity_type = 'settings' and v_operation <> 'upsert' then
-      v_results := v_results || jsonb_build_array(jsonb_build_object(
-        'mutationId', v_mutation_id,
-        'status', 'rejected',
-        'entityRevision', null,
-        'problem', jsonb_build_object(
-          'title', 'Rejected',
-          'detail', 'Settings only support upsert.'
-        )
-      ));
-      continue;
-    end if;
-
     select *
     into v_existing
     from public.sync_changes
@@ -89,6 +128,37 @@ begin
         'status', 'duplicate',
         'entityRevision', v_existing.revision,
         'problem', null
+      ));
+      continue;
+    end if;
+
+    select *
+    into v_outcome
+    from public.sync_mutation_outcomes
+    where user_id = p_user_id and mutation_id = v_mutation_id;
+    if found then
+      v_results := v_results || jsonb_build_array(jsonb_build_object(
+        'mutationId', v_mutation_id,
+        'status', 'duplicate',
+        'entityRevision', v_outcome.entity_revision,
+        'problem', null
+      ));
+      continue;
+    end if;
+
+    if v_entity_type = 'settings' and v_operation <> 'upsert' then
+      v_problem := jsonb_build_object(
+        'title', 'Rejected',
+        'detail', 'Settings only support upsert.'
+      );
+      insert into public.sync_mutation_outcomes (
+        user_id, mutation_id, status, entity_revision, problem
+      ) values (p_user_id, v_mutation_id, 'rejected', null, v_problem);
+      v_results := v_results || jsonb_build_array(jsonb_build_object(
+        'mutationId', v_mutation_id,
+        'status', 'rejected',
+        'entityRevision', null,
+        'problem', v_problem
       ));
       continue;
     end if;
@@ -116,27 +186,35 @@ begin
     end if;
 
     if v_base_revision < 0 or v_base_revision > v_current_revision then
+      v_problem := jsonb_build_object(
+        'title', 'Rejected',
+        'detail', 'baseRevision is invalid.'
+      );
+      insert into public.sync_mutation_outcomes (
+        user_id, mutation_id, status, entity_revision, problem
+      ) values (p_user_id, v_mutation_id, 'rejected', null, v_problem);
       v_results := v_results || jsonb_build_array(jsonb_build_object(
         'mutationId', v_mutation_id,
         'status', 'rejected',
         'entityRevision', null,
-        'problem', jsonb_build_object(
-          'title', 'Rejected',
-          'detail', 'baseRevision is invalid.'
-        )
+        'problem', v_problem
       ));
       continue;
     end if;
 
     if v_current_revision > 0 and v_base_revision < v_current_revision then
+      v_problem := jsonb_build_object(
+        'title', 'Conflict',
+        'detail', 'The entity was updated on another device.'
+      );
+      insert into public.sync_mutation_outcomes (
+        user_id, mutation_id, status, entity_revision, problem
+      ) values (p_user_id, v_mutation_id, 'conflict', v_current_revision, v_problem);
       v_results := v_results || jsonb_build_array(jsonb_build_object(
         'mutationId', v_mutation_id,
         'status', 'conflict',
         'entityRevision', v_current_revision,
-        'problem', jsonb_build_object(
-          'title', 'Conflict',
-          'detail', 'The entity was updated on another device.'
-        )
+        'problem', v_problem
       ));
       continue;
     end if;
@@ -242,5 +320,7 @@ create index if not exists sync_changes_user_entity_sequence_idx
 comment on function public.push_sync_batch is
   'Applies one authenticated sync batch inside Postgres so Worker CPU does not scale with mutation count.';
 
+revoke all on table public.sync_batches from public, anon, authenticated, service_role;
+revoke all on table public.sync_mutation_outcomes from public, anon, authenticated, service_role;
 revoke all on function public.push_sync_batch from public, anon, authenticated;
 grant execute on function public.push_sync_batch to service_role;

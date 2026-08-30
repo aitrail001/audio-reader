@@ -25,6 +25,7 @@ const JSON_COLUMNS_ALLOWED = new Map<string, readonly string[]>([
   ["transcript_revisions", ["quality", "ebook_alignment"]],
   ["assistant_cache_entries", ["result"]],
   ["sync_changes", ["payload"]],
+  ["sync_mutation_outcomes", ["problem"]],
   ["idempotency_records", ["response_headers"]],
   ["audit_events", ["metadata", "before_metadata", "after_metadata"]],
   ["operator_settings", ["payload"]],

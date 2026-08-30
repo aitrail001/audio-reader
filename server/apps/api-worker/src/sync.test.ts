@@ -197,4 +197,40 @@ describe("sync API", () => {
     }
     expect(body.results[0]).toMatchObject({ status: "conflict", entityRevision: 1 });
   });
+
+  it("rejects duplicate mutation IDs before writing the batch", async () => {
+    const mutation = {
+      mutationId: MUTATION_ID,
+      entityType: "progress",
+      entityId: ENTITY_ID,
+      operation: "upsert",
+      baseRevision: 0,
+      occurredAt: "2026-08-26T09:12:04.000Z",
+      payload: { positionSeconds: 10 },
+    };
+    const app = createTestApp();
+    const response = await app.fetch(
+      new Request("http://localhost/v1/sync/push", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          deviceId: DEVICE_ID,
+          batchId: BATCH_ID,
+          mutations: [mutation, { ...mutation, payload: { positionSeconds: 20 } }],
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    const body = await readJson(response);
+    expect(body).toMatchObject({
+      code: "bad_request",
+      fieldErrors: [
+        {
+          field: "mutations.1.mutationId",
+          message: "mutationId must be unique within the batch.",
+        },
+      ],
+    });
+  });
 });

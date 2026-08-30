@@ -440,6 +440,8 @@ type TenantIds = {
   jobId: string;
   usageId: string;
   syncId: string;
+  syncBatchId: string;
+  syncOutcomeId: string;
   idempotencyId: string;
   adminRoleId: string;
   privacyId: string;
@@ -464,6 +466,8 @@ function idKey(table: string): keyof TenantIds {
     assistant_jobs: "jobId",
     usage_ledger: "usageId",
     sync_changes: "syncId",
+    sync_batches: "syncBatchId",
+    sync_mutation_outcomes: "syncOutcomeId",
     idempotency_records: "idempotencyId",
     admin_roles: "adminRoleId",
     privacy_requests: "privacyId",
@@ -530,6 +534,8 @@ function loadTenantIds(db: PostgresSession, userId: string): TenantIds {
     jobId: one("assistant_jobs"),
     usageId: one("usage_ledger"),
     syncId: one("sync_changes"),
+    syncBatchId: one("sync_batches"),
+    syncOutcomeId: one("sync_mutation_outcomes"),
     idempotencyId: one("idempotency_records"),
     adminRoleId: one("admin_roles"),
     privacyId: one("privacy_requests"),
@@ -699,6 +705,13 @@ function insertSql(table: string, owner: TenantIds): string {
     case "sync_changes":
       return `insert into sync_changes (user_id, sequence, entity_type, entity_id, operation)
         values (${u}, 99, 'books', 'x', 'upsert')`;
+    case "sync_batches":
+      return `insert into sync_batches (user_id, batch_id, mutation_fingerprint)
+        values (${u}, gen_random_uuid(), 'hijack')`;
+    case "sync_mutation_outcomes":
+      return `insert into sync_mutation_outcomes
+        (user_id, mutation_id, status, entity_revision, problem)
+        values (${u}, gen_random_uuid(), 'rejected', null, '{"title":"Rejected"}'::jsonb)`;
     case "idempotency_records":
       return `insert into idempotency_records (user_id, key, method, pathname, fingerprint, status)
         values (${u}, 'idempotency-key-99xx', 'POST', '/v1/x', 'fp', 'completed')`;
@@ -786,6 +799,13 @@ begin
 
   insert into public.sync_changes (user_id, sequence, entity_type, entity_id, operation)
   values (p_user, 1, 'books', v_book::text, 'upsert');
+
+  insert into public.sync_batches (user_id, batch_id, mutation_fingerprint)
+  values (p_user, gen_random_uuid(), 'seed');
+
+  insert into public.sync_mutation_outcomes
+    (user_id, mutation_id, status, entity_revision, problem)
+  values (p_user, gen_random_uuid(), 'rejected', null, '{"title":"Rejected"}'::jsonb);
 
   insert into public.idempotency_records (user_id, key, method, pathname, fingerprint, status)
   values (p_user, 'idempotency-key-16', 'POST', '/v1/sync', 'fp', 'completed');

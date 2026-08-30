@@ -10,7 +10,7 @@ transaction functions. Tables, policies, and RPCs come from versioned SQL in
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Private, synchronized | `profiles`, `devices`, `user_settings`, `books`, `book_assets`, `chapters`, `reading_progress`, `transcript_revisions`, `transcript_segments`, `vocabulary_occurrences`, `known_lemmas`, `review_cards`, `review_events`, `user_assistant_results` |
 | Private, user-filed   | `privacy_requests` (authenticated JWT may CRUD own rows)                                                                                                                                                                                           |
-| Private, server-owned | `assistant_jobs`, `usage_ledger`, `sync_changes`, `idempotency_records`, `admin_roles`, `chat_messages`, `product_events`                                                                                                                            |
+| Private, server-owned | `assistant_jobs`, `usage_ledger`, `sync_changes`, `sync_batches`, `sync_mutation_outcomes`, `idempotency_records`, `admin_roles`, `chat_messages`, `product_events`                                                                                  |
 | Global / operational  | `canonical_works`, `canonical_editions`, `assistant_cache_entries`, `feature_flags`, `quota_limits`, `model_policies`, `audit_events`, `operator_settings`, `passwordless_hits`, `passwordless_cooldowns`, `passwordless_blocked_attempts`               |
 
 Synchronized private rows carry `id`, `user_id`, `created_at`, `updated_at`,
@@ -33,6 +33,8 @@ erDiagram
   profiles ||--o{ assistant_jobs : owns
   profiles ||--o{ usage_ledger : records
   profiles ||--o{ sync_changes : emits
+  profiles ||--o{ sync_batches : submits
+  profiles ||--o{ sync_mutation_outcomes : records
   profiles ||--o{ idempotency_records : claims
   profiles ||--o{ admin_roles : assigned
   profiles ||--o{ privacy_requests : files
@@ -69,7 +71,7 @@ Authenticated JWTs are scoped with `auth.uid()` and `public.current_user_is_acti
 - Synchronized private tables and `privacy_requests`: select/insert/update/delete own rows
 - `assistant_jobs`, `usage_ledger`, and `sync_changes`: select own rows only
 - `assistant_cache_entries`, `model_policies`, `admin_roles`, `audit_events`,
-  `operator_settings`, `idempotency_records`, `feature_flags`, `quota_limits`,
+  `operator_settings`, `idempotency_records`, `sync_batches`, `sync_mutation_outcomes`, `feature_flags`, `quota_limits`,
   `canonical_works`, `canonical_editions`, `chat_messages`, `passwordless_hits`,
   `passwordless_cooldowns`, `passwordless_blocked_attempts`, and `product_events`: no JWT policies
   (normal clients cannot query them)
@@ -90,6 +92,9 @@ Server-only `SECURITY DEFINER` RPCs. EXECUTE is granted to `service_role` only.
   claim, store, and replay idempotent HTTP responses
 - `append_sync_change`: lock the profile, bump `server_version`, append the next
   per-user sequence
+- `push_sync_batch`: bind a batch ID to its mutation fingerprint, reject duplicate
+  IDs before writes, preserve terminal mutation outcomes, and apply one ordered
+  sync batch under the profile lock
 - `claim_assistant_generation`: insert one in-flight job per `cache_key`, or
   attach when the unique index rejects a second owner
 - `attach_user_assistant_result`: point another user's private result at an

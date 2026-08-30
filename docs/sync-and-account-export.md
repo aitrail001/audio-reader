@@ -34,7 +34,9 @@ queue, interval, ease, retention statistics, and review history across devices.
 
 The service applies each upload batch in one account-scoped Postgres
 transaction. Mutation IDs remain replay-safe, entity revisions are checked in
-order, and account sequence allocation is serialized. Downloads use an
+order, duplicate IDs are rejected before writes, and rejected/conflicted
+outcomes remain terminal on retry. A batch ID is bound to one canonical
+mutation fingerprint, and account sequence allocation is serialized. Downloads use an
 exclusive cursor and request only one bounded page plus a has-more sentinel;
 the Worker never loads an account's complete sync history to produce a page.
 The service-role-only batch RPC accepts at most 500 mutations, validates the

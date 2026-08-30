@@ -19,6 +19,8 @@ export const CORE_TABLES = [
   "assistant_jobs",
   "usage_ledger",
   "sync_changes",
+  "sync_batches",
+  "sync_mutation_outcomes",
   "idempotency_records",
   "feature_flags",
   "model_policies",
@@ -57,6 +59,8 @@ export const PRIVATE_TABLES = [
   ...SYNC_TABLES,
   "usage_ledger",
   "sync_changes",
+  "sync_batches",
+  "sync_mutation_outcomes",
   "idempotency_records",
   "admin_roles",
   "privacy_requests",
@@ -109,6 +113,8 @@ export const JWT_DENIED_TABLES = [
 /** RLS enabled, no authenticated policies. Includes JWT-denied tables. */
 export const SERVER_ONLY_TABLES = [
   "idempotency_records",
+  "sync_batches",
+  "sync_mutation_outcomes",
   "canonical_works",
   "canonical_editions",
   "feature_flags",

@@ -223,6 +223,7 @@ function parseMutations(value: unknown, requestId: string): SyncMutation[] | Res
     return fieldError(requestId, "mutations", "mutations cannot exceed 500 items.");
   }
   const mutations: SyncMutation[] = [];
+  const mutationIds = new Set<string>();
   for (const [index, item] of value.entries()) {
     if (!isRecord(item)) {
       return fieldError(requestId, `mutations.${String(index)}`, "mutation must be an object.");
@@ -235,6 +236,14 @@ function parseMutations(value: unknown, requestId: string): SyncMutation[] | Res
     if (mutationId instanceof Response) {
       return mutationId;
     }
+    if (mutationIds.has(mutationId)) {
+      return fieldError(
+        requestId,
+        `mutations.${String(index)}.mutationId`,
+        "mutationId must be unique within the batch.",
+      );
+    }
+    mutationIds.add(mutationId);
     const entityId = requiredUuid(item.entityId, `mutations.${String(index)}.entityId`, requestId);
     if (entityId instanceof Response) {
       return entityId;
