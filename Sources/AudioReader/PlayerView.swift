@@ -1954,7 +1954,7 @@ private struct TranscriptTextColumn: View {
                             onMarkKnown: { word in
                                 state.markKnown(word, known: !state.isMarkedKnown(word))
                             },
-                            onTranslate: { state.translateCurrentSentence() },
+                            onTranslate: { state.translateSentence(segment) },
                             onAccept: { if let g = state.sentenceGloss(for: segment) { state.acceptGloss(g) } },
                             onReject: { if let g = state.sentenceGloss(for: segment) { state.rejectGloss(g) } },
                             onRetry: { state.retranslateSentence(segment) },

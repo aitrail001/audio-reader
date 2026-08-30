@@ -311,6 +311,7 @@ struct BackgroundJob: Identifiable, Equatable, Sendable {
     var chapterID: String?
     var chapterTitle: String
     var targetID: String?
+    var targetIDs: [String]
     var stage: String
     var detail: String
     var fraction: Double?
@@ -324,6 +325,7 @@ struct BackgroundJob: Identifiable, Equatable, Sendable {
         chapterID: String? = nil,
         chapterTitle: String,
         targetID: String? = nil,
+        targetIDs: [String] = [],
         stage: String,
         detail: String,
         fraction: Double?
@@ -336,6 +338,7 @@ struct BackgroundJob: Identifiable, Equatable, Sendable {
         self.chapterID = chapterID
         self.chapterTitle = chapterTitle
         self.targetID = targetID
+        self.targetIDs = targetIDs
         self.stage = stage
         self.detail = detail
         self.fraction = fraction
@@ -841,6 +844,11 @@ enum ChapterTranslationBatchError: LocalizedError {
     }
 }
 
+struct SentenceTranslationPlan: Equatable, Sendable {
+    var window: [TranscriptSegment]
+    var targets: [TranscriptSegment]
+}
+
 enum ChapterTranslationBatch {
     static let maximumAttempts = 3
 
@@ -852,6 +860,124 @@ enum ChapterTranslationBatch {
         let blockSize = max(1, size)
         return stride(from: 0, to: segments.count, by: blockSize).map { start in
             Array(segments[start..<min(start + blockSize, segments.count)])
+        }
+    }
+
+    static func block(containing segmentID: String, in segments: [TranscriptSegment], size: Int) -> [TranscriptSegment]? {
+        guard let index = segments.firstIndex(where: { $0.id == segmentID }) else { return nil }
+        let blockSize = max(1, size)
+        let start = (index / blockSize) * blockSize
+        return Array(segments[start..<min(start + blockSize, segments.count)])
+    }
+
+    static func plan(
+        segments: [TranscriptSegment],
+        size: Int,
+        startIndex: Int = 0,
+        forceIDs: Set<String> = [],
+        needsTranslation: (TranscriptSegment) -> Bool,
+        contextRadius: Int = 0
+    ) -> [SentenceTranslationPlan] {
+        blocks(segments, size: size).compactMap { block in
+            makePlan(
+                block: block,
+                in: segments,
+                startIndex: startIndex,
+                forceIDs: forceIDs,
+                needsTranslation: needsTranslation,
+                contextRadius: contextRadius
+            )
+        }
+    }
+
+    static func plan(
+        containing segmentID: String,
+        in segments: [TranscriptSegment],
+        size: Int,
+        forceIDs: Set<String> = [],
+        needsTranslation: (TranscriptSegment) -> Bool,
+        contextRadius: Int = 0
+    ) -> SentenceTranslationPlan? {
+        guard let block = block(containing: segmentID, in: segments, size: size) else { return nil }
+        return makePlan(
+            block: block,
+            in: segments,
+            startIndex: 0,
+            forceIDs: forceIDs,
+            needsTranslation: needsTranslation,
+            contextRadius: contextRadius
+        )
+    }
+
+    static func refreshingWindow(
+        _ plan: SentenceTranslationPlan,
+        in segments: [TranscriptSegment],
+        size: Int,
+        needsTranslation: (TranscriptSegment) -> Bool,
+        contextRadius: Int = 0
+    ) -> SentenceTranslationPlan {
+        guard let firstTarget = plan.targets.first,
+              let block = block(containing: firstTarget.id, in: segments, size: size)
+        else { return plan }
+        return SentenceTranslationPlan(
+            window: window(
+                block: block,
+                in: segments,
+                targets: plan.targets,
+                needsTranslation: needsTranslation,
+                contextRadius: contextRadius
+            ),
+            targets: plan.targets
+        )
+    }
+
+    private static func makePlan(
+        block: [TranscriptSegment],
+        in segments: [TranscriptSegment],
+        startIndex: Int,
+        forceIDs: Set<String>,
+        needsTranslation: (TranscriptSegment) -> Bool,
+        contextRadius: Int
+    ) -> SentenceTranslationPlan? {
+        guard !block.isEmpty else { return nil }
+        let idToIndex = Dictionary(uniqueKeysWithValues: segments.enumerated().map { ($0.element.id, $0.offset) })
+        let targets = block.filter { segment in
+            guard let index = idToIndex[segment.id], index >= startIndex else { return false }
+            return forceIDs.contains(segment.id) || needsTranslation(segment)
+        }
+        guard !targets.isEmpty else { return nil }
+        return SentenceTranslationPlan(
+            window: window(
+                block: block,
+                in: segments,
+                targets: targets,
+                needsTranslation: needsTranslation,
+                contextRadius: contextRadius
+            ),
+            targets: targets
+        )
+    }
+
+    private static func window(
+        block: [TranscriptSegment],
+        in segments: [TranscriptSegment],
+        targets: [TranscriptSegment],
+        needsTranslation: (TranscriptSegment) -> Bool,
+        contextRadius: Int
+    ) -> [TranscriptSegment] {
+        let idToIndex = Dictionary(uniqueKeysWithValues: segments.enumerated().map { ($0.element.id, $0.offset) })
+        let blockIndices = block.compactMap { idToIndex[$0.id] }
+        guard let blockStart = blockIndices.min(), let blockEnd = blockIndices.max() else {
+            return targets
+        }
+        let radius = max(0, contextRadius)
+        let windowStart = max(0, blockStart - radius)
+        let windowEnd = min(segments.count - 1, blockEnd + radius)
+        let targetIDs = Set(targets.map(\.id))
+        return (windowStart...windowEnd).compactMap { index -> TranscriptSegment? in
+            let segment = segments[index]
+            if targetIDs.contains(segment.id) { return segment }
+            return needsTranslation(segment) ? nil : segment
         }
     }
 

@@ -411,6 +411,228 @@ struct ImportParityTests {
 
         #expect(blocks.map(\.count) == [3, 3, 1])
         #expect(blocks.flatMap { $0 }.map(\.id) == segments.map(\.id))
+        #expect(ChapterTranslationBatch.block(containing: "segment-5", in: segments, size: 3)?.map(\.id) == [
+            "segment-4", "segment-5", "segment-6"
+        ])
+        #expect(ChapterTranslationBatch.block(containing: "segment-7", in: segments, size: 3)?.map(\.id) == [
+            "segment-7"
+        ])
+        #expect(ChapterTranslationBatch.block(containing: "missing", in: segments, size: 3) == nil)
+    }
+
+    @Test("Single-sentence plans target untranslated chunk-mates and keep translated ones as window context")
+    func plansSingleSentenceChunkTargetsAndTranslatedContext() {
+        let segments = numberedTranscriptSegments(7)
+        let translated: Set<String> = ["segment-4", "segment-6"]
+        let plan = ChapterTranslationBatch.plan(
+            containing: "segment-5",
+            in: segments,
+            size: 3,
+            needsTranslation: { !translated.contains($0.id) }
+        )
+
+        #expect(plan?.window.map(\.id) == ["segment-4", "segment-5", "segment-6"])
+        #expect(plan?.targets.map(\.id) == ["segment-5"])
+        let context = ReadingAssistantPrompt.sentenceContext(plan!)
+        #expect(context.contains("PREVIOUS: Sentence 4."))
+        #expect(context.contains("TARGET id=segment-5: Sentence 5."))
+        #expect(context.contains("NEXT: Sentence 6."))
+        #expect(!context.contains("TARGET id=segment-4:"))
+        #expect(!context.contains("TARGET id=segment-6:"))
+        #expect(!context.contains("Sentence 3."))
+        #expect(!context.contains("Sentence 7."))
+    }
+
+    @Test("Untranslated sentences in an adjacent chunk are omitted from a single-sentence plan")
+    func omitsUntranslatedSentencesFromAdjacentChunks() {
+        let segments = numberedTranscriptSegments(7)
+        let plan = ChapterTranslationBatch.plan(
+            containing: "segment-5",
+            in: segments,
+            size: 3,
+            needsTranslation: { _ in true },
+            contextRadius: 2
+        )
+
+        #expect(plan?.window.map(\.id) == ["segment-4", "segment-5", "segment-6"])
+        #expect(plan?.targets.map(\.id) == ["segment-4", "segment-5", "segment-6"])
+        #expect(plan?.window.map(\.id).contains("segment-3") == false)
+        #expect(plan?.window.map(\.id).contains("segment-7") == false)
+        let context = ReadingAssistantPrompt.sentenceContext(plan!)
+        #expect(context.contains("TARGET id=segment-4: Sentence 4."))
+        #expect(context.contains("TARGET id=segment-5: Sentence 5."))
+        #expect(context.contains("TARGET id=segment-6: Sentence 6."))
+        #expect(!context.contains("PREVIOUS: Sentence 3."))
+        #expect(!context.contains("NEXT: Sentence 7."))
+        #expect(!context.contains("Sentence 3."))
+        #expect(!context.contains("Sentence 7."))
+    }
+
+    @Test("Extra context radius adds only already-translated neighbors outside the chunk")
+    func contextRadiusAddsOnlyTranslatedExtraChunkNeighbors() {
+        let segments = numberedTranscriptSegments(7)
+        let translated: Set<String> = ["segment-2", "segment-3", "segment-7"]
+        let plan = ChapterTranslationBatch.plan(
+            containing: "segment-5",
+            in: segments,
+            size: 3,
+            needsTranslation: { !translated.contains($0.id) },
+            contextRadius: 2
+        )
+
+        #expect(plan?.window.map(\.id) == [
+            "segment-2", "segment-3", "segment-4", "segment-5", "segment-6", "segment-7"
+        ])
+        #expect(plan?.targets.map(\.id) == ["segment-4", "segment-5", "segment-6"])
+        #expect(plan?.window.map(\.id).contains("segment-1") == false)
+    }
+
+    @Test("Force-retranslate keeps the requested sentence as a target and translated chunk-mates as context")
+    func forceRetranslateKeepsTranslatedNeighborsAsContext() {
+        let segments = numberedTranscriptSegments(7)
+        let translated: Set<String> = ["segment-4", "segment-5"]
+        let plan = ChapterTranslationBatch.plan(
+            containing: "segment-5",
+            in: segments,
+            size: 3,
+            forceIDs: ["segment-5"],
+            needsTranslation: { !translated.contains($0.id) }
+        )
+
+        #expect(plan?.window.map(\.id) == ["segment-4", "segment-5", "segment-6"])
+        #expect(plan?.targets.map(\.id) == ["segment-5", "segment-6"])
+    }
+
+    @Test("Chapter plans skip fully translated positional chunks and respect startIndex")
+    func chapterPlanSkipsTranslatedChunksAndRespectsStartIndex() {
+        let segments = numberedTranscriptSegments(7)
+        let translated: Set<String> = ["segment-1", "segment-2", "segment-3", "segment-7"]
+        let pending = ChapterTranslationBatch.plan(
+            segments: segments,
+            size: 3,
+            needsTranslation: { !translated.contains($0.id) }
+        )
+        let resumed = ChapterTranslationBatch.plan(
+            segments: segments,
+            size: 3,
+            startIndex: 4,
+            needsTranslation: { _ in true }
+        )
+
+        #expect(pending.map { $0.targets.map(\.id) } == [["segment-4", "segment-5", "segment-6"]])
+        #expect(pending[0].window.map(\.id) == ["segment-4", "segment-5", "segment-6"])
+        #expect(resumed.map { $0.targets.map(\.id) } == [["segment-5", "segment-6"], ["segment-7"]])
+        #expect(resumed[0].window.map(\.id) == ["segment-5", "segment-6"])
+    }
+
+    @Test("Retranslate-all chapter plans include every sentence in each positional chunk")
+    func chapterPlanForceAllIncludesEverySentence() {
+        let segments = numberedTranscriptSegments(7)
+        let translated = Set(segments.map(\.id))
+        let plans = ChapterTranslationBatch.plan(
+            segments: segments,
+            size: 3,
+            forceIDs: translated,
+            needsTranslation: { !translated.contains($0.id) }
+        )
+
+        #expect(plans.map { $0.targets.map(\.id) } == [
+            ["segment-1", "segment-2", "segment-3"],
+            ["segment-4", "segment-5", "segment-6"],
+            ["segment-7"]
+        ])
+        #expect(plans.allSatisfy { $0.window.map(\.id) == $0.targets.map(\.id) })
+    }
+
+    @Test("Sparse untranslated sentences stay in their positional chapter chunks")
+    func doesNotRepackPendingSentencesBeforeChunking() {
+        let segments = numberedTranscriptSegments(7)
+        let translated: Set<String> = ["segment-2", "segment-3", "segment-5", "segment-6"]
+        let plans = ChapterTranslationBatch.plan(
+            segments: segments,
+            size: 3,
+            needsTranslation: { !translated.contains($0.id) }
+        )
+
+        #expect(plans.map { $0.targets.map(\.id) } == [["segment-1"], ["segment-4"], ["segment-7"]])
+        #expect(plans.map { $0.window.map(\.id) } == [
+            ["segment-1", "segment-2", "segment-3"],
+            ["segment-4", "segment-5", "segment-6"],
+            ["segment-7"]
+        ])
+    }
+
+    @Test("Chapter windows refresh extra-radius context from earlier blocks without changing targets")
+    func refreshesChapterWindowAfterEarlierBlocksTranslate() {
+        let segments = numberedTranscriptSegments(7)
+        var translated = Set<String>()
+        let plans = ChapterTranslationBatch.plan(
+            segments: segments,
+            size: 3,
+            needsTranslation: { !translated.contains($0.id) },
+            contextRadius: 2
+        )
+
+        #expect(plans.map { $0.targets.map(\.id) } == [
+            ["segment-1", "segment-2", "segment-3"],
+            ["segment-4", "segment-5", "segment-6"],
+            ["segment-7"]
+        ])
+        #expect(plans[1].window.map(\.id) == ["segment-4", "segment-5", "segment-6"])
+        #expect(!plans[1].window.map(\.id).contains("segment-2"))
+        #expect(!plans[1].window.map(\.id).contains("segment-3"))
+
+        translated.formUnion(["segment-1", "segment-2", "segment-3"])
+        let refreshed = ChapterTranslationBatch.refreshingWindow(
+            plans[1],
+            in: segments,
+            size: 3,
+            needsTranslation: { !translated.contains($0.id) },
+            contextRadius: 2
+        )
+
+        #expect(refreshed.targets.map(\.id) == ["segment-4", "segment-5", "segment-6"])
+        #expect(refreshed.window.map(\.id) == [
+            "segment-2", "segment-3", "segment-4", "segment-5", "segment-6"
+        ])
+        #expect(!refreshed.window.map(\.id).contains("segment-1"))
+        #expect(!refreshed.window.map(\.id).contains("segment-7"))
+        #expect(!refreshed.targets.map(\.id).contains("segment-3"))
+    }
+
+    @Test("Refreshing a chapter window does not promote startIndex-excluded sentences into targets")
+    func refreshingWindowKeepsOriginalTargets() {
+        let segments = numberedTranscriptSegments(7)
+        let plans = ChapterTranslationBatch.plan(
+            segments: segments,
+            size: 3,
+            startIndex: 4,
+            needsTranslation: { _ in true },
+            contextRadius: 2
+        )
+        let plan = plans[0]
+        let refreshed = ChapterTranslationBatch.refreshingWindow(
+            plan,
+            in: segments,
+            size: 3,
+            needsTranslation: { _ in true },
+            contextRadius: 2
+        )
+        let afterNeighborTranslated = ChapterTranslationBatch.refreshingWindow(
+            plan,
+            in: segments,
+            size: 3,
+            needsTranslation: { $0.id != "segment-4" },
+            contextRadius: 2
+        )
+
+        #expect(plan.targets.map(\.id) == ["segment-5", "segment-6"])
+        #expect(refreshed.targets.map(\.id) == ["segment-5", "segment-6"])
+        #expect(!refreshed.window.map(\.id).contains("segment-4"))
+        #expect(afterNeighborTranslated.targets.map(\.id) == ["segment-5", "segment-6"])
+        #expect(afterNeighborTranslated.window.map(\.id).contains("segment-4"))
+        #expect(!afterNeighborTranslated.targets.map(\.id).contains("segment-4"))
+        #expect(!afterNeighborTranslated.window.map(\.id).contains("segment-7"))
     }
 
     @Test("Chapter translation parses one reviewable result per sentence")
@@ -1173,14 +1395,35 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.54")
-        #expect(plist["CFBundleVersion"] as? String == "55")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.54")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "55")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.54;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 55;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.55")
+        #expect(plist["CFBundleVersion"] as? String == "56")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.55")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "56")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.55;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 56;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
+    }
+
+    private func numberedTranscriptSegments(_ count: Int) -> [TranscriptSegment] {
+        var segments: [TranscriptSegment] = []
+        for index in 1...count {
+            segments.append(TranscriptSegment(
+                id: "segment-\(index)",
+                start: Double(index),
+                end: Double(index + 1),
+                words: [
+                    TranscriptWord(
+                        id: "word-\(index)",
+                        text: "Sentence \(index).",
+                        start: Double(index),
+                        end: Double(index + 1),
+                        confidence: nil
+                    )
+                ]
+            ))
+        }
+        return segments
     }
 }
 

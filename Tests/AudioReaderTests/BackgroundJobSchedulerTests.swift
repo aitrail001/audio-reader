@@ -153,6 +153,38 @@ struct BackgroundJobSchedulerTests {
     }
 
     @MainActor
+    @Test("A sentence-batch job marks every plan target active and overlaps chapter work")
+    func sentenceBatchTargetsOverlapInFlightWork() {
+        var queue = BackgroundJobQueue(maxConcurrentPerKind: 2)
+        queue.enqueue(
+            kind: .sentenceTranslation,
+            origin: origin,
+            targetID: "segment-5",
+            targetIDs: ["segment-4", "segment-5", "segment-6"]
+        )
+        let chapterOrigin = BackgroundJobOrigin(
+            bookID: "book-1",
+            bookTitle: "The Book",
+            chapterID: "chapter-2",
+            chapterTitle: "Other Chapter"
+        )
+        queue.enqueue(kind: .chapterTranslation, origin: chapterOrigin)
+
+        #expect(queue.hasOverlappingTranslation(chapterID: "chapter-1", targetIDs: ["segment-4"]))
+        #expect(queue.hasOverlappingTranslation(chapterID: "chapter-1", targetIDs: ["segment-6"]))
+        #expect(!queue.hasOverlappingTranslation(chapterID: "chapter-1", targetIDs: ["segment-7"]))
+        #expect(queue.hasOverlappingTranslation(chapterID: "chapter-2", targetIDs: ["segment-1"]))
+        #expect(!queue.hasOverlappingTranslation(chapterID: "chapter-3", targetIDs: ["segment-1"]))
+
+        let state = AppState()
+        state.selectedChapterID = "chapter-1"
+        state.llmJobQueue = queue
+        #expect(state.isLLMJobActive(kind: .sentenceTranslation, targetID: "segment-4"))
+        #expect(state.isLLMJobActive(kind: .sentenceTranslation, targetID: "segment-6"))
+        #expect(!state.isLLMJobActive(kind: .sentenceTranslation, targetID: "segment-7"))
+    }
+
+    @MainActor
     @Test("A queued selected chapter translation cannot pretend to stop after a block")
     func queuedChapterTranslationDoesNotExposeStopState() {
         let state = AppState()

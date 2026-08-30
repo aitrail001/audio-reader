@@ -21,6 +21,7 @@ struct BackgroundJobQueue: Sendable {
         kind: BackgroundJob.Kind,
         origin: BackgroundJobOrigin,
         targetID: String? = nil,
+        targetIDs: [String] = [],
         stage: String? = nil,
         detail: String? = nil,
         fraction: Double? = nil
@@ -37,12 +38,32 @@ struct BackgroundJobQueue: Sendable {
             chapterID: origin.chapterID,
             chapterTitle: origin.chapterTitle,
             targetID: targetID,
+            targetIDs: targetIDs,
             stage: stage ?? kind.title,
             detail: state == .queued ? "Waiting for a \(kind.queueName) slot…" : detail ?? "Starting…",
             fraction: state == .queued ? nil : fraction
         )
         jobs.append(job)
         return job
+    }
+
+    func hasOverlappingTranslation(chapterID: String?, targetIDs: Set<String>) -> Bool {
+        guard let chapterID, !targetIDs.isEmpty else { return false }
+        return jobs.contains { job in
+            guard job.chapterID == chapterID else { return false }
+            switch job.kind {
+            case .chapterTranslation:
+                return true
+            case .sentenceTranslation:
+                var inFlight = Set(job.targetIDs)
+                if let targetID = job.targetID {
+                    inFlight.insert(targetID)
+                }
+                return !inFlight.isDisjoint(with: targetIDs)
+            default:
+                return false
+            }
+        }
     }
 
     mutating func update(id: UUID, stage: String, detail: String, fraction: Double?) {

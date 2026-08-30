@@ -207,29 +207,17 @@ enum SentenceTranslationContract {
 }
 
 enum ReadingAssistantPrompt {
-    static func sentenceContext(
-        around targets: [TranscriptSegment],
-        in transcript: Transcript?,
-        radius: Int
-    ) -> String {
-        guard let segments = transcript?.segments, !segments.isEmpty else {
-            return targets.map { "TARGET id=\($0.id): \($0.displayText)" }.joined(separator: "\n")
-        }
+    static func sentenceContext(_ plan: SentenceTranslationPlan) -> String {
+        sentenceContext(window: plan.window, targets: plan.targets)
+    }
+
+    static func sentenceContext(window: [TranscriptSegment], targets: [TranscriptSegment]) -> String {
         let targetIDs = Set(targets.map(\.id))
-        let targetIndices = segments.indices.filter { targetIDs.contains(segments[$0].id) }
-        guard !targetIndices.isEmpty else {
+        if window.isEmpty {
             return targets.map { "TARGET id=\($0.id): \($0.displayText)" }.joined(separator: "\n")
         }
-        let contextRadius = max(1, radius)
-        var includedIndices = Set<Int>()
-        for index in targetIndices {
-            includedIndices.formUnion(
-                max(0, index - contextRadius)...min(segments.count - 1, index + contextRadius)
-            )
-        }
-        let firstTargetIndex = targetIndices.min() ?? 0
-        return includedIndices.sorted().map { index in
-            let segment = segments[index]
+        let firstTargetIndex = window.firstIndex { targetIDs.contains($0.id) } ?? 0
+        return window.enumerated().map { index, segment in
             if targetIDs.contains(segment.id) {
                 return "TARGET id=\(segment.id): \(segment.displayText)"
             }

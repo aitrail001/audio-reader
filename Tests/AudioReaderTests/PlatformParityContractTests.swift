@@ -423,6 +423,65 @@ struct PlatformParityContractTests {
         #expect(!promptSource.contains("You are a literary translator"))
     }
 
+    @Test("Sentence and chapter translation share one planner on both platforms")
+    func sharesSentenceTranslationPlanner() throws {
+        let appState = try source("Sources/AudioReader/AppState.swift")
+        let models = try source("Sources/AudioReader/Models.swift")
+        let translate = try section(
+            in: appState,
+            from: "    private func translate(",
+            to: "    func translateChapter("
+        )
+        let chapter = try section(
+            in: appState,
+            from: "    func translateChapter(",
+            to: "    func requestChapterTranslationStop("
+        )
+
+        #expect(models.contains("struct SentenceTranslationPlan"))
+        #expect(models.contains("static func plan("))
+        #expect(!models.contains("#if os("))
+        #expect(translate.contains("ChapterTranslationBatch.plan("))
+        #expect(translate.contains("runSentenceTranslationPlan("))
+        #expect(translate.contains("refreshSelectedChapterTranslationStatus()"))
+        #expect(chapter.contains("ChapterTranslationBatch.plan("))
+        #expect(chapter.contains("ChapterTranslationBatch.refreshingWindow("))
+        #expect(chapter.contains("runSentenceTranslationPlan("))
+        let refreshIndex = try #require(chapter.range(of: "ChapterTranslationBatch.refreshingWindow(")?.lowerBound)
+        let runIndex = try #require(chapter.range(of: "runSentenceTranslationPlan(")?.lowerBound)
+        #expect(refreshIndex < runIndex)
+        #expect(translate.contains("kind: .sentenceTranslation"))
+        #expect(!translate.contains("kind: .chapterTranslation"))
+        #expect(chapter.contains("kind: .chapterTranslation"))
+        #expect(!translate.contains("#if os("))
+        #expect(!chapter.contains("#if os("))
+        #expect(appState.contains("hasOverlappingTranslation("))
+    }
+
+    @Test("Sentence-row Translate uses the visible row segment, not the playback current sentence")
+    func sentenceRowTranslateUsesRowSegment() throws {
+        let playerView = try source("Sources/AudioReader/PlayerView.swift")
+        let appState = try source("Sources/AudioReader/AppState.swift")
+        let sentenceRow = try section(
+            in: playerView,
+            from: "                    ForEach(transcript.segments) { segment in",
+            to: "                        .equatable()"
+        )
+        let translateCurrent = try section(
+            in: appState,
+            from: "    func translateCurrentSentence() {",
+            to: "    func retranslateCurrentSentence() {"
+        )
+
+        #expect(sentenceRow.contains("onTranslate: { state.translateSentence(segment) }"))
+        #expect(!sentenceRow.contains("onTranslate: { state.translateCurrentSentence() }"))
+        #expect(sentenceRow.contains("onRetry: { state.retranslateSentence(segment) }"))
+        #expect(appState.contains("func translateSentence(_ segment: TranscriptSegment)"))
+        #expect(translateCurrent.contains("translateSentence(segment)"))
+        #expect(!playerView.contains("#if os(macOS)\n                            onTranslate"))
+        #expect(!appState.contains("#if os(macOS)\n    func translateSentence"))
+    }
+
     @Test("Retranslation confirmation and loading are shared across both platforms")
     func sharesRetranslationFeedback() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")

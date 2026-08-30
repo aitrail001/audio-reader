@@ -144,10 +144,10 @@ final class AppState {
     }
 
     func isLLMJobActive(kind: BackgroundJob.Kind, targetID: String? = nil) -> Bool {
-        llmJobQueue.jobs.contains {
-            $0.kind == kind
-                && $0.chapterID == selectedChapterID
-                && (targetID == nil || $0.targetID == targetID)
+        llmJobQueue.jobs.contains { job in
+            guard job.kind == kind, job.chapterID == selectedChapterID else { return false }
+            guard let targetID else { return true }
+            return job.targetID == targetID || job.targetIDs.contains(targetID)
         }
     }
 
@@ -1485,6 +1485,10 @@ final class AppState {
 
     func translateCurrentSentence() {
         guard let segment = currentSegment else { return }
+        translateSentence(segment)
+    }
+
+    func translateSentence(_ segment: TranscriptSegment) {
         translate(kind: .sentence, source: segment.displayText, context: nil, timestamp: segment.start, segment: segment, targetID: segment.id)
     }
 
@@ -1593,6 +1597,7 @@ final class AppState {
         kind: BackgroundJob.Kind,
         origin: BackgroundJobOrigin,
         targetID: String? = nil,
+        targetIDs: [String] = [],
         stage: String? = nil,
         detail: String? = nil,
         operation: @escaping @MainActor (UUID) async -> Void
@@ -1603,6 +1608,7 @@ final class AppState {
             kind: kind,
             origin: origin,
             targetID: targetID,
+            targetIDs: targetIDs,
             stage: stage,
             detail: detail
         )
@@ -1734,79 +1740,95 @@ final class AppState {
         let book = selectedBook
         let chapter = selectedChapter
         let origin = selectedOrigin()
-        let jobKind: BackgroundJob.Kind = kind == .sentence ? .sentenceTranslation : .wordTranslation
-        guard !llmJobQueue.jobs.contains(where: {
-            $0.kind == jobKind && $0.chapterID == origin.chapterID && $0.targetID == targetID
-        }) else { return }
         let metadata = bookMetadata(book: book, chapter: chapter)
-        let capturedTranscript = transcript
-        let prompt: LLMTaskPrompt
         if kind == .sentence {
-            let translationContext = segment.map {
-                ReadingAssistantPrompt.sentenceContext(
-                    around: [$0],
-                    in: capturedTranscript,
-                    radius: sentenceContextCount
-                )
-            } ?? "TARGET id=\(targetID): \(trimmed)"
-            prompt = ReadingAssistantPrompt.sentenceTranslation(
-                language: language,
-                sourceLanguage: sourceLanguage,
-                readerLevel: readerLevel,
-                metadata: metadata,
-                context: translationContext,
-                targetIDs: [targetID]
-            )
-        } else {
-            prompt = LLMTaskPrompt(
-                system: ReadingAssistantPrompt.word(
+            let planSegments: [TranscriptSegment]
+            if let segments = transcript?.segments, !segments.isEmpty {
+                planSegments = segments
+            } else if let segment {
+                planSegments = [segment]
+            } else {
+                planSegments = []
+            }
+            guard let plan = ChapterTranslationBatch.plan(
+                containing: targetID,
+                in: planSegments,
+                size: FoundationModelsPromptPolicy.chapterTranslationBlockSize(
+                    for: provider,
+                    requested: settings.chapterTranslationBlockSize
+                ),
+                forceIDs: force ? [targetID] : [],
+                needsTranslation: { sentenceGloss(for: $0, language: language.rawValue) == nil },
+                contextRadius: sentenceContextCount
+            ), !plan.targets.isEmpty else { return }
+            let planTargetIDs = Set(plan.targets.map(\.id))
+            guard !llmJobQueue.hasOverlappingTranslation(
+                chapterID: origin.chapterID,
+                targetIDs: planTargetIDs
+            ) else { return }
+            enqueueLLMJob(
+                kind: .sentenceTranslation,
+                origin: origin,
+                targetID: targetID,
+                targetIDs: plan.targets.map(\.id),
+                detail: "Requesting \(model)…"
+            ) { _ in
+                let outcome = await self.runSentenceTranslationPlan(
+                    plan,
                     language: language,
                     sourceLanguage: sourceLanguage,
-                    readerLevel: readerLevel
-                ),
-                user: "Word: \(trimmed)\nSentence: \(context ?? trimmed)"
-            )
+                    readerLevel: readerLevel,
+                    metadata: metadata,
+                    provider: provider,
+                    baseURL: baseURL,
+                    model: model,
+                    effort: effort,
+                    enableThinking: enableThinking,
+                    grokAuthentication: grokAuthentication,
+                    openAIAuthentication: openAIAuthentication,
+                    book: book,
+                    chapter: chapter,
+                    preserveReplacementIDs: force ? [targetID] : []
+                )
+                if outcome.remaining.contains(where: { $0.id == targetID }), let replaced {
+                    self.saveGloss(replaced)
+                }
+                if !outcome.remaining.isEmpty, self.isSelected(origin) {
+                    self.translationError = outcome.lastIssue
+                }
+                self.refreshSelectedChapterTranslationStatus()
+            }
+            return
         }
+        guard !llmJobQueue.jobs.contains(where: {
+            $0.kind == .wordTranslation && $0.chapterID == origin.chapterID && $0.targetID == targetID
+        }) else { return }
+        let prompt = LLMTaskPrompt(
+            system: ReadingAssistantPrompt.word(
+                language: language,
+                sourceLanguage: sourceLanguage,
+                readerLevel: readerLevel
+            ),
+            user: "Word: \(trimmed)\nSentence: \(context ?? trimmed)"
+        )
         enqueueLLMJob(
-            kind: jobKind,
+            kind: .wordTranslation,
             origin: origin,
             targetID: targetID,
             detail: "Requesting \(model)…"
         ) { _ in
             do {
-                let text: String
-                if kind == .sentence {
-                    let raw = try await GrokClient.shared.completeStructuredJSON(
-                        provider: provider,
-                        system: prompt.system,
-                        user: prompt.user,
-                        baseURL: baseURL,
-                        model: model,
-                        effort: effort,
-                        enableThinking: enableThinking,
-                        grokAuthentication: grokAuthentication,
-                        openAIAuthentication: openAIAuthentication
-                    )
-                    guard let result = try ChapterTranslationBatch.parse(
-                        raw,
-                        expectedIDs: [targetID]
-                    ).first else {
-                        throw ChapterTranslationBatchError.missingSentences
-                    }
-                    text = result.glossText
-                } else {
-                    text = try await GrokClient.shared.complete(
-                        provider: provider,
-                        system: prompt.system,
-                        user: prompt.user,
-                        baseURL: baseURL,
-                        model: model,
-                        effort: effort,
-                        enableThinking: enableThinking,
-                        grokAuthentication: grokAuthentication,
-                        openAIAuthentication: openAIAuthentication
-                    )
-                }
+                let text = try await GrokClient.shared.complete(
+                    provider: provider,
+                    system: prompt.system,
+                    user: prompt.user,
+                    baseURL: baseURL,
+                    model: model,
+                    effort: effort,
+                    enableThinking: enableThinking,
+                    grokAuthentication: grokAuthentication,
+                    openAIAuthentication: openAIAuthentication
+                )
                 let entry = GlossEntry(
                     id: id,
                     kind: kind,
@@ -1838,6 +1860,97 @@ final class AppState {
         }
     }
 
+    private func runSentenceTranslationPlan(
+        _ plan: SentenceTranslationPlan,
+        language: StudyLanguage,
+        sourceLanguage: TranscriptionLanguage,
+        readerLevel: ReaderLanguageLevel,
+        metadata: String,
+        provider: LLMProvider,
+        baseURL: String,
+        model: String,
+        effort: String,
+        enableThinking: Bool,
+        grokAuthentication: GrokAuthentication,
+        openAIAuthentication: OpenAIAuthentication,
+        book: Book?,
+        chapter: Chapter?,
+        preserveReplacementIDs: Set<String>,
+        reportAttempt: ((Int, Int) -> Void)? = nil
+    ) async -> (entries: [GlossEntry], remaining: [TranscriptSegment], lastIssue: String) {
+        var remaining = plan.targets
+        var completedEntries: [GlossEntry] = []
+        var lastIssue = ChapterTranslationBatchError.missingSentences.localizedDescription
+        for attempt in 1...ChapterTranslationBatch.maximumAttempts where !remaining.isEmpty {
+            reportAttempt?(attempt, completedEntries.count)
+            let request = SentenceTranslationPlan(window: plan.window, targets: remaining)
+            let prompt = ReadingAssistantPrompt.sentenceTranslation(
+                language: language,
+                sourceLanguage: sourceLanguage,
+                readerLevel: readerLevel,
+                metadata: metadata,
+                context: ReadingAssistantPrompt.sentenceContext(request),
+                targetIDs: remaining.map(\.id)
+            )
+            do {
+                let raw = try await GrokClient.shared.completeStructuredJSON(
+                    provider: provider,
+                    system: prompt.system,
+                    user: prompt.user,
+                    baseURL: baseURL,
+                    model: model,
+                    effort: effort,
+                    enableThinking: enableThinking,
+                    grokAuthentication: grokAuthentication,
+                    openAIAuthentication: openAIAuthentication
+                )
+                let parsed = try ChapterTranslationBatch.parseAvailable(
+                    raw,
+                    expectedIDs: remaining.map(\.id)
+                )
+                var batch: [GlossEntry] = []
+                batch.reserveCapacity(parsed.results.count)
+                for result in parsed.results {
+                    guard let item = remaining.first(where: { $0.id == result.id }) else { continue }
+                    let existing = sentenceGloss(for: item, language: language.rawValue)
+                    let preserve = preserveReplacementIDs.contains(item.id) && existing?.status == .accepted
+                    batch.append(GlossEntry(
+                        id: GlossEntry.makeID(kind: .sentence, language: language.rawValue, source: item.displayText, context: nil),
+                        kind: .sentence,
+                        language: language.rawValue,
+                        source: item.displayText,
+                        context: nil,
+                        text: result.glossText,
+                        status: .pending,
+                        model: model,
+                        bookID: book?.id,
+                        bookTitle: book?.title,
+                        chapterID: chapter?.id,
+                        chapterTitle: chapter?.title,
+                        timestamp: item.start,
+                        createdAt: Date(),
+                        decidedAt: nil,
+                        replacedText: preserve ? existing?.text : nil,
+                        replacedModel: preserve ? existing?.model : nil
+                    ))
+                }
+                saveGlosses(batch)
+                completedEntries.append(contentsOf: batch)
+                let missing = Set(parsed.missingIDs)
+                remaining.removeAll { !missing.contains($0.id) }
+                if !remaining.isEmpty {
+                    lastIssue = ChapterTranslationBatchError.missingSentences.localizedDescription
+                }
+            } catch {
+                lastIssue = error.localizedDescription
+            }
+            if !remaining.isEmpty, attempt < ChapterTranslationBatch.maximumAttempts {
+                try? await Task.sleep(for: .milliseconds(500 * attempt))
+            }
+        }
+        return (completedEntries, remaining, lastIssue)
+    }
+
     func translateChapter(mode: ChapterTranslationMode = .untranslatedOnly) {
         guard let transcript, !transcript.segments.isEmpty else {
             chapterAssistantError = "Transcribe this chapter before translating it."
@@ -1855,46 +1968,49 @@ final class AppState {
         } else {
             startIndex = 0
         }
-        let indexedSegments = transcript.segments.enumerated().filter { index, segment in
-            guard index >= startIndex else { return false }
-            return resumedMode == .retranslateAll || sentenceGloss(for: segment, language: language.rawValue) == nil
-        }
-        let pendingSegments = indexedSegments.map(\.element)
-        guard !pendingSegments.isEmpty else {
-            refreshSelectedChapterTranslationStatus()
-            chapterTranslation = selectedChapterTranslationCheckpoint?.status == .allAccepted
-                ? "All chapter translations are accepted. You can retranslate the whole chapter."
-                : "Every sentence has a translation and is ready for review."
-            return
-        }
         let provider = llmProvider
         if let configurationError = llmConfigurationError(for: provider) {
             chapterAssistantError = configurationError.localizedDescription
             showSettings = true
             return
         }
-        let blocks = ChapterTranslationBatch.blocks(
-            pendingSegments,
-            size: FoundationModelsPromptPolicy.chapterTranslationBlockSize(
-                for: provider,
-                requested: settings.chapterTranslationBlockSize
-            )
+        let blockSize = FoundationModelsPromptPolicy.chapterTranslationBlockSize(
+            for: provider,
+            requested: settings.chapterTranslationBlockSize
         )
-        let total = pendingSegments.count
+        let forceIDs = resumedMode == .retranslateAll ? Set(transcript.segments.map(\.id)) : []
+        let sentenceContextCount = settings.sentenceContextCount
+        let plans = ChapterTranslationBatch.plan(
+            segments: transcript.segments,
+            size: blockSize,
+            startIndex: startIndex,
+            forceIDs: forceIDs,
+            needsTranslation: { sentenceGloss(for: $0, language: language.rawValue) == nil },
+            contextRadius: sentenceContextCount
+        )
+        guard !plans.isEmpty else {
+            refreshSelectedChapterTranslationStatus()
+            chapterTranslation = selectedChapterTranslationCheckpoint?.status == .allAccepted
+                ? "All chapter translations are accepted. You can retranslate the whole chapter."
+                : "Every sentence has a translation and is ready for review."
+            return
+        }
+        let total = plans.reduce(0) { $0 + $1.targets.count }
         let model = selectedLLMModel
         let baseURL = settings.endpoint(for: provider)
         let effort = selectedLLMEffort
         let enableThinking = settings.qwenThinking
-        let sentenceContextCount = settings.sentenceContextCount
         let openAIAuthentication = self.openAIAuthentication
         let grokAuthentication = self.grokAuthentication
         let book = selectedBook
         let chapter = selectedChapter
         let checkpointChapterID = chapter?.id ?? transcript.chapterID
         let origin = selectedOrigin()
-        guard !llmJobQueue.jobs.contains(where: {
-            $0.kind == .chapterTranslation && $0.chapterID == checkpointChapterID
-        }) else { return }
+        let planTargetIDs = Set(plans.flatMap { $0.targets.map(\.id) })
+        guard !llmJobQueue.hasOverlappingTranslation(
+            chapterID: checkpointChapterID,
+            targetIDs: planTargetIDs
+        ) else { return }
         let jobID = UUID()
         let metadata = bookMetadata(book: book, chapter: chapter)
         if isSelected(origin) {
@@ -1923,107 +2039,70 @@ final class AppState {
             id: jobID,
             kind: .chapterTranslation,
             origin: origin,
+            targetIDs: Array(planTargetIDs),
             stage: "Translating chapter",
             detail: "0 of \(total) sentence drafts ready"
         ) { jobID in
             var completed = 0
             var stoppedAfterBlock = false
             var jobFailed = false
-            for block in blocks {
-                var remaining = block
-                var lastIssue = ChapterTranslationBatchError.missingSentences.localizedDescription
-                for attempt in 1...ChapterTranslationBatch.maximumAttempts where !remaining.isEmpty {
-                    let prompt = ReadingAssistantPrompt.sentenceTranslation(
-                        language: language,
-                        sourceLanguage: sourceLanguage,
-                        readerLevel: readerLevel,
-                        metadata: metadata,
-                        context: ReadingAssistantPrompt.sentenceContext(
-                            around: block,
-                            in: transcript,
-                            radius: sentenceContextCount
-                        ),
-                        targetIDs: remaining.map(\.id)
-                    )
-                    let stopRequested = self.chapterTranslationStopRequests.contains(jobID)
-                    self.updateLLMJob(
-                        id: jobID,
-                        stage: "Translating chapter",
-                        detail: stopRequested
-                            ? "Stop requested · finishing the current block"
-                            : "\(completed) of \(total) drafts ready · attempt \(attempt) of \(ChapterTranslationBatch.maximumAttempts)",
-                        completed: completed,
-                        total: total
-                    )
-                    do {
-                        let raw = try await GrokClient.shared.completeStructuredJSON(
-                            provider: provider,
-                            system: prompt.system,
-                            user: prompt.user,
-                            baseURL: baseURL,
-                            model: model,
-                            effort: effort,
-                            enableThinking: enableThinking,
-                            grokAuthentication: grokAuthentication,
-                            openAIAuthentication: openAIAuthentication
+            for plan in plans {
+                let request = ChapterTranslationBatch.refreshingWindow(
+                    plan,
+                    in: transcript.segments,
+                    size: blockSize,
+                    needsTranslation: { self.sentenceGloss(for: $0, language: language.rawValue) == nil },
+                    contextRadius: sentenceContextCount
+                )
+                let outcome = await self.runSentenceTranslationPlan(
+                    request,
+                    language: language,
+                    sourceLanguage: sourceLanguage,
+                    readerLevel: readerLevel,
+                    metadata: metadata,
+                    provider: provider,
+                    baseURL: baseURL,
+                    model: model,
+                    effort: effort,
+                    enableThinking: enableThinking,
+                    grokAuthentication: grokAuthentication,
+                    openAIAuthentication: openAIAuthentication,
+                    book: book,
+                    chapter: chapter,
+                    preserveReplacementIDs: forceIDs,
+                    reportAttempt: { attempt, planCompleted in
+                        let stopRequested = self.chapterTranslationStopRequests.contains(jobID)
+                        self.updateLLMJob(
+                            id: jobID,
+                            stage: "Translating chapter",
+                            detail: stopRequested
+                                ? "Stop requested · finishing the current block"
+                                : "\(completed + planCompleted) of \(total) drafts ready · attempt \(attempt) of \(ChapterTranslationBatch.maximumAttempts)",
+                            completed: completed + planCompleted,
+                            total: total
                         )
-                        let parsed = try ChapterTranslationBatch.parseAvailable(
-                            raw,
-                            expectedIDs: remaining.map(\.id)
-                        )
-                        var completedEntries: [GlossEntry] = []
-                        completedEntries.reserveCapacity(parsed.results.count)
-                        for result in parsed.results {
-                            guard let segment = remaining.first(where: { $0.id == result.id }) else { continue }
-                            let existing = self.sentenceGloss(for: segment, language: language.rawValue)
-                            completedEntries.append(GlossEntry(
-                                id: GlossEntry.makeID(kind: .sentence, language: language.rawValue, source: segment.displayText, context: nil),
-                                kind: .sentence,
-                                language: language.rawValue,
-                                source: segment.displayText,
-                                context: nil,
-                                text: result.glossText,
-                                status: .pending,
-                                model: model,
-                                bookID: book?.id,
-                                bookTitle: book?.title,
-                                chapterID: chapter?.id,
-                                chapterTitle: chapter?.title,
-                                timestamp: segment.start,
-                                createdAt: Date(),
-                                decidedAt: nil,
-                                replacedText: resumedMode == .retranslateAll && existing?.status == .accepted ? existing?.text : nil,
-                                replacedModel: resumedMode == .retranslateAll && existing?.status == .accepted ? existing?.model : nil
-                            ))
-                        }
-                        self.saveGlosses(completedEntries)
-                        completed += completedEntries.count
-                        let missing = Set(parsed.missingIDs)
-                        remaining.removeAll { !missing.contains($0.id) }
-                        if !remaining.isEmpty {
-                            lastIssue = ChapterTranslationBatchError.missingSentences.localizedDescription
-                        }
-                    } catch {
-                        lastIssue = error.localizedDescription
                     }
-                    if !remaining.isEmpty, attempt < ChapterTranslationBatch.maximumAttempts {
-                        try? await Task.sleep(for: .milliseconds(500 * attempt))
-                    }
-                }
-                if !remaining.isEmpty {
+                )
+                completed += outcome.entries.count
+                if !outcome.remaining.isEmpty {
                     jobFailed = true
-                    let nextIndex = transcript.segments.firstIndex { $0.id == remaining[0].id } ?? startIndex
+                    let nextIndex = transcript.segments.firstIndex { $0.id == outcome.remaining[0].id } ?? startIndex
                     self.saveTranslationCheckpoint(chapterID: checkpointChapterID, language: language.rawValue, mode: resumedMode, nextSegmentIndex: nextIndex, total: transcript.segments.count, status: .inProgress)
                     if self.isSelected(origin) {
                         self.chapterTranslationFailed = true
-                        self.chapterAssistantError = "Translation paused after \(ChapterTranslationBatch.maximumAttempts) attempts. \(remaining.count) sentence(s) in this block still need translation. Last issue: \(lastIssue)"
+                        self.chapterAssistantError = "Translation paused after \(ChapterTranslationBatch.maximumAttempts) attempts. \(outcome.remaining.count) sentence(s) in this block still need translation. Last issue: \(outcome.lastIssue)"
                         self.chapterTranslation = "\(completed) finished sentence draft(s) were checkpointed. Retry resumes with the remaining sentences only."
                     }
                     break
                 }
-                let nextIndex = (block.compactMap { item in
-                    transcript.segments.firstIndex { $0.id == item.id }
-                }.max() ?? startIndex) + 1
+                let blockIDs = Set(
+                    ChapterTranslationBatch.block(
+                        containing: plan.targets[0].id,
+                        in: transcript.segments,
+                        size: blockSize
+                    )?.map(\.id) ?? plan.targets.map(\.id)
+                )
+                let nextIndex = (transcript.segments.lastIndex { blockIDs.contains($0.id) } ?? startIndex) + 1
                 self.saveTranslationCheckpoint(chapterID: checkpointChapterID, language: language.rawValue, mode: resumedMode, nextSegmentIndex: nextIndex, total: transcript.segments.count, status: .inProgress)
                 if self.chapterTranslationStopRequests.contains(jobID) {
                     stoppedAfterBlock = true

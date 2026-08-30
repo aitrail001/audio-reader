@@ -228,6 +228,7 @@ struct SettingsView: View {
                 settingRow("Chapter block") {
                     countStepper(value: $draft.chapterTranslationBlockSize, range: 1...20, suffix: "sentences per request")
                 }
+                helper("Chapter block is consecutive sentences per translation request. Translating one sentence uses that same chunk.")
                 settingRow("Chat context") {
                     countStepper(value: $draft.chatContextCount, range: 0...20, suffix: "before and after")
                 }

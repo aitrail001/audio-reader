@@ -67,32 +67,30 @@ struct ReadingAssistantPromptTests {
         #expect(!advanced.contains("explain every ordinary word"))
     }
 
-    @Test("Sentence context always includes the target's previous and next sentences")
-    func sentenceContextIncludesNeighbors() {
-        let segments = [
-            segment(id: "previous", text: "The room fell silent."),
-            segment(id: "target", text: "She broke the ice."),
-            segment(id: "next", text: "Everyone relaxed.")
-        ]
-        let transcript = Transcript(
-            chapterID: "chapter",
-            audioPath: "/tmp/context.m4b",
-            createdAt: Date(),
-            locale: "en-US",
-            segments: segments,
-            source: "test",
-            ebookAligned: false
+    @Test("Sentence context labels plan targets and translated window sentences without promoting untranslated extras")
+    func sentenceContextLabelsPlanTargetsAndTranslatedNeighbors() {
+        let previous = segment(id: "previous", text: "The room fell silent.")
+        let target = segment(id: "target", text: "She broke the ice.")
+        let nextTranslated = segment(id: "next-translated", text: "Everyone relaxed.")
+        let plan = SentenceTranslationPlan(
+            window: [previous, target, nextTranslated],
+            targets: [target]
         )
 
-        let context = ReadingAssistantPrompt.sentenceContext(
-            around: [segments[1]],
-            in: transcript,
-            radius: 0
+        let context = ReadingAssistantPrompt.sentenceContext(plan)
+        let untranslatedOnly = ReadingAssistantPrompt.sentenceContext(
+            SentenceTranslationPlan(window: [target], targets: [target])
         )
 
         #expect(context.contains("PREVIOUS: The room fell silent."))
         #expect(context.contains("TARGET id=target: She broke the ice."))
         #expect(context.contains("NEXT: Everyone relaxed."))
+        #expect(!context.contains("TARGET id=previous:"))
+        #expect(!context.contains("TARGET id=next-translated:"))
+        #expect(!context.contains("Nobody mentioned it."))
+        #expect(!untranslatedOnly.contains("PREVIOUS:"))
+        #expect(!untranslatedOnly.contains("NEXT:"))
+        #expect(untranslatedOnly.contains("TARGET id=target: She broke the ice."))
     }
 
     @Test("Core prompts do not name a provider or model")
@@ -119,11 +117,20 @@ struct ReadingAssistantPromptTests {
     @Test("Single and batch translation flows use the same prompt and structured result contract")
     func sentenceFlowsShareOneContract() throws {
         let appState = try source("Sources/AudioReader/AppState.swift")
+        let models = try source("Sources/AudioReader/Models.swift")
 
-        #expect(appState.components(separatedBy: "ReadingAssistantPrompt.sentenceTranslation(").count - 1 == 2)
-        #expect(appState.components(separatedBy: "completeStructuredJSON(").count - 1 == 2)
+        #expect(appState.components(separatedBy: "ReadingAssistantPrompt.sentenceTranslation(").count - 1 == 1)
+        #expect(appState.components(separatedBy: "completeStructuredJSON(").count - 1 == 1)
+        #expect(appState.components(separatedBy: "ChapterTranslationBatch.parseAvailable(").count - 1 == 1)
+        #expect(!appState.contains("ChapterTranslationBatch.parse("))
+        #expect(appState.contains("runSentenceTranslationPlan("))
+        #expect(appState.components(separatedBy: "ChapterTranslationBatch.plan(").count - 1 == 2)
+        #expect(appState.contains("ChapterTranslationBatch.refreshingWindow("))
+        #expect(appState.contains("FoundationModelsPromptPolicy.chapterTranslationBlockSize("))
         #expect(!appState.contains("TranslationPrompt.sentence("))
         #expect(!appState.contains("TranslationPrompt.chapter("))
+        #expect(models.contains("struct SentenceTranslationPlan"))
+        #expect(!models.contains("#if os("))
     }
 
     @Test("Structured translation results preserve categorized language and concept notes")
