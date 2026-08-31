@@ -118,6 +118,7 @@ describe("supabase object store", () => {
   });
 
   it.each([
+    [400, "unknown"],
     [401, "denied"],
     [403, "denied"],
     [404, "not_found"],
@@ -132,6 +133,24 @@ describe("supabase object store", () => {
     });
 
     await expect(store.anonymousRead("private/canary")).resolves.toBe(expected);
+  });
+
+  it("recognizes Supabase's structured HTTP 400 object-not-found response", async () => {
+    const notFound = JSON.stringify({
+      statusCode: "404",
+      error: "not_found",
+      message: "Object not found",
+    });
+    const store = createSupabaseObjectStore({
+      url: "https://example.supabase.co",
+      serviceRoleKey: "service-role",
+      bucket: "private-assets",
+      fetch: () => Promise.resolve(new Response(notFound, { status: 400 })),
+    });
+
+    await expect(store.anonymousRead("private/canary")).resolves.toBe("not_found");
+    await expect(store.get("private/canary")).resolves.toBeUndefined();
+    await expect(store.open("private/canary")).resolves.toBeUndefined();
   });
 
   it("does not create a missing bucket during a readiness ping", async () => {

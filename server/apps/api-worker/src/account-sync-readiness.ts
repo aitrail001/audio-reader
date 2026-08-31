@@ -196,6 +196,7 @@ export function createAccountSyncReadinessService(input: {
     let checksumStatus: AccountSyncCheckStatus = "not_checked";
     let deleteStatus: AccountSyncCheckStatus;
     let notFoundStatus: AccountSyncCheckStatus = "not_checked";
+    let anonymousNotFound = false;
     let reason: AccountSyncUnavailableReason | null = metadataPublicAccess
       ? "storage_public_access_allowed"
       : null;
@@ -217,6 +218,9 @@ export function createAccountSyncReadinessService(input: {
       if (anonymousStatus === "readable") {
         statuses = { ...statuses, privacyStatus: "failed" };
         reason = "storage_public_access_allowed";
+      } else if (anonymousStatus === "not_found") {
+        // This only proves privacy if the authenticated read and checksum below prove the canary.
+        anonymousNotFound = true;
       } else if (anonymousStatus !== "denied") {
         statuses = { ...statuses, privacyStatus: "failed" };
         reason ??= "storage_privacy_verification_failed";
@@ -237,6 +241,10 @@ export function createAccountSyncReadinessService(input: {
         downloadStatus = "failed";
         reason ??= "storage_download_failed";
       }
+    }
+    if (anonymousNotFound && (downloadStatus !== "ok" || checksumStatus !== "ok")) {
+      statuses = { ...statuses, privacyStatus: "failed" };
+      reason ??= "storage_privacy_verification_failed";
     }
 
     // Delete after every put attempt: a provider can commit an object before returning an error.

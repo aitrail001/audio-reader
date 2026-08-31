@@ -385,7 +385,7 @@ export function createSupabaseObjectStore(options: SupabaseStorageOptions): Obje
     },
     async anonymousRead(key) {
       try {
-        return classifyAnonymousResponse(
+        return await classifySupabaseAnonymousResponse(
           await fetchImpl(objectUrl(key, "object/public"), { method: "GET" }),
         );
       } catch {
@@ -423,7 +423,7 @@ export function createSupabaseObjectStore(options: SupabaseStorageOptions): Obje
         method: "GET",
         headers,
       });
-      if (response.status === 404) {
+      if (response.status === 404 || (await isSupabaseObjectNotFound(response))) {
         return undefined;
       }
       if (!response.ok) {
@@ -436,7 +436,7 @@ export function createSupabaseObjectStore(options: SupabaseStorageOptions): Obje
         method: "GET",
         headers,
       });
-      if (response.status === 404) return undefined;
+      if (response.status === 404 || (await isSupabaseObjectNotFound(response))) return undefined;
       if (!response.ok || response.body === null)
         throw new Error("supabase storage download failed");
       const size = Number(response.headers.get("content-length"));
@@ -607,6 +607,31 @@ function classifyAnonymousResponse(
   if (response.status === 401 || response.status === 403) return "denied";
   if (response.status === 404) return "not_found";
   return "unknown";
+}
+
+async function classifySupabaseAnonymousResponse(
+  response: Response,
+): Promise<"denied" | "readable" | "not_found" | "unknown"> {
+  const classified = classifyAnonymousResponse(response);
+  if (classified !== "unknown") return classified;
+  return (await isSupabaseObjectNotFound(response)) ? "not_found" : "unknown";
+}
+
+/** Supabase may carry a legacy 404 object code inside HTTP 400; other 400s stay failures. */
+async function isSupabaseObjectNotFound(response: Response): Promise<boolean> {
+  if (response.status !== 400) return false;
+  try {
+    const payload: unknown = await response.json();
+    if (!isRecord(payload)) return false;
+    const statusCode = payload.statusCode;
+    return (
+      (statusCode === 404 || statusCode === "404") &&
+      typeof payload.error === "string" &&
+      payload.error.toLowerCase() === "not_found"
+    );
+  } catch {
+    return false;
+  }
 }
 
 function cloudflareResult(payload: unknown): unknown {

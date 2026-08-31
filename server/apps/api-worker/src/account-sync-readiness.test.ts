@@ -359,6 +359,11 @@ describe("account sync object-storage readiness", () => {
     const staleKey = `private/account-sync-readiness/${String(time - 15 * 60 * 1_000 - 1)}/stale-owner/ambiguous.canary`;
     const objects = new Map<string, Uint8Array>([[staleKey, new Uint8Array([1])]]);
     const deleted: string[] = [];
+    const notFound = JSON.stringify({
+      statusCode: "404",
+      error: "not_found",
+      message: "Object not found",
+    });
     const store = createSupabaseObjectStore({
       url: "https://example.supabase.co",
       serviceRoleKey: "service-role",
@@ -403,7 +408,7 @@ describe("account sync object-storage readiness", () => {
           return Promise.resolve(new Response("{}", { status: 200 }));
         }
         if (url.includes("/storage/v1/object/public/private-assets/") && method === "GET") {
-          return Promise.resolve(new Response("denied", { status: 403 }));
+          return Promise.resolve(new Response(notFound, { status: 400 }));
         }
         const authenticatedPrefix = "/storage/v1/object/authenticated/private-assets/";
         if (url.includes(authenticatedPrefix) && method === "GET") {
@@ -413,7 +418,7 @@ describe("account sync object-storage readiness", () => {
           const value = objects.get(key);
           return Promise.resolve(
             value === undefined
-              ? new Response("missing", { status: 404 })
+              ? new Response(notFound, { status: 400 })
               : new Response(value, { status: 200 }),
           );
         }
@@ -554,22 +559,60 @@ describe("account sync object-storage readiness", () => {
     expect(recording.objects.size).toBe(0);
   });
 
-  it.each(["not_found", "unknown"] as const)(
-    "fails closed when the post-upload anonymous check is %s",
-    async (status) => {
-      const recording = recordingStore();
-      recording.store.anonymousRead = () => Promise.resolve(status);
+  it("accepts anonymous not-found only when authenticated download proves the canary exists", async () => {
+    const recording = recordingStore();
+    recording.store.anonymousRead = () => Promise.resolve("not_found");
 
-      await expect(service("gcs", recording.store).read(true)).resolves.toMatchObject({
-        ready: false,
-        effective: false,
-        privacyStatus: "failed",
-        reason: "storage_privacy_verification_failed",
-        deleteStatus: "ok",
-        notFoundStatus: "ok",
-      });
-    },
-  );
+    await expect(service("supabase", recording.store).read(true)).resolves.toMatchObject({
+      ready: true,
+      effective: true,
+      privacyStatus: "ok",
+      downloadStatus: "ok",
+      checksumStatus: "ok",
+    });
+  });
+
+  it("keeps anonymous not-found failed when authenticated download cannot prove existence", async () => {
+    const recording = recordingStore();
+    recording.store.anonymousRead = () => Promise.resolve("not_found");
+    recording.store.get = () => Promise.resolve(undefined);
+
+    await expect(service("supabase", recording.store).read(true)).resolves.toMatchObject({
+      ready: false,
+      effective: false,
+      privacyStatus: "failed",
+      downloadStatus: "failed",
+    });
+  });
+
+  it("keeps anonymous not-found privacy failed when the authenticated checksum mismatches", async () => {
+    const recording = recordingStore({ corruptRead: true });
+    recording.store.anonymousRead = () => Promise.resolve("not_found");
+
+    await expect(service("supabase", recording.store).read(true)).resolves.toMatchObject({
+      ready: false,
+      effective: false,
+      privacyStatus: "failed",
+      checksumStatus: "failed",
+      reason: "storage_checksum_mismatch",
+      deleteStatus: "ok",
+      notFoundStatus: "ok",
+    });
+  });
+
+  it("fails closed when the post-upload anonymous check is unknown", async () => {
+    const recording = recordingStore();
+    recording.store.anonymousRead = () => Promise.resolve("unknown");
+
+    await expect(service("gcs", recording.store).read(true)).resolves.toMatchObject({
+      ready: false,
+      effective: false,
+      privacyStatus: "failed",
+      reason: "storage_privacy_verification_failed",
+      deleteStatus: "ok",
+      notFoundStatus: "ok",
+    });
+  });
 
   it("classifies an anonymous probe transport failure as privacy verification, not upload failure", async () => {
     const recording = recordingStore();
