@@ -375,6 +375,44 @@ struct VocabularyReviewTests {
     }
 
     @MainActor
+    @Test("A canonical review updates every occurrence and attributes the event to the study card")
+    func canonicalReviewUpdatesOccurrencesAndEvent() async throws {
+        var first = entry(id: "did-a", bookID: "book-a")
+        first.word = "did"
+        first.canonicalForm = "do"
+        first.partOfSpeech = .verb
+        first.senseID = "do:verb"
+        first.canonicalizationSource = .irregularRule
+        first.canonicalizationConfidence = 0.99
+        first.canonicalizationStatus = .confirmed
+        var second = first
+        second.id = "done-b"
+        second.word = "done"
+        second.bookID = "book-b"
+        second.bookTitle = "Book B"
+        let reviews = InMemoryReviewEventRepository()
+        let state = AppState(composition: .inMemory(reviewEvents: reviews))
+        state.vocab = [first, second]
+        let card = try #require(VocabularyStudyCards.cards(state.vocab).only)
+        let reviewedAt = Date(timeIntervalSince1970: 2_000_000)
+
+        let saved = await state.reviewVocabulary(
+            card.id,
+            occurrenceID: second.id,
+            quality: .remember,
+            face: .recognition,
+            at: reviewedAt
+        )
+
+        #expect(saved)
+        #expect(state.vocab.allSatisfy { $0.reviewCount == 1 && $0.lastReviewedAt == reviewedAt })
+        let event = try #require(reviews.loadReviewEvents().only)
+        #expect(event.cardID == card.id)
+        #expect(event.vocabularyID.rawValue == second.id)
+        #expect(card.occurrence(id: second.id)?.bookID == "book-b")
+    }
+
+    @MainActor
     @Test("A history write failure leaves the review due instead of advancing an unsynced card")
     func gradingFailureDoesNotAdvanceCard() async {
         let state = AppState(composition: AppComposition(

@@ -3,6 +3,7 @@ import type { components } from "@audio-reader/contract";
 import {
   isSyncEntityType,
   type IdentityStore,
+  type OpsStore,
   type SyncMutation,
   type SyncStore,
 } from "@audio-reader/database";
@@ -10,6 +11,8 @@ import { readJsonObject } from "./body";
 import { asHead, jsonResponse, problemResponse } from "./http";
 import { withIdempotency, type IdempotencyStore } from "./idempotency";
 import { requireBoundDevice } from "./route-helpers";
+import type { AccountSyncReadinessService } from "./account-sync-readiness";
+import { validateSyncV2Payload } from "./sync-v2-payload-policy";
 
 type SyncPushResponse = components["schemas"]["SyncPushResponse"];
 type SyncPullResponse = components["schemas"]["SyncPullResponse"];
@@ -18,9 +21,14 @@ type SyncBootstrapResponse = components["schemas"]["SyncBootstrapResponse"];
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 const SYNC_METHODS: Record<string, readonly string[]> = {
+  "/v1/sync/capabilities": ["GET", "HEAD"],
   "/v1/sync/push": ["POST"],
   "/v1/sync/bootstrap": ["GET", "HEAD"],
   "/v1/sync/pull": ["GET", "HEAD"],
+  "/v2/sync/protocol": ["GET", "HEAD"],
+  "/v2/sync/push": ["POST"],
+  "/v2/sync/bootstrap": ["GET", "HEAD"],
+  "/v2/sync/pull": ["GET", "HEAD"],
 };
 
 export type SyncRouteContext = {
@@ -30,6 +38,8 @@ export type SyncRouteContext = {
   idempotencyStore: IdempotencyStore;
   sync?: SyncStore;
   identity?: IdentityStore;
+  ops?: OpsStore;
+  accountSyncReadiness: AccountSyncReadinessService;
 };
 
 export function isSyncPath(path: string): boolean {
@@ -66,13 +76,56 @@ export async function handleSyncRoute(context: SyncRouteContext): Promise<Respon
   if (!allowed.includes(method)) {
     return syncMethodError(path, method, context.requestId);
   }
-  if (path === "/v1/sync/push") {
+  if (path.startsWith("/v1/sync/")) {
+    return retiredSync(context);
+  }
+  if (path.endsWith("/push")) {
     return pushSync(context);
   }
-  if (path === "/v1/sync/bootstrap") {
+  if (path === "/v2/sync/protocol") {
+    return syncProtocol(context);
+  }
+  if (path.endsWith("/bootstrap")) {
     return bootstrapSync(context, url);
   }
   return pullSync(context, url);
+}
+
+async function retiredSync(context: SyncRouteContext): Promise<Response> {
+  const principal = await requirePrincipal(context);
+  if (principal instanceof Response) return principal;
+  const deviceId = await requireBoundSyncDevice(context, principal);
+  if (deviceId instanceof Response) return deviceId;
+  void deviceId;
+  return asHead(
+    context.request,
+    problemResponse({
+      status: 426,
+      code: "upgrade_required",
+      title: "Upgrade required",
+      detail: "This sync generation is retired. Upgrade to the object-backed v2 protocol.",
+      traceId: context.requestId,
+      headers: { "X-Min-App-Version": "2.0.0" },
+    }),
+  );
+}
+
+async function syncProtocol(context: SyncRouteContext): Promise<Response> {
+  const principal = await requirePrincipal(context);
+  if (principal instanceof Response) return principal;
+  const deviceId = await requireBoundSyncDevice(context, principal);
+  if (deviceId instanceof Response) return deviceId;
+  const unavailable = await accountSyncUnavailable(context);
+  if (unavailable !== undefined) return unavailable;
+  void deviceId;
+  return asHead(
+    context.request,
+    jsonResponse({
+      protocol: "object-v2",
+      transcriptRepresentation: "asset-manifest-only",
+      legacyBootstrap: false,
+    }),
+  );
 }
 
 async function bootstrapSync(context: SyncRouteContext, url: URL): Promise<Response> {
@@ -82,6 +135,8 @@ async function bootstrapSync(context: SyncRouteContext, url: URL): Promise<Respo
   if (sync instanceof Response) return sync;
   const deviceId = await requireBoundSyncDevice(context, principal);
   if (deviceId instanceof Response) return deviceId;
+  const unavailable = await accountSyncUnavailable(context);
+  if (unavailable !== undefined) return unavailable;
   void deviceId;
   const cursor = url.searchParams.get("cursor");
   const offset = boundedInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
@@ -134,6 +189,8 @@ async function pushSync(context: SyncRouteContext): Promise<Response> {
   if (deviceId instanceof Response) {
     return deviceId;
   }
+  const unavailable = await accountSyncUnavailable(context);
+  if (unavailable !== undefined) return unavailable;
   const contentDigest = optionalContentDigest(context.request, context.requestId);
   if (contentDigest instanceof Response) {
     return contentDigest;
@@ -157,10 +214,11 @@ async function pushSync(context: SyncRouteContext): Promise<Response> {
       if (bodyDeviceId !== deviceId) {
         return fieldError(context.requestId, "deviceId", "deviceId must match X-Device-Id.");
       }
-      const mutations = parseMutations(body.value.mutations, context.requestId);
-      if (mutations instanceof Response) {
-        return mutations;
+      const parsedMutations = parseMutations(body.value.mutations, context.requestId);
+      if (parsedMutations instanceof Response) {
+        return parsedMutations;
       }
+      const mutations = parsedMutations;
       logSync("sync_push_start", context.requestId, {
         mutations: mutations.length,
         contentLength: context.request.headers.get("content-length") ?? "unknown",
@@ -233,6 +291,8 @@ async function pullSync(context: SyncRouteContext, url: URL): Promise<Response> 
   if (deviceId instanceof Response) {
     return deviceId;
   }
+  const unavailable = await accountSyncUnavailable(context);
+  if (unavailable !== undefined) return unavailable;
   void deviceId;
   const cursor = url.searchParams.get("cursor") ?? "0";
   const limitRaw = url.searchParams.get("limit");
@@ -297,6 +357,24 @@ function requireSync(context: SyncRouteContext): SyncStore | Response {
   return context.sync;
 }
 
+/** Sync routes fail closed before reading or mutating sync state while dependencies are paused. */
+async function accountSyncUnavailable(context: SyncRouteContext): Promise<Response | undefined> {
+  const requested =
+    (await context.ops?.listFlags())?.find((flag) => flag.key === "account_sync")?.enabled === true;
+  const readiness = await context.accountSyncReadiness.read(requested);
+  if (readiness.effective) return undefined;
+  return problemResponse({
+    status: 503,
+    code: "account_sync_paused",
+    title: "Account sync paused",
+    detail:
+      readiness.lastFailureDetail ??
+      "Account sync is not requested or its dependencies are unavailable.",
+    traceId: context.requestId,
+    headers: { "Retry-After": String(readiness.retryAfterSeconds) },
+  });
+}
+
 async function requireBoundSyncDevice(
   context: SyncRouteContext,
   principal: Principal,
@@ -316,8 +394,8 @@ function parseMutations(value: unknown, requestId: string): SyncMutation[] | Res
   if (!Array.isArray(value)) {
     return fieldError(requestId, "mutations", "mutations must be an array.");
   }
-  if (value.length > 500) {
-    return fieldError(requestId, "mutations", "mutations cannot exceed 500 items.");
+  if (value.length > 100) {
+    return fieldError(requestId, "mutations", "mutations cannot exceed 100 items.");
   }
   const mutations: SyncMutation[] = [];
   const mutationIds = new Set<string>();
@@ -383,6 +461,14 @@ function parseMutations(value: unknown, requestId: string): SyncMutation[] | Res
         requestId,
         `mutations.${String(index)}.payload`,
         "payload must be an object.",
+      );
+    }
+    const payloadProblem = validateSyncV2Payload(item.entityType, item.payload);
+    if (payloadProblem !== undefined) {
+      return fieldError(
+        requestId,
+        `mutations.${String(index)}.${payloadProblem.field}`,
+        payloadProblem.message,
       );
     }
     mutations.push({

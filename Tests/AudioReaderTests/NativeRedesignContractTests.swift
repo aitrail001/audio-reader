@@ -126,6 +126,34 @@ struct NativeRedesignContractTests {
         #expect(vocabulary.contains(#"Label("Choose review""#))
     }
 
+    @Test("Anki export selection is explicit, temporary, accessible, and distinct from My List")
+    func ankiExportSelectionModeContract() throws {
+        let vocabulary = try source("Sources/AudioReader/VocabularyView.swift")
+
+        #expect(vocabulary.contains(#"Button("Select for Anki export")"#))
+        #expect(vocabulary.contains("if exportSelection.isActive"))
+        #expect(vocabulary.contains(#"Text("\(exportSelection.selectedCount) selected")"#))
+        #expect(vocabulary.contains(#"Button("Cancel")"#))
+        #expect(vocabulary.contains("exportSelection.completeExport()"))
+        #expect(vocabulary.contains("exportSelection.leaveVocabulary()"))
+        #expect(vocabulary.contains(".onDisappear"))
+        #expect(vocabulary.contains("showsExportSelection: exportSelection.isActive"))
+        #expect(vocabulary.contains("if showsExportSelection"))
+        #expect(vocabulary.contains("Temporary Anki export selection"))
+        #expect(vocabulary.contains(".accessibilityValue(selectedForExport ? \"Selected\" : \"Not selected\")"))
+        #expect(vocabulary.contains(".accessibilityAddTraits(selectedForExport ? .isSelected : [])"))
+        #expect(vocabulary.contains("words.myList."))
+
+        let export = try section(
+            in: vocabulary,
+            from: "private func startAnkiExport(scope: AnkiExportScope)",
+            to: "private func beginAnkiExportSelection()"
+        )
+        let clear = try #require(export.range(of: "exportSelection.completeExport()"))
+        let asyncWork = try #require(export.range(of: "Task {"))
+        #expect(clear.lowerBound < asyncWork.lowerBound)
+    }
+
     @Test("iPad destinations and import actions meet touch and automation contracts")
     func iPadTouchContracts() throws {
         let root = try source("Sources/AudioReader/IPadRootView.swift")

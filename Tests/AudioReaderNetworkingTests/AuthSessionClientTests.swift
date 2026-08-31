@@ -32,6 +32,33 @@ struct AuthSessionClientTests {
         #expect(http.requests.allSatisfy { $0.headers["Content-Type"] == "application/json" })
     }
 
+    @Test("account export discovery and integrity verification use only v2 private assets")
+    func accountExportUsesV2Manifest() async throws {
+        let http = StubHTTPClient()
+        let client = ProductAuthClient(http: http, baseURL: ProductAPI.defaultBaseURL)
+        http.enqueue(status: 200, json: """
+        {"assets":[{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","compressedBytes":11,"sha256":"4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93"}]}
+        """)
+        http.enqueue(status: 200, json: """
+        {"url":"http://localhost:8787/v2/assets/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/content"}
+        """)
+        http.enqueue(status: 200, body: Data("{\"ok\":true}".utf8))
+
+        let data = try await client.downloadAccountExport(
+            accessToken: "access",
+            deviceID: deviceID,
+            assetID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        )
+
+        #expect(data == Data("{\"ok\":true}".utf8))
+        #expect(http.requests.map(\.path) == [
+            "/v2/assets?kind=accountExport",
+            "/v2/assets/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/download",
+            "http://localhost:8787/v2/assets/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/content",
+        ])
+        #expect(http.requests.allSatisfy { !$0.path.contains("/v1/assets") })
+    }
+
     @Test("HTTP authorize sends the native audioreader callback URI")
     func httpAuthorizeSendsNativeCallback() async throws {
         let http = StubHTTPClient()
@@ -111,6 +138,34 @@ struct AuthSessionClientTests {
                 )
             )
         }
+    }
+
+    @Test("Bootstrap decodes the effective account sync readiness contract")
+    func bootstrapDecodesAccountSyncReadiness() async throws {
+        let http = StubHTTPClient()
+        let client = ProductAuthClient(http: http, baseURL: ProductAPI.defaultBaseURL)
+        http.enqueue(
+            status: 200,
+            json: """
+            {"profile":{"id":"00000000-0000-4000-8000-000000000010","accountId":"00000000-0000-4000-8000-000000000010","email":"reader@example.com","displayName":null,"avatarUrl":null,"createdAt":"2026-08-31T00:00:00Z","updatedAt":"2026-08-31T00:00:00Z","deletionPendingAt":null},"device":{"id":"00000000-0000-4000-8000-000000000001","platform":"macos","name":"Mac","appVersion":"1.6.0","buildNumber":"90","createdAt":"2026-08-31T00:00:00Z","lastSeenAt":"2026-08-31T00:00:00Z","revoked":false,"revokedAt":null},"syncCursor":"7","featureFlags":[{"key":"account_sync","enabled":false,"variant":null}],"quotas":[],"accountSyncReadiness":{"requiredSchemaVersion":"20260830123000","schemaReady":true,"provider":"gcs","bucket":"private-sync","credentialStatus":"failed","uploadStatus":"not_checked","downloadStatus":"not_checked","checksumStatus":"not_checked","deleteStatus":"not_checked","notFoundStatus":"not_checked","ready":false,"requested":true,"effective":false,"reason":"storage_credentials_invalid","checkedAt":"2026-08-31T00:00:00Z","cachedUntil":"2026-08-31T00:00:05Z","retryAfterSeconds":5,"lastSuccessAt":null,"lastFailureAt":"2026-08-31T00:00:00Z","lastFailureCode":"storage_credentials_invalid","lastFailureDetail":"Object storage credentials could not access the configured bucket."}}
+            """
+        )
+
+        let bootstrap = try await client.bootstrap(
+            accessToken: "access-1",
+            request: AuthBootstrapRequest(
+                deviceId: deviceID,
+                platform: .macos,
+                deviceName: "Mac",
+                appVersion: "1.6.0",
+                buildNumber: "90",
+                locale: "en-AU",
+                timeZone: "Australia/Melbourne"
+            )
+        )
+
+        let fieldNames = Set(Mirror(reflecting: bootstrap).children.compactMap(\.label))
+        #expect(fieldNames.contains("accountSyncReadiness"))
     }
 
     @Test("Analytics preference uses the authenticated self-service endpoint")

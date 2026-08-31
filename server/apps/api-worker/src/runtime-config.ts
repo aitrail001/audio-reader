@@ -34,8 +34,9 @@ export type RuntimeConfigView = {
     wrappingSecretSource: OperatorWrappingSource;
   };
   storage: {
-    provider: "gcs" | "supabase" | "none";
+    provider: "gcs" | "supabase" | "r2" | "none";
     bucket?: string;
+    credentialsConfigured: boolean;
     serviceAccountConfigured: boolean;
     clientEmail?: string;
     source: "env" | "admin" | "none";
@@ -99,9 +100,19 @@ export type RuntimeConfigService = {
   put(input: RuntimeConfigPut, actorId: string): Promise<RuntimeConfigView>;
   resolveQwen(): Promise<{ apiKey: string; baseUrl?: string; model?: string } | undefined>;
   resolveQwenClient(input: { useFakes: boolean }): Promise<QwenClient>;
-  resolveStorage(input: { useFakes: boolean }): Promise<ObjectStore>;
+  resolveStorage(input: { useFakes: boolean }): Promise<RuntimeStorageResolution>;
   resolveTurnstileSecret(): Promise<string | undefined>;
   invalidate(): void;
+};
+
+export type RuntimeStorageResolution = {
+  store: ObjectStore;
+  descriptor: {
+    provider: "gcs" | "supabase" | "r2" | "memory" | "none";
+    bucket?: string;
+    configured: boolean;
+    credentialsConfigured: boolean;
+  };
 };
 
 type CachedState = {
@@ -135,7 +146,12 @@ export function createRuntimeConfigService(input: {
   const now = input.now ?? (() => Date.now());
   let cache: CachedState | undefined;
   let qwenClient: { key: string; client: QwenClient } | undefined;
-  let objectStore: { key: string; store: ObjectStore } | undefined;
+  let objectStore:
+    | {
+        config: readonly (string | boolean)[];
+        resolution: RuntimeStorageResolution;
+      }
+    | undefined;
 
   async function load(): Promise<CachedState> {
     if (cache !== undefined && cache.expiresAt > now()) {
@@ -268,6 +284,8 @@ export function createRuntimeConfigService(input: {
         clientEmail = undefined;
       }
     }
+    const storageResolution = resolveStorageFor(snapshot, false);
+    const storageDescriptor = storageResolution.descriptor;
     return {
       qwen: {
         apiKeyConfigured: snapshot.qwenApiKey !== "",
@@ -281,26 +299,17 @@ export function createRuntimeConfigService(input: {
         wrappingSecretSource: wrappingSource,
       },
       storage: {
-        provider:
-          snapshot.gcsBucket !== "" && snapshot.gcsJson !== ""
-            ? "gcs"
-            : (input.env.SUPABASE_URL?.trim() ?? "") !== "" &&
-                supabaseBucket !== "" &&
-                (input.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
-                  input.env.SUPABASE_SECRET_KEY?.trim() ||
-                  "") !== ""
-              ? "supabase"
-              : "none",
-        ...(snapshot.gcsBucket === ""
-          ? snapshot.gcsJson === "" &&
-            (input.env.SUPABASE_URL?.trim() ?? "") !== "" &&
-            supabaseBucket !== ""
-            ? { bucket: supabaseBucket }
-            : {}
-          : { bucket: snapshot.gcsBucket }),
+        provider: storageDescriptor.provider === "memory" ? "none" : storageDescriptor.provider,
+        ...(storageDescriptor.bucket === undefined ? {} : { bucket: storageDescriptor.bucket }),
+        credentialsConfigured: storageDescriptor.credentialsConfigured,
         serviceAccountConfigured: snapshot.gcsJson !== "",
         ...(clientEmail === undefined || clientEmail === "" ? {} : { clientEmail }),
-        source: storageSource === "none" && snapshot.gcsBucket !== "" ? "admin" : storageSource,
+        source:
+          input.env.ASSETS !== undefined && snapshot.gcsBucket === "" && supabaseBucket === ""
+            ? "env"
+            : storageSource === "none" && snapshot.gcsBucket !== ""
+              ? "admin"
+              : storageSource,
       },
       turnstile: {
         configured: snapshot.turnstileSecret !== "",
@@ -325,6 +334,111 @@ export function createRuntimeConfigService(input: {
       },
       ...(snapshot.state.updatedAt === undefined ? {} : { updatedAt: snapshot.state.updatedAt }),
     };
+  }
+
+  /** Provider selection and its public descriptor are resolved from one immutable snapshot. */
+  function resolveStorageFor(
+    snapshot: Awaited<ReturnType<typeof resolved>>,
+    useFakes: boolean,
+  ): RuntimeStorageResolution {
+    const supabaseUrl = input.env.SUPABASE_URL?.trim() ?? "";
+    const supabaseKey =
+      input.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || input.env.SUPABASE_SECRET_KEY?.trim() || "";
+    const supabaseBucket = input.env.SUPABASE_STORAGE_BUCKET?.trim() ?? "";
+    const hasR2 = input.env.ASSETS !== undefined;
+    const r2 = input.env.ASSETS;
+    const r2AccountId = input.env.R2_ACCOUNT_ID?.trim() ?? "";
+    const r2BucketName = input.env.R2_BUCKET_NAME?.trim() ?? "";
+    const r2ManagementApiToken = input.env.R2_MANAGEMENT_API_TOKEN?.trim() ?? "";
+    const r2CredentialsConfigured =
+      r2AccountId !== "" && r2BucketName !== "" && r2ManagementApiToken !== "";
+    const config = [
+      snapshot.gcsBucket,
+      snapshot.gcsJson,
+      supabaseUrl,
+      supabaseKey,
+      supabaseBucket,
+      hasR2,
+      r2AccountId,
+      r2BucketName,
+      r2ManagementApiToken,
+      useFakes,
+    ] as const;
+    if (
+      objectStore !== undefined &&
+      objectStore.config.every((value, index) => value === config[index])
+    ) {
+      return objectStore.resolution;
+    }
+
+    let resolution: RuntimeStorageResolution;
+    if (snapshot.gcsBucket !== "" || snapshot.gcsJson !== "") {
+      const parsed =
+        snapshot.gcsBucket === "" || snapshot.gcsJson === ""
+          ? undefined
+          : tryCreateGcsObjectStore({
+              bucket: snapshot.gcsBucket,
+              serviceAccountJson: snapshot.gcsJson,
+              ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
+            });
+      resolution = {
+        store: parsed ?? createUnavailableObjectStore(),
+        descriptor: {
+          provider: "gcs",
+          ...(snapshot.gcsBucket === "" ? {} : { bucket: snapshot.gcsBucket }),
+          configured: true,
+          credentialsConfigured: parsed !== undefined,
+        },
+      };
+    } else if (supabaseBucket !== "") {
+      const parsed = tryCreateSupabaseObjectStore({
+        ...(supabaseUrl === "" ? {} : { url: supabaseUrl }),
+        ...(supabaseKey === "" ? {} : { serviceRoleKey: supabaseKey }),
+        bucket: supabaseBucket,
+        ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
+      });
+      resolution = {
+        store: parsed ?? createUnavailableObjectStore(),
+        descriptor: {
+          provider: "supabase",
+          bucket: supabaseBucket,
+          configured: true,
+          credentialsConfigured: parsed !== undefined,
+        },
+      };
+    } else if (r2 !== undefined) {
+      resolution = {
+        store: createR2ObjectStore(r2, {
+          accountId: r2AccountId,
+          bucketName: r2BucketName,
+          apiToken: r2ManagementApiToken,
+          ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
+        }),
+        descriptor: {
+          provider: "r2",
+          ...(r2BucketName === "" ? {} : { bucket: r2BucketName }),
+          configured: true,
+          credentialsConfigured: r2CredentialsConfigured,
+        },
+      };
+    } else if (useFakes) {
+      resolution = {
+        store: createFakeObjectStore(),
+        descriptor: {
+          provider: "memory",
+          bucket: "memory",
+          configured: true,
+          credentialsConfigured: true,
+        },
+      };
+    } else {
+      resolution = {
+        store: createUnavailableObjectStore(),
+        descriptor: { provider: "none", configured: false, credentialsConfigured: false },
+      };
+    }
+    objectStore = { config, resolution };
+    return resolution;
   }
 
   return {
@@ -494,39 +608,7 @@ export function createRuntimeConfigService(input: {
     },
     async resolveStorage({ useFakes }) {
       const snapshot = await resolved();
-      const key = `${snapshot.gcsBucket}:${String(snapshot.gcsJson.length)}`;
-      if (objectStore?.key === key) {
-        return objectStore.store;
-      }
-      const gcs = tryCreateGcsObjectStore({
-        bucket: snapshot.gcsBucket,
-        serviceAccountJson: snapshot.gcsJson,
-        ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
-      });
-      const supabaseUrl = input.env.SUPABASE_URL?.trim() ?? "";
-      const supabaseKey =
-        input.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || input.env.SUPABASE_SECRET_KEY?.trim() || "";
-      const supabaseBucket = input.env.SUPABASE_STORAGE_BUCKET?.trim() ?? "";
-      // Match the Job Worker resolver: database credentials alone do not identify storage.
-      const supabase =
-        supabaseBucket === ""
-          ? undefined
-          : tryCreateSupabaseObjectStore({
-              ...(supabaseUrl === "" ? {} : { url: supabaseUrl }),
-              ...(supabaseKey === "" ? {} : { serviceRoleKey: supabaseKey }),
-              bucket: supabaseBucket,
-              ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
-            });
-      const store =
-        gcs ??
-        supabase ??
-        (input.env.ASSETS !== undefined
-          ? createR2ObjectStore(input.env.ASSETS)
-          : useFakes
-            ? createFakeObjectStore()
-            : createUnavailableObjectStore());
-      objectStore = { key, store };
-      return store;
+      return resolveStorageFor(snapshot, useFakes);
     },
     async resolveTurnstileSecret() {
       const snapshot = await resolved();

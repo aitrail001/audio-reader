@@ -461,6 +461,10 @@ type TenantIds = {
   adminRoleId: string;
   privacyId: string;
   objectWriteLeaseId: string;
+  assetManifestV2Id: string;
+  syncV2ChangeId: string;
+  syncV2BatchId: string;
+  syncV2OutcomeId: string;
 };
 
 function idKey(table: string): keyof TenantIds {
@@ -488,6 +492,10 @@ function idKey(table: string): keyof TenantIds {
     admin_roles: "adminRoleId",
     privacy_requests: "privacyId",
     object_write_leases: "objectWriteLeaseId",
+    asset_manifests_v2: "assetManifestV2Id",
+    sync_v2_changes: "syncV2ChangeId",
+    sync_v2_batches: "syncV2BatchId",
+    sync_v2_mutation_outcomes: "syncV2OutcomeId",
   };
   const key = keys[table];
   if (key === undefined) {
@@ -557,6 +565,10 @@ function loadTenantIds(db: PostgresSession, userId: string): TenantIds {
     adminRoleId: one("admin_roles"),
     privacyId: one("privacy_requests"),
     objectWriteLeaseId: one("object_write_leases"),
+    assetManifestV2Id: one("asset_manifests_v2"),
+    syncV2ChangeId: one("sync_v2_changes"),
+    syncV2BatchId: one("sync_v2_batches"),
+    syncV2OutcomeId: one("sync_v2_mutation_outcomes"),
   };
 }
 
@@ -741,6 +753,26 @@ function insertSql(table: string, owner: TenantIds): string {
     case "object_write_leases":
       return `insert into object_write_leases (user_id, object_key)
         values (${u}, '${owner.userId}/private-object')`;
+    case "asset_manifests_v2":
+      return `insert into asset_manifests_v2 (
+        user_id, kind, content_type, encoding, compressed_bytes, original_bytes, sha256,
+        object_key, upload_object_key
+      ) values (
+        ${u}, 'cover', 'image/png', 'identity', 1, 1, repeat('a', 64),
+        'private/v2/${owner.userId}/cover/' || repeat('a', 64),
+        'private/v2/${owner.userId}/pending/' || gen_random_uuid()::text
+      )`;
+    case "sync_v2_changes":
+      return `insert into sync_v2_changes
+        (user_id, entity_type, entity_id, operation, revision, payload)
+        values (${u}, 'settings', gen_random_uuid(), 'upsert', 1, '{}')`;
+    case "sync_v2_batches":
+      return `insert into sync_v2_batches (user_id, device_id, batch_id)
+        values (${u}, gen_random_uuid(), gen_random_uuid())`;
+    case "sync_v2_mutation_outcomes":
+      return `insert into sync_v2_mutation_outcomes
+        (user_id, mutation_id, status, entity_revision)
+        values (${u}, gen_random_uuid(), 'applied', 1)`;
     default:
       throw new Error(`no insert for ${table}`);
   }
@@ -758,6 +790,7 @@ declare
   v_vocab uuid;
   v_card uuid;
   v_job uuid;
+  v_asset_sha text := repeat(replace(p_user::text, '-', ''), 2);
 begin
   insert into public.profiles (user_id, display_name, account_status)
   values (p_user, p_status || ' user', p_status);
@@ -839,6 +872,27 @@ begin
 
   insert into public.object_write_leases (user_id, object_key)
   values (p_user, p_user::text || '/seed-object');
+
+  insert into public.asset_manifests_v2 (
+    user_id, kind, content_type, encoding, compressed_bytes, original_bytes, sha256,
+    object_key, upload_object_key
+  ) values (
+    p_user, 'cover', 'image/png', 'identity', 1, 1,
+    v_asset_sha,
+    'private/v2/' || p_user::text || '/cover/' || v_asset_sha,
+    'private/v2/' || p_user::text || '/pending/' || gen_random_uuid()::text
+  );
+
+  insert into public.sync_v2_changes
+    (user_id, entity_type, entity_id, operation, revision, payload)
+  values (p_user, 'settings', gen_random_uuid(), 'upsert', 1, '{}');
+
+  insert into public.sync_v2_batches (user_id, device_id, batch_id)
+  values (p_user, gen_random_uuid(), gen_random_uuid());
+
+  insert into public.sync_v2_mutation_outcomes
+    (user_id, mutation_id, status, entity_revision)
+  values (p_user, gen_random_uuid(), 'applied', 1);
 end;
 $$;
 

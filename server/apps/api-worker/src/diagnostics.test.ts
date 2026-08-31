@@ -29,6 +29,7 @@ function runtime(overrides: Partial<RuntimeConfigView["qwen"]> = {}): RuntimeCon
     },
     storage: {
       provider: "none",
+      credentialsConfigured: false,
       serviceAccountConfigured: false,
       source: "none",
     },

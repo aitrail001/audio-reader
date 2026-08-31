@@ -24,7 +24,28 @@ after the requester supplies the exact source needed to recompute the key.
 
 Free-form chat, notes, review answers, custom instructions, and other personal
 work are not shared. Every use still writes a private `user_assistant_results`
-row for pending/accepted/rejected state.
+row whose lifecycle is defined separately below.
+
+## Separate lifecycles
+
+`assistant_cache_entries` is reusable HMAC-addressed infrastructure. It has no
+owner or searchable passage and may be quarantined, expired, or physically
+purged. `user_assistant_results` and local `local_assistant_results` are durable
+private data. They retain pending, accepted, rejected, stale, edited, and
+replaced decisions, model provenance, and append-only history. A cache entry ID
+is provenance only: private output is copied into the result row and survives
+cache eviction and app relaunch.
+
+Ordinary word and sentence translations and chapter summaries remain queryable
+database rows. Exceptionally large, immutable, whole-content assistant output
+uses the private v2 asset manifest with kind `assistantArtifact`; it is never an
+automatic shared-cache candidate. Free-form chat and private notes never enter
+the shared cache.
+
+Account exports place shared cache reference metadata separately from private
+result content and history; they never copy the shared cache payload. Account
+deletion cascades private results and `assistantArtifact` manifests/objects but
+does not delete global shared cache entries.
 
 ## Cache identity
 
@@ -69,3 +90,5 @@ are not auto-hydrated.
 - Admins can quarantine or purge entries from metadata; they cannot search the
   global cache by source text.
 - Single-flight inserts on `cache_key` prevent duplicate Qwen generations.
+- “Cache” in Operator surfaces means the shared exact-content cache, never a
+  user's durable local or cloud assistant results.

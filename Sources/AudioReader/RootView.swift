@@ -7,6 +7,7 @@ struct RootView: View {
     @State private var showMacAppleBooks = false
     @State private var macAppleBooks = MacAppleBooksLibrary()
     @State private var importingAppleBookID: String?
+    @State private var pendingAppleBooksDuplicate: MacAppleBookItem?
     @State private var pendingMacBookDelete: Book?
     @State private var macBookDeleteError: String?
 #endif
@@ -62,8 +63,10 @@ struct RootView: View {
         .sheet(isPresented: $showMacAppleBooks) {
             MacAppleBooksView(
                 library: macAppleBooks,
+                pendingDuplicateImport: $pendingAppleBooksDuplicate,
                 importingID: importingAppleBookID,
-                onImport: importAppleBook
+                onImport: importAppleBook,
+                onConfirmDuplicate: confirmAppleBooksDuplicateImport
             )
         }
         .alert("Import Result", isPresented: Binding(
@@ -237,9 +240,40 @@ struct RootView: View {
         Task {
             defer { importingAppleBookID = nil }
             do {
+                guard let location = item.location else {
+                    throw AudiobookImportError.protectedOrUnavailable
+                }
+                let destinationRoot = libraryRoot
+                let preflight = try await Task.detached(priority: .userInitiated) {
+                    try AudiobookImportService.preflightFiles([location], into: destinationRoot)
+                }.value
+                if preflight.requiresConfirmation {
+                    pendingAppleBooksDuplicate = item
+                    return
+                }
                 try macAppleBooks.importAudiobook(item, into: libraryRoot)
                 macAppleBooks.message = "Imported \(item.title) into AudioReader."
                 importResult = "Imported \(item.title) from Apple Books."
+                await state.rescan()
+            } catch {
+                importResult = error.localizedDescription
+            }
+        }
+    }
+
+    private func confirmAppleBooksDuplicateImport(_ item: MacAppleBookItem) {
+        pendingAppleBooksDuplicate = nil
+        importingAppleBookID = item.id
+        Task {
+            defer { importingAppleBookID = nil }
+            do {
+                try macAppleBooks.importAudiobook(
+                    item,
+                    into: libraryRoot,
+                    duplicatePolicy: .confirmedReimport
+                )
+                macAppleBooks.message = "Imported another copy of \(item.title) into AudioReader."
+                importResult = "Imported another copy of \(item.title) from Apple Books."
                 await state.rescan()
             } catch {
                 importResult = error.localizedDescription

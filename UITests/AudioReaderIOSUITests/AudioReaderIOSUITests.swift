@@ -63,7 +63,7 @@ final class AudioReaderIOSUITests: XCTestCase {
         }
     }
 
-    func testCorrectionRestoreSyncAndExportActions() {
+    func testCorrectionRestoreAndSyncActions() {
         let app = launch(scenario: "reader")
 
         if !element("transcript.edit", in: app).waitForExistence(timeout: 3) {
@@ -91,22 +91,48 @@ final class AudioReaderIOSUITests: XCTestCase {
         revealSidebar(in: libraryApp)
         XCTAssertTrue(element("sync.status", in: libraryApp).waitForExistence(timeout: 3))
         XCTAssertTrue(element("sync.now", in: libraryApp).exists)
-        libraryApp.terminate()
-        let wordsApp = launch(scenario: "words")
-        let identifiedExport = element("anki.export", in: wordsApp)
-        let export: XCUIElement
-        if identifiedExport.waitForExistence(timeout: 3) {
-            export = identifiedExport
-        } else {
-            let more = wordsApp.buttons["More"].firstMatch
-            XCTAssertTrue(more.waitForExistence(timeout: 3))
-            more.tap()
-            export = wordsApp.buttons["Export to Anki"].firstMatch
-        }
-        XCTAssertTrue(export.waitForExistence(timeout: 3))
-        XCTAssertTrue(export.isEnabled)
-        export.tap()
-        XCTAssertTrue(wordsApp.buttons["Current filtered view"].waitForExistence(timeout: 3))
+    }
+
+    func testAnkiExportSelectionIsExplicitAndTemporary() {
+        let app = launch(scenario: "words-rich")
+        let entryID = "ui-vocab-due-0"
+
+        element("words.section.library", in: app).tap()
+        XCTAssertTrue(element("words.card.\(entryID)", in: app).waitForExistence(timeout: 3))
+        XCTAssertFalse(element("anki.selection.\(entryID)", in: app).exists)
+
+        let myList = element("words.myList.\(entryID)", in: app)
+        XCTAssertTrue(scrollToExistence(myList, in: app))
+        let originalMyListLabel = myList.label
+        XCTAssertEqual(originalMyListLabel, "Add to My list")
+
+        enterAnkiExportSelection(in: app)
+        let selection = element("anki.selection.\(entryID)", in: app)
+        XCTAssertTrue(selection.waitForExistence(timeout: 3))
+        XCTAssertEqual(selection.value as? String, "Not selected")
+        selection.tap()
+
+        let count = element("anki.selection.count", in: app)
+        XCTAssertTrue(count.waitForExistence(timeout: 3))
+        XCTAssertEqual(count.value as? String, "1 selected")
+        XCTAssertEqual(selection.value as? String, "Selected")
+        XCTAssertEqual(myList.label, originalMyListLabel)
+
+        app.buttons["Cancel"].firstMatch.tap()
+        XCTAssertTrue(waitForNonExistence(count, timeout: 3))
+        XCTAssertTrue(waitForNonExistence(selection, timeout: 3))
+        XCTAssertEqual(myList.label, originalMyListLabel)
+
+        enterAnkiExportSelection(in: app)
+        let secondSelection = element("anki.selection.\(entryID)", in: app)
+        XCTAssertTrue(secondSelection.waitForExistence(timeout: 3))
+        secondSelection.tap()
+        XCTAssertEqual(element("anki.selection.count", in: app).value as? String, "1 selected")
+
+        app.buttons["Export"].firstMatch.tap()
+        XCTAssertTrue(waitForNonExistence(element("anki.selection.count", in: app), timeout: 3))
+        XCTAssertTrue(waitForNonExistence(secondSelection, timeout: 3))
+        XCTAssertEqual(myList.label, originalMyListLabel)
     }
 
     func testReducedMotionFixtureKeepsReaderUsable() {
@@ -173,6 +199,24 @@ final class AudioReaderIOSUITests: XCTestCase {
         XCTAssertTrue(element("sidebar.library", in: app).waitForExistence(timeout: 3))
     }
 
+    private func enterAnkiExportSelection(in app: XCUIApplication) {
+        let identifiedExport = element("anki.export", in: app)
+        let export: XCUIElement
+        if waitForHittable(identifiedExport, timeout: 2) {
+            export = identifiedExport
+        } else {
+            let more = app.buttons["More"].firstMatch
+            XCTAssertTrue(more.waitForExistence(timeout: 3))
+            more.tap()
+            export = app.buttons["Export to Anki"].firstMatch
+        }
+        XCTAssertTrue(waitForHittable(export, timeout: 3))
+        export.tap()
+        let select = app.buttons["Select for Anki export"].firstMatch
+        XCTAssertTrue(select.waitForExistence(timeout: 3))
+        select.tap()
+    }
+
     private func launch(scenario: String, reduceMotion: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["--uitesting", "--uitesting-scenario=\(scenario)"]
@@ -185,6 +229,18 @@ final class AudioReaderIOSUITests: XCTestCase {
 
     private func element(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    private func waitForHittable(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let predicate = NSPredicate(format: "exists == true AND hittable == true")
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func waitForNonExistence(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let predicate = NSPredicate(format: "exists == false")
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
     }
 
     private func scrollToExistence(

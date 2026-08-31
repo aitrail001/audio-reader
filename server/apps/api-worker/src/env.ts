@@ -24,6 +24,9 @@ export type WorkerEnv = {
   QWEN_MODEL?: string;
   GCS_BUCKET?: string;
   GCS_SERVICE_ACCOUNT_JSON?: string;
+  R2_ACCOUNT_ID?: string;
+  R2_BUCKET_NAME?: string;
+  R2_MANAGEMENT_API_TOKEN?: string;
   OPERATOR_CONFIG_KEY?: string;
   ADMIN_BOOTSTRAP_EMAIL?: string;
   TURNSTILE_SECRET_KEY?: string;

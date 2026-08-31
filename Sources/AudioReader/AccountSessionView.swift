@@ -251,12 +251,28 @@ struct AccountSessionView: View {
                     .font(.body)
             }
             .accessibilityLabel("Sync learning data across devices")
-            .disabled(session.isBusy || !session.flagEnabled("account_sync", default: false))
+            .disabled(session.isBusy || (!session.mode.isSyncEnabled && !session.accountSyncReadiness.effective))
 
             Text("Sync is optional. Turning it on pushes pending learning-data changes and pulls updates from your other devices. Books and media stay on this device unless you enable cloud media later.")
                 .font(.body)
                 .foregroundStyle(Palette.dim)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if let readinessMessage = session.syncReadinessMessage {
+                Text(readinessMessage)
+                    .font(.body)
+                    .foregroundStyle(Palette.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel("Account sync readiness")
+            }
+
+            if session.syncAvailabilityManagedByOperator {
+                Button("Refresh sync availability") {
+                    Task { await session.refreshSession() }
+                }
+                .disabled(session.isBusy)
+                .accessibilityHint("Checks whether the service operator has enabled cross-device sync")
+            }
 
             AccountSyncStatusView(session: session)
 

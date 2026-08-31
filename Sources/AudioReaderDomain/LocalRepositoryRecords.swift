@@ -6,8 +6,23 @@ public struct StoredSettings: Codable, Equatable, Sendable {
     public var textSource: String
     public var skipSeconds: Double
     public var transcriptionLanguage: String
+    public var bookTranscriptionLanguages: [String: String]?
     public var readerLanguageLevel: String
     public var targetLanguage: String
+    public var llmProvider: String?
+    public var grokAuthentication: String?
+    public var grokEndpoint: String?
+    public var grokModel: String?
+    public var grokEffort: String?
+    public var qwenEndpoint: String?
+    public var qwenModel: String?
+    public var qwenThinking: Bool?
+    public var qwenEffort: String?
+    public var qwenEffortPolicyVersion: Int?
+    public var openAIAuthentication: String?
+    public var openAIEndpoint: String?
+    public var openAIModel: String?
+    public var openAIEffort: String?
     public var sentenceContextCount: Int
     public var chapterTranslationBlockSize: Int
     public var chatContextCount: Int
@@ -32,8 +47,23 @@ public struct StoredSettings: Codable, Equatable, Sendable {
         textSource: String = "Spoken",
         skipSeconds: Double = 5,
         transcriptionLanguage: String = "en-US",
+        bookTranscriptionLanguages: [String: String]? = nil,
         readerLanguageLevel: String = "intermediate",
         targetLanguage: String = "zh-Hans",
+        llmProvider: String? = nil,
+        grokAuthentication: String? = nil,
+        grokEndpoint: String? = nil,
+        grokModel: String? = nil,
+        grokEffort: String? = nil,
+        qwenEndpoint: String? = nil,
+        qwenModel: String? = nil,
+        qwenThinking: Bool? = nil,
+        qwenEffort: String? = nil,
+        qwenEffortPolicyVersion: Int? = nil,
+        openAIAuthentication: String? = nil,
+        openAIEndpoint: String? = nil,
+        openAIModel: String? = nil,
+        openAIEffort: String? = nil,
         sentenceContextCount: Int = 2,
         chapterTranslationBlockSize: Int = 5,
         chatContextCount: Int = 3,
@@ -57,8 +87,23 @@ public struct StoredSettings: Codable, Equatable, Sendable {
         self.textSource = textSource
         self.skipSeconds = skipSeconds
         self.transcriptionLanguage = transcriptionLanguage
+        self.bookTranscriptionLanguages = bookTranscriptionLanguages
         self.readerLanguageLevel = readerLanguageLevel
         self.targetLanguage = targetLanguage
+        self.llmProvider = llmProvider
+        self.grokAuthentication = grokAuthentication
+        self.grokEndpoint = grokEndpoint
+        self.grokModel = grokModel
+        self.grokEffort = grokEffort
+        self.qwenEndpoint = qwenEndpoint
+        self.qwenModel = qwenModel
+        self.qwenThinking = qwenThinking
+        self.qwenEffort = qwenEffort
+        self.qwenEffortPolicyVersion = qwenEffortPolicyVersion
+        self.openAIAuthentication = openAIAuthentication
+        self.openAIEndpoint = openAIEndpoint
+        self.openAIModel = openAIModel
+        self.openAIEffort = openAIEffort
         self.sentenceContextCount = sentenceContextCount
         self.chapterTranslationBlockSize = chapterTranslationBlockSize
         self.chatContextCount = chatContextCount
@@ -122,6 +167,66 @@ public struct StoredChapter: Codable, Equatable, Sendable {
         self.title = title
         self.duration = duration
         self.startTime = startTime
+    }
+}
+
+/// Device-local media reference. Paths and fingerprints never enter the cloud
+/// book payload, but remain typed and durable across local launches.
+public struct StoredLocalAsset: Codable, Equatable, Sendable {
+    public var id: AssetID
+    public var bookID: BookID
+    public var kind: String
+    public var localMediaKey: String
+    public var contentHash: String?
+    public var byteCount: Int64?
+    public var metadata: [String: String]
+
+    public init(
+        id: AssetID,
+        bookID: BookID,
+        kind: String,
+        localMediaKey: String,
+        contentHash: String? = nil,
+        byteCount: Int64? = nil,
+        metadata: [String: String] = [:]
+    ) {
+        self.id = id
+        self.bookID = bookID
+        self.kind = kind
+        self.localMediaKey = localMediaKey
+        self.contentHash = contentHash
+        self.byteCount = byteCount
+        self.metadata = metadata
+    }
+}
+
+/// A verified v2 immutable object installed on this device. The manifest is compact; bytes stay
+/// at `localObjectPath` and are never copied into SQLite.
+public struct StoredSyncAssetManifest: Codable, Equatable, Sendable {
+    public var id: String
+    public var kind: String
+    public var revisionID: String?
+    public var bookID: String?
+    public var chapterID: String?
+    public var contentType: String
+    public var encoding: String
+    public var sha256: String
+    public var compressedBytes: Int64
+    public var originalBytes: Int64
+    public var segmentCount: Int?
+    public var localObjectPath: String
+
+    public init(
+        id: String, kind: String, revisionID: String? = nil, bookID: String? = nil,
+        chapterID: String? = nil, contentType: String, encoding: String, sha256: String,
+        compressedBytes: Int64, originalBytes: Int64, segmentCount: Int? = nil,
+        localObjectPath: String
+    ) {
+        self.id = id; self.kind = kind; self.revisionID = revisionID; self.bookID = bookID
+        self.chapterID = chapterID; self.contentType = contentType; self.encoding = encoding
+        self.sha256 = sha256; self.compressedBytes = compressedBytes
+        self.originalBytes = originalBytes; self.segmentCount = segmentCount
+        self.localObjectPath = localObjectPath
     }
 }
 
@@ -279,9 +384,45 @@ public struct StoredTranscript: Codable, Equatable, Sendable {
     }
 }
 
+public enum VocabularyPartOfSpeech: String, Codable, CaseIterable, Sendable {
+    case noun, verb, adjective, adverb, pronoun, determiner, preposition, conjunction, interjection
+    case phrase, sentence, unknown
+}
+
+public enum VocabularyCanonicalizationSource: String, Codable, Sendable {
+    case normalized
+    case appleNaturalLanguage
+    case irregularRule
+    case userEdited
+    case llmFallback
+    case cachedLLM
+}
+
+public enum VocabularyCanonicalizationStatus: String, Codable, Sendable {
+    case confirmed
+    case needsReview
+}
+
+public enum VocabularyCaptureSource: String, Codable, Sendable {
+    case explicitWord
+    case explicitPhrase
+    case explicitSentence
+    case acceptedSentenceTranslation
+    case automaticPhraseSuggestion
+}
+
 public struct StoredVocabularyOccurrence: Codable, Equatable, Sendable {
     public var id: VocabularyOccurrenceID
     public var surface: String
+    public var canonicalForm: String
+    public var partOfSpeech: String
+    public var senseID: String?
+    public var canonicalizationSource: String
+    public var canonicalizationConfidence: Double
+    public var canonicalizationStatus: String
+    public var canonicalizationTraceID: String?
+    public var captureSource: String
+    public var reviewEligible: Bool
     public var category: String
     public var definition: String?
     public var dictionaryName: String?
@@ -312,6 +453,15 @@ public struct StoredVocabularyOccurrence: Codable, Equatable, Sendable {
     public init(
         id: VocabularyOccurrenceID,
         surface: String,
+        canonicalForm: String? = nil,
+        partOfSpeech: String = VocabularyPartOfSpeech.unknown.rawValue,
+        senseID: String? = nil,
+        canonicalizationSource: String = VocabularyCanonicalizationSource.normalized.rawValue,
+        canonicalizationConfidence: Double = 0.4,
+        canonicalizationStatus: String = VocabularyCanonicalizationStatus.needsReview.rawValue,
+        canonicalizationTraceID: String? = nil,
+        captureSource: String = VocabularyCaptureSource.explicitWord.rawValue,
+        reviewEligible: Bool = true,
         category: String,
         definition: String? = nil,
         dictionaryName: String? = nil,
@@ -341,6 +491,15 @@ public struct StoredVocabularyOccurrence: Codable, Equatable, Sendable {
     ) {
         self.id = id
         self.surface = surface
+        self.canonicalForm = canonicalForm ?? surface
+        self.partOfSpeech = partOfSpeech
+        self.senseID = senseID
+        self.canonicalizationSource = canonicalizationSource
+        self.canonicalizationConfidence = canonicalizationConfidence
+        self.canonicalizationStatus = canonicalizationStatus
+        self.canonicalizationTraceID = canonicalizationTraceID
+        self.captureSource = captureSource
+        self.reviewEligible = reviewEligible
         self.category = category
         self.definition = definition
         self.dictionaryName = dictionaryName
@@ -367,6 +526,94 @@ public struct StoredVocabularyOccurrence: Codable, Equatable, Sendable {
         self.reviewIntervalDays = reviewIntervalDays
         self.reviewEaseFactor = reviewEaseFactor
         self.isInLearnList = isInLearnList
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, surface, canonicalForm, partOfSpeech, senseID
+        case canonicalizationSource, canonicalizationConfidence, canonicalizationStatus, canonicalizationTraceID
+        case captureSource, reviewEligible, category, definition, dictionaryName, dictionaryHTML
+        case translation, translationLanguage, translationModel, sourceLanguage, context, spokenText, ebookText
+        case bookID, bookTitle, chapterID, chapterTitle, segmentID, wordID, timestamp, addedAt
+        case reviewCount, nextReview, lastReviewedAt, lastReviewQuality, reviewIntervalDays, reviewEaseFactor
+        case isInLearnList
+    }
+
+    /// Additive decoding keeps current vNext stores readable while the later
+    /// persistence cutover introduces separate occurrence and study-card rows.
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let surface = try values.decode(String.self, forKey: .surface)
+        let category = try values.decode(String.self, forKey: .category)
+        let reviewCount = try values.decodeIfPresent(Int.self, forKey: .reviewCount) ?? 0
+        let isInLearnList = try values.decodeIfPresent(Bool.self, forKey: .isInLearnList) ?? false
+        let storedCaptureSource = try values.decodeIfPresent(String.self, forKey: .captureSource)
+        let captureSource = storedCaptureSource
+            ?? Self.defaultCaptureSource(for: category, reviewed: reviewCount > 0, saved: isInLearnList).rawValue
+        let reviewEligible = (try values.decodeIfPresent(Bool.self, forKey: .reviewEligible))
+            ?? (VocabularyCaptureSource(rawValue: captureSource)?.defaultStoredReviewEligibility ?? true)
+        self.init(
+            id: try values.decode(VocabularyOccurrenceID.self, forKey: .id),
+            surface: surface,
+            canonicalForm: try values.decodeIfPresent(String.self, forKey: .canonicalForm),
+            partOfSpeech: try values.decodeIfPresent(String.self, forKey: .partOfSpeech)
+                ?? VocabularyPartOfSpeech.unknown.rawValue,
+            senseID: try values.decodeIfPresent(String.self, forKey: .senseID),
+            canonicalizationSource: try values.decodeIfPresent(String.self, forKey: .canonicalizationSource)
+                ?? VocabularyCanonicalizationSource.normalized.rawValue,
+            canonicalizationConfidence: try values.decodeIfPresent(Double.self, forKey: .canonicalizationConfidence) ?? 0.4,
+            canonicalizationStatus: try values.decodeIfPresent(String.self, forKey: .canonicalizationStatus)
+                ?? VocabularyCanonicalizationStatus.needsReview.rawValue,
+            canonicalizationTraceID: try values.decodeIfPresent(String.self, forKey: .canonicalizationTraceID),
+            captureSource: captureSource,
+            reviewEligible: reviewCount > 0 ? true : reviewEligible,
+            category: category,
+            definition: try values.decodeIfPresent(String.self, forKey: .definition),
+            dictionaryName: try values.decodeIfPresent(String.self, forKey: .dictionaryName),
+            dictionaryHTML: try values.decodeIfPresent(String.self, forKey: .dictionaryHTML),
+            translation: try values.decodeIfPresent(String.self, forKey: .translation),
+            translationLanguage: try values.decodeIfPresent(String.self, forKey: .translationLanguage),
+            translationModel: try values.decodeIfPresent(String.self, forKey: .translationModel),
+            sourceLanguage: try values.decodeIfPresent(String.self, forKey: .sourceLanguage),
+            context: try values.decode(String.self, forKey: .context),
+            spokenText: try values.decodeIfPresent(String.self, forKey: .spokenText),
+            ebookText: try values.decodeIfPresent(String.self, forKey: .ebookText),
+            bookID: try values.decode(BookID.self, forKey: .bookID),
+            bookTitle: try values.decode(String.self, forKey: .bookTitle),
+            chapterID: try values.decode(ChapterID.self, forKey: .chapterID),
+            chapterTitle: try values.decode(String.self, forKey: .chapterTitle),
+            segmentID: try values.decodeIfPresent(String.self, forKey: .segmentID),
+            wordID: try values.decodeIfPresent(String.self, forKey: .wordID),
+            timestamp: try values.decode(TimeInterval.self, forKey: .timestamp),
+            addedAt: try values.decode(Date.self, forKey: .addedAt),
+            reviewCount: reviewCount,
+            nextReview: try values.decodeIfPresent(Date.self, forKey: .nextReview),
+            lastReviewedAt: try values.decodeIfPresent(Date.self, forKey: .lastReviewedAt),
+            lastReviewQuality: try values.decodeIfPresent(String.self, forKey: .lastReviewQuality),
+            reviewIntervalDays: try values.decodeIfPresent(Double.self, forKey: .reviewIntervalDays) ?? 0,
+            reviewEaseFactor: try values.decodeIfPresent(Double.self, forKey: .reviewEaseFactor) ?? 2.5,
+            isInLearnList: isInLearnList
+        )
+    }
+
+    private static func defaultCaptureSource(
+        for category: String,
+        reviewed: Bool,
+        saved: Bool
+    ) -> VocabularyCaptureSource {
+        switch category {
+        case "phrase": reviewed || saved ? .explicitPhrase : .automaticPhraseSuggestion
+        case "sentence": reviewed || saved ? .explicitSentence : .acceptedSentenceTranslation
+        default: .explicitWord
+        }
+    }
+}
+
+private extension VocabularyCaptureSource {
+    var defaultStoredReviewEligibility: Bool {
+        switch self {
+        case .explicitWord, .explicitPhrase, .explicitSentence: true
+        case .acceptedSentenceTranslation, .automaticPhraseSuggestion: false
+        }
     }
 }
 
@@ -485,6 +732,7 @@ public struct StoredKnownLemma: Codable, Equatable, Sendable {
 public struct StoredReviewEvent: Codable, Equatable, Sendable {
     public var id: ReviewEventID
     public var vocabularyID: VocabularyOccurrenceID
+    public var cardID: String?
     public var face: String
     public var rating: String
     public var reviewedAt: Date
@@ -492,12 +740,14 @@ public struct StoredReviewEvent: Codable, Equatable, Sendable {
     public init(
         id: ReviewEventID,
         vocabularyID: VocabularyOccurrenceID,
+        cardID: String? = nil,
         face: String,
         rating: String,
         reviewedAt: Date
     ) {
         self.id = id
         self.vocabularyID = vocabularyID
+        self.cardID = cardID
         self.face = face
         self.rating = rating
         self.reviewedAt = reviewedAt
@@ -516,6 +766,42 @@ public enum AssistantResultStatus: String, Codable, Sendable {
     case accepted
     case rejected
     case stale
+    case edited
+    case replaced
+}
+
+public struct StoredAssistantResultHistory: Codable, Equatable, Sendable {
+    public var resultID: String
+    public var sequence: Int64
+    public var status: AssistantResultStatus
+    public var text: String
+    public var model: String
+    public var promptVersion: String
+    public var modelPolicyHash: String
+    public var recordedAt: Date
+    public var sharedCacheEntryID: String?
+
+    public init(
+        resultID: String,
+        sequence: Int64,
+        status: AssistantResultStatus,
+        text: String,
+        model: String,
+        promptVersion: String,
+        modelPolicyHash: String,
+        recordedAt: Date,
+        sharedCacheEntryID: String? = nil
+    ) {
+        self.resultID = resultID
+        self.sequence = sequence
+        self.status = status
+        self.text = text
+        self.model = model
+        self.promptVersion = promptVersion
+        self.modelPolicyHash = modelPolicyHash
+        self.recordedAt = recordedAt
+        self.sharedCacheEntryID = sharedCacheEntryID
+    }
 }
 
 public struct StoredAssistantResult: Codable, Equatable, Sendable {
@@ -524,6 +810,8 @@ public struct StoredAssistantResult: Codable, Equatable, Sendable {
     public var status: AssistantResultStatus
     public var language: String
     public var model: String
+    public var promptVersion: String
+    public var modelPolicyHash: String
     public var bookID: BookID?
     public var bookTitle: String?
     public var chapterID: ChapterID?
@@ -536,6 +824,8 @@ public struct StoredAssistantResult: Codable, Equatable, Sendable {
     public var decidedAt: Date?
     public var replacedText: String?
     public var replacedModel: String?
+    /// Optional provenance only. Durable private text never reads through this shared cache row.
+    public var sharedCacheEntryID: String?
 
     public init(
         id: String,
@@ -543,6 +833,8 @@ public struct StoredAssistantResult: Codable, Equatable, Sendable {
         status: AssistantResultStatus,
         language: String,
         model: String,
+        promptVersion: String = "local",
+        modelPolicyHash: String = "local",
         bookID: BookID? = nil,
         bookTitle: String? = nil,
         chapterID: ChapterID? = nil,
@@ -554,13 +846,16 @@ public struct StoredAssistantResult: Codable, Equatable, Sendable {
         createdAt: Date,
         decidedAt: Date? = nil,
         replacedText: String? = nil,
-        replacedModel: String? = nil
+        replacedModel: String? = nil,
+        sharedCacheEntryID: String? = nil
     ) {
         self.id = id
         self.kind = kind
         self.status = status
         self.language = language
         self.model = model
+        self.promptVersion = promptVersion
+        self.modelPolicyHash = modelPolicyHash
         self.bookID = bookID
         self.bookTitle = bookTitle
         self.chapterID = chapterID
@@ -573,6 +868,55 @@ public struct StoredAssistantResult: Codable, Equatable, Sendable {
         self.decidedAt = decidedAt
         self.replacedText = replacedText
         self.replacedModel = replacedModel
+        self.sharedCacheEntryID = sharedCacheEntryID
+    }
+}
+
+/// Portable accepted/rejected decision payload. Derived vocabulary travels
+/// with the decision so another device restores the same learning state.
+public struct StoredAssistantDecisionPayload: Codable, Equatable, Sendable {
+    public var result: StoredAssistantResult
+    public var vocabulary: [StoredVocabularyOccurrence]
+    public var removedVocabularyIDs: [VocabularyOccurrenceID]?
+
+    public init(
+        result: StoredAssistantResult,
+        vocabulary: [StoredVocabularyOccurrence],
+        removedVocabularyIDs: [VocabularyOccurrenceID]? = nil
+    ) {
+        self.result = result
+        self.vocabulary = vocabulary
+        self.removedVocabularyIDs = removedVocabularyIDs
+    }
+}
+
+/// Checkpoints are operational resume state, not generated prose, so their
+/// lifecycle remains independent from durable assistant results.
+public struct StoredTranslationCheckpoint: Codable, Equatable, Sendable {
+    public var chapterID: ChapterID
+    public var language: String
+    public var mode: String
+    public var completedSegmentCount: Int
+    public var totalSegmentCount: Int
+    public var status: String
+    public var updatedAt: Date
+
+    public init(
+        chapterID: ChapterID,
+        language: String,
+        mode: String = "continueFromCheckpoint",
+        completedSegmentCount: Int,
+        totalSegmentCount: Int = 0,
+        status: String = "inProgress",
+        updatedAt: Date
+    ) {
+        self.chapterID = chapterID
+        self.language = language
+        self.mode = mode
+        self.completedSegmentCount = completedSegmentCount
+        self.totalSegmentCount = totalSegmentCount
+        self.status = status
+        self.updatedAt = updatedAt
     }
 }
 
@@ -585,9 +929,9 @@ public enum OutboxEntityType: String, Codable, Sendable {
     case lexemeState = "lexeme_state"
     case reviewEvent = "review_event"
     case transcript
+    case asset
     case transcriptOverlay = "transcript_overlay"
-    case translationDecision = "translation_decision"
-    case summaryDecision = "summary_decision"
+    case assistantResult = "assistant_result"
     case chatMessage = "chat_message"
     case studyActivity = "study_activity"
 }

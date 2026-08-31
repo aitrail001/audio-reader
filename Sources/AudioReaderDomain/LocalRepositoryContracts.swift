@@ -12,14 +12,35 @@ public protocol SettingsRepository: Sendable {
 
 public protocol BookRepository: Sendable {
     func loadBooks() throws -> [StoredBook]
+    func loadDeletedBookIDs() throws -> [BookID]
     func saveBook(_ book: StoredBook) throws
     func deleteBook(id: BookID) throws
+    func loadAssets(bookID: BookID) throws -> [StoredLocalAsset]
+    func saveAssets(_ assets: [StoredLocalAsset], bookID: BookID) throws
+    func deleteAssets(bookID: BookID) throws
 }
 
 public protocol TranscriptRepository: Sendable {
     func loadTranscript(chapterID: ChapterID) throws -> StoredTranscript?
     func saveTranscript(_ transcript: StoredTranscript) throws
     func loadAllTranscripts() throws -> [StoredTranscript]
+    func loadTranscriptSegments(chapterID: ChapterID, range: Range<Int>) throws -> [StoredTranscriptSegment]
+    func updateTranscriptSegment(chapterID: ChapterID, segment: StoredTranscriptSegment) throws
+}
+
+public extension TranscriptRepository {
+    func loadTranscriptSegments(chapterID: ChapterID, range: Range<Int>) throws -> [StoredTranscriptSegment] {
+        guard let transcript = try loadTranscript(chapterID: chapterID) else { return [] }
+        return Array(transcript.segments.dropFirst(range.lowerBound).prefix(range.count))
+    }
+
+    func updateTranscriptSegment(chapterID: ChapterID, segment: StoredTranscriptSegment) throws {
+        guard var transcript = try loadTranscript(chapterID: chapterID),
+              let index = transcript.segments.firstIndex(where: { $0.id == segment.id })
+        else { return }
+        transcript.segments[index] = segment
+        try saveTranscript(transcript)
+    }
 }
 
 public protocol TranscriptOverlayRepository: Sendable {
@@ -46,6 +67,7 @@ public protocol VocabularyRepository: Sendable {
     func saveVocabulary(_ entries: [StoredVocabularyOccurrence]) throws
     func upsertVocabulary(_ entries: [StoredVocabularyOccurrence]) throws
     func updateVocabularyReviewSchedule(_ schedule: StoredVocabularyReviewSchedule) throws
+    func updateVocabularyReviewSchedules(_ schedules: [StoredVocabularyReviewSchedule]) throws
     func updateVocabularyLearnList(id: VocabularyOccurrenceID, included: Bool) throws
     func deleteVocabulary(id: VocabularyOccurrenceID) throws
 }
@@ -56,6 +78,10 @@ public extension VocabularyRepository {
     func updateVocabularyReviewSchedule(_ schedule: StoredVocabularyReviewSchedule) throws {
         guard let current = try loadVocabulary().first(where: { $0.id == schedule.vocabularyID }) else { return }
         try upsertVocabulary([schedule.merging(into: current)])
+    }
+
+    func updateVocabularyReviewSchedules(_ schedules: [StoredVocabularyReviewSchedule]) throws {
+        for schedule in schedules { try updateVocabularyReviewSchedule(schedule) }
     }
 
     func updateVocabularyLearnList(id: VocabularyOccurrenceID, included: Bool) throws {
@@ -78,6 +104,10 @@ public protocol ReviewEventRepository: Sendable {
         _ event: StoredReviewEvent,
         vocabulary: StoredVocabularyOccurrence
     ) throws
+    func appendReviewEvent(
+        _ event: StoredReviewEvent,
+        vocabularies: [StoredVocabularyOccurrence]
+    ) throws
 }
 
 public extension ReviewEventRepository {
@@ -92,12 +122,35 @@ public extension ReviewEventRepository {
     ) throws {
         try appendReviewEvent(event)
     }
+
+    func appendReviewEvent(
+        _ event: StoredReviewEvent,
+        vocabularies: [StoredVocabularyOccurrence]
+    ) throws {
+        guard let vocabulary = vocabularies.first else {
+            try appendReviewEvent(event)
+            return
+        }
+        try appendReviewEvent(event, vocabulary: vocabulary)
+    }
 }
 
 public protocol AssistantResultRepository: Sendable {
     func loadAssistantResults() throws -> [StoredAssistantResult]
+    func loadAssistantResultHistory(resultID: String) throws -> [StoredAssistantResultHistory]
     func saveAssistantResult(_ result: StoredAssistantResult) throws
     func replaceAssistantResults(_ results: [StoredAssistantResult]) throws
+}
+
+public protocol TranslationCheckpointRepository: Sendable {
+    func loadTranslationCheckpoints() throws -> [StoredTranslationCheckpoint]
+    func saveTranslationCheckpoint(_ checkpoint: StoredTranslationCheckpoint) throws
+    func deleteTranslationCheckpoint(chapterID: ChapterID, language: String) throws
+}
+
+public protocol StudyActivityRepository: Sendable {
+    func loadStudyActivityDays() throws -> [String]
+    func saveStudyActivityDays(_ days: [String]) throws
 }
 
 public protocol SyncOutboxRepository: Sendable {

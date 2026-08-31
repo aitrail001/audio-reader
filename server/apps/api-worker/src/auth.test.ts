@@ -13,6 +13,7 @@ import { createFakeDatabaseClient } from "@audio-reader/database";
 import { REQUEST_ID_HEADER } from "@audio-reader/observability";
 import { describe, expect, it, vi } from "vitest";
 import { createApiAppFromEnv, createTestApp } from "./app";
+import { createUnavailableObjectStore, type ObjectStore } from "./object-store";
 
 const DEVICE_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
 const DEVICE_B = "3fa85f64-5717-4562-b3fc-2c963f66afa7";
@@ -43,6 +44,7 @@ function createAuthApp(
     generateOtp?: () => string;
     verifyTurnstile?: (token: string, ip: string) => Promise<boolean>;
     passwordlessLimits?: MemoryPasswordlessLimiterOptions["limits"];
+    storage?: ObjectStore;
   } = {},
 ) {
   const now = options.now ?? (() => new Date());
@@ -56,13 +58,17 @@ function createAuthApp(
     ...(options.verifyTurnstile === undefined ? {} : { verifyTurnstile: options.verifyTurnstile }),
     ...(options.passwordlessLimits === undefined ? {} : { limits: options.passwordlessLimits }),
   });
+  const database = createFakeDatabaseClient();
   return {
     auth,
+    database,
     passwordlessLimiter,
     app: createTestApp({
       auth,
+      database,
       passwordlessLimiter,
       authenticate: (request) => auth.authenticate(request),
+      ...(options.storage === undefined ? {} : { storage: options.storage }),
     }),
   };
 }
@@ -767,6 +773,32 @@ describe("product authentication API", () => {
     expect(
       quotas.some((item) => isRecord(item) && item.key === "devices" && item.limit === 2),
     ).toBe(true);
+  });
+
+  it("returns requested and effective account sync state with a machine-readable pause reason", async () => {
+    const { app, database } = createAuthApp({ storage: createUnavailableObjectStore() });
+    await database.ops.patchFlag("account_sync", { enabled: true });
+    const session = await signIn(app, EMAIL, DEVICE_ID);
+
+    const response = await bootstrapDevice(
+      app,
+      session.accessToken,
+      DEVICE_ID,
+      "idempotency-account-sync-readiness",
+    );
+    const body = await readJson(response);
+    const flags = isRecord(body) && Array.isArray(body.featureFlags) ? body.featureFlags : [];
+
+    expect(response.status).toBe(200);
+    expect(
+      flags.some((item) => isRecord(item) && item.key === "account_sync" && item.enabled === false),
+    ).toBe(true);
+    expect(isRecord(body) ? body.accountSyncReadiness : null).toMatchObject({
+      requested: true,
+      effective: false,
+      reason: "upgrade_required",
+      minAppVersion: "2.0.0",
+    });
   });
 
   it("rejects a third device when the starter device quota is two", async () => {

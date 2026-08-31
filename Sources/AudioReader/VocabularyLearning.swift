@@ -11,6 +11,10 @@ enum VocabularyLearningStage: String, CaseIterable, Identifiable, Sendable {
         guard entry.reviewCount > 0 else { return .new }
         return entry.reviewIntervalDays < 7 ? .learning : .review
     }
+
+    static func resolve(_ card: VocabularyStudyCard) -> Self {
+        resolve(card.studyEntry)
+    }
 }
 
 /// User-facing Words views keep the manual saved list separate from the
@@ -54,13 +58,13 @@ enum VocabularyListFilter: String, CaseIterable, Identifiable, Sendable {
         case .saved:
             entry.isInLearnList
         case .due:
-            entry.reviewCount > 0 && VocabReviewScheduler.isDue(entry, at: date)
+            entry.reviewEligible && entry.reviewCount > 0 && VocabReviewScheduler.isDue(entry, at: date)
         case .new:
-            VocabularyLearningStage.resolve(entry) == .new
+            entry.reviewEligible && VocabularyLearningStage.resolve(entry) == .new
         case .learning:
-            VocabularyLearningStage.resolve(entry) == .learning
+            entry.reviewEligible && VocabularyLearningStage.resolve(entry) == .learning
         case .review:
-            VocabularyLearningStage.resolve(entry) == .review
+            entry.reviewEligible && VocabularyLearningStage.resolve(entry) == .review
         }
     }
 }
@@ -73,10 +77,10 @@ struct VocabularyStudySessionBreakdown: Equatable, Sendable {
 }
 
 struct VocabularyLearningQueue: Equatable, Sendable {
-    let new: [VocabEntry]
-    let learning: [VocabEntry]
-    let due: [VocabEntry]
-    let session: [VocabEntry]
+    let new: [VocabularyStudyCard]
+    let learning: [VocabularyStudyCard]
+    let due: [VocabularyStudyCard]
+    let session: [VocabularyStudyCard]
 
     var sessionBreakdown: VocabularyStudySessionBreakdown {
         VocabularyStudySessionBreakdown(
@@ -138,7 +142,7 @@ struct VocabularyFilterProjection: Equatable, Sendable {
     let allCategoryCount: Int
     let learnListCount: Int
     let listCounts: [VocabularyListFilter: Int]
-    let due: [VocabEntry]
+    let due: [VocabularyStudyCard]
 
     static let empty = VocabularyFilterProjection(
         books: [],
@@ -201,9 +205,6 @@ struct VocabularyFilterProjection: Equatable, Sendable {
     ) rethrows -> VocabularyFilterProjection {
         var bookTitles: [String: String] = [:]
         var categoryCounts: [VocabCategory: Int] = [:]
-        var listCounts = Dictionary(uniqueKeysWithValues: VocabularyListFilter.allCases.map { ($0, 0) })
-        var learnListCount = 0
-        var filtered: [VocabEntry] = []
         let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
 
         for (index, entry) in entries.enumerated() {
@@ -211,12 +212,15 @@ struct VocabularyFilterProjection: Equatable, Sendable {
             if bookTitles[entry.bookID] == nil {
                 bookTitles[entry.bookID] = entry.bookTitle
             }
-            if entry.isInLearnList { learnListCount += 1 }
-
-            guard bookFilter == "all" || entry.bookID == bookFilter else { continue }
-            listCounts[.all, default: 0] += 1
-            if entry.isInLearnList { listCounts[.saved, default: 0] += 1 }
-            switch VocabularyLearningStage.resolve(entry) {
+        }
+        let scopedOccurrences = entries.filter { bookFilter == "all" || $0.bookID == bookFilter }
+        let studyCards = VocabularyStudyCards.cards(scopedOccurrences)
+        var listCounts = Dictionary(uniqueKeysWithValues: VocabularyListFilter.allCases.map { ($0, 0) })
+        listCounts[.all] = scopedOccurrences.count
+        listCounts[.saved] = scopedOccurrences.count(where: \.isInLearnList)
+        for card in studyCards {
+            let entry = card.studyEntry
+            switch VocabularyLearningStage.resolve(card) {
             case .new: listCounts[.new, default: 0] += 1
             case .learning: listCounts[.learning, default: 0] += 1
             case .review: listCounts[.review, default: 0] += 1
@@ -224,7 +228,17 @@ struct VocabularyFilterProjection: Equatable, Sendable {
             if entry.reviewCount > 0, VocabReviewScheduler.isDue(entry, at: date) {
                 listCounts[.due, default: 0] += 1
             }
-            guard list.includes(entry, at: date) else { continue }
+        }
+        let listEntries: [VocabEntry] = switch list {
+        case .all: scopedOccurrences
+        case .saved: scopedOccurrences.filter(\.isInLearnList)
+        case .due, .new, .learning, .review: studyCards
+            .filter { list.includes($0.studyEntry, at: date) }
+            .map(\.studyEntry)
+        }
+        var filtered: [VocabEntry] = []
+        for (index, entry) in listEntries.enumerated() {
+            if index.isMultiple(of: 256) { try checkCancellation() }
             categoryCounts[entry.category, default: 0] += 1
             guard category == nil || entry.category == category else { continue }
             guard search.isEmpty || matchesSearch(entry, query: search) else { continue }
@@ -239,7 +253,7 @@ struct VocabularyFilterProjection: Equatable, Sendable {
             filtered: filtered,
             categoryCounts: categoryCounts,
             allCategoryCount: categoryCounts.values.reduce(0, +),
-            learnListCount: learnListCount,
+            learnListCount: entries.count(where: \.isInLearnList),
             listCounts: listCounts,
             due: try VocabularyLearningAnalytics.buildQueue(
                 entries: filtered,
@@ -351,28 +365,31 @@ struct VocabularyReviewSetupProjection: Equatable, Sendable {
         at date: Date,
         checkCancellation: () throws -> Void
     ) rethrows -> Self {
+        let cards = VocabularyStudyCards.cards(entries)
         var bookTitles: [String: String] = [:]
         var categoriesByBook: [String: Set<VocabCategory>] = [:]
         var learnListBookIDs = Set<String>()
         var itemCounts: [VocabReviewScope: Int] = [:]
-        var dueEntries: [VocabReviewScope: [VocabEntry]] = [:]
-        var newEntries: [VocabReviewScope: [VocabEntry]] = [:]
+        var dueEntries: [VocabReviewScope: [VocabularyStudyCard]] = [:]
+        var newEntries: [VocabReviewScope: [VocabularyStudyCard]] = [:]
 
-        for (index, entry) in entries.enumerated() {
+        for (index, card) in cards.enumerated() {
             if index.isMultiple(of: 256) { try checkCancellation() }
-            bookTitles[entry.bookID] = bookTitles[entry.bookID] ?? entry.bookTitle
-            categoriesByBook[entry.bookID, default: []].insert(entry.category)
-            let entryScopes = scopes(for: entry)
+            for occurrence in card.occurrences {
+                bookTitles[occurrence.bookID] = bookTitles[occurrence.bookID] ?? occurrence.bookTitle
+                categoriesByBook[occurrence.bookID, default: []].insert(occurrence.category)
+                if occurrence.isInLearnList { learnListBookIDs.insert(occurrence.bookID) }
+            }
+            let entryScopes = scopes(for: card)
             for scope in entryScopes {
                 itemCounts[scope, default: 0] += 1
             }
-            if entry.isInLearnList { learnListBookIDs.insert(entry.bookID) }
-            switch VocabularyLearningStage.resolve(entry) {
+            switch VocabularyLearningStage.resolve(card) {
             case .new:
-                for scope in entryScopes { newEntries[scope, default: []].append(entry) }
+                for scope in entryScopes { newEntries[scope, default: []].append(card) }
             case .learning, .review:
-                guard VocabReviewScheduler.isDue(entry, at: date) else { continue }
-                for scope in entryScopes { dueEntries[scope, default: []].append(entry) }
+                guard VocabReviewScheduler.isDue(card.studyEntry, at: date) else { continue }
+                for scope in entryScopes { dueEntries[scope, default: []].append(card) }
             }
         }
 
@@ -414,19 +431,20 @@ struct VocabularyReviewSetupProjection: Equatable, Sendable {
         summaries[scope] ?? .empty
     }
 
-    private static func scopes(for entry: VocabEntry) -> [VocabReviewScope] {
-        var result: [VocabReviewScope] = [
-            .book(entry.bookID),
-            .bookCategory(entry.bookID, entry.category)
-        ]
-        if entry.isInLearnList {
-            result.append(.learnList)
-            result.append(.learnListBook(entry.bookID))
+    private static func scopes(for card: VocabularyStudyCard) -> Set<VocabReviewScope> {
+        var result = Set<VocabReviewScope>()
+        for occurrence in card.occurrences {
+            result.insert(.book(occurrence.bookID))
+            result.insert(.bookCategory(occurrence.bookID, occurrence.category))
+            if occurrence.isInLearnList {
+                result.insert(.learnList)
+                result.insert(.learnListBook(occurrence.bookID))
+            }
         }
         return result
     }
 
-    private static func scheduledBefore(_ lhs: VocabEntry, _ rhs: VocabEntry) -> Bool {
+    private static func scheduledBefore(_ lhs: VocabularyStudyCard, _ rhs: VocabularyStudyCard) -> Bool {
         let lhsDate = lhs.nextReview ?? .distantPast
         let rhsDate = rhs.nextReview ?? .distantPast
         if lhsDate != rhsDate { return lhsDate < rhsDate }
@@ -478,25 +496,26 @@ enum VocabularyLearningAnalytics {
         at date: Date,
         checkCancellation: () throws -> Void
     ) rethrows -> VocabularyLearningQueue {
-        var new: [VocabEntry] = []
-        var learning: [VocabEntry] = []
-        var dueReview: [VocabEntry] = []
-        for (index, entry) in entries.enumerated() {
+        let cards = VocabularyStudyCards.cards(entries)
+        var new: [VocabularyStudyCard] = []
+        var learning: [VocabularyStudyCard] = []
+        var dueReview: [VocabularyStudyCard] = []
+        for (index, card) in cards.enumerated() {
             if index.isMultiple(of: 256) { try checkCancellation() }
-            switch VocabularyLearningStage.resolve(entry) {
+            switch VocabularyLearningStage.resolve(card) {
             case .new:
-                new.append(entry)
+                new.append(card)
             case .learning:
-                learning.append(entry)
+                learning.append(card)
             case .review:
-                if VocabReviewScheduler.isDue(entry, at: date) { dueReview.append(entry) }
+                if VocabReviewScheduler.isDue(card.studyEntry, at: date) { dueReview.append(card) }
             }
         }
         new.sort { $0.addedAt < $1.addedAt }
         learning.sort(by: scheduledBefore)
         dueReview.sort(by: scheduledBefore)
         try checkCancellation()
-        let dueLearning = learning.filter { VocabReviewScheduler.isDue($0, at: date) }
+        let dueLearning = learning.filter { VocabReviewScheduler.isDue($0.studyEntry, at: date) }
         let due = dueLearning + dueReview
         return VocabularyLearningQueue(
             new: new,
@@ -558,12 +577,18 @@ enum VocabularyLearningAnalytics {
         }
         let retention = retentionCount == 0 ? nil : Double(retainedCount) / Double(retentionCount)
 
+        let studyCards = VocabularyStudyCards.cards(entries)
         var entryByID: [String: VocabEntry] = [:]
         var entriesByBook: [String: [VocabEntry]] = [:]
-        for (index, entry) in entries.enumerated() {
+        for (index, card) in studyCards.enumerated() {
             if index.isMultiple(of: 256) { try checkCancellation() }
-            entryByID[entry.id] = entry
-            entriesByBook[entry.bookID, default: []].append(entry)
+            for occurrence in card.occurrences { entryByID[occurrence.id] = occurrence }
+            for bookID in Set(card.occurrences.map(\.bookID)) {
+                guard let occurrence = card.occurrence(inBook: bookID) else { continue }
+                entriesByBook[bookID, default: []].append(
+                    occurrence.applyingStudySchedule(card.schedule)
+                )
+            }
         }
         try checkCancellation()
 
@@ -573,7 +598,7 @@ enum VocabularyLearningAnalytics {
             streakDays: streak(reviewedDays: reviewedDays, through: today, calendar: calendar),
             retention: retention,
             forecast: try forecast(
-                entries: entries,
+                entries: studyCards.map(\.studyEntry),
                 today: today,
                 calendar: calendar,
                 checkCancellation: checkCancellation
@@ -674,7 +699,7 @@ enum VocabularyLearningAnalytics {
         }
     }
 
-    private static func scheduledBefore(_ lhs: VocabEntry, _ rhs: VocabEntry) -> Bool {
+    private static func scheduledBefore(_ lhs: VocabularyStudyCard, _ rhs: VocabularyStudyCard) -> Bool {
         let lhsDate = lhs.nextReview ?? .distantPast
         let rhsDate = rhs.nextReview ?? .distantPast
         if lhsDate != rhsDate { return lhsDate < rhsDate }

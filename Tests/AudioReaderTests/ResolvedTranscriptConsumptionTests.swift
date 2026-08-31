@@ -75,6 +75,79 @@ struct ResolvedTranscriptConsumptionTests {
         #expect(tokens.allSatisfy { $0.id.contains("-overlay-") })
     }
 
+    @Test("whole-chapter assistant input preserves more than one reader page")
+    func wholeChapterAssistantInputPreservesTotalCount() throws {
+        let state = AppState(composition: .inMemory())
+        let chapter = Chapter(
+            id: "large-chapter",
+            index: 0,
+            title: "Large chapter",
+            audioPath: "/tmp/large.m4b"
+        )
+        state.books = [Book(
+            id: "large-book",
+            title: "Large book",
+            folderPath: "/tmp",
+            chapters: [chapter]
+        )]
+        state.selectedBookID = "large-book"
+        state.selectedChapterID = chapter.id
+        var segments: [TranscriptSegment] = []
+        segments.reserveCapacity(451)
+        for index in 0..<451 {
+            let start = Double(index)
+            segments.append(TranscriptSegment(
+                id: "segment-\(index)",
+                start: start,
+                end: start + 1,
+                words: [TranscriptWord(
+                    id: "word-\(index)",
+                    text: "Sentence \(index)",
+                    start: start,
+                    end: start + 1,
+                    confidence: 1
+                )],
+                ebookText: nil,
+                alignmentScore: nil
+            ))
+        }
+        state.transcript = Transcript(
+            chapterID: chapter.id,
+            audioPath: chapter.audioPath,
+            createdAt: Date(timeIntervalSince1970: 1),
+            locale: "en",
+            segments: segments,
+            source: "test",
+            ebookAligned: false
+        )
+
+        let complete = try #require(state.completeTranscriptForChapterAssistant())
+        #expect(complete.segments.count == 451)
+        #expect(complete.segments.last?.id == "segment-450")
+        #expect(state.presentedTranscript?.segments.count == 451)
+
+        let pending = GlossEntry(
+            id: "large-pending-gloss",
+            kind: .sentence,
+            language: state.settings.targetLanguage,
+            source: segments[0].displayText,
+            context: nil,
+            text: "translation",
+            status: .pending,
+            model: "test",
+            bookID: "large-book",
+            bookTitle: "Large book",
+            chapterID: chapter.id,
+            chapterTitle: chapter.title,
+            timestamp: 0,
+            createdAt: Date(timeIntervalSince1970: 2),
+            decidedAt: nil
+        )
+        state.glosses = [pending]
+        state.rejectGloss(pending)
+        #expect(state.chapterTranslationCheckpoints.first?.totalSentences == 451)
+    }
+
     private func segment() -> TranscriptSegment {
         TranscriptSegment(
             id: "sentence",

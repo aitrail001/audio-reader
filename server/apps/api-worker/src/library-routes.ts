@@ -2,7 +2,7 @@ import type { Principal } from "@audio-reader/auth";
 import type { components } from "@audio-reader/contract";
 import type { CatalogStore, IdentityStore } from "@audio-reader/database";
 import { readJsonObject } from "./body";
-import { asHead, emptyResponse, jsonResponse } from "./http";
+import { asHead, emptyResponse, jsonResponse, problemResponse } from "./http";
 import { withIdempotency, type IdempotencyStore } from "./idempotency";
 import {
   UUID_PATTERN,
@@ -29,6 +29,7 @@ type Transcript = components["schemas"]["Transcript"];
 
 const BOOK_ITEM = /^\/v1\/books\/([^/]+)$/;
 const BOOK_CHAPTERS = /^\/v1\/books\/([^/]+)\/chapters$/;
+const BOOK_TRANSCRIPTS = /^\/v1\/books\/([^/]+)\/transcripts$/;
 const CHAPTER_ITEM = /^\/v1\/chapters\/([^/]+)$/;
 const CHAPTER_TRANSCRIPT = /^\/v1\/chapters\/([^/]+)\/transcript$/;
 const PROGRESS_ITEM = /^\/v1\/progress\/([^/]+)$/;
@@ -38,6 +39,7 @@ const METHODS: Record<string, readonly string[]> = {
   "/v1/books": ["GET", "HEAD", "POST"],
   "/v1/books/{bookId}": ["GET", "HEAD", "PATCH", "DELETE"],
   "/v1/books/{bookId}/chapters": ["GET", "HEAD"],
+  "/v1/books/{bookId}/transcripts": ["GET", "HEAD", "POST"],
   "/v1/chapters/{chapterId}": ["GET", "HEAD"],
   "/v1/progress/{chapterId}": ["GET", "HEAD", "PUT"],
   "/v1/vocabulary": ["GET", "HEAD", "POST"],
@@ -57,6 +59,10 @@ function resolvePath(path: string): Resolved | undefined {
   const bookChapters = BOOK_CHAPTERS.exec(path);
   if (bookChapters?.[1] !== undefined) {
     return { route: "/v1/books/{bookId}/chapters", id: bookChapters[1] };
+  }
+  const bookTranscripts = BOOK_TRANSCRIPTS.exec(path);
+  if (bookTranscripts?.[1] !== undefined) {
+    return { route: "/v1/books/{bookId}/transcripts", id: bookTranscripts[1] };
   }
   const transcript = CHAPTER_TRANSCRIPT.exec(path);
   if (transcript?.[1] !== undefined) {
@@ -138,6 +144,23 @@ export async function handleLibraryRoute(
   });
   if (bound instanceof Response) {
     return bound;
+  }
+  if (
+    resolved.route === "/v1/books/{bookId}/transcripts" ||
+    resolved.route === "/v1/chapters/{chapterId}/transcript" ||
+    resolved.route === "/v1/transcripts"
+  ) {
+    return asHead(
+      context.request,
+      problemResponse({
+        status: 426,
+        code: "upgrade_required",
+        title: "Upgrade required",
+        detail: "Inline transcript APIs are retired. Upgrade to v2 transcript revision assets.",
+        traceId: context.requestId,
+        headers: { "X-Min-App-Version": "2.0.0" },
+      }),
+    );
   }
   const catalog = context.catalog;
   if (catalog === undefined) {

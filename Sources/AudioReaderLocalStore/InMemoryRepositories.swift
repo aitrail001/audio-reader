@@ -220,6 +220,8 @@ public final class InMemoryBookRepository: BookRepository, @unchecked Sendable {
     private let lock = NSLock()
     private var order: [BookID] = []
     private var items: [BookID: StoredBook] = [:]
+    private var assets: [BookID: [StoredLocalAsset]] = [:]
+    private var deletedIDs: Set<BookID> = []
 
     public init() {}
 
@@ -229,6 +231,12 @@ public final class InMemoryBookRepository: BookRepository, @unchecked Sendable {
         return order.compactMap { items[$0] }
     }
 
+    public func loadDeletedBookIDs() throws -> [BookID] {
+        lock.lock()
+        defer { lock.unlock() }
+        return deletedIDs.sorted { $0.rawValue < $1.rawValue }
+    }
+
     public func saveBook(_ book: StoredBook) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -236,13 +244,34 @@ public final class InMemoryBookRepository: BookRepository, @unchecked Sendable {
             order.append(book.id)
         }
         items[book.id] = book
+        deletedIDs.remove(book.id)
     }
 
     public func deleteBook(id: BookID) throws {
         lock.lock()
         defer { lock.unlock() }
         items[id] = nil
+        assets[id] = nil
+        deletedIDs.insert(id)
         order.removeAll { $0 == id }
+    }
+
+    public func loadAssets(bookID: BookID) throws -> [StoredLocalAsset] {
+        lock.lock()
+        defer { lock.unlock() }
+        return assets[bookID] ?? []
+    }
+
+    public func saveAssets(_ assets: [StoredLocalAsset], bookID: BookID) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        self.assets[bookID] = assets
+    }
+
+    public func deleteAssets(bookID: BookID) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        assets[bookID] = nil
     }
 }
 
@@ -311,6 +340,15 @@ public final class InMemoryVocabularyRepository: VocabularyRepository, @unchecke
         items[schedule.vocabularyID] = schedule.merging(into: current)
     }
 
+    public func updateVocabularyReviewSchedules(_ schedules: [StoredVocabularyReviewSchedule]) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        for schedule in schedules {
+            guard let current = items[schedule.vocabularyID] else { continue }
+            items[schedule.vocabularyID] = schedule.merging(into: current)
+        }
+    }
+
     public func updateVocabularyLearnList(id: VocabularyOccurrenceID, included: Bool) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -376,6 +414,19 @@ public final class InMemoryReviewEventRepository: ReviewEventRepository, @unchec
         reviewedVocabulary[vocabulary.id] = vocabulary
     }
 
+    public func appendReviewEvent(
+        _ event: StoredReviewEvent,
+        vocabularies: [StoredVocabularyOccurrence]
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !items.contains(where: { $0.id == event.id }) else { return }
+        items.append(event)
+        for vocabulary in vocabularies {
+            reviewedVocabulary[vocabulary.id] = vocabulary
+        }
+    }
+
     public func loadReviewVocabularySnapshot() throws -> [StoredVocabularyOccurrence]? {
         lock.lock()
         defer { lock.unlock() }
@@ -386,6 +437,7 @@ public final class InMemoryReviewEventRepository: ReviewEventRepository, @unchec
 public final class InMemoryAssistantResultRepository: AssistantResultRepository, @unchecked Sendable {
     private let lock = NSLock()
     private var items: [String: StoredAssistantResult] = [:]
+    private var history: [String: [StoredAssistantResultHistory]] = [:]
 
     public init() {}
 
@@ -398,16 +450,49 @@ public final class InMemoryAssistantResultRepository: AssistantResultRepository,
         }
     }
 
+    public func loadAssistantResultHistory(resultID: String) throws -> [StoredAssistantResultHistory] {
+        lock.lock()
+        defer { lock.unlock() }
+        return history[resultID] ?? []
+    }
+
     public func saveAssistantResult(_ result: StoredAssistantResult) throws {
         lock.lock()
         defer { lock.unlock() }
+        appendHistoryIfChanged(result)
         items[result.id] = result
     }
 
     public func replaceAssistantResults(_ results: [StoredAssistantResult]) throws {
         lock.lock()
         defer { lock.unlock() }
+        for result in results { appendHistoryIfChanged(result) }
         items = Dictionary(results.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+    }
+
+    private func appendHistoryIfChanged(_ result: StoredAssistantResult) {
+        var entries = history[result.id] ?? []
+        if let latest = entries.last,
+           latest.status == result.status,
+           latest.text == result.text,
+           latest.model == result.model,
+           latest.promptVersion == result.promptVersion,
+           latest.modelPolicyHash == result.modelPolicyHash,
+           latest.sharedCacheEntryID == result.sharedCacheEntryID {
+            return
+        }
+        entries.append(StoredAssistantResultHistory(
+            resultID: result.id,
+            sequence: Int64(entries.count + 1),
+            status: result.status,
+            text: result.text,
+            model: result.model,
+            promptVersion: result.promptVersion,
+            modelPolicyHash: result.modelPolicyHash,
+            recordedAt: result.decidedAt ?? result.createdAt,
+            sharedCacheEntryID: result.sharedCacheEntryID
+        ))
+        history[result.id] = entries
     }
 }
 

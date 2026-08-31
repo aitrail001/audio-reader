@@ -2,28 +2,37 @@ struct AppComposition: Sendable {
     var vocabulary: any VocabularyRepository
     var knownLemmas: any KnownLemmaRepository
     var reviewEvents: any ReviewEventRepository
-    /// When false, AppState skips live settings, gloss, checkpoint, summary, and study-activity I/O and does not open LibraryStore.shared during init.
+    var canonicalizationFallback: VocabularyCanonicalizationFallbackResolver?
+    /// When false, AppState skips all disk-backed learning and assistant state.
     var usesLivePersistence: Bool
+    /// Canonical structured state published after a sync page commits.
+    var synchronizedStore: LocalSQLiteStore?
 
     init(
         vocabulary: any VocabularyRepository,
         knownLemmas: any KnownLemmaRepository,
         reviewEvents: any ReviewEventRepository = InMemoryReviewEventRepository(),
-        usesLivePersistence: Bool = false
+        canonicalizationFallback: VocabularyCanonicalizationFallbackResolver? = nil,
+        usesLivePersistence: Bool = false,
+        synchronizedStore: LocalSQLiteStore? = nil
     ) {
         self.vocabulary = vocabulary
         self.knownLemmas = knownLemmas
         self.reviewEvents = reviewEvents
+        self.canonicalizationFallback = canonicalizationFallback
         self.usesLivePersistence = usesLivePersistence
+        self.synchronizedStore = synchronizedStore
     }
 
     static let live = AppComposition(
-        vocabulary: LibraryStoreVocabularyRepository(store: .shared),
-        knownLemmas: PersistenceKnownLemmaRepository(),
-        reviewEvents: LocalSQLiteStore(
-            fileURL: Persistence.root.appendingPathComponent("library.sqlite")
+        vocabulary: Persistence.store,
+        knownLemmas: Persistence.store,
+        reviewEvents: Persistence.store,
+        canonicalizationFallback: VocabularyCanonicalizationFallbackResolver(
+            client: ManagedVocabularyCanonicalizationFallbackClient()
         ),
-        usesLivePersistence: true
+        usesLivePersistence: true,
+        synchronizedStore: Persistence.store
     )
 
     static func inMemory(

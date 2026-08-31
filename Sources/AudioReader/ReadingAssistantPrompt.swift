@@ -45,6 +45,9 @@ struct ChapterSummaryRecord: Codable, Equatable, Identifiable, Sendable {
     var language: String
     var status: GlossStatus
     var model: String
+    var promptVersion: String = "local"
+    var modelPolicyHash: String = "local"
+    var sharedCacheEntryID: String? = nil
     var bookID: String?
     var bookTitle: String
     var chapterID: String
@@ -63,6 +66,10 @@ struct ChapterSummaryRecord: Codable, Equatable, Identifiable, Sendable {
         chapterID: String,
         chapterTitle: String,
         replacing existing: ChapterSummaryRecord?,
+        assistantResultID: String? = nil,
+        promptVersion: String = "local",
+        modelPolicyHash: String = "local",
+        sharedCacheEntryID: String? = nil,
         createdAt: Date = Date()
     ) -> Self {
         let previousSummary = existing?.status == .accepted
@@ -72,11 +79,14 @@ struct ChapterSummaryRecord: Codable, Equatable, Identifiable, Sendable {
             ? existing?.model
             : existing?.replacedModel
         return Self(
-            id: makeID(chapterID: chapterID, language: language),
+            id: assistantResultID ?? existing?.id ?? UUID().uuidString.lowercased(),
             summary: summary,
             language: language,
-            status: .pending,
+            status: existing == nil ? .pending : .replaced,
             model: model,
+            promptVersion: promptVersion,
+            modelPolicyHash: modelPolicyHash,
+            sharedCacheEntryID: sharedCacheEntryID,
             bookID: bookID,
             bookTitle: bookTitle,
             chapterID: chapterID,

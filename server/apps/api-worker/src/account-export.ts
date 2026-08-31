@@ -1,10 +1,11 @@
-import type { CatalogStore, IdentityStore, SyncStore } from "@audio-reader/database";
+import type { CatalogStore, IdentityStore, OpsStore, SyncStore } from "@audio-reader/database";
 
 /** Account-data JSON the native apps save. Omits secrets, wrapping keys, and OTP codes. */
 export async function buildAccountExportPayload(input: {
   accountId: string;
   identity?: IdentityStore;
   catalog?: CatalogStore;
+  ops?: OpsStore;
   sync?: SyncStore;
 }): Promise<Record<string, unknown>> {
   const exportedAt = new Date().toISOString();
@@ -19,6 +20,7 @@ export async function buildAccountExportPayload(input: {
       ? []
       : await input.catalog.listDueReviews(input.accountId, exportedAt);
   const transcriptOverlays = await exportTranscriptOverlays(input.sync, input.accountId);
+  const assistantResults = (await input.ops?.listAssistantResults(input.accountId)) ?? [];
   const library = [];
   for (const book of books) {
     const chapters = (await input.catalog?.listChapters(input.accountId, book.id)) ?? [];
@@ -83,6 +85,36 @@ export async function buildAccountExportPayload(input: {
     lemmas,
     reviews,
     transcriptOverlays,
+    assistantResults: assistantResults.map((result) => ({
+      id: result.id,
+      task: result.task,
+      status: result.status,
+      sharedCacheReference:
+        result.cacheEntryId === null ? null : { entryId: result.cacheEntryId },
+      privateContent: {
+        resultKind: result.resultKind,
+        language: result.language,
+        sourceText: result.sourceText,
+        contextText: result.contextText,
+        bookTitle: result.bookTitle,
+        chapterTitle: result.chapterTitle,
+        targetId: result.targetId,
+        timestampSeconds: result.timestampSeconds,
+        outputText: result.outputText,
+        structured: result.privateContent,
+        editedOutput: result.privateEditedOutput,
+        notes: result.privateNotes,
+        replacedText: result.replacedText,
+        replacedModel: result.replacedModel,
+      },
+      model: result.model,
+      promptVersion: result.promptVersion,
+      modelPolicyHash: result.modelPolicyHash,
+      decidedAt: result.decidedAt,
+      createdAt: result.createdAt,
+      updatedAt: result.updatedAt,
+      history: result.history,
+    })),
   };
 }
 

@@ -315,24 +315,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/uploads": {
+    "/v2/assets": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** Discover ready private immutable manifests owned by the account */
+        get: operations["listV2Assets"];
         put?: never;
-        /** Create a signed upload ticket */
-        post: operations["createUpload"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/uploads/{uploadId}/complete": {
+    "/v2/assets/uploads": {
         parameters: {
             query?: never;
             header?: never;
@@ -341,15 +341,32 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Complete and verify an upload */
-        post: operations["completeUpload"];
+        /** Create a pending private upload for a large immutable asset */
+        post: operations["createV2AssetUpload"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/assets/{assetId}/download": {
+    "/v2/assets/uploads/{uploadId}/body": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Stream a bounded immutable object to the authenticated Worker upload fallback */
+        put: operations["putV2AssetUploadBody"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v2/assets/uploads/{uploadId}/complete": {
         parameters: {
             query?: never;
             header?: never;
@@ -358,11 +375,63 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Create a short-lived signed download */
-        post: operations["createAssetDownload"];
+        /** Verify a pending object and atomically publish its ready manifest */
+        post: operations["completeV2AssetUpload"];
         delete?: never;
         options?: never;
         head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v2/assets/{assetId}/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create an owner-authorized short-lived private download */
+        post: operations["createV2AssetDownload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v2/assets/{assetId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Resolve one announced ready manifest by its owner-scoped identifier */
+        get: operations["getV2Asset"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v2/assets/{assetId}/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Stream owner-authorized immutable object content */
+        get: operations["getV2AssetContent"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        /** Read owner-authorized immutable object metadata without content */
+        head: operations["headV2AssetContent"];
         patch?: never;
         trace?: never;
     };
@@ -449,40 +518,6 @@ export interface paths {
         put?: never;
         /** Submit append-only review events */
         post: operations["submitReviews"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/chapters/{chapterId}/transcript": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get active transcript for a chapter */
-        get: operations["getActiveTranscript"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/transcripts": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Upload a local transcript version */
-        post: operations["createTranscript"];
         delete?: never;
         options?: never;
         head?: never;
@@ -586,6 +621,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/sync/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Return the required-upgrade response for retired sync clients */
+        get: operations["getRetiredSyncProtocol"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/sync/push": {
         parameters: {
             query?: never;
@@ -595,8 +647,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Push an idempotent mutation batch */
-        post: operations["pushSyncMutations"];
+        /** Return the required-upgrade response for retired sync clients */
+        post: operations["pushRetiredSyncMutations"];
         delete?: never;
         options?: never;
         head?: never;
@@ -610,8 +662,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Pull ordered account changes */
-        get: operations["pullSyncChanges"];
+        /** Return the required-upgrade response for retired sync clients */
+        get: operations["pullRetiredSyncChanges"];
         put?: never;
         post?: never;
         delete?: never;
@@ -627,8 +679,76 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Read a consistent latest-state snapshot before incremental sync */
-        get: operations["bootstrapSyncState"];
+        /** Return the required-upgrade response for retired sync clients */
+        get: operations["bootstrapRetiredSyncState"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v2/sync/protocol": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read the required object-backed sync protocol generation */
+        get: operations["getSyncV2Protocol"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v2/sync/push": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Push structured mutations without large immutable bytes */
+        post: operations["pushSyncV2Mutations"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v2/sync/pull": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Pull ordered v2 account changes */
+        get: operations["pullSyncV2Changes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v2/sync/bootstrap": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read a fixed high-water v2 latest-state page */
+        get: operations["bootstrapSyncV2State"];
         put?: never;
         post?: never;
         delete?: never;
@@ -987,6 +1107,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/legacy-cleanup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Inspect or explicitly queue deletion of one account's obsolete v1 data
+         * @description Dry-run is read-only. Execution is idempotently queued and deletes owned legacy objects
+         *     before deleting v1 sync, transcript, and asset rows. This operation is never automatic.
+         */
+        post: operations["adminCleanupObsoleteV1Data"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/jobs": {
         parameters: {
             query?: never;
@@ -1153,6 +1294,23 @@ export interface paths {
         };
         /** List persisted product usage events for analysis */
         get: operations["adminListProductEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/account-sync-readiness": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read requested and effective account sync dependency readiness */
+        get: operations["adminGetAccountSyncReadiness"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1366,6 +1524,8 @@ export interface components {
             /** Format: uuid */
             id: string;
             /** Format: uuid */
+            sharedCacheEntryID?: string;
+            /** Format: uuid */
             accountId: string;
             /** Format: email */
             email: string;
@@ -1404,6 +1564,41 @@ export interface components {
             rolloutPercent?: number;
             minAppVersion?: string | null;
             platforms?: ("macos" | "ios" | "ipados")[];
+        };
+        AccountSyncReadiness: {
+            minAppVersion: string;
+            requiredSchemaVersion: string;
+            schemaReady: boolean;
+            /** @enum {string} */
+            provider: "gcs" | "supabase" | "r2" | "memory" | "none";
+            bucket: string | null;
+            /** @enum {string} */
+            credentialStatus: "ok" | "failed" | "not_checked";
+            /** @enum {string} */
+            privacyStatus: "ok" | "failed" | "not_checked";
+            /** @enum {string} */
+            uploadStatus: "ok" | "failed" | "not_checked";
+            /** @enum {string} */
+            downloadStatus: "ok" | "failed" | "not_checked";
+            /** @enum {string} */
+            checksumStatus: "ok" | "failed" | "not_checked";
+            /** @enum {string} */
+            deleteStatus: "ok" | "failed" | "not_checked";
+            /** @enum {string} */
+            notFoundStatus: "ok" | "failed" | "not_checked";
+            ready: boolean;
+            requested: boolean;
+            effective: boolean;
+            reason: ("upgrade_required" | "required_schema_unavailable" | "storage_not_configured" | "storage_bucket_missing" | "storage_credentials_missing" | "storage_credentials_invalid" | "storage_direct_upload_unavailable" | "storage_public_access_allowed" | "storage_privacy_verification_failed" | "storage_upload_failed" | "storage_download_failed" | "storage_checksum_mismatch" | "storage_delete_failed" | "storage_delete_verification_failed") | null;
+            /** Format: date-time */
+            checkedAt: string;
+            /** Format: date-time */
+            cachedUntil: string;
+            retryAfterSeconds: number;
+            lastSuccessAt: string | null;
+            lastFailureAt: string | null;
+            lastFailureCode: string | null;
+            lastFailureDetail: string | null;
         };
         FeatureFlagPatch: {
             reason: string;
@@ -1453,6 +1648,7 @@ export interface components {
             featureFlags: components["schemas"]["FeatureFlag"][];
             quotas: components["schemas"]["Quota"][];
             syncCursor: string;
+            accountSyncReadiness: components["schemas"]["AccountSyncReadiness"];
         };
         UserSettings: {
             revision: number;
@@ -1553,19 +1749,45 @@ export interface components {
             durationSeconds: number;
             startSeconds?: number;
         };
+        /** @enum {string} */
+        AssetKind: "audio" | "epub" | "cover" | "transcriptRevision" | "epubReadingPackage" | "alignmentPackage" | "mediaAnalysis" | "transcriptExport" | "accountExport" | "assistantArtifact" | "otherLargeImmutable";
         Asset: {
             /** Format: uuid */
             id: string;
             /** @enum {string} */
-            kind: "audio" | "ebook" | "cover" | "transcript_export" | "account_export";
+            kind: "audio" | "epub" | "cover" | "transcriptRevision" | "epubReadingPackage" | "alignmentPackage" | "mediaAnalysis" | "transcriptExport" | "accountExport" | "assistantArtifact" | "otherLargeImmutable";
             contentType: string;
             sizeBytes: number;
+            compressedBytes: number;
+            originalBytes: number;
             sha256: string;
+            encoding: string;
+            revisionId?: string | null;
+            bookId?: string | null;
+            chapterId?: string | null;
+            segmentCount?: number | null;
             /** @enum {string} */
             status: "pending" | "ready" | "failed" | "deleting";
             /** Format: date-time */
             createdAt: string;
             deletedAt?: string | null;
+        };
+        AssetManifestCreate: {
+            /** @enum {string} */
+            kind: "audio" | "epub" | "cover" | "transcriptRevision" | "epubReadingPackage" | "alignmentPackage" | "mediaAnalysis" | "transcriptExport" | "accountExport" | "assistantArtifact" | "otherLargeImmutable";
+            contentType: string;
+            encoding: string;
+            compressedBytes: number;
+            originalBytes: number;
+            sha256: string;
+            /** Format: uuid */
+            revisionId?: string;
+            /** Format: uuid */
+            bookId?: string;
+            /** Format: uuid */
+            chapterId?: string;
+            segmentCount?: number;
+            fileName: string;
         };
         UploadCreate: {
             /** @enum {string} */
@@ -1591,6 +1813,7 @@ export interface components {
                 [key: string]: string;
             };
             multipart?: boolean;
+            ready?: boolean;
         };
         UploadComplete: {
             parts: {
@@ -1804,9 +2027,13 @@ export interface components {
             lookupOnly?: boolean;
             /** @description Skip cache reads and generate a fresh result for this request. */
             refresh?: boolean;
+            /** Format: uuid */
+            assistantResultId?: string;
         };
         TranslationSentence: {
             id: string;
+            /** Format: uuid */
+            assistantResultId?: string;
             text: string;
         };
         TranslationBatchRequest: {
@@ -1838,6 +2065,7 @@ export interface components {
         TranslationResult: {
             /** Format: uuid */
             id: string;
+            sharedCacheEntryID?: string | null;
             targetId?: string | null;
             source?: string;
             translation: string;
@@ -1846,6 +2074,9 @@ export interface components {
             provenance: "cache_shared_exact" | "cache_account" | "generated";
             cacheKeyVersion?: number;
             modelLabel?: string;
+            model: string;
+            promptVersion: string;
+            modelPolicyHash: string;
             policyVersion: string;
             /** Format: date-time */
             createdAt: string;
@@ -1872,10 +2103,13 @@ export interface components {
             lookupOnly?: boolean;
             /** @description Skip cache reads and generate a fresh summary for this request. */
             refresh?: boolean;
+            /** Format: uuid */
+            assistantResultId?: string;
         };
         ChapterSummary: {
             /** Format: uuid */
             id: string;
+            sharedCacheEntryID?: string | null;
             overview: string;
             keyPoints: string[];
             charactersOrIdeas?: string[];
@@ -1886,6 +2120,10 @@ export interface components {
             themes: string[];
             /** @enum {string} */
             provenance: "cache_shared_exact" | "cache_account" | "generated";
+            model: string;
+            promptVersion: string;
+            modelPolicyHash: string;
+            policyVersion: string;
             /** Format: date-time */
             createdAt: string;
         };
@@ -1944,7 +2182,7 @@ export interface components {
             /** Format: uuid */
             mutationId: string;
             /** @enum {string} */
-            entityType: "settings" | "book" | "chapter" | "progress" | "vocabulary" | "lexeme_state" | "review_event" | "transcript" | "transcript_overlay" | "translation_decision" | "summary_decision" | "chat_message" | "study_activity";
+            entityType: "settings" | "book" | "chapter" | "progress" | "vocabulary" | "lexeme_state" | "review_event" | "transcript" | "transcript_overlay" | "assistant_result" | "chat_message" | "study_activity";
             entityId: string;
             /** @enum {string} */
             operation: "upsert" | "delete" | "append";
@@ -1954,6 +2192,14 @@ export interface components {
             payload: {
                 [key: string]: unknown;
             };
+        };
+        SyncV2Protocol: {
+            /** @constant */
+            protocol: "object-v2";
+            /** @constant */
+            transcriptRepresentation: "asset-manifest-only";
+            /** @constant */
+            legacyBootstrap: false;
         };
         SyncPushRequest: {
             /** Format: uuid */
@@ -2045,6 +2291,28 @@ export interface components {
             updatedAt: string;
             startedAt?: string | null;
             finishedAt?: string | null;
+        };
+        LegacyCleanupRequest: {
+            /** Format: uuid */
+            userId: string;
+            dryRun: boolean;
+        };
+        LegacyCleanupInspection: {
+            changes: number;
+            outcomes: number;
+            batches: number;
+            transcriptRevisions: number;
+            transcriptSegments: number;
+            assets: number;
+            objectKeys: string[];
+            executed: boolean;
+        };
+        LegacyCleanupAccepted: {
+            /** Format: uuid */
+            jobId: string;
+            /** @enum {string} */
+            status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "dead_letter";
+            inspected: components["schemas"]["LegacyCleanupInspection"];
         };
         AdminCapabilities: {
             roles: ("support_readonly" | "operator" | "privacy_officer" | "billing_operator" | "superadmin")[];
@@ -2246,8 +2514,9 @@ export interface components {
             };
             storage: {
                 /** @enum {string} */
-                provider: "gcs" | "supabase" | "none";
+                provider: "gcs" | "supabase" | "r2" | "none";
                 bucket?: string;
+                credentialsConfigured: boolean;
                 serviceAccountConfigured: boolean;
                 clientEmail?: string;
                 /** @enum {string} */
@@ -3399,7 +3668,40 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
-    createUpload: {
+    listV2Assets: {
+        parameters: {
+            query?: {
+                kind?: components["schemas"]["AssetKind"];
+                bookId?: string;
+                chapterId?: string;
+            };
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ready private manifests */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        assets: components["schemas"]["Asset"][];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createV2AssetUpload: {
         parameters: {
             query?: never;
             header: {
@@ -3413,11 +3715,11 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["UploadCreate"];
+                "application/json": components["schemas"]["AssetManifestCreate"];
             };
         };
         responses: {
-            /** @description Upload ticket */
+            /** @description Pending private upload ticket */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -3429,14 +3731,60 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             422: components["responses"]["Unprocessable"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };
     };
-    completeUpload: {
+    putV2AssetUploadBody: {
+        parameters: {
+            query?: never;
+            header: {
+                "Content-Length": number;
+            };
+            path: {
+                uploadId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description Bounded upload body accepted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        ok: true;
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            /** @description Content-Length is required */
+            411: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            422: components["responses"]["Unprocessable"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    completeV2AssetUpload: {
         parameters: {
             query?: never;
             header: {
@@ -3450,13 +3798,9 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UploadComplete"];
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description Ready asset */
+            /** @description Ready immutable asset manifest */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -3471,11 +3815,10 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             422: components["responses"]["Unprocessable"];
-            429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };
     };
-    createAssetDownload: {
+    createV2AssetDownload: {
         parameters: {
             query?: never;
             header: {
@@ -3491,7 +3834,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Signed download */
+            /** @description Short-lived private download ticket */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -3505,8 +3848,84 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
-            422: components["responses"]["Unprocessable"];
-            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getV2Asset: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+            };
+            path: {
+                assetId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ready immutable asset manifest */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Asset"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getV2AssetContent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Immutable object bytes */
+            200: {
+                headers: {
+                    "Content-Length"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    headV2AssetContent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Immutable object metadata */
+            200: {
+                headers: {
+                    "Content-Length"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -3821,73 +4240,6 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
-    getActiveTranscript: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                chapterId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Transcript */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Transcript"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-            422: components["responses"]["Unprocessable"];
-            429: components["responses"]["RateLimited"];
-            500: components["responses"]["InternalError"];
-        };
-    };
-    createTranscript: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description Stable device UUID stored in Keychain. */
-                "X-Device-Id": components["parameters"]["DeviceId"];
-                /** @description Unique key for a logical mutation; reuse with different content is rejected. */
-                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TranscriptCreate"];
-            };
-        };
-        responses: {
-            /** @description Created transcript */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Transcript"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-            422: components["responses"]["Unprocessable"];
-            429: components["responses"]["RateLimited"];
-            500: components["responses"]["InternalError"];
-        };
-    };
     createTranslation: {
         parameters: {
             query?: never;
@@ -4073,12 +4425,147 @@ export interface operations {
             502: components["responses"]["InternalError"];
         };
     };
-    pushSyncMutations: {
+    getRetiredSyncProtocol: {
         parameters: {
             query?: never;
             header: {
                 /** @description Stable device UUID stored in Keychain. */
                 "X-Device-Id": components["parameters"]["DeviceId"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description The v1 sync generation is retired */
+            426: {
+                headers: {
+                    "X-Min-App-Version"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    pushRetiredSyncMutations: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": components["parameters"]["DeviceId"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description The v1 sync generation is retired */
+            426: {
+                headers: {
+                    "X-Min-App-Version"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    pullRetiredSyncChanges: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description The v1 sync generation is retired */
+            426: {
+                headers: {
+                    "X-Min-App-Version"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    bootstrapRetiredSyncState: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description The v1 sync generation is retired */
+            426: {
+                headers: {
+                    "X-Min-App-Version"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getSyncV2Protocol: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Object-backed sync protocol identity */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncV2Protocol"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    pushSyncV2Mutations: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Stable device UUID stored in Keychain. */
+                "X-Device-Id": string;
                 /** @description Unique key for a logical mutation; reuse with different content is rejected. */
                 "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
@@ -4103,14 +4590,13 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             422: components["responses"]["Unprocessable"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };
     };
-    pullSyncChanges: {
+    pullSyncV2Changes: {
         parameters: {
             query?: {
                 /** @description Opaque continuation token returned by the previous page; clients must not interpret it. */
@@ -4138,14 +4624,11 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
-            422: components["responses"]["Unprocessable"];
-            429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };
     };
-    bootstrapSyncState: {
+    bootstrapSyncV2State: {
         parameters: {
             query?: {
                 /** @description Fixed snapshot high-water cursor returned by the first bootstrap page. */
@@ -4162,7 +4645,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Latest entity state and revision/hash manifest page */
+            /** @description Latest v2 entity state and revision/hash page */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4174,10 +4657,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
-            422: components["responses"]["Unprocessable"];
-            429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -4894,6 +5374,50 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    adminCleanupObsoleteV1Data: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Required when dryRun is false. */
+                "Idempotency-Key"?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LegacyCleanupRequest"];
+            };
+        };
+        responses: {
+            /** @description Obsolete v1 data inspection */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyCleanupInspection"];
+                };
+            };
+            /** @description Cleanup job accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyCleanupAccepted"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     adminListJobs: {
         parameters: {
             query?: {
@@ -5266,6 +5790,36 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CursorPageProductEvents"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    adminGetAccountSyncReadiness: {
+        parameters: {
+            query?: {
+                probe?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Account sync readiness */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccountSyncReadiness"];
                 };
             };
             400: components["responses"]["BadRequest"];

@@ -5,6 +5,7 @@ import AudioReaderDomain
 #endif
 
 enum Persistence {
+    static let transcriptPageSize = 200
     private static let overlayLog = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "transcript-overlay")
     static var root: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -13,139 +14,186 @@ enum Persistence {
         return dir
     }
 
-    static var transcriptsDir: URL {
-        let dir = root.appendingPathComponent("transcripts", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }
+    /// This identity is the hard boundary that prevents an older branch from
+    /// opening or repairing the current schema.
+    static var databaseURL: URL { root.appendingPathComponent("library-vNext.sqlite") }
+    static let localMediaReimportNotice = "Local media from earlier versions is not migrated. Re-import audio or EPUB files to use them in this clean library."
+    static let store = LocalSQLiteStore(fileURL: databaseURL)
 
-    static var vocabURL: URL { root.appendingPathComponent("vocab.json") }
-    static var knownLemmasURL: URL { root.appendingPathComponent("lexicon.json") }
-    static var studyActivityURL: URL { root.appendingPathComponent("study-activity.json") }
-    static var settingsURL: URL { root.appendingPathComponent("settings.json") }
-    static var glossesURL: URL { root.appendingPathComponent("glosses.json") }
-    static var chapterTranslationCheckpointsURL: URL { root.appendingPathComponent("chapter-translation-checkpoints.json") }
-    static var chapterSummariesURL: URL { root.appendingPathComponent("chapter-summaries.json") }
     static var importedBooksURL: URL {
 #if os(iOS)
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let dir = documents.appendingPathComponent("ImportedBooks", isDirectory: true)
+        let dir = documents.appendingPathComponent("ImportedBooks-vNext", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-
-        let legacy = root.appendingPathComponent("ImportedBooks", isDirectory: true)
-        if let entries = try? FileManager.default.contentsOfDirectory(
-            at: legacy,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) {
-            for entry in entries {
-                let destination = dir.appendingPathComponent(entry.lastPathComponent)
-                guard !FileManager.default.fileExists(atPath: destination.path) else { continue }
-                try? FileManager.default.moveItem(at: entry, to: destination)
-            }
-        }
         return dir
 #else
-        let dir = root.appendingPathComponent("ImportedBooks", isDirectory: true)
+        let dir = root.appendingPathComponent("ImportedBooks-vNext", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
 #endif
     }
 
-    static func transcriptURL(chapterID: String) -> URL {
-        transcriptsDir.appendingPathComponent("\(safeFileName(chapterID)).json")
+    /// A scan publishes only changed catalog metadata. Media paths remain on
+    /// the filesystem and are never copied into the sync payload.
+    static func saveCatalogBooks(
+        _ books: [Book],
+        database: LocalSQLiteStore = Persistence.store
+    ) throws {
+        let existing = Dictionary(uniqueKeysWithValues: try database.loadBooks().map { ($0.id, $0) })
+        for book in books {
+            let stored = StoredBook(book)
+            let existingAssets = try database.loadAssets(bookID: stored.id)
+            let assets = StoredLocalAsset.snapshots(for: book, reusing: existingAssets)
+            if existing[stored.id] == stored {
+                if existingAssets != assets { try database.saveAssets(assets, bookID: stored.id) }
+                continue
+            }
+            let entityID = AccountSyncApplicator.syncEntityID(stored.id.rawValue, kind: "book")
+            let revision = try database.loadVersion(entityType: OutboxEntityType.book.rawValue, entityID: entityID)
+                .map { ServerVersion($0.serverVersion) } ?? .zero
+            try database.saveBook(
+                stored,
+                assets: assets,
+                mutation: AccountSyncApplicator.bookMutation(for: stored, baseRevision: revision)
+            )
+        }
     }
 
-    static func loadTranscriptJSON(chapterID: String, audioPath: String? = nil) -> Transcript? {
-        if let transcript = decodeTranscript(at: transcriptURL(chapterID: chapterID)) {
-            return transcript
+    static func loadCatalogBooks(database: LocalSQLiteStore = Persistence.store) throws -> [Book] {
+        try database.loadBooks().map { stored in
+            Book(stored, assets: try database.loadAssets(bookID: stored.id))
         }
-        guard let audioPath else { return nil }
-        let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(
-            at: transcriptsDir,
-            includingPropertiesForKeys: nil
-        ) else { return nil }
-        for url in files where url.pathExtension.lowercased() == "json" {
-            guard var transcript = decodeTranscript(at: url) else { continue }
-            guard transcript.audioPath == audioPath else { continue }
-            transcript.chapterID = chapterID
-            return transcript
-        }
-        return nil
     }
 
-    static func loadTranscript(chapterID: String, audioPath: String? = nil) -> Transcript? {
-        LibraryStore.shared.loadTranscript(chapterID: chapterID, audioPath: audioPath)
+    /// Durable catalog tombstones win over filesystem discovery. This leaves
+    /// unmanaged media untouched while ensuring rescans never enqueue a new upsert.
+    static func reconcileScannedBooks(
+        _ scanned: [Book],
+        database: LocalSQLiteStore = Persistence.store
+    ) throws -> [Book] {
+        let visible = try filterSuppressedBooks(scanned, database: database)
+        try saveCatalogBooks(visible, database: database)
+        let scannedIDs = Set(visible.map(\.id))
+        return visible + (try loadCatalogBooks(database: database)).filter { !scannedIDs.contains($0.id) }
+    }
+
+    static func filterSuppressedBooks(
+        _ scanned: [Book],
+        database: LocalSQLiteStore = Persistence.store
+    ) throws -> [Book] {
+        let suppressed = Set(try database.loadDeletedBookIDs().map(\.rawValue))
+        return scanned.filter { !suppressed.contains($0.id) }
+    }
+
+    /// Media is staged inside the managed root before SQLite commits. A failed
+    /// tombstone restores the folder; after commit, deleting the staging folder
+    /// cannot make the catalog row reappear on the next scan.
+    static func deleteBook(
+        _ book: Book,
+        mediaRoot: URL,
+        database: LocalSQLiteStore = Persistence.store
+    ) throws {
+        let storedID = BookID(rawValue: book.id)
+        let entityID = AccountSyncApplicator.syncEntityID(book.id, kind: "book")
+        let revision = try database.loadVersion(
+            entityType: OutboxEntityType.book.rawValue,
+            entityID: entityID
+        ).map { ServerVersion($0.serverVersion) } ?? .zero
+        let mutation = try AccountSyncApplicator.bookDeletionMutation(
+            localID: book.id,
+            baseRevision: revision
+        )
+        let root = mediaRoot.standardizedFileURL.resolvingSymlinksInPath()
+        let folder = book.folderPath.isEmpty
+            ? nil
+            : URL(fileURLWithPath: book.folderPath, isDirectory: true)
+                .standardizedFileURL.resolvingSymlinksInPath()
+        var staged: URL?
+        if let folder, FileManager.default.fileExists(atPath: folder.path) {
+            let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+            guard folder.path.hasPrefix(rootPrefix), folder.path != root.path else {
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            let destination = root.appendingPathComponent(".deleting-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.moveItem(at: folder, to: destination)
+            staged = destination
+        }
+        do {
+            _ = try database.deleteBook(id: storedID, mutation: mutation)
+        } catch {
+            if let staged, let folder { try? FileManager.default.moveItem(at: staged, to: folder) }
+            throw error
+        }
+        if let staged { try FileManager.default.removeItem(at: staged) }
+    }
+
+    static func loadTranscript(chapterID: String) -> Transcript? {
+        try? store.loadTranscript(chapterID: ChapterID(rawValue: chapterID)).map(Transcript.init)
+    }
+
+    static func loadTranscriptPage(chapterID: String, range: Range<Int>) -> Transcript? {
+        try? store.loadTranscript(
+            chapterID: ChapterID(rawValue: chapterID),
+            range: range
+        ).map(Transcript.init)
+    }
+
+    static func transcriptSegmentCount(chapterID: String) -> Int {
+        (try? store.transcriptSegmentCount(chapterID: ChapterID(rawValue: chapterID))) ?? 0
+    }
+
+    static func loadTranscriptPage(for chapter: Chapter, range: Range<Int>) -> Transcript? {
+        guard let transcript = loadTranscriptPage(chapterID: chapter.id, range: range),
+              transcript.belongs(to: chapter)
+        else { return nil }
+        return transcript
+    }
+
+    /// Assistant jobs deliberately opt into the complete revision, assembled
+    /// by SQLite in bounded pages rather than reusing the reader's visible page.
+    static func loadCompleteTranscript(for chapter: Chapter) -> Transcript? {
+        guard let transcript = try? store.loadCompleteTranscript(
+            chapterID: ChapterID(rawValue: chapter.id),
+            pageSize: transcriptPageSize
+        ), Transcript(transcript).belongs(to: chapter) else { return nil }
+        return Transcript(transcript)
     }
 
     static func loadTranscript(for chapter: Chapter) -> Transcript? {
-        let legacyAudioPath = chapter.startTime == nil ? chapter.audioPath : nil
-        if let transcript = loadTranscript(chapterID: chapter.id, audioPath: legacyAudioPath),
-           transcript.belongs(to: chapter) {
-            return transcript
-        }
-        guard var recovered = loadAllTranscripts()
-            .filter({ matchesPersistentMedia($0, chapter: chapter) })
-            .max(by: { $0.createdAt < $1.createdAt })
+        guard let transcript = loadTranscript(chapterID: chapter.id),
+              transcript.belongs(to: chapter)
         else { return nil }
-        recovered.chapterID = chapter.id
-        recovered.audioPath = chapter.audioPath
-        recovered.chapterStart = chapter.startTime
-        try? saveTranscript(recovered)
-        return recovered
+        return transcript
     }
 
     static func loadAllTranscripts() -> [Transcript] {
-        LibraryStore.shared.loadAllTranscripts()
+        ((try? store.loadAllTranscripts()) ?? []).map(Transcript.init)
     }
 
-    static func readyChapterIDs(in books: [Book], transcripts: [Transcript]) -> Set<String> {
-        let byChapter = Dictionary(transcripts.map { ($0.chapterID, $0) }, uniquingKeysWith: { _, newest in newest })
+    static func readyChapterIDs(in books: [Book]) -> Set<String> {
+        let persisted = (try? store.activeTranscriptChapterIDs()) ?? []
         return Set(books.flatMap(\.chapters).compactMap { chapter in
-            if let transcript = byChapter[chapter.id], transcript.belongs(to: chapter) {
-                return chapter.id
-            }
-            return transcripts.contains(where: { matchesPersistentMedia($0, chapter: chapter) }) ? chapter.id : nil
+            chapter.hasAudio && persisted.contains(ChapterID(rawValue: chapter.id)) ? chapter.id : nil
         })
     }
 
-    private static func matchesPersistentMedia(_ transcript: Transcript, chapter: Chapter) -> Bool {
-        guard LibraryScanner.persistentPathIdentity(transcript.audioPath)
-                == LibraryScanner.persistentPathIdentity(chapter.audioPath)
-        else { return false }
-        switch (transcript.chapterStart, chapter.startTime) {
-        case (nil, nil):
-            return true
-        case let (saved?, current?):
-            return abs(saved - current) < 0.01
-        default:
-            return false
-        }
-    }
-
     static func saveTranscript(_ transcript: Transcript) throws {
-        try LibraryStore.shared.saveTranscript(transcript)
-        let data = try JSONEncoder.iso.encode(transcript)
-        try data.write(to: transcriptURL(chapterID: transcript.chapterID), options: .atomic)
+        try store.saveTranscript(StoredTranscript(transcript))
     }
 
     static func loadTranscriptOverlays(chapterID: String) -> [StoredTranscriptOverlay] {
-        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
-        return (try? sqlite.loadTranscriptOverlays(chapterID: ChapterID(rawValue: chapterID))) ?? []
+        (try? store.loadTranscriptOverlays(chapterID: ChapterID(rawValue: chapterID))) ?? []
     }
 
     static func loadAllTranscriptOverlays() -> [StoredTranscriptOverlay] {
-        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
-        return (try? sqlite.loadAllTranscriptOverlays()) ?? []
+        (try? store.loadAllTranscriptOverlays()) ?? []
     }
 
     static func loadTranscriptOverlayState(
         chapterID: String,
         segmentID: String
     ) -> StoredTranscriptOverlayState? {
-        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
-        return try? sqlite.loadTranscriptOverlayState(
+        return try? store.loadTranscriptOverlayState(
             chapterID: ChapterID(rawValue: chapterID),
             segmentID: segmentID
         )
@@ -187,26 +235,29 @@ enum Persistence {
             }
         }
 
-        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
-        let state = try sqlite.loadTranscriptOverlayState(
+        let state = try store.loadTranscriptOverlayState(
             chapterID: overlay.chapterID,
             segmentID: overlay.segmentID
         )
         let baseRevision = state?.current.revision ?? 0
-        _ = try sqlite.mergeTranscriptOverlay(overlay, revision: baseRevision)
-        try sqlite.enqueue(overlayMutation(
+        _ = try store.mergeTranscriptOverlay(
             overlay,
-            operation: .upsert,
-            baseRevision: baseRevision
-        ))
+            revision: baseRevision,
+            mutation: overlayMutation(overlay, operation: .upsert, baseRevision: baseRevision)
+        )
 
         if let baseSegment = base.segments.first(where: { $0.id == overlay.segmentID }) {
+            let priorGlosses = loadGlosses()
             let glosses = GlossEntry.stalingAcceptedSentenceTranslations(
-                loadGlosses(),
+                priorGlosses,
                 chapterID: base.chapterID,
                 source: baseSegment.displayText
             )
-            saveGlosses(glosses)
+            let priorByID = Dictionary(uniqueKeysWithValues: priorGlosses.map { ($0.id, $0.status) })
+            saveGlossUpdates(
+                glosses.filter { priorByID[$0.id] != $0.status },
+                allItems: glosses
+            )
         }
         overlayLog.info("message=overlay.save component=transcript-overlay outcome=success chapter=\(overlay.chapterID.rawValue, privacy: .public) segment=\(overlay.segmentID, privacy: .public)")
     }
@@ -214,20 +265,17 @@ enum Persistence {
     /// Restore is represented as a sync tombstone before local deletion so a
     /// crash cannot silently revive the correction on another device.
     static func restoreOriginalTranscriptSegment(overlayID: String) throws {
-        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
-        guard let overlay = try sqlite.loadAllTranscriptOverlays().first(where: { $0.id == overlayID }) else {
+        guard let overlay = try store.loadAllTranscriptOverlays().first(where: { $0.id == overlayID }) else {
             return
         }
-        let baseRevision = try sqlite.loadTranscriptOverlayState(
+        let baseRevision = try store.loadTranscriptOverlayState(
             chapterID: overlay.chapterID,
             segmentID: overlay.segmentID
         )?.current.revision ?? 0
-        try sqlite.enqueue(overlayMutation(
-            overlay,
-            operation: .delete,
-            baseRevision: baseRevision
-        ))
-        try sqlite.deleteTranscriptOverlay(id: overlayID)
+        try store.deleteTranscriptOverlay(
+            id: overlayID,
+            mutation: overlayMutation(overlay, operation: .delete, baseRevision: baseRevision)
+        )
         overlayLog.info("message=overlay.restore component=transcript-overlay outcome=success chapter=\(overlay.chapterID.rawValue, privacy: .public) segment=\(overlay.segmentID, privacy: .public)")
     }
 
@@ -239,31 +287,29 @@ enum Persistence {
         segmentID: String,
         choosing candidateID: String
     ) throws -> StoredTranscriptOverlay? {
-        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
         let domainChapterID = ChapterID(rawValue: chapterID)
-        guard let state = try sqlite.loadTranscriptOverlayState(
+        guard let state = try store.loadTranscriptOverlayState(
             chapterID: domainChapterID,
             segmentID: segmentID
         ) else { return nil }
         let choices = [state.current] + state.conflicts
         guard let chosen = choices.first(where: { $0.id == candidateID }) else { return nil }
-        try sqlite.resolveTranscriptOverlay(
+        try store.resolveTranscriptOverlay(
             chapterID: domainChapterID,
             segmentID: segmentID,
-            choosing: candidateID
+            choosing: candidateID,
+            mutation: overlayMutation(
+                chosen.overlay,
+                operation: .upsert,
+                baseRevision: state.current.revision
+            )
         )
-        try sqlite.enqueue(overlayMutation(
-            chosen.overlay,
-            operation: .upsert,
-            baseRevision: state.current.revision
-        ))
         overlayLog.info("message=overlay.resolve component=transcript-overlay outcome=success chapter=\(chapterID, privacy: .public) segment=\(segmentID, privacy: .public) candidate=\(candidateID, privacy: .public)")
         return chosen.overlay
     }
 
     static func loadReaderProgress(bookID: String) -> StoredReaderProgressState? {
-        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
-        return try? sqlite.loadReaderProgress(bookID: BookID(rawValue: bookID))
+        try? store.loadReaderProgress(bookID: BookID(rawValue: bookID))
     }
 
     /// Stores chapter-relative fractional seconds without rounding. Sync
@@ -273,15 +319,13 @@ enum Persistence {
         guard progress.relativeSeconds.isFinite, progress.relativeSeconds >= 0 else {
             throw ReaderProgressSaveError.invalidSeconds
         }
-        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
-        let outcome = try sqlite.mergeReaderProgress(progress)
+        let outcome = try store.mergeReaderProgress(progress)
         overlayLog.info("message=reader_progress.save component=reader-progress outcome=\(String(describing: outcome), privacy: .public) book=\(progress.bookID.rawValue, privacy: .public) chapter=\(progress.chapterID.rawValue, privacy: .public) device=\(progress.deviceID, privacy: .public)")
         return outcome
     }
 
     static func resolveReaderProgress(bookID: String, choosing candidateID: String) throws {
-        let sqlite = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
-        try sqlite.resolveReaderProgress(bookID: BookID(rawValue: bookID), choosing: candidateID)
+        try store.resolveReaderProgress(bookID: BookID(rawValue: bookID), choosing: candidateID)
         overlayLog.info("message=reader_progress.resolve component=reader-progress outcome=success book=\(bookID, privacy: .public) candidate=\(candidateID, privacy: .public)")
     }
 
@@ -309,161 +353,284 @@ enum Persistence {
         )
     }
 
-    private static func decodeTranscript(at url: URL) -> Transcript? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder.iso.decode(Transcript.self, from: data)
-    }
-
-    /// APFS file names must be ≤255 bytes and cannot include `/` or `:`.
-    static func safeFileName(_ raw: String) -> String {
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
-        let filtered = String(raw.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" })
-        let trimmed = filtered.trimmingCharacters(in: CharacterSet(charactersIn: "._"))
-        let name = trimmed.isEmpty ? "chapter" : trimmed
-        if name.utf8.count <= 80 { return name }
-        return String(name.prefix(80))
-    }
-
-    static func loadVocabJSON() -> [VocabEntry] {
-        guard let data = try? Data(contentsOf: vocabURL) else { return [] }
-        return (try? JSONDecoder.iso.decode([VocabEntry].self, from: data)) ?? []
-    }
-
     static func loadVocab() -> [VocabEntry] {
-        let fromStore = LibraryStore.shared.loadVocab()
-        if !fromStore.isEmpty { return fromStore }
-        return loadVocabJSON()
+        ((try? store.loadVocabulary()) ?? []).map(VocabEntry.init)
     }
 
     static func saveVocab(_ items: [VocabEntry]) {
-        LibraryStore.shared.replaceVocab(items)
-        saveVocabJSON(items)
+        try? store.saveVocabulary(items.map(StoredVocabularyOccurrence.init))
     }
 
     static func saveVocabUpdates(_ updates: [VocabEntry], allItems: [VocabEntry]) {
-        LibraryStore.shared.upsertVocab(updates)
-        saveVocabJSON(allItems)
+        try? store.upsertVocabulary(updates.map(StoredVocabularyOccurrence.init))
     }
 
-    private static func saveVocabJSON(_ items: [VocabEntry]) {
-        guard let data = try? JSONEncoder.iso.encode(items) else { return }
-        try? data.write(to: vocabURL, options: .atomic)
-    }
-
-    static func loadKnownLemmas(from url: URL = knownLemmasURL) -> [KnownLemmaRecord] {
-        guard let data = try? Data(contentsOf: url) else { return [] }
-        return (try? JSONDecoder.iso.decode([KnownLemmaRecord].self, from: data)) ?? []
+    static func loadKnownLemmas() -> [KnownLemmaRecord] {
+        ((try? store.loadKnownLemmas()) ?? []).map(KnownLemmaRecord.init)
     }
 
     @discardableResult
-    static func saveKnownLemmas(
-        _ items: [KnownLemmaRecord],
-        to url: URL = knownLemmasURL
-    ) -> Bool {
-        guard let data = try? JSONEncoder.iso.encode(items) else { return false }
+    static func saveKnownLemmas(_ items: [KnownLemmaRecord]) -> Bool {
         do {
-            try data.write(to: url, options: .atomic)
+            try store.saveKnownLemmas(items.map(StoredKnownLemma.init))
             return true
         } catch {
             return false
         }
     }
 
-    static func loadStudyActivityLog(from url: URL = studyActivityURL) -> StudyActivityLog {
-        guard let data = try? Data(contentsOf: url) else { return .empty }
-        return (try? JSONDecoder.iso.decode(StudyActivityLog.self, from: data)) ?? .empty
+    static func loadStudyActivityLog(database: LocalSQLiteStore = Persistence.store) -> StudyActivityLog {
+        StudyActivityLog(days: (try? database.loadStudyActivityDays()) ?? [])
     }
 
-    static func saveStudyActivityLog(
-        _ log: StudyActivityLog,
-        to url: URL = studyActivityURL
-    ) {
-        guard let data = try? JSONEncoder.iso.encode(log) else { return }
-        try? data.write(to: url, options: .atomic)
+    static func saveStudyActivityLog(_ log: StudyActivityLog) {
+        try? store.saveStudyActivityDays(log.days)
     }
 
-    static func loadSettings() -> AppSettings {
-        let settings = loadSettings(from: settingsURL)
-        if let data = try? Data(contentsOf: settingsURL),
-           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           object["qwenEffortPolicyVersion"] == nil {
-            saveSettings(settings)
-        }
-        return settings
-    }
-
-    static func loadSettings(from url: URL) -> AppSettings {
-        guard let data = try? Data(contentsOf: url),
-              let settings = try? JSONDecoder().decode(AppSettings.self, from: data)
-        else {
-            return .default
-        }
+    static func loadSettings(database: LocalSQLiteStore = Persistence.store) -> AppSettings {
+        var settings = AppSettings.default
+        if let stored = try? database.loadSettings() { settings.apply(stored) }
         return settings
     }
 
     @discardableResult
     static func saveSettings(_ settings: AppSettings) -> Bool {
-        saveSettings(settings, to: settingsURL)
-    }
-
-    @discardableResult
-    static func saveSettings(_ settings: AppSettings, to url: URL) -> Bool {
-        guard let data = try? JSONEncoder().encode(settings) else { return false }
         do {
-            try data.write(to: url, options: .atomic)
+            try store.saveSettings(StoredSettings(settings))
             return true
         } catch {
             return false
         }
     }
 
-    static func loadGlossesJSON() -> [GlossEntry] {
-        guard let data = try? Data(contentsOf: glossesURL) else { return [] }
-        return (try? JSONDecoder.iso.decode([GlossEntry].self, from: data)) ?? []
-    }
-
-    static func loadGlosses() -> [GlossEntry] {
-        let fromStore = LibraryStore.shared.loadGlosses()
-        if !fromStore.isEmpty { return fromStore }
-        return loadGlossesJSON()
+    static func loadGlosses(database: LocalSQLiteStore = Persistence.store) -> [GlossEntry] {
+        ((try? database.loadAssistantResults()) ?? []).compactMap { try? GlossEntry($0) }
     }
 
     static func saveGlosses(_ items: [GlossEntry]) {
-        LibraryStore.shared.replaceGlosses(items)
-        saveGlossesJSON(items)
+        let durable = ((try? store.loadAssistantResults()) ?? []).filter {
+            $0.kind == .chapterSummary || $0.kind == .chapterTranslation
+        }
+        try? store.replaceAssistantResults(durable + items.map(StoredAssistantResult.init))
     }
 
     static func saveGlossUpdates(_ updates: [GlossEntry], allItems: [GlossEntry]) {
-        LibraryStore.shared.upsertGloss(updates)
-        saveGlossesJSON(allItems)
+        for update in updates {
+            let result = StoredAssistantResult(update)
+            if update.status == .stale || update.status == .edited || update.status == .replaced,
+               UUID(uuidString: result.id) != nil {
+                try? saveAssistantResultLifecycle(result)
+            } else {
+                try? store.saveAssistantResult(result)
+            }
+        }
     }
 
-    private static func saveGlossesJSON(_ items: [GlossEntry]) {
-        guard let data = try? JSONEncoder.iso.encode(items) else { return }
-        try? data.write(to: glossesURL, options: .atomic)
+    /// Non-acceptance lifecycle changes retain the server-issued assistant result UUID.
+    private static func saveAssistantResultLifecycle(_ result: StoredAssistantResult) throws {
+        let entityID = result.id
+        let baseRevision = try store.loadVersion(
+            entityType: OutboxEntityType.assistantResult.rawValue,
+            entityID: entityID
+        )?.serverVersion ?? 0
+        try store.updateAssistantResult(
+            result,
+            mutation: OutboxMutation(
+                id: MutationID.generate(),
+                entityType: .assistantResult,
+                entityID: entityID,
+                operation: .upsert,
+                baseRevision: ServerVersion(baseRevision),
+                occurredAt: result.decidedAt ?? Date(),
+                payload: try JSONEncoder.iso.encode(
+                    StoredAssistantDecisionPayload(result: result, vocabulary: [])
+                )
+            )
+        )
     }
 
-    static func loadChapterTranslationCheckpoints() -> [ChapterTranslationCheckpoint] {
-        guard let data = try? Data(contentsOf: chapterTranslationCheckpointsURL) else { return [] }
-        return (try? JSONDecoder.iso.decode([ChapterTranslationCheckpoint].self, from: data)) ?? []
+    /// Live acceptance has one owner: SQLite commits the decision, derived
+    /// learning rows, and upload intent together before AppState publishes it.
+    static func acceptGlosses(_ items: [GlossEntry], vocabulary: [VocabEntry]) throws {
+        let storedVocabulary = vocabulary.map(StoredVocabularyOccurrence.init)
+        let results = items.map(StoredAssistantResult.init)
+        let mutations = try zip(items, results).map { item, result in
+            let source = GlossEntry.normalize(item.source)
+            let related = zip(vocabulary, storedVocabulary).compactMap { entry, stored in
+                GlossEntry.normalize(entry.context) == source ? stored : nil
+            }
+            let payload = try JSONEncoder.iso.encode(
+                StoredAssistantDecisionPayload(result: result, vocabulary: related)
+            )
+            let entityID = UUID(uuidString: result.id) == nil
+                ? AccountSyncApplicator.syncEntityID(result.id, kind: "assistant-result")
+                : result.id.lowercased()
+            let baseRevision = try store.loadVersion(
+                entityType: OutboxEntityType.assistantResult.rawValue,
+                entityID: entityID
+            )?.serverVersion ?? 0
+            return OutboxMutation(
+                id: MutationID.generate(),
+                entityType: .assistantResult,
+                entityID: entityID,
+                operation: .upsert,
+                baseRevision: ServerVersion(baseRevision),
+                occurredAt: result.decidedAt ?? result.createdAt,
+                payload: payload
+            )
+        }
+        try store.acceptAssistantResults(results, vocabulary: storedVocabulary, mutations: mutations)
+    }
+
+    /// A rejection removes only unreviewed assistant-derived learning rows and
+    /// records the portable decision in the same SQLite transaction.
+    static func rejectGloss(_ item: GlossEntry, derivedVocabulary: [VocabEntry]) throws {
+        let result = StoredAssistantResult(item)
+        let removedIDs = derivedVocabulary.map { StoredVocabularyOccurrence($0).id }
+        let payload = try JSONEncoder.iso.encode(StoredAssistantDecisionPayload(
+            result: result,
+            vocabulary: [],
+            removedVocabularyIDs: removedIDs
+        ))
+        let entityID = UUID(uuidString: result.id) == nil
+            ? AccountSyncApplicator.syncEntityID(result.id, kind: "assistant-result")
+            : result.id.lowercased()
+        let baseRevision = try store.loadVersion(
+            entityType: OutboxEntityType.assistantResult.rawValue,
+            entityID: entityID
+        )?.serverVersion ?? 0
+        try store.rejectAssistantResult(
+            result,
+            derivedVocabularyIDs: removedIDs,
+            mutation: OutboxMutation(
+                id: MutationID.generate(),
+                entityType: .assistantResult,
+                entityID: entityID,
+                operation: .upsert,
+                baseRevision: ServerVersion(baseRevision),
+                occurredAt: result.decidedAt ?? result.createdAt,
+                payload: payload
+            )
+        )
+    }
+
+    static func loadChapterTranslationCheckpoints(
+        database: LocalSQLiteStore = Persistence.store
+    ) -> [ChapterTranslationCheckpoint] {
+        ((try? database.loadTranslationCheckpoints()) ?? []).compactMap { checkpoint in
+            guard let mode = ChapterTranslationMode(rawValue: checkpoint.mode),
+                  let status = ChapterTranslationStatus(rawValue: checkpoint.status)
+            else { return nil }
+            return ChapterTranslationCheckpoint(
+                chapterID: checkpoint.chapterID.rawValue,
+                language: checkpoint.language,
+                mode: mode,
+                nextSegmentIndex: checkpoint.completedSegmentCount,
+                totalSentences: checkpoint.totalSegmentCount,
+                status: status,
+                updatedAt: checkpoint.updatedAt
+            )
+        }
     }
 
     static func saveChapterTranslationCheckpoints(_ checkpoints: [ChapterTranslationCheckpoint]) {
-        guard let data = try? JSONEncoder.iso.encode(checkpoints) else { return }
-        try? data.write(to: chapterTranslationCheckpointsURL, options: .atomic)
+        let desired = Set(checkpoints.map(\.id))
+        for current in (try? store.loadTranslationCheckpoints()) ?? [] {
+            let id = ChapterTranslationCheckpoint.makeID(
+                chapterID: current.chapterID.rawValue,
+                language: current.language
+            )
+            if !desired.contains(id) {
+                try? store.deleteTranslationCheckpoint(chapterID: current.chapterID, language: current.language)
+            }
+        }
+        for checkpoint in checkpoints {
+            try? store.saveTranslationCheckpoint(StoredTranslationCheckpoint(
+                chapterID: ChapterID(rawValue: checkpoint.chapterID),
+                language: checkpoint.language,
+                mode: checkpoint.mode.rawValue,
+                completedSegmentCount: checkpoint.nextSegmentIndex,
+                totalSegmentCount: checkpoint.totalSentences,
+                status: checkpoint.status.rawValue,
+                updatedAt: checkpoint.updatedAt
+            ))
+        }
     }
 
-    static func loadChapterSummaries(from url: URL = chapterSummariesURL) -> [ChapterSummaryRecord] {
-        guard let data = try? Data(contentsOf: url) else { return [] }
-        return (try? JSONDecoder.iso.decode([ChapterSummaryRecord].self, from: data)) ?? []
+    static func loadChapterSummaries(database: LocalSQLiteStore = Persistence.store) -> [ChapterSummaryRecord] {
+        ((try? database.loadAssistantResults()) ?? [])
+            .filter { $0.kind == .chapterSummary }
+            .compactMap(chapterSummary(from:))
     }
 
-    static func saveChapterSummaries(
-        _ summaries: [ChapterSummaryRecord],
-        to url: URL = chapterSummariesURL
-    ) {
-        guard let data = try? JSONEncoder.iso.encode(summaries) else { return }
-        try? data.write(to: url, options: .atomic)
+    static func saveChapterSummaries(_ summaries: [ChapterSummaryRecord]) {
+        let durable = ((try? store.loadAssistantResults()) ?? []).filter { $0.kind != .chapterSummary }
+        try? store.replaceAssistantResults(durable + summaries.compactMap(storedSummary(from:)))
+    }
+
+    static func saveChapterSummaryUpdate(_ summary: ChapterSummaryRecord) {
+        guard let result = storedSummary(from: summary) else { return }
+        if summary.status != .pending, UUID(uuidString: result.id) != nil {
+            try? saveAssistantResultLifecycle(result)
+        } else {
+            try? store.saveAssistantResult(result)
+        }
+    }
+
+    private static func storedSummary(from record: ChapterSummaryRecord) -> StoredAssistantResult? {
+        guard let summary = String(data: (try? JSONEncoder.iso.encode(record.summary)) ?? Data(), encoding: .utf8)
+        else { return nil }
+        let replaced = record.replacedSummary.flatMap {
+            String(data: (try? JSONEncoder.iso.encode($0)) ?? Data(), encoding: .utf8)
+        }
+        return StoredAssistantResult(
+            id: record.id,
+            kind: .chapterSummary,
+            status: AssistantResultStatus(rawValue: record.status.rawValue) ?? .pending,
+            language: record.language,
+            model: record.model,
+            promptVersion: record.promptVersion,
+            modelPolicyHash: record.modelPolicyHash,
+            bookID: record.bookID.map(BookID.init(rawValue:)),
+            bookTitle: record.bookTitle,
+            chapterID: ChapterID(rawValue: record.chapterID),
+            chapterTitle: record.chapterTitle,
+            source: record.chapterTitle,
+            text: summary,
+            createdAt: record.createdAt,
+            decidedAt: record.decidedAt,
+            replacedText: replaced,
+            replacedModel: record.replacedModel,
+            sharedCacheEntryID: record.sharedCacheEntryID
+        )
+    }
+
+    private static func chapterSummary(from result: StoredAssistantResult) -> ChapterSummaryRecord? {
+        guard let summary = try? JSONDecoder.iso.decode(
+            ChapterSummaryPresentation.self,
+            from: Data(result.text.utf8)
+        ), let chapterID = result.chapterID?.rawValue else { return nil }
+        let replaced = result.replacedText.flatMap {
+            try? JSONDecoder.iso.decode(ChapterSummaryPresentation.self, from: Data($0.utf8))
+        }
+        return ChapterSummaryRecord(
+            id: result.id,
+            summary: summary,
+            language: result.language,
+            status: GlossStatus(rawValue: result.status.rawValue) ?? .pending,
+            model: result.model,
+            promptVersion: result.promptVersion,
+            modelPolicyHash: result.modelPolicyHash,
+            sharedCacheEntryID: result.sharedCacheEntryID,
+            bookID: result.bookID?.rawValue,
+            bookTitle: result.bookTitle ?? "",
+            chapterID: chapterID,
+            chapterTitle: result.chapterTitle ?? "",
+            createdAt: result.createdAt,
+            decidedAt: result.decidedAt,
+            replacedSummary: replaced,
+            replacedModel: result.replacedModel
+        )
     }
 }
 
@@ -562,13 +729,7 @@ struct AppSettings: Codable, Equatable {
     }
 
     private static var defaultLibraryPath: String {
-#if os(macOS)
-        "/Users/johnsonzhang/Documents/books"
-#else
-        // Path only: do not create folders or the Application Support tree.
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("ImportedBooks", isDirectory: true).path
-#endif
+        Persistence.importedBooksURL.path
     }
 
     init(
@@ -728,44 +889,6 @@ extension JSONEncoder {
     }
 }
 
-struct PersistenceSettingsRepository: SettingsRepository {
-    var url: URL
-
-    init(url: URL = Persistence.settingsURL) {
-        self.url = url
-    }
-
-    func loadSettings() throws -> StoredSettings {
-        StoredSettings(Persistence.loadSettings(from: url))
-    }
-
-    func saveSettings(_ settings: StoredSettings) throws {
-        var app = Persistence.loadSettings(from: url)
-        app.apply(settings)
-        guard Persistence.saveSettings(app, to: url) else {
-            throw LocalStoreError.saveFailed
-        }
-    }
-}
-
-struct PersistenceKnownLemmaRepository: KnownLemmaRepository {
-    var url: URL
-
-    init(url: URL = Persistence.knownLemmasURL) {
-        self.url = url
-    }
-
-    func loadKnownLemmas() throws -> [StoredKnownLemma] {
-        Persistence.loadKnownLemmas(from: url).map(StoredKnownLemma.init)
-    }
-
-    func saveKnownLemmas(_ lemmas: [StoredKnownLemma]) throws {
-        guard Persistence.saveKnownLemmas(lemmas.map(KnownLemmaRecord.init), to: url) else {
-            throw LocalStoreError.saveFailed
-        }
-    }
-}
-
 extension StoredSettings {
     init(_ settings: AppSettings) {
         self.init(
@@ -774,8 +897,23 @@ extension StoredSettings {
             textSource: settings.textSource,
             skipSeconds: settings.skipSeconds,
             transcriptionLanguage: settings.transcriptionLanguage,
+            bookTranscriptionLanguages: settings.bookTranscriptionLanguages,
             readerLanguageLevel: settings.readerLanguageLevel,
             targetLanguage: settings.targetLanguage,
+            llmProvider: settings.llmProvider,
+            grokAuthentication: settings.grokAuthentication,
+            grokEndpoint: settings.grokEndpoint,
+            grokModel: settings.grokModel,
+            grokEffort: settings.grokEffort,
+            qwenEndpoint: settings.qwenEndpoint,
+            qwenModel: settings.qwenModel,
+            qwenThinking: settings.qwenThinking,
+            qwenEffort: settings.qwenEffort,
+            qwenEffortPolicyVersion: settings.qwenEffortPolicyVersion,
+            openAIAuthentication: settings.openAIAuthentication,
+            openAIEndpoint: settings.openAIEndpoint,
+            openAIModel: settings.openAIModel,
+            openAIEffort: settings.openAIEffort,
             sentenceContextCount: settings.sentenceContextCount,
             chapterTranslationBlockSize: settings.chapterTranslationBlockSize,
             chatContextCount: settings.chatContextCount,
@@ -799,13 +937,28 @@ extension StoredSettings {
 
 extension AppSettings {
     mutating func apply(_ stored: StoredSettings) {
-        libraryPath = stored.libraryPath
+        if !stored.libraryPath.isEmpty { libraryPath = stored.libraryPath }
         playbackRate = stored.playbackRate
         textSource = stored.textSource
         skipSeconds = stored.skipSeconds
         transcriptionLanguage = stored.transcriptionLanguage
+        if let value = stored.bookTranscriptionLanguages { bookTranscriptionLanguages = value }
         readerLanguageLevel = stored.readerLanguageLevel
         targetLanguage = stored.targetLanguage
+        if let value = stored.llmProvider { llmProvider = value }
+        if let value = stored.grokAuthentication { grokAuthentication = value }
+        if let value = stored.grokEndpoint { grokEndpoint = value }
+        if let value = stored.grokModel { grokModel = value }
+        if let value = stored.grokEffort { grokEffort = value }
+        if let value = stored.qwenEndpoint { qwenEndpoint = value }
+        if let value = stored.qwenModel { qwenModel = value }
+        if let value = stored.qwenThinking { qwenThinking = value }
+        if let value = stored.qwenEffort { qwenEffort = value }
+        if let value = stored.qwenEffortPolicyVersion { qwenEffortPolicyVersion = value }
+        if let value = stored.openAIAuthentication { openAIAuthentication = value }
+        if let value = stored.openAIEndpoint { openAIEndpoint = value }
+        if let value = stored.openAIModel { openAIModel = value }
+        if let value = stored.openAIEffort { openAIEffort = value }
         sentenceContextCount = stored.sentenceContextCount
         chapterTranslationBlockSize = stored.chapterTranslationBlockSize
         chatContextCount = stored.chatContextCount

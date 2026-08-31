@@ -1,10 +1,22 @@
 import type { Principal } from "@audio-reader/auth";
 import type { components } from "@audio-reader/contract";
-import type { IdentityStore, OpsStore } from "@audio-reader/database";
+import {
+  AssetReservationError,
+  type IdentityStore,
+  type OpsAsset,
+  type OpsStore,
+} from "@audio-reader/database";
 import { readJsonObject } from "./body";
-import { jsonResponse } from "./http";
+import { asHead, jsonResponse, problemResponse } from "./http";
 import { withIdempotency, type IdempotencyStore } from "./idempotency";
 import type { ObjectStore } from "./object-store";
+import {
+  contentAddressedObjectKey,
+  isAssetManifestKind,
+  pendingUploadObjectKey,
+  validateAssetManifestDraft,
+  verifyAssetStream,
+} from "./asset-manifest-policy";
 import {
   UUID_PATTERN,
   conflict,
@@ -24,9 +36,15 @@ const COMPLETE = /^\/v1\/uploads\/([^/]+)\/complete$/;
 const BODY = /^\/v1\/uploads\/([^/]+)\/body$/;
 const DOWNLOAD = /^\/v1\/assets\/([^/]+)\/download$/;
 const CONTENT = /^\/v1\/assets\/([^/]+)\/content$/;
+const V2_COMPLETE = /^\/v2\/assets\/uploads\/([^/]+)\/complete$/;
+const V2_BODY = /^\/v2\/assets\/uploads\/([^/]+)\/body$/;
+const V2_DOWNLOAD = /^\/v2\/assets\/([^/]+)\/download$/;
+const V2_CONTENT = /^\/v2\/assets\/([^/]+)\/content$/;
+const V2_ASSET = /^\/v2\/assets\/(?!uploads$)([^/]+)$/;
+const MAX_WORKER_UPLOAD_BYTES = 8 * 1024 * 1024;
 
 export function isBinaryAssetPath(path: string): boolean {
-  return BODY.test(path) || CONTENT.test(path);
+  return BODY.test(path) || CONTENT.test(path) || V2_BODY.test(path) || V2_CONTENT.test(path);
 }
 
 export type AssetRouteContext = {
@@ -41,11 +59,18 @@ export type AssetRouteContext = {
 
 export function isAssetPath(path: string): boolean {
   return (
+    path === "/v2/assets" ||
     path === "/v1/uploads" ||
+    path === "/v2/assets/uploads" ||
     COMPLETE.test(path) ||
+    V2_COMPLETE.test(path) ||
     BODY.test(path) ||
+    V2_BODY.test(path) ||
     DOWNLOAD.test(path) ||
-    CONTENT.test(path)
+    V2_DOWNLOAD.test(path) ||
+    CONTENT.test(path) ||
+    V2_CONTENT.test(path) ||
+    V2_ASSET.test(path)
   );
 }
 
@@ -55,19 +80,25 @@ export function assetMethodError(
   requestId: string,
 ): Response | undefined {
   const upper = method.toUpperCase();
-  if (path === "/v1/uploads" && upper !== "POST") {
+  if (path === "/v2/assets" && upper !== "GET") {
+    return methodNotAllowed(["GET"], requestId);
+  }
+  if (V2_ASSET.test(path) && upper !== "GET") {
+    return methodNotAllowed(["GET"], requestId);
+  }
+  if ((path === "/v1/uploads" || path === "/v2/assets/uploads") && upper !== "POST") {
     return methodNotAllowed(["POST"], requestId);
   }
-  if (COMPLETE.test(path) && upper !== "POST") {
+  if ((COMPLETE.test(path) || V2_COMPLETE.test(path)) && upper !== "POST") {
     return methodNotAllowed(["POST"], requestId);
   }
-  if (BODY.test(path) && upper !== "PUT") {
+  if ((BODY.test(path) || V2_BODY.test(path)) && upper !== "PUT") {
     return methodNotAllowed(["PUT"], requestId);
   }
-  if (DOWNLOAD.test(path) && upper !== "POST") {
+  if ((DOWNLOAD.test(path) || V2_DOWNLOAD.test(path)) && upper !== "POST") {
     return methodNotAllowed(["POST"], requestId);
   }
-  if (CONTENT.test(path) && upper !== "GET" && upper !== "HEAD") {
+  if ((CONTENT.test(path) || V2_CONTENT.test(path)) && upper !== "GET" && upper !== "HEAD") {
     return methodNotAllowed(["GET", "HEAD"], requestId);
   }
   return undefined;
@@ -87,27 +118,71 @@ export async function handleAssetRoute(context: AssetRouteContext): Promise<Resp
   if (principal instanceof Response) {
     return principal;
   }
+  if (path.startsWith("/v1/")) {
+    return asHead(
+      context.request,
+      problemResponse({
+        status: 426,
+        code: "upgrade_required",
+        title: "Upgrade required",
+        detail: "The v1 asset adapter is retired. Upgrade to the private v2 asset protocol.",
+        traceId: context.requestId,
+        headers: { "X-Min-App-Version": "2.0.0" },
+      }),
+    );
+  }
   const ops = context.ops;
   const objects = context.objects;
   if (ops === undefined || objects === undefined) {
     return notFound(context.requestId, "Object storage is not configured.");
   }
-  if (path === "/v1/uploads") {
-    return createUpload(context, principal, ops, url.origin);
+  if (path === "/v2/assets") {
+    const kind = url.searchParams.get("kind") ?? undefined;
+    const bookId = url.searchParams.get("bookId") ?? undefined;
+    const chapterId = url.searchParams.get("chapterId") ?? undefined;
+    if (kind !== undefined && !isAssetManifestKind(kind)) {
+      return fieldError(context.requestId, "kind", "kind is unsupported.");
+    }
+    if (bookId !== undefined && !UUID_PATTERN.test(bookId)) {
+      return fieldError(context.requestId, "bookId", "bookId must be a UUID.");
+    }
+    if (chapterId !== undefined && !UUID_PATTERN.test(chapterId)) {
+      return fieldError(context.requestId, "chapterId", "chapterId must be a UUID.");
+    }
+    const assets = await ops.listAssets(principal.accountId, {
+      ...(kind === undefined ? {} : { kind }),
+      ...(bookId === undefined ? {} : { bookId }),
+      ...(chapterId === undefined ? {} : { chapterId }),
+    });
+    return jsonResponse({ assets: assets.map(assetResponse) });
   }
-  const complete = COMPLETE.exec(path);
+  const direct = V2_ASSET.exec(path);
+  if (direct?.[1] !== undefined) {
+    if (!UUID_PATTERN.test(direct[1])) {
+      return fieldError(context.requestId, "assetId", "assetId must be a UUID.");
+    }
+    const asset = await ops.getAsset(principal.accountId, direct[1]);
+    if (asset === undefined || asset.status !== "ready") {
+      return notFound(context.requestId);
+    }
+    return jsonResponse(assetResponse(asset));
+  }
+  if (path === "/v1/uploads" || path === "/v2/assets/uploads") {
+    return createUpload(context, principal, ops, objects, url.origin);
+  }
+  const complete = COMPLETE.exec(path) ?? V2_COMPLETE.exec(path);
   if (complete?.[1] !== undefined) {
     return completeUpload(context, principal, ops, objects, complete[1]);
   }
-  const body = BODY.exec(path);
+  const body = BODY.exec(path) ?? V2_BODY.exec(path);
   if (body?.[1] !== undefined) {
     return putUploadBody(context, principal, ops, objects, body[1]);
   }
-  const download = DOWNLOAD.exec(path);
+  const download = DOWNLOAD.exec(path) ?? V2_DOWNLOAD.exec(path);
   if (download?.[1] !== undefined) {
-    return createDownload(context, principal, ops, download[1], url.origin);
+    return createDownload(context, principal, ops, download[1], url.origin, path.startsWith("/v2/"));
   }
-  const content = CONTENT.exec(path);
+  const content = CONTENT.exec(path) ?? V2_CONTENT.exec(path);
   if (content?.[1] !== undefined) {
     return getContent(context, principal, ops, objects, content[1]);
   }
@@ -118,6 +193,7 @@ async function createUpload(
   context: AssetRouteContext,
   principal: Principal,
   ops: OpsStore,
+  objects: ObjectStore,
   origin: string,
 ): Promise<Response> {
   const deviceId = requireDeviceId(context.request, context.requestId);
@@ -132,47 +208,142 @@ async function createUpload(
       if (!body.ok) {
         return body.response;
       }
-      const kind = body.value.kind;
-      if (kind !== "audio" && kind !== "ebook" && kind !== "cover") {
-        return fieldError(context.requestId, "kind", "kind must be audio, ebook, or cover.");
-      }
-      const contentType = requiredString(body.value.contentType, "contentType", context.requestId);
-      if (contentType instanceof Response) {
-        return contentType;
-      }
-      const sha256 = requiredString(body.value.sha256, "sha256", context.requestId);
-      if (sha256 instanceof Response) {
-        return sha256;
+      const validated = validateAssetManifestDraft(body.value);
+      if (!validated.ok) {
+        return fieldError(context.requestId, validated.field, validated.message);
       }
       const fileName = requiredString(body.value.fileName, "fileName", context.requestId);
       if (fileName instanceof Response) {
         return fileName;
       }
-      if (typeof body.value.sizeBytes !== "number" || body.value.sizeBytes < 1) {
-        return fieldError(context.requestId, "sizeBytes", "sizeBytes must be >= 1.");
+      const manifest = validated.value;
+      const existing = await ops.getAssetByContent(
+        principal.accountId,
+        manifest.kind,
+        manifest.sha256,
+      );
+      if (existing !== undefined) {
+        if (
+          existing.revisionId !== manifest.revisionId ||
+          existing.chapterId !== manifest.chapterId ||
+          existing.compressedBytes !== manifest.compressedBytes
+        ) {
+          return conflict(context.requestId, "Content digest is already bound to different metadata.");
+        }
+        const upload = await uploadTarget(
+          objects,
+          existing.uploadObjectKey,
+          existing.uploadId,
+          existing.compressedBytes,
+          existing.contentType,
+          existing.sha256,
+          origin,
+        );
+        if (upload === undefined) {
+          return directUploadUnavailable(context.requestId);
+        }
+        const ticket: UploadTicket = {
+          uploadId: existing.uploadId,
+          assetId: existing.id,
+          method: "PUT",
+          url: upload.url,
+          expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+          headers: upload.headers,
+          multipart: false,
+          ready: existing.status === "ready",
+        };
+        return jsonResponse(ticket, existing.status === "ready" ? 200 : 201);
       }
-      const asset = await ops.createAsset(principal.accountId, {
-        kind,
-        contentType,
-        sizeBytes: body.value.sizeBytes,
-        sha256,
-        fileName,
-      });
+      const uploadId = crypto.randomUUID();
+      const uploadObjectKey = pendingUploadObjectKey(principal.accountId, uploadId);
+      const upload = await uploadTarget(
+        objects,
+        uploadObjectKey,
+        uploadId,
+        manifest.compressedBytes,
+        manifest.contentType,
+        manifest.sha256,
+        origin,
+      );
+      if (upload === undefined) {
+        return directUploadUnavailable(context.requestId);
+      }
+      let asset: OpsAsset;
+      try {
+        asset = await ops.createAsset(principal.accountId, {
+          ...manifest,
+          fileName,
+          objectKey: contentAddressedObjectKey(principal.accountId, manifest.kind, manifest.sha256),
+          uploadObjectKey,
+          uploadId,
+        });
+      } catch (error) {
+        if (error instanceof AssetReservationError) {
+          return problemResponse({
+            status: 429,
+            code: error.code,
+            title: "Asset reservation rejected",
+            detail:
+              error.code === "pending_asset_count_exceeded"
+                ? "Too many private uploads are pending."
+                : "Private object quota would be exceeded.",
+            traceId: context.requestId,
+          });
+        }
+        throw error;
+      }
       const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
       const ticket: UploadTicket = {
         uploadId: asset.uploadId,
         assetId: asset.id,
         method: "PUT",
-        url: `${origin}/v1/uploads/${asset.uploadId}/body`,
+        url: upload.url,
         expiresAt,
-        headers: { "content-type": contentType },
+        headers: upload.headers,
         multipart: false,
+        ready: false,
       };
       return jsonResponse(ticket, 201);
     },
     context.requestId,
     principal,
   );
+}
+
+async function uploadTarget(
+  objects: ObjectStore,
+  uploadObjectKey: string,
+  uploadId: string,
+  compressedBytes: number,
+  contentType: string,
+  sha256: string,
+  origin: string,
+): Promise<{ url: string; headers: Record<string, string> } | undefined> {
+  if (compressedBytes <= MAX_WORKER_UPLOAD_BYTES) {
+    return {
+      url: `${origin}/v2/assets/uploads/${uploadId}/body`,
+      headers: {
+        "content-type": contentType,
+        "content-length": String(compressedBytes),
+      },
+    };
+  }
+  return objects.createBoundUpload?.(uploadObjectKey, {
+    expiresSeconds: 15 * 60,
+    contentType,
+    contentLength: compressedBytes,
+    sha256,
+  });
+}
+
+function directUploadUnavailable(requestId: string): Response {
+  return problemResponse({
+    status: 503,
+    code: "direct_upload_unavailable",
+    title: "Direct upload unavailable",
+    detail: "Large private objects require a short-lived direct upload URL.",
+    traceId: requestId,
+  });
 }
 
 async function putUploadBody(
@@ -189,21 +360,69 @@ async function putUploadBody(
   if (asset === undefined) {
     return notFound(context.requestId);
   }
-  const bytes = new Uint8Array(await context.request.arrayBuffer());
+  if (asset.compressedBytes > MAX_WORKER_UPLOAD_BYTES) {
+    return fieldError(context.requestId, "body", "Large objects must use direct upload.");
+  }
+  const declaredLength = context.request.headers.get("content-length");
+  if (declaredLength === null) {
+    return problemResponse({
+      status: 411,
+      code: "content_length_required",
+      title: "Content-Length required",
+      detail: "Bounded upload fallback requires an exact Content-Length header.",
+      traceId: context.requestId,
+    });
+  }
+  if (Number(declaredLength) !== asset.compressedBytes) {
+    return fieldError(context.requestId, "content-length", "Upload size does not match its manifest.");
+  }
+  const bytes = await readBoundedUpload(context.request, asset.compressedBytes);
+  if (bytes === undefined) {
+    return fieldError(context.requestId, "body", "Upload size does not match its manifest.");
+  }
+  if (bytes.byteLength !== asset.compressedBytes) {
+    return fieldError(context.requestId, "body", "Upload size does not match its manifest.");
+  }
   if (!(await objectWriteIsAllowed(context.identity, principal.accountId))) {
     return conflict(context.requestId, "Account deletion is already in progress.");
   }
-  const lease = await ops.beginObjectWrite(principal.accountId, asset.objectKey);
-  await objects.put(asset.objectKey, bytes);
+  const lease = await ops.beginObjectWrite(principal.accountId, asset.uploadObjectKey);
+  await objects.put(asset.uploadObjectKey, bytes);
   // Account deletion and storage writes are separate systems. Re-check after the write and
   // compensate so a request that raced the deletion sweep cannot recreate private media.
   if (!(await objectWriteIsAllowed(context.identity, principal.accountId))) {
-    await objects.delete(asset.objectKey);
+    await objects.delete(asset.uploadObjectKey);
     await ops.finishObjectWrite(lease.id);
     return conflict(context.requestId, "Account deletion began while the upload was in progress.");
   }
   await ops.finishObjectWrite(lease.id);
   return jsonResponse({ ok: true });
+}
+
+/** Reads the Worker fallback stream without ever buffering beyond the reserved manifest size. */
+async function readBoundedUpload(request: Request, expectedBytes: number): Promise<Uint8Array | undefined> {
+  const reader = request.body?.getReader();
+  if (reader === undefined) return expectedBytes === 0 ? new Uint8Array() : undefined;
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let next = (await reader.read()) as ReadableStreamReadResult<Uint8Array>;
+  while (!next.done) {
+    total += next.value.byteLength;
+    if (total > expectedBytes || total > MAX_WORKER_UPLOAD_BYTES) {
+      await reader.cancel();
+      return undefined;
+    }
+    chunks.push(next.value);
+    next = await reader.read();
+  }
+  if (total !== expectedBytes) return undefined;
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 async function objectWriteIsAllowed(
@@ -241,29 +460,122 @@ async function completeUpload(
       if (stored === undefined) {
         return notFound(context.requestId);
       }
-      const object = await objects.get(stored.objectKey);
+      if (stored.status === "ready") {
+        try {
+          await objects.delete(stored.uploadObjectKey);
+          await ops.finishReadyAssetUploadCleanup([stored.id]);
+        } catch {
+          return problemResponse({
+            status: 503,
+            code: "upload_cleanup_pending",
+            title: "Upload cleanup pending",
+            detail: "The immutable object is ready but temporary upload cleanup will be retried.",
+            traceId: context.requestId,
+          });
+        }
+        return jsonResponse(assetResponse(stored));
+      }
+      const object = await objects.open(stored.uploadObjectKey);
       if (object === undefined) {
         return fieldError(context.requestId, "uploadId", "Upload body is missing.");
       }
+      if (
+        !(await verifyAssetStream(
+          {
+            compressedBytes: stored.compressedBytes,
+            sha256: stored.sha256,
+            kind: stored.kind,
+            encoding: stored.encoding,
+            originalBytes: stored.originalBytes,
+            segmentCount: stored.segmentCount,
+          },
+          object,
+        ))
+      ) {
+        console.warn(
+          JSON.stringify({
+            level: "warn",
+            message: "asset_upload_verification_failed",
+            requestId: context.requestId,
+            component: "assets",
+            outcome: "rejected",
+            assetId: stored.id,
+          }),
+        );
+        return fieldError(context.requestId, "uploadId", "Upload size or checksum does not match the manifest.");
+      }
+      if (!(await objectWriteIsAllowed(context.identity, principal.accountId))) {
+        return conflict(context.requestId, "Account deletion is already in progress.");
+      }
+      const lease = await ops.beginObjectWrite(principal.accountId, stored.objectKey);
+      const existing = await objects.open(stored.objectKey);
+      if (
+        existing !== undefined &&
+        !(await verifyAssetStream(
+          {
+            compressedBytes: stored.compressedBytes,
+            sha256: stored.sha256,
+            kind: stored.kind,
+            encoding: stored.encoding,
+            originalBytes: stored.originalBytes,
+            segmentCount: stored.segmentCount,
+          },
+          existing,
+        ))
+      ) {
+        await ops.finishObjectWrite(lease.id);
+        return fieldError(context.requestId, "uploadId", "Immutable object key already contains different bytes.");
+      }
+      if (existing === undefined) await objects.copy(stored.uploadObjectKey, stored.objectKey);
+      if (!(await objectWriteIsAllowed(context.identity, principal.accountId))) {
+        await objects.delete(stored.objectKey);
+        await ops.finishObjectWrite(lease.id);
+        return conflict(context.requestId, "Account deletion began while the upload was completing.");
+      }
       const completed = await ops.completeAsset(principal.accountId, uploadId);
       if (completed === undefined) {
+        await ops.finishObjectWrite(lease.id);
         return notFound(context.requestId);
       }
-      const payload: Asset = {
-        id: completed.id,
-        kind: completed.kind,
-        contentType: completed.contentType,
-        sizeBytes: completed.sizeBytes,
-        sha256: completed.sha256,
-        status: completed.status,
-        createdAt: completed.createdAt,
-        deletedAt: completed.deletedAt,
-      };
-      return jsonResponse(payload);
+      try {
+        await objects.delete(stored.uploadObjectKey);
+        await ops.finishReadyAssetUploadCleanup([completed.id]);
+      } catch {
+        await ops.finishObjectWrite(lease.id);
+        return problemResponse({
+          status: 503,
+          code: "upload_cleanup_pending",
+          title: "Upload cleanup pending",
+          detail: "The immutable object is ready but temporary upload cleanup will be retried.",
+          traceId: context.requestId,
+        });
+      }
+      await ops.finishObjectWrite(lease.id);
+      return jsonResponse(assetResponse(completed));
     },
     context.requestId,
     principal,
   );
+}
+
+function assetResponse(asset: OpsAsset): Asset {
+  return {
+    id: asset.id,
+    kind: asset.kind,
+    contentType: asset.contentType,
+    sizeBytes: asset.compressedBytes,
+    compressedBytes: asset.compressedBytes,
+    originalBytes: asset.originalBytes,
+    sha256: asset.sha256,
+    encoding: asset.encoding,
+    revisionId: asset.revisionId,
+    bookId: asset.bookId,
+    chapterId: asset.chapterId,
+    segmentCount: asset.segmentCount,
+    status: asset.status,
+    createdAt: asset.createdAt,
+    deletedAt: asset.deletedAt,
+  };
 }
 
 async function createDownload(
@@ -272,6 +584,7 @@ async function createDownload(
   ops: OpsStore,
   assetId: string,
   origin: string,
+  v2: boolean,
 ): Promise<Response> {
   const deviceId = requireDeviceId(context.request, context.requestId);
   if (deviceId instanceof Response) {
@@ -291,7 +604,7 @@ async function createDownload(
       const expiresSeconds = 15 * 60;
       const signed = await context.objects?.signedDownloadUrl?.(asset.objectKey, expiresSeconds);
       const payload: SignedDownload = {
-        url: signed ?? `${origin}/v1/assets/${asset.id}/content`,
+        url: signed ?? `${origin}/${v2 ? "v2" : "v1"}/assets/${asset.id}/content`,
         expiresAt: new Date(Date.now() + expiresSeconds * 1000).toISOString(),
       };
       return jsonResponse(payload);
@@ -318,6 +631,9 @@ async function getContent(
   }
   return new Response(bytes, {
     status: 200,
-    headers: { "content-type": asset.contentType },
+    headers: {
+      "content-type": asset.contentType,
+      "content-length": String(asset.compressedBytes),
+    },
   });
 }

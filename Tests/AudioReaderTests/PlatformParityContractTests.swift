@@ -35,6 +35,7 @@ struct PlatformParityContractTests {
         let vocabularyView = try source("Sources/AudioReader/VocabularyView.swift")
         let learningDashboard = try source("Sources/AudioReader/VocabularyLearningDashboard.swift")
         let vocabularyLearning = try source("Sources/AudioReader/VocabularyLearning.swift")
+        let vocabularyCanonicalization = try source("Sources/AudioReader/VocabularyCanonicalization.swift")
         let reviewSetupView = try source("Sources/AudioReader/VocabularyReviewSetupView.swift")
         let reviewView = try source("Sources/AudioReader/VocabularyReviewView.swift")
         let appState = try source("Sources/AudioReader/AppState.swift")
@@ -57,6 +58,12 @@ struct PlatformParityContractTests {
         #expect(learningDashboard.contains("words.todayCards"))
         #expect(learningDashboard.contains("Study "))
         #expect(vocabularyView.contains("state.setVocabularyLearnList("))
+        #expect(vocabularyView.contains("state.acceptVocabularyForReview(entry.id)"))
+        #expect(vocabularyView.contains("state.updateVocabularyCanonicalForm("))
+        #expect(vocabularyView.contains("Save sentence as card"))
+        #expect(vocabularyView.contains("Accept phrase suggestion"))
+        #expect(vocabularyCanonicalization.contains("import NaturalLanguage"))
+        #expect(!vocabularyCanonicalization.contains("#if os("))
         #expect(reviewSetupView.contains("VocabReviewScope.book("))
         #expect(reviewSetupView.contains("VocabReviewScope.bookCategory("))
         #expect(reviewSetupView.contains("VocabReviewScope.learnList"))
@@ -81,6 +88,9 @@ struct PlatformParityContractTests {
         #expect(vocabularyView.contains("My list is the list you control."))
         #expect(reviewView.contains("entry.bookTitle"))
         #expect(reviewView.contains("entry.chapterTitle"))
+        #expect(reviewView.contains("Label(\"Open in text\", systemImage: \"text.alignleft\")"))
+        #expect(reviewView.contains("state.jumpToVocab(reviewOccurrence)"))
+        #expect(reviewView.contains("card.occurrences"))
         #expect(vocabularyView.contains("VocabOriginalPlayButton(state: state, entry: entry"))
         #expect(reviewView.contains("VocabOriginalPlayButton(state: state, entry: entry"))
         #expect(appState.contains("func playVocabSentence("))
@@ -315,9 +325,10 @@ struct PlatformParityContractTests {
         #expect(!appStateBootSection.contains("refreshGrokModels"))
         #expect(!appStateBootSection.contains("refreshQwenModels"))
         #expect(!appStateBootSection.contains("refreshOpenAIModels"))
-        #expect(appStateBootSection.contains("async let accountRestore"))
+        #expect(!appStateBootSection.contains("async let accountRestore"))
         #expect(appStateBootSection.contains("await rescan()"))
-        #expect(!appStateBootSection.contains("await account.restore()"))
+        #expect(appStateBootSection.contains("await account.restore()"))
+        #expect(appStateBootSection.contains("reloadSyncedLearningData()"))
         #expect(!client.contains("Data(trimmed.utf8).write(to: fileURL"))
         #expect(!settings.contains("State(initialValue: state.apiKeyDraft)"))
         #expect(!settings.contains("State(initialValue: state.qwenAPIKeyDraft)"))
@@ -570,9 +581,11 @@ struct PlatformParityContractTests {
         #expect(playerView.contains("Button(\"Regenerate\")"))
         #expect(appState.contains("var chapterSummary: ChapterSummaryRecord?"))
         #expect(appState.contains("Persistence.loadChapterSummaries()"))
-        #expect(appState.contains("Persistence.saveChapterSummaries(chapterSummaries)"))
+        #expect(appState.contains("Persistence.saveChapterSummaryUpdate(summary)"))
         #expect(appState.contains("kind: .chapterSummary"))
-        #expect(persistence.contains("chapter-summaries.json"))
+        #expect(persistence.contains("static func saveChapterSummaryUpdate"))
+        #expect(persistence.contains("saveAssistantResultLifecycle(result)"))
+        #expect(!persistence.contains("chapter-summaries.json"))
         #expect(!playerView.contains("#if os(macOS)\n                    if let summary = state.chapterSummary"))
     }
 
@@ -695,6 +708,18 @@ struct PlatformParityContractTests {
         #expect(iPadPlist.contains("NSMicrophoneUsageDescription"))
         #expect(!macPlist.contains("SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE"))
         #expect(!iPadPlist.contains("SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE"))
+    }
+
+    @Test("Both empty libraries explain the clean vNext media cutover")
+    func cleanLibraryCutoverNoticeHasPlatformParity() throws {
+        let persistence = try source("Sources/AudioReader/Persistence.swift")
+        let macLibrary = try source("Sources/AudioReader/LibraryView.swift")
+        let iPadLibrary = try source("Sources/AudioReader/IPadRootView.swift")
+
+        #expect(persistence.contains("static let localMediaReimportNotice"))
+        #expect(persistence.contains("Local media from earlier versions is not migrated"))
+        #expect(macLibrary.contains("Persistence.localMediaReimportNotice"))
+        #expect(iPadLibrary.contains("Persistence.localMediaReimportNotice"))
     }
 
     private func source(_ relativePath: String) throws -> String {

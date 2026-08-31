@@ -369,6 +369,88 @@ struct ImportParityTests {
     }
 
 #if os(macOS)
+    @MainActor
+    @Test("macOS Apple Books reads and imports expanded EPUB downloads")
+    func macAppleBooksReadsExpandedEPUBDownloads() async throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let archive = try makeNavigationEPUB(in: fixture.root, usesNCX: false)
+        let booksRoot = fixture.root.appendingPathComponent("Books", isDirectory: true)
+        _ = try expandEPUB(archive, in: booksRoot)
+
+        let items = try await MacAppleBooksLibrary.readDownloadedBooks(in: booksRoot)
+        let item = try #require(items.first)
+
+        #expect(items.count == 1)
+        #expect(item.title == "Navigation Book")
+        #expect(item.author == "Page Turner")
+        #expect(item.artworkData == navigationEPUBCoverData)
+        #expect(!item.isProtected)
+        #expect(item.canImport)
+
+        let importedRoot = fixture.root.appendingPathComponent("Imported", isDirectory: true)
+        try MacAppleBooksLibrary().importAudiobook(item, into: importedRoot)
+        let book = try #require(LibraryScanner.scan(root: importedRoot).first)
+        let coverPath = try #require(book.coverPath)
+
+        #expect(book.title == "Navigation Book")
+        #expect(book.author == "Page Turner")
+        #expect(book.source == .appleBooks)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: coverPath)) == navigationEPUBCoverData)
+    }
+
+    @Test("macOS Apple Books keeps encrypted EPUB reading content unavailable")
+    func macAppleBooksRejectsEncryptedExpandedEPUBContent() async throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let archive = try makeNavigationEPUB(in: fixture.root, usesNCX: false)
+        let booksRoot = fixture.root.appendingPathComponent("Books", isDirectory: true)
+        let expanded = try expandEPUB(archive, in: booksRoot)
+        try Data("""
+        <encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <EncryptedData xmlns="http://www.w3.org/2001/04/xmlenc#">
+            <EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/>
+            <CipherData><CipherReference URI="OEBPS/content.xhtml"/></CipherData>
+          </EncryptedData>
+        </encryption>
+        """.utf8).write(to: expanded.appendingPathComponent("META-INF/encryption.xml"))
+
+        let item = try #require(
+            try await MacAppleBooksLibrary.readDownloadedBooks(in: booksRoot).first
+        )
+
+        #expect(item.isProtected)
+        #expect(!item.canImport)
+    }
+
+    @Test("macOS Apple Books allows expanded EPUBs with obfuscated fonts")
+    func macAppleBooksAllowsExpandedEPUBWithObfuscatedFonts() async throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let archive = try makeNavigationEPUB(in: fixture.root, usesNCX: false)
+        let booksRoot = fixture.root.appendingPathComponent("Books", isDirectory: true)
+        let expanded = try expandEPUB(archive, in: booksRoot)
+        let fonts = expanded.appendingPathComponent("OEBPS/fonts", isDirectory: true)
+        try FileManager.default.createDirectory(at: fonts, withIntermediateDirectories: true)
+        try Data("obfuscated font fixture".utf8).write(to: fonts.appendingPathComponent("body.otf"))
+        try Data("""
+        <encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <EncryptedData xmlns="http://www.w3.org/2001/04/xmlenc#">
+            <EncryptionMethod Algorithm="http://www.idpf.org/2008/embedding"/>
+            <CipherData><CipherReference URI="OEBPS/fonts/body.otf"/></CipherData>
+          </EncryptedData>
+        </encryption>
+        """.utf8).write(to: expanded.appendingPathComponent("META-INF/encryption.xml"))
+
+        let item = try #require(
+            try await MacAppleBooksLibrary.readDownloadedBooks(in: booksRoot).first
+        )
+
+        #expect(item.title == "Navigation Book")
+        #expect(!item.isProtected)
+        #expect(item.canImport)
+    }
+
     @Test("macOS Apple Books exposes only accessible downloaded media")
     func macAppleBooksImportConstraint() throws {
         let fixture = try TemporaryFixture()
@@ -687,98 +769,36 @@ struct ImportParityTests {
         #expect(different.belongs(to: chapter) == false)
     }
 
-    @Test("Chapter readiness is computed once from matching transcript identities")
-    func computesChapterReadiness() {
-        let embedded = Chapter(
-            id: "embedded-two",
-            index: 1,
-            title: "Embedded Two",
-            audioPath: "/tmp/book.m4b",
-            duration: 120,
-            startTime: 42.5
-        )
-        let ordinary = Chapter(
-            id: "ordinary",
-            index: 0,
-            title: "Ordinary",
-            audioPath: "/tmp/chapter.mp3",
-            duration: 60,
-            startTime: nil
-        )
-        let book = Book(
-            id: "book",
-            title: "Book",
-            author: nil,
-            folderPath: "/tmp",
-            coverPath: nil,
-            ebookPath: nil,
-            chapters: [embedded, ordinary]
-        )
-        let staleEmbedded = Transcript(
-            chapterID: embedded.id,
-            audioPath: embedded.audioPath,
-            createdAt: Date(),
-            locale: "en-US",
-            segments: [],
-            source: "SpeechAnalyzer",
-            ebookAligned: false
-        )
-        let ordinaryTranscript = Transcript(
-            chapterID: ordinary.id,
-            audioPath: ordinary.audioPath,
-            createdAt: Date(),
-            locale: "en-US",
-            segments: [],
-            source: "SpeechAnalyzer",
-            ebookAligned: false
-        )
-
-        let ready = Persistence.readyChapterIDs(in: [book], transcripts: [staleEmbedded, ordinaryTranscript])
-
-        #expect(ready == [ordinary.id])
-    }
-
-    @Test("Imported-book chapter identities survive iOS container path changes")
-    func preservesImportedBookChapterIdentityAcrossContainerChanges() {
-        let oldPath = "/private/var/mobile/Containers/Data/Application/OLD/Documents/ImportedBooks/The Ride/book.m4b"
-        let currentPath = "/var/mobile/Containers/Data/Application/NEW/Documents/ImportedBooks/The Ride/book.m4b"
-
-        #expect(LibraryScanner.stableID("\(oldPath)#0.000") == LibraryScanner.stableID("\(currentPath)#0.000"))
-    }
-
-    @Test("Readiness recovers transcripts saved under an earlier iOS container")
-    func recoversTranscriptAcrossContainerChanges() {
-        let oldPath = "/private/var/mobile/Containers/Data/Application/OLD/Documents/ImportedBooks/The Ride/book.m4b"
-        let currentPath = "/var/mobile/Containers/Data/Application/NEW/Documents/ImportedBooks/The Ride/book.m4b"
-        let chapter = Chapter(
-            id: LibraryScanner.stableID("\(currentPath)#42.500"),
-            index: 1,
-            title: "Chapter Two",
-            audioPath: currentPath,
-            duration: 120,
-            startTime: 42.5
-        )
-        let transcript = Transcript(
-            chapterID: "legacy-absolute-path-id",
-            audioPath: oldPath,
-            chapterStart: 42.5,
-            createdAt: Date(),
-            locale: "en-US",
-            segments: [],
-            source: "SpeechAnalyzer",
-            ebookAligned: false
-        )
-        let book = Book(
-            id: "book",
+    @Test("vNext imported book chapter and asset identities survive iOS container path changes")
+    func preservesVNextImportedBookIdentityAcrossContainerChanges() {
+        let oldFolder = "/private/var/mobile/Containers/Data/Application/OLD/Documents/ImportedBooks-vNext/The Ride"
+        let currentFolder = "/var/mobile/Containers/Data/Application/NEW/Documents/ImportedBooks-vNext/The Ride"
+        let oldPath = "\(oldFolder)/book.m4b"
+        let currentPath = "\(currentFolder)/book.m4b"
+        let oldBookID = LibraryScanner.stableID(oldFolder)
+        let currentBookID = LibraryScanner.stableID(currentFolder)
+        let oldChapterID = LibraryScanner.stableID("\(oldPath)#0.000")
+        let currentChapterID = LibraryScanner.stableID("\(currentPath)#0.000")
+        let oldBook = Book(
+            id: oldBookID,
             title: "The Ride",
-            author: nil,
-            folderPath: currentPath,
-            coverPath: nil,
-            ebookPath: nil,
-            chapters: [chapter]
+            folderPath: oldFolder,
+            chapters: [Chapter(id: oldChapterID, index: 0, title: "One", audioPath: oldPath, startTime: 0)]
+        )
+        let currentBook = Book(
+            id: currentBookID,
+            title: "The Ride",
+            folderPath: currentFolder,
+            chapters: [Chapter(id: currentChapterID, index: 0, title: "One", audioPath: currentPath, startTime: 0)]
         )
 
-        #expect(Persistence.readyChapterIDs(in: [book], transcripts: [transcript]) == [chapter.id])
+        #expect(oldBookID == currentBookID)
+        #expect(oldChapterID == currentChapterID)
+        #expect(StoredLocalAsset.snapshots(for: oldBook).map(\.id) == StoredLocalAsset.snapshots(for: currentBook).map(\.id))
+        #expect(
+            LibraryScanner.stableID("/old/Documents/ImportedBooks/Legacy/book.m4b")
+                == LibraryScanner.stableID("/new/Documents/ImportedBooks/Legacy/book.m4b")
+        )
     }
 
     @Test("Chapter translation groups sentences by the configured block size")
@@ -1575,12 +1595,12 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.6.0")
-        #expect(plist["CFBundleVersion"] as? String == "90")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.6.0")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "90")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.6.0;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 90;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "2.0.0")
+        #expect(plist["CFBundleVersion"] as? String == "91")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "2.0.0")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "91")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 2.0.0;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 91;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
         #expect(plist["ProductAPIBaseURL"] as? String == ProductAPI.hostedProductionBaseURL.absoluteString)
@@ -1690,6 +1710,16 @@ private func makeEPUB(
 private let navigationEPUBCoverData = Data(base64Encoded:
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )!
+
+private func expandEPUB(_ archive: URL, in directory: URL) throws -> URL {
+    let expanded = directory.appendingPathComponent(
+        "0123456789ABCDEF0123456789ABCDEF.epub",
+        isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: expanded, withIntermediateDirectories: true)
+    try FileManager.default.unzipItem(at: archive, to: expanded)
+    return expanded
+}
 
 private func makeNavigationEPUB(in directory: URL, usesNCX: Bool) throws -> URL {
     let source = directory.appendingPathComponent(".navigation-epub-source", isDirectory: true)

@@ -7,6 +7,7 @@ import { readJsonObject } from "./body";
 import { asHead, jsonResponse } from "./http";
 import { withIdempotency, type IdempotencyStore } from "./idempotency";
 import type { ObjectStore } from "./object-store";
+import { contentAddressedObjectKey, pendingUploadObjectKey } from "./asset-manifest-policy";
 import { captureProductEvent } from "./product-events";
 import {
   UUID_PATTERN,
@@ -213,6 +214,7 @@ async function createExport(
       const created = await ops.createExport(principal.accountId, format);
       const payload = await buildAccountExportPayload({
         accountId: principal.accountId,
+        ops,
         ...(context.identity === undefined ? {} : { identity: context.identity }),
         ...(context.catalog === undefined ? {} : { catalog: context.catalog }),
         ...(context.sync === undefined ? {} : { sync: context.sync }),
@@ -221,26 +223,40 @@ async function createExport(
       const bytes = new TextEncoder().encode(json);
       const digest = await sha256Hex(json);
       const fileName = `audioreader-account-${created.id.slice(0, 8)}.json`;
+      const uploadId = crypto.randomUUID();
+      const objectKey = contentAddressedObjectKey(principal.accountId, "accountExport", digest);
+      const uploadObjectKey = pendingUploadObjectKey(principal.accountId, uploadId);
       const asset = await ops.createAsset(principal.accountId, {
-        kind: "account_export",
+        kind: "accountExport",
         contentType: "application/json",
-        sizeBytes: bytes.byteLength,
+        compressedBytes: bytes.byteLength,
+        originalBytes: bytes.byteLength,
         sha256: digest,
+        encoding: "identity",
+        revisionId: null,
+        bookId: null,
+        chapterId: null,
+        segmentCount: null,
         fileName,
+        objectKey,
+        uploadObjectKey,
+        uploadId,
       });
       if (context.objects !== undefined) {
-        const lease = await ops.beginObjectWrite(principal.accountId, asset.objectKey);
-        await context.objects.put(asset.objectKey, bytes);
+        const lease = await ops.beginObjectWrite(principal.accountId, asset.uploadObjectKey);
+        await context.objects.put(asset.uploadObjectKey, bytes);
         // The post-write check closes the cross-system deletion race; a late export must remove
         // itself rather than recreate private data after the deletion worker's final sweep.
         if (!(await objectWriteIsAllowed(context.identity, principal.accountId))) {
-          await context.objects.delete(asset.objectKey);
+          await context.objects.delete(asset.uploadObjectKey);
           await ops.finishObjectWrite(lease.id);
           return conflict(
             context.requestId,
             "Account deletion began while the export was being created.",
           );
         }
+        await context.objects.put(asset.objectKey, bytes);
+        await context.objects.delete(asset.uploadObjectKey);
         await ops.finishObjectWrite(lease.id);
         await ops.completeAsset(principal.accountId, asset.uploadId);
       }

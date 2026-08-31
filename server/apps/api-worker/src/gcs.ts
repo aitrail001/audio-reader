@@ -28,13 +28,13 @@ export function parseServiceAccountJson(raw: string): GcsServiceAccount {
   if (clientEmail === "" || privateKeyPem.trim() === "") {
     throw new Error("GCS service account JSON needs client_email and private_key.");
   }
-  const tokenUri = typeof parsed.token_uri === "string" ? parsed.token_uri.trim() : "";
   const privateKeyId =
     typeof parsed.private_key_id === "string" ? parsed.private_key_id.trim() : "";
   return {
     clientEmail,
     privateKeyPem,
-    tokenUri: tokenUri === "" ? DEFAULT_TOKEN_URI : tokenUri,
+    // The credential document is untrusted input; the OAuth audience and fetch target are fixed.
+    tokenUri: DEFAULT_TOKEN_URI,
     ...(privateKeyId === "" ? {} : { privateKeyId }),
   };
 }
@@ -116,6 +116,77 @@ export function createGcsObjectStore(options: GcsStoreOptions): ObjectStore {
         return "unavailable";
       }
     },
+    async inspectPrivacy() {
+      const bucketUrl = `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}`;
+      const metadataResponse = await authorized(bucketUrl);
+      if (metadataResponse.status === 404) return { bucketExists: false, publicAccess: false };
+      if (!metadataResponse.ok) {
+        throw new Error("GCS privacy inspection failed.");
+      }
+      const metadata: unknown = await metadataResponse.json();
+      if (!isRecord(metadata) || !isRecord(metadata.iamConfiguration)) {
+        throw new Error("GCS privacy inspection response was invalid.");
+      }
+      const uniformBucketLevelAccess =
+        isRecord(metadata.iamConfiguration.uniformBucketLevelAccess) &&
+        metadata.iamConfiguration.uniformBucketLevelAccess.enabled === true;
+      const iamResponse = await authorized(`${bucketUrl}/iam`);
+      if (!iamResponse.ok) {
+        throw new Error("GCS privacy inspection failed.");
+      }
+      const iam: unknown = await iamResponse.json();
+      let acl: unknown = { items: [] };
+      if (!uniformBucketLevelAccess) {
+        const aclResponse = await authorized(`${bucketUrl}/defaultObjectAcl`);
+        if (!aclResponse.ok) throw new Error("GCS privacy inspection failed.");
+        acl = await aclResponse.json();
+      }
+      if (
+        !isRecord(iam) ||
+        !Array.isArray(iam.bindings) ||
+        !isRecord(acl) ||
+        !Array.isArray(acl.items)
+      ) {
+        throw new Error("GCS privacy inspection response was invalid.");
+      }
+      const publicAccessPrevention =
+        metadata.iamConfiguration.publicAccessPrevention === "enforced";
+      const publicIam = iam.bindings.some(
+        (binding) =>
+          isRecord(binding) &&
+          Array.isArray(binding.members) &&
+          binding.members.some(
+            (member) => member === "allUsers" || member === "allAuthenticatedUsers",
+          ),
+      );
+      const publicAcl = acl.items.some(
+        (entry) =>
+          isRecord(entry) &&
+          (entry.entity === "allUsers" || entry.entity === "allAuthenticatedUsers"),
+      );
+      return {
+        bucketExists: true,
+        publicAccess: !publicAccessPrevention && (publicIam || publicAcl),
+      };
+    },
+    async anonymousRead(key) {
+      const path = key
+        .split("/")
+        .map((segment) => encodeURIComponent(segment))
+        .join("/");
+      try {
+        const response = await fetchImpl(
+          `https://storage.googleapis.com/${encodeURIComponent(bucket)}/${path}`,
+          { method: "GET" },
+        );
+        if (response.ok) return "readable";
+        if (response.status === 401 || response.status === 403) return "denied";
+        if (response.status === 404) return "not_found";
+        return "unknown";
+      } catch {
+        return "unknown";
+      }
+    },
     async put(key, value) {
       const url = new URL(
         `https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(bucket)}/o`,
@@ -131,6 +202,24 @@ export function createGcsObjectStore(options: GcsStoreOptions): ObjectStore {
         throw new Error("GCS upload failed.");
       }
     },
+    async copy(sourceKey, destinationKey) {
+      const source = encodeURIComponent(sourceKey);
+      const destination = encodeURIComponent(destinationKey);
+      const base = `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o/${source}/rewriteTo/b/${encodeURIComponent(bucket)}/o/${destination}`;
+      let rewriteToken: string | undefined;
+      for (let attempt = 0; attempt < 1_000; attempt += 1) {
+        const url = new URL(base);
+        if (rewriteToken !== undefined) url.searchParams.set("rewriteToken", rewriteToken);
+        const response = await authorized(url.toString(), { method: "POST" });
+        if (!response.ok) throw new Error("GCS object copy failed.");
+        const payload: unknown = await response.json();
+        if (!isRecord(payload)) throw new Error("GCS object copy response was invalid.");
+        if (payload.done === true) return;
+        rewriteToken = typeof payload.rewriteToken === "string" ? payload.rewriteToken : undefined;
+        if (rewriteToken === undefined) throw new Error("GCS object copy response was invalid.");
+      }
+      throw new Error("GCS object copy exceeded its bounded rewrite steps.");
+    },
     async get(key) {
       const objectPath = encodeURIComponent(key);
       const response = await authorized(
@@ -144,7 +233,31 @@ export function createGcsObjectStore(options: GcsStoreOptions): ObjectStore {
       }
       return new Uint8Array(await response.arrayBuffer());
     },
-    async list(prefix) {
+    async open(key) {
+      const objectPath = encodeURIComponent(key);
+      const metadataResponse = await authorized(
+        `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o/${objectPath}`,
+      );
+      if (metadataResponse.status === 404) return undefined;
+      if (!metadataResponse.ok) throw new Error("GCS object metadata failed.");
+      const metadata: unknown = await metadataResponse.json();
+      if (!isRecord(metadata) || typeof metadata.size !== "string") {
+        throw new Error("GCS object metadata was invalid.");
+      }
+      const size = Number(metadata.size);
+      if (!Number.isSafeInteger(size) || size < 0) throw new Error("GCS object size was invalid.");
+      const mediaResponse = await authorized(
+        `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o/${objectPath}?alt=media`,
+      );
+      if (!mediaResponse.ok || mediaResponse.body === null) throw new Error("GCS download failed.");
+      const custom = isRecord(metadata.metadata) ? metadata.metadata : {};
+      return {
+        size,
+        body: mediaResponse.body as ReadableStream<Uint8Array>,
+        ...(typeof custom.sha256 === "string" ? { sha256: custom.sha256 } : {}),
+      };
+    },
+    async list(prefix, limit) {
       const keys: string[] = [];
       let pageToken = "";
       do {
@@ -152,7 +265,8 @@ export function createGcsObjectStore(options: GcsStoreOptions): ObjectStore {
           `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o`,
         );
         url.searchParams.set("prefix", prefix);
-        url.searchParams.set("maxResults", "1000");
+        const remaining = limit === undefined ? 1000 : Math.max(1, limit - keys.length);
+        url.searchParams.set("maxResults", String(Math.min(1000, remaining)));
         if (pageToken !== "") url.searchParams.set("pageToken", pageToken);
         const response = await authorized(url.toString());
         if (!response.ok) throw new Error("GCS list failed.");
@@ -166,8 +280,9 @@ export function createGcsObjectStore(options: GcsStoreOptions): ObjectStore {
           );
         }
         pageToken = typeof payload.nextPageToken === "string" ? payload.nextPageToken : "";
+        if (limit !== undefined && keys.length >= limit) break;
       } while (pageToken !== "");
-      return [...new Set(keys)].sort();
+      return [...new Set(keys)].sort().slice(0, limit);
     },
     async delete(key) {
       const objectPath = encodeURIComponent(key);
@@ -180,15 +295,48 @@ export function createGcsObjectStore(options: GcsStoreOptions): ObjectStore {
       }
     },
     async signedDownloadUrl(key, expiresSeconds = 900) {
-      return signGcsGetUrl({
+      return signGcsUrl({
         bucket,
         objectName: key,
         account,
         expiresSeconds,
         now,
         key: await signingKey(),
+        method: "GET",
       });
     },
+    async signedUploadUrl(key, expiresSeconds = 900) {
+      return signGcsUrl({
+        bucket,
+        objectName: key,
+        account,
+        expiresSeconds,
+        now,
+        key: await signingKey(),
+        method: "PUT",
+      });
+    },
+    async createBoundUpload(key, input) {
+      const headers = {
+        "content-length": String(input.contentLength),
+        "content-type": input.contentType,
+        "x-goog-content-sha256": input.sha256,
+        "x-goog-meta-sha256": input.sha256,
+      };
+      const url = await signGcsUrl({
+        bucket,
+        objectName: key,
+        account,
+        expiresSeconds: input.expiresSeconds,
+        now,
+        key: await signingKey(),
+        method: "PUT",
+        headers,
+        payloadHash: input.sha256,
+      });
+      return { url, headers };
+    },
+    supportsBoundUpload: () => Promise.resolve(true),
   };
 }
 
@@ -200,17 +348,36 @@ export async function signGcsGetUrl(input: {
   now: () => number;
   key: CryptoKey;
 }): Promise<string> {
+  return signGcsUrl({ ...input, method: "GET" });
+}
+
+async function signGcsUrl(input: {
+  bucket: string;
+  objectName: string;
+  account: GcsServiceAccount;
+  expiresSeconds: number;
+  now: () => number;
+  key: CryptoKey;
+  method: "GET" | "PUT";
+  headers?: Record<string, string>;
+  payloadHash?: string;
+}): Promise<string> {
   const expires = Math.min(Math.max(Math.trunc(input.expiresSeconds), 1), 604_800);
   const issued = new Date(input.now());
   const dateStamp = yyyymmdd(issued);
   const timestamp = `${dateStamp}T${hhmmss(issued)}Z`;
   const credential = `${input.account.clientEmail}/${dateStamp}/auto/storage/goog4_request`;
+  const signedHeaderValues = new Map<string, string>([
+    ["host", "storage.googleapis.com"],
+    ...Object.entries(input.headers ?? {}).map(([name, value]) => [name.toLowerCase(), value.trim()] as const),
+  ]);
+  const signedHeaders = [...signedHeaderValues.keys()].sort();
   const params = new Map<string, string>([
     ["X-Goog-Algorithm", "GOOG4-RSA-SHA256"],
     ["X-Goog-Credential", credential],
     ["X-Goog-Date", timestamp],
     ["X-Goog-Expires", String(expires)],
-    ["X-Goog-SignedHeaders", "host"],
+    ["X-Goog-SignedHeaders", signedHeaders.join(";")],
   ]);
   const canonicalQuery = [...params.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
@@ -221,13 +388,13 @@ export async function signGcsGetUrl(input: {
     .map((segment) => rfc3986(segment))
     .join("/")}`;
   const canonicalRequest = [
-    "GET",
+    input.method,
     resourcePath,
     canonicalQuery,
-    "host:storage.googleapis.com",
+    signedHeaders.map((name) => `${name}:${signedHeaderValues.get(name) ?? ""}`).join("\n"),
     "",
-    "host",
-    "UNSIGNED-PAYLOAD",
+    signedHeaders.join(";"),
+    input.payloadHash ?? "UNSIGNED-PAYLOAD",
   ].join("\n");
   const hashedRequest = await sha256Hex(canonicalRequest);
   const stringToSign = [

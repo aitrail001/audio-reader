@@ -661,15 +661,51 @@ paths:
           in: path
           required: true
           schema: *id009
-  /v1/uploads:
+  /v2/assets:
+    get:
+      operationId: listV2Assets
+      summary: Discover ready private immutable manifests owned by the account
+      tags:
+        - Assets
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - name: kind
+          in: query
+          schema:
+            $ref: "#/components/schemas/AssetKind"
+        - name: bookId
+          in: query
+          schema: *id009
+        - name: chapterId
+          in: query
+          schema: *id009
+      responses:
+        "200":
+          description: Ready private manifests
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [assets]
+                properties:
+                  assets:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Asset"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "500": *id008
+  /v2/assets/uploads:
     post:
-      operationId: createUpload
-      summary: Create a signed upload ticket
+      operationId: createV2AssetUpload
+      summary: Create a pending private upload for a large immutable asset
       tags:
         - Assets
       responses:
         "201":
-          description: Upload ticket
+          description: Pending private upload ticket
           content:
             application/json:
               schema:
@@ -677,7 +713,6 @@ paths:
         "400": *id001
         "401": *id002
         "403": *id003
-        "404": *id004
         "409": *id005
         "422": *id006
         "429": *id007
@@ -687,19 +722,69 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/UploadCreate"
+              $ref: "#/components/schemas/AssetManifestCreate"
       parameters:
         - $ref: "#/components/parameters/DeviceId"
         - $ref: "#/components/parameters/IdempotencyKey"
-  /v1/uploads/{uploadId}/complete:
+  /v2/assets/uploads/{uploadId}/body:
+    put:
+      operationId: putV2AssetUploadBody
+      summary: Stream a bounded immutable object to the authenticated Worker upload fallback
+      tags:
+        - Assets
+      parameters:
+        - name: uploadId
+          in: path
+          required: true
+          schema: *id009
+        - name: Content-Length
+          in: header
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 8388608
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+              maxLength: 8388608
+      responses:
+        "200":
+          description: Bounded upload body accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [ok]
+                properties:
+                  ok: { type: boolean, const: true }
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "411":
+          description: Content-Length is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "422": *id006
+        "500": *id008
+  /v2/assets/uploads/{uploadId}/complete:
     post:
-      operationId: completeUpload
-      summary: Complete and verify an upload
+      operationId: completeV2AssetUpload
+      summary: Verify a pending object and atomically publish its ready manifest
       tags:
         - Assets
       responses:
         "200":
-          description: Ready asset
+          description: Ready immutable asset manifest
           content:
             application/json:
               schema:
@@ -710,31 +795,23 @@ paths:
         "404": *id004
         "409": *id005
         "422": *id006
-        "429": *id007
         "500": *id008
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/UploadComplete"
       parameters:
-        - &id021
-          name: uploadId
+        - name: uploadId
           in: path
           required: true
           schema: *id009
         - $ref: "#/components/parameters/DeviceId"
         - $ref: "#/components/parameters/IdempotencyKey"
-  /v1/assets/{assetId}/download:
+  /v2/assets/{assetId}/download:
     post:
-      operationId: createAssetDownload
-      summary: Create a short-lived signed download
+      operationId: createV2AssetDownload
+      summary: Create an owner-authorized short-lived private download
       tags:
         - Assets
       responses:
         "200":
-          description: Signed download
+          description: Short-lived private download ticket
           content:
             application/json:
               schema:
@@ -744,17 +821,72 @@ paths:
         "403": *id003
         "404": *id004
         "409": *id005
-        "422": *id006
-        "429": *id007
         "500": *id008
       parameters:
-        - &id022
-          name: assetId
+        - name: assetId
           in: path
           required: true
           schema: *id009
         - $ref: "#/components/parameters/DeviceId"
         - $ref: "#/components/parameters/IdempotencyKey"
+  /v2/assets/{assetId}:
+    get:
+      operationId: getV2Asset
+      summary: Resolve one announced ready manifest by its owner-scoped identifier
+      tags:
+        - Assets
+      responses:
+        "200":
+          description: Ready immutable asset manifest
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "500": *id008
+      parameters:
+        - name: assetId
+          in: path
+          required: true
+          schema: *id009
+        - $ref: "#/components/parameters/DeviceId"
+  /v2/assets/{assetId}/content:
+    get:
+      operationId: getV2AssetContent
+      summary: Stream owner-authorized immutable object content
+      tags:
+        - Assets
+      responses:
+        "200":
+          description: Immutable object bytes
+          headers:
+            Content-Length:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "500": *id008
+    head:
+      operationId: headV2AssetContent
+      summary: Read owner-authorized immutable object metadata without content
+      tags:
+        - Assets
+      responses:
+        "200":
+          description: Immutable object metadata
+          headers:
+            Content-Length:
+              schema: { type: integer, minimum: 1 }
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "500": *id008
   /v1/progress/{chapterId}:
     get:
       operationId: getReadingProgress
@@ -1001,59 +1133,6 @@ paths:
       parameters:
         - $ref: "#/components/parameters/DeviceId"
         - $ref: "#/components/parameters/IdempotencyKey"
-  /v1/chapters/{chapterId}/transcript:
-    get:
-      operationId: getActiveTranscript
-      summary: Get active transcript for a chapter
-      tags:
-        - Transcripts
-      responses:
-        "200":
-          description: Transcript
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Transcript"
-        "400": *id001
-        "401": *id002
-        "403": *id003
-        "404": *id004
-        "409": *id005
-        "422": *id006
-        "429": *id007
-        "500": *id008
-      parameters:
-        - *id011
-  /v1/transcripts:
-    post:
-      operationId: createTranscript
-      summary: Upload a local transcript version
-      tags:
-        - Transcripts
-      responses:
-        "201":
-          description: Created transcript
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Transcript"
-        "400": *id001
-        "401": *id002
-        "403": *id003
-        "404": *id004
-        "409": *id005
-        "422": *id006
-        "429": *id007
-        "500": *id008
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/TranscriptCreate"
-      parameters:
-        - $ref: "#/components/parameters/DeviceId"
-        - $ref: "#/components/parameters/IdempotencyKey"
   /v1/ai/translations:
     post:
       operationId: createTranslation
@@ -1208,10 +1287,118 @@ paths:
       parameters:
         - $ref: "#/components/parameters/DeviceId"
         - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/sync/capabilities:
+    get:
+      operationId: getRetiredSyncProtocol
+      summary: Return the required-upgrade response for retired sync clients
+      tags:
+        - Sync
+      responses:
+        "426":
+          description: The v1 sync generation is retired
+          headers:
+            X-Min-App-Version:
+              schema: { type: string, example: 2.0.0 }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "401": *id002
+        "403": *id003
+        "500": *id008
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
   /v1/sync/push:
     post:
-      operationId: pushSyncMutations
-      summary: Push an idempotent mutation batch
+      operationId: pushRetiredSyncMutations
+      summary: Return the required-upgrade response for retired sync clients
+      tags:
+        - Sync
+      responses:
+        "426":
+          description: The v1 sync generation is retired
+          headers:
+            X-Min-App-Version:
+              schema: { type: string, example: 2.0.0 }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "401": *id002
+        "403": *id003
+        "500": *id008
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+  /v1/sync/pull:
+    get:
+      operationId: pullRetiredSyncChanges
+      summary: Return the required-upgrade response for retired sync clients
+      tags:
+        - Sync
+      responses:
+        "426":
+          description: The v1 sync generation is retired
+          headers:
+            X-Min-App-Version:
+              schema: { type: string, example: 2.0.0 }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "401": *id002
+        "403": *id003
+        "500": *id008
+      parameters:
+        - &id019
+          name: X-Device-Id
+          in: header
+          required: true
+          schema: *id009
+          description: Stable device UUID stored in Keychain.
+  /v1/sync/bootstrap:
+    get:
+      operationId: bootstrapRetiredSyncState
+      summary: Return the required-upgrade response for retired sync clients
+      tags:
+        - Sync
+      responses:
+        "426":
+          description: The v1 sync generation is retired
+          headers:
+            X-Min-App-Version:
+              schema: { type: string, example: 2.0.0 }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "401": *id002
+        "403": *id003
+        "500": *id008
+      parameters:
+        - *id019
+  /v2/sync/protocol:
+    get:
+      operationId: getSyncV2Protocol
+      summary: Read the required object-backed sync protocol generation
+      tags:
+        - Sync
+      responses:
+        "200":
+          description: Object-backed sync protocol identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncV2Protocol"
+        "401": *id002
+        "403": *id003
+        "409": *id005
+        "500": *id008
+      parameters:
+        - *id019
+  /v2/sync/push:
+    post:
+      operationId: pushSyncV2Mutations
+      summary: Push structured mutations without large immutable bytes
       tags:
         - Sync
       responses:
@@ -1224,7 +1411,6 @@ paths:
         "400": *id001
         "401": *id002
         "403": *id003
-        "404": *id004
         "409": *id005
         "422": *id006
         "429": *id007
@@ -1236,12 +1422,12 @@ paths:
             schema:
               $ref: "#/components/schemas/SyncPushRequest"
       parameters:
-        - $ref: "#/components/parameters/DeviceId"
+        - *id019
         - $ref: "#/components/parameters/IdempotencyKey"
-  /v1/sync/pull:
+  /v2/sync/pull:
     get:
-      operationId: pullSyncChanges
-      summary: Pull ordered account changes
+      operationId: pullSyncV2Changes
+      summary: Pull ordered v2 account changes
       tags:
         - Sync
       responses:
@@ -1254,29 +1440,21 @@ paths:
         "400": *id001
         "401": *id002
         "403": *id003
-        "404": *id004
         "409": *id005
-        "422": *id006
-        "429": *id007
         "500": *id008
       parameters:
         - *id012
         - *id013
-        - &id019
-          name: X-Device-Id
-          in: header
-          required: true
-          schema: *id009
-          description: Stable device UUID stored in Keychain.
-  /v1/sync/bootstrap:
+        - *id019
+  /v2/sync/bootstrap:
     get:
-      operationId: bootstrapSyncState
-      summary: Read a consistent latest-state snapshot before incremental sync
+      operationId: bootstrapSyncV2State
+      summary: Read a fixed high-water v2 latest-state page
       tags:
         - Sync
       responses:
         "200":
-          description: Latest entity state and revision/hash manifest page
+          description: Latest v2 entity state and revision/hash page
           content:
             application/json:
               schema:
@@ -1284,10 +1462,7 @@ paths:
         "400": *id001
         "401": *id002
         "403": *id003
-        "404": *id004
         "409": *id005
-        "422": *id006
-        "429": *id007
         "500": *id008
       parameters:
         - name: cursor
@@ -1970,6 +2145,53 @@ paths:
         - *id016
         - $ref: "#/components/parameters/DeviceId"
         - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/admin/legacy-cleanup:
+    post:
+      operationId: adminCleanupObsoleteV1Data
+      security:
+        - AdminBearer: []
+      summary: Inspect or explicitly queue deletion of one account's obsolete v1 data
+      description: |
+        Dry-run is read-only. Execution is idempotently queued and deletes owned legacy objects
+        before deleting v1 sync, transcript, and asset rows. This operation is never automatic.
+      tags:
+        - Admin Operations
+      responses:
+        "200":
+          description: Obsolete v1 data inspection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyCleanupInspection"
+        "202":
+          description: Cleanup job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyCleanupAccepted"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LegacyCleanupRequest"
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Required when dryRun is false.
+          schema:
+            type: string
+            minLength: 16
+            maxLength: 128
   /v1/admin/jobs:
     get:
       operationId: adminListJobs
@@ -2417,6 +2639,35 @@ paths:
         "422": *id006
         "429": *id007
         "500": *id008
+  /v1/admin/account-sync-readiness:
+    get:
+      operationId: adminGetAccountSyncReadiness
+      security:
+        - AdminBearer: []
+      summary: Read requested and effective account sync dependency readiness
+      tags:
+        - Admin Flags
+      parameters:
+        - name: probe
+          in: query
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Account sync readiness
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountSyncReadiness"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
   /v1/admin/feature-flags:
     get:
       operationId: adminListFeatureFlags
@@ -2637,8 +2888,16 @@ components:
     ChapterId: *id011
     DevicePathId: *id020
     VocabularyId: *id014
-    UploadId: *id021
-    AssetId: *id022
+    UploadId:
+      name: uploadId
+      in: path
+      required: true
+      schema: *id009
+    AssetId:
+      name: assetId
+      in: path
+      required: true
+      schema: *id009
     ExportId: *id023
     UserId: *id015
     PolicyId: *id024
@@ -2981,6 +3240,7 @@ components:
         - updatedAt
       properties:
         id: *id009
+        sharedCacheEntryID: *id009
         accountId: *id009
         email:
           type: string
@@ -3064,6 +3324,100 @@ components:
               - macos
               - ios
               - ipados
+    AccountSyncReadiness:
+      type: object
+      additionalProperties: false
+      required:
+        - minAppVersion
+        - requiredSchemaVersion
+        - schemaReady
+        - provider
+        - bucket
+        - credentialStatus
+        - privacyStatus
+        - uploadStatus
+        - downloadStatus
+        - checksumStatus
+        - deleteStatus
+        - notFoundStatus
+        - ready
+        - requested
+        - effective
+        - reason
+        - checkedAt
+        - cachedUntil
+        - retryAfterSeconds
+        - lastSuccessAt
+        - lastFailureAt
+        - lastFailureCode
+        - lastFailureDetail
+      properties:
+        minAppVersion:
+          type: string
+          pattern: "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        requiredSchemaVersion:
+          type: string
+        schemaReady:
+          type: boolean
+        provider:
+          type: string
+          enum:
+            - gcs
+            - supabase
+            - r2
+            - memory
+            - none
+        bucket: *id025
+        credentialStatus: &id027
+          type: string
+          enum:
+            - ok
+            - failed
+            - not_checked
+        privacyStatus: *id027
+        uploadStatus: *id027
+        downloadStatus: *id027
+        checksumStatus: *id027
+        deleteStatus: *id027
+        notFoundStatus: *id027
+        ready:
+          type: boolean
+        requested:
+          type: boolean
+        effective:
+          type: boolean
+        reason:
+          oneOf:
+            - type: string
+              enum:
+                - upgrade_required
+                - required_schema_unavailable
+                - storage_not_configured
+                - storage_bucket_missing
+                - storage_credentials_missing
+                - storage_credentials_invalid
+                - storage_direct_upload_unavailable
+                - storage_public_access_allowed
+                - storage_privacy_verification_failed
+                - storage_upload_failed
+                - storage_download_failed
+                - storage_checksum_mismatch
+                - storage_delete_failed
+                - storage_delete_verification_failed
+            - type: "null"
+        checkedAt: *id018
+        cachedUntil: *id018
+        retryAfterSeconds:
+          type: integer
+          minimum: 1
+          maximum: 300
+        lastSuccessAt: *id026
+        lastFailureAt: *id026
+        lastFailureCode:
+          oneOf:
+            - type: string
+            - type: "null"
+        lastFailureDetail: *id025
     FeatureFlagPatch:
       type: object
       additionalProperties: false
@@ -3176,6 +3530,7 @@ components:
         - featureFlags
         - quotas
         - syncCursor
+        - accountSyncReadiness
       properties:
         profile:
           $ref: "#/components/schemas/Profile"
@@ -3193,6 +3548,8 @@ components:
             $ref: "#/components/schemas/Quota"
         syncCursor:
           type: string
+        accountSyncReadiness:
+          $ref: "#/components/schemas/AccountSyncReadiness"
     UserSettings:
       type: object
       additionalProperties: false
@@ -3457,6 +3814,20 @@ components:
         startSeconds:
           type: number
           minimum: 0
+    AssetKind:
+      type: string
+      enum:
+        - audio
+        - epub
+        - cover
+        - transcriptRevision
+        - epubReadingPackage
+        - alignmentPackage
+        - mediaAnalysis
+        - transcriptExport
+        - accountExport
+        - assistantArtifact
+        - otherLargeImmutable
     Asset:
       type: object
       additionalProperties: false
@@ -3465,7 +3836,10 @@ components:
         - kind
         - contentType
         - sizeBytes
+        - compressedBytes
+        - originalBytes
         - sha256
+        - encoding
         - status
         - createdAt
       properties:
@@ -3474,17 +3848,49 @@ components:
           type: string
           enum:
             - audio
-            - ebook
+            - epub
             - cover
-            - transcript_export
-            - account_export
+            - transcriptRevision
+            - epubReadingPackage
+            - alignmentPackage
+            - mediaAnalysis
+            - transcriptExport
+            - accountExport
+            - assistantArtifact
+            - otherLargeImmutable
         contentType:
           type: string
         sizeBytes:
           type: integer
           minimum: 0
+        compressedBytes:
+          type: integer
+          minimum: 0
+        originalBytes:
+          type: integer
+          minimum: 0
         sha256:
           type: string
+          pattern: "^[0-9a-f]{64}$"
+        encoding:
+          type: string
+        revisionId:
+          oneOf:
+            - *id009
+            - type: "null"
+        bookId:
+          oneOf:
+            - *id009
+            - type: "null"
+        chapterId:
+          oneOf:
+            - *id009
+            - type: "null"
+        segmentCount:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: "null"
         status:
           type: string
           enum:
@@ -3494,6 +3900,56 @@ components:
             - deleting
         createdAt: *id018
         deletedAt: *id026
+    AssetManifestCreate:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - contentType
+        - encoding
+        - compressedBytes
+        - originalBytes
+        - sha256
+        - fileName
+      properties:
+        kind:
+          type: string
+          enum:
+            - audio
+            - epub
+            - cover
+            - transcriptRevision
+            - epubReadingPackage
+            - alignmentPackage
+            - mediaAnalysis
+            - transcriptExport
+            - accountExport
+            - assistantArtifact
+            - otherLargeImmutable
+        contentType:
+          type: string
+          minLength: 1
+        encoding:
+          type: string
+          minLength: 1
+        compressedBytes:
+          type: integer
+          minimum: 1
+        originalBytes:
+          type: integer
+          minimum: 1
+        sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        revisionId: *id009
+        bookId: *id009
+        chapterId: *id009
+        segmentCount:
+          type: integer
+          minimum: 0
+        fileName:
+          type: string
+          minLength: 1
     UploadCreate:
       type: object
       additionalProperties: false
@@ -3550,6 +4006,8 @@ components:
           additionalProperties:
             type: string
         multipart:
+          type: boolean
+        ready:
           type: boolean
     UploadComplete:
       type: object
@@ -4061,6 +4519,7 @@ components:
         refresh:
           type: boolean
           description: Skip cache reads and generate a fresh result for this request.
+        assistantResultId: *id009
     TranslationSentence:
       type: object
       additionalProperties: false
@@ -4071,6 +4530,7 @@ components:
         id:
           type: string
           minLength: 1
+        assistantResultId: *id009
         text:
           type: string
           minLength: 1
@@ -4166,9 +4626,16 @@ components:
         - notes
         - provenance
         - policyVersion
+        - model
+        - promptVersion
+        - modelPolicyHash
         - createdAt
       properties:
         id: *id009
+        sharedCacheEntryID:
+          oneOf:
+            - *id009
+            - type: "null"
         targetId: *id025
         source:
           type: string
@@ -4189,6 +4656,13 @@ components:
           minimum: 1
         modelLabel:
           type: string
+        model:
+          type: string
+        promptVersion:
+          type: string
+        modelPolicyHash:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
         policyVersion:
           type: string
         createdAt: *id018
@@ -4252,6 +4726,7 @@ components:
         refresh:
           type: boolean
           description: Skip cache reads and generate a fresh summary for this request.
+        assistantResultId: *id009
     ChapterSummary:
       type: object
       additionalProperties: false
@@ -4262,9 +4737,17 @@ components:
         - keyConcepts
         - themes
         - provenance
+        - model
+        - promptVersion
+        - modelPolicyHash
+        - policyVersion
         - createdAt
       properties:
         id: *id009
+        sharedCacheEntryID:
+          oneOf:
+            - *id009
+            - type: "null"
         overview:
           type: string
         keyPoints:
@@ -4297,6 +4780,15 @@ components:
             - cache_shared_exact
             - cache_account
             - generated
+        model:
+          type: string
+        promptVersion:
+          type: string
+        modelPolicyHash:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        policyVersion:
+          type: string
         createdAt: *id018
     ChatMessage:
       type: object
@@ -4447,8 +4939,7 @@ components:
             - review_event
             - transcript
             - transcript_overlay
-            - translation_decision
-            - summary_decision
+            - assistant_result
             - chat_message
             - study_activity
         entityId:
@@ -4466,6 +4957,23 @@ components:
         payload:
           type: object
           additionalProperties: true
+    SyncV2Protocol:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol
+        - transcriptRepresentation
+        - legacyBootstrap
+      properties:
+        protocol:
+          type: string
+          const: object-v2
+        transcriptRepresentation:
+          type: string
+          const: asset-manifest-only
+        legacyBootstrap:
+          type: boolean
+          const: false
     SyncPushRequest:
       type: object
       additionalProperties: false
@@ -4479,7 +4987,7 @@ components:
         baseCursor: *id025
         mutations:
           type: array
-          maxItems: 500
+          maxItems: 100
           items:
             $ref: "#/components/schemas/SyncMutation"
     SyncMutationResult:
@@ -4709,6 +5217,63 @@ components:
         updatedAt: *id018
         startedAt: *id026
         finishedAt: *id026
+    LegacyCleanupRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - userId
+        - dryRun
+      properties:
+        userId: *id009
+        dryRun:
+          type: boolean
+    LegacyCleanupInspection:
+      type: object
+      additionalProperties: false
+      required:
+        - changes
+        - outcomes
+        - batches
+        - transcriptRevisions
+        - transcriptSegments
+        - assets
+        - objectKeys
+        - executed
+      properties:
+        changes: &id_legacy_cleanup_count
+          type: integer
+          minimum: 0
+        outcomes: *id_legacy_cleanup_count
+        batches: *id_legacy_cleanup_count
+        transcriptRevisions: *id_legacy_cleanup_count
+        transcriptSegments: *id_legacy_cleanup_count
+        assets: *id_legacy_cleanup_count
+        objectKeys:
+          type: array
+          items:
+            type: string
+        executed:
+          type: boolean
+    LegacyCleanupAccepted:
+      type: object
+      additionalProperties: false
+      required:
+        - jobId
+        - status
+        - inspected
+      properties:
+        jobId: *id009
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - succeeded
+            - failed
+            - cancelled
+            - dead_letter
+        inspected:
+          $ref: "#/components/schemas/LegacyCleanupInspection"
     AdminCapabilities:
       type: object
       additionalProperties: false
@@ -5322,6 +5887,7 @@ components:
           additionalProperties: false
           required:
             - provider
+            - credentialsConfigured
             - serviceAccountConfigured
             - source
           properties:
@@ -5330,9 +5896,12 @@ components:
               enum:
                 - gcs
                 - supabase
+                - r2
                 - none
             bucket:
               type: string
+            credentialsConfigured:
+              type: boolean
             serviceAccountConfigured:
               type: boolean
             clientEmail:

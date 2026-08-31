@@ -73,6 +73,36 @@ struct ProductAIClientTests {
         #expect(json?["chapterTitle"] as? String == "An Arrival")
     }
 
+    @Test("Translation preserves private identity and exact model policy provenance")
+    func translationLifecycleIdentityDecodes() async throws {
+        let http = StubHTTPClient()
+        http.enqueue(
+            status: 200,
+            json: """
+            {"id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","sharedCacheEntryID":"4fa85f64-5717-4562-b3fc-2c963f66afa6","translation":"你好","notes":[],"provenance":"generated","policyVersion":"qwen-managed-v3","model":"qwen3.5-plus-2026-08-01","promptVersion":"qwen-managed-v3","modelPolicyHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","createdAt":"2026-09-01T00:00:00Z"}
+            """
+        )
+        let client = LiveProductAIClient(http: http)
+
+        let result = try await client.translate(
+            accessToken: "access",
+            deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            request: ProductTranslationRequest(
+                task: "sentence",
+                sourceLanguage: "en",
+                targetLanguage: "zh",
+                learnerLevel: "intermediate",
+                source: "Hello"
+            )
+        )
+
+        #expect(result.id == "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        #expect(result.sharedCacheEntryID == "4fa85f64-5717-4562-b3fc-2c963f66afa6")
+        #expect(result.model == "qwen3.5-plus-2026-08-01")
+        #expect(result.promptVersion == "qwen-managed-v3")
+        #expect(result.modelPolicyHash == String(repeating: "a", count: 64))
+    }
+
     @Test("translateBatch posts the chapter block and decodes per-sentence cache results")
     func translateBatchPostsChapterBlock() async throws {
         let http = StubHTTPClient()
@@ -172,6 +202,32 @@ struct ProductAIClientTests {
         let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
         #expect(json?["question"] as? String == "Chapter text")
         #expect((json?["contextSegments"] as? [String])?.first == "Summarize")
+    }
+
+    @Test("traced completion correlates provenance to the returned provider message")
+    func completeReturnsProviderMessageTrace() async throws {
+        let http = StubHTTPClient()
+        http.enqueue(
+            status: 202,
+            json: """
+            {"threadId":"3fa85f64-5717-4562-b3fc-2c963f66afa6","messageId":"provider-message-17","streamUrl":"/v1/ai/chat/thread/messages/provider-message-17"}
+            """
+        )
+        http.enqueue(
+            status: 200,
+            json: """
+            {"id":"provider-message-17","role":"assistant","text":"{\\"canonicalForm\\":\\"bank\\"}","createdAt":"2026-08-28T00:00:00Z"}
+            """
+        )
+        let completion = try await LiveProductAIClient(http: http).completeWithTrace(
+            accessToken: "access",
+            deviceID: "device",
+            system: "Canonicalize",
+            user: "bank"
+        )
+
+        #expect(completion.traceID == "provider-message-17")
+        #expect(completion.text == #"{"canonicalForm":"bank"}"#)
     }
 
     @Test("translate lookupOnly maps a cache miss to a not-found problem")

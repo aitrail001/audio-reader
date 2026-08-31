@@ -237,9 +237,7 @@ struct EPUBAlignmentTests {
             ebookAligned: true,
             ebookAlignment: .init(status: .trusted, reason: "test", metrics: .empty)
         )
-        try Persistence.saveTranscript(saved)
-        let state = AppState()
-        state.books = [Book(
+        let book = Book(
             id: "book-\(UUID().uuidString)",
             title: "Book",
             author: nil,
@@ -247,7 +245,11 @@ struct EPUBAlignmentTests {
             coverPath: nil,
             ebookPath: old.path,
             chapters: [chapter]
-        )]
+        )
+        try Persistence.store.saveBook(StoredBook(book))
+        try Persistence.saveTranscript(saved)
+        let state = AppState()
+        state.books = [book]
         state.selectedBookID = state.books[0].id
         state.selectedChapterID = chapterID
         state.transcript = saved
@@ -275,6 +277,7 @@ struct EPUBAlignmentTests {
             in: bookFolder,
             text: Self.bookSentences.joined(separator: " ")
         )
+        let oldBytes = try Data(contentsOf: old)
         let replacement = try fixture.makeEPUB(
             named: "blocked.epub",
             in: incoming,
@@ -306,9 +309,7 @@ struct EPUBAlignmentTests {
             ebookAligned: true,
             ebookAlignment: .init(status: .trusted, reason: "test", metrics: .empty)
         )
-        try Persistence.saveTranscript(saved)
-        let state = AppState()
-        state.books = [Book(
+        let book = Book(
             id: "book-\(UUID().uuidString)",
             title: "Book",
             author: nil,
@@ -316,7 +317,14 @@ struct EPUBAlignmentTests {
             coverPath: nil,
             ebookPath: old.path,
             chapters: [chapter]
-        )]
+        )
+        try Persistence.store.saveBook(StoredBook(book))
+        try Persistence.saveTranscript(saved)
+        let persistedTranscriptBefore = try JSONEncoder.iso.encode(
+            #require(Persistence.loadTranscript(chapterID: chapterID))
+        )
+        let state = AppState()
+        state.books = [book]
         state.selectedBookID = state.books[0].id
         state.selectedChapterID = chapterID
         state.transcript = saved
@@ -331,6 +339,11 @@ struct EPUBAlignmentTests {
         let reloaded = try #require(Persistence.loadTranscript(for: chapter))
         #expect(didThrow)
         #expect(FileManager.default.fileExists(atPath: old.path))
+        #expect(try Data(contentsOf: old) == oldBytes)
+        #expect(try JSONEncoder.iso.encode(
+            #require(Persistence.loadTranscript(chapterID: chapterID))
+        ) == persistedTranscriptBefore)
+        #expect(state.books[0].ebookPath == old.path)
         #expect(reloaded.ebookAligned)
         #expect(reloaded.alignmentStatus == .trusted)
         #expect(reloaded.segments[0].trustedEbookText == Self.bookSentences[0])

@@ -38,6 +38,11 @@ struct IPadToolbarPlacementPolicyTests {
         #expect(IPadLibraryImportToolbarPlacement.owner == .content)
     }
 
+    @Test("Anki export mode is owned only by the visible vocabulary detail column")
+    func vocabularyDetailOwnsAnkiExportToolbar() {
+        #expect(IPadAnkiExportToolbarPlacement.owner == .detail)
+    }
+
     @Test("iPad EPUB parity uses supported user-provided document paths")
     func ipadUsesDocumentPickerForEPUB() {
         #expect(!IPadEPUBImportPolicy.appleBooksLibraryEnumerationSupported)

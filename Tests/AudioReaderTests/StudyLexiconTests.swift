@@ -433,7 +433,7 @@ struct KnownLemmaPersistenceTests {
     @Test("Known lemmas round-trip language and form")
     func roundTripsLanguageAndForm() throws {
         let fixture = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AudioReader-known-\(UUID().uuidString).json")
+            .appendingPathComponent("AudioReader-known-\(UUID().uuidString).sqlite")
         defer { try? FileManager.default.removeItem(at: fixture) }
 
         let records = KnownLemmaStore.upsert(
@@ -441,8 +441,9 @@ struct KnownLemmaPersistenceTests {
             into: [],
             at: Date(timeIntervalSince1970: 2_000_000)
         )
-        Persistence.saveKnownLemmas(records, to: fixture)
-        let loaded = Persistence.loadKnownLemmas(from: fixture)
+        let store = LocalSQLiteStore(fileURL: fixture)
+        try store.saveKnownLemmas(records.map(StoredKnownLemma.init))
+        let loaded = try LocalSQLiteStore(fileURL: fixture).loadKnownLemmas().map(KnownLemmaRecord.init)
 
         #expect(loaded.map(\.form) == ["forest"])
         #expect(loaded.first?.language == "en")

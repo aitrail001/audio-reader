@@ -10,9 +10,9 @@ export const SYNC_ENTITY_TYPES = [
   "lexeme_state",
   "review_event",
   "transcript",
+  "asset",
   "transcript_overlay",
-  "translation_decision",
-  "summary_decision",
+  "assistant_result",
   "chat_message",
   "study_activity",
 ] as const;
@@ -224,12 +224,17 @@ export function createMemorySyncStore(options: { identity?: IdentityStore } = {}
   };
 }
 
-export function createSupabaseSyncStore(rest: RestClient): SyncStore {
+export function createSupabaseSyncStore(rest: RestClient, namespace: "v1" | "v2" = "v1"): SyncStore {
+  const pushRpc = namespace === "v2" ? "/rpc/push_sync_v2_batch" : "/rpc/push_sync_batch";
+  const pullRpc = namespace === "v2" ? "/rpc/pull_sync_v2_page" : "/rpc/pull_sync_page";
+  const bootstrapRpc = namespace === "v2" ? "/rpc/bootstrap_sync_v2_page" : "/rpc/bootstrap_sync_page";
+  const changesTable = namespace === "v2" ? "/sync_v2_changes" : "/sync_changes";
+  const batchesTable = namespace === "v2" ? "/sync_v2_batches" : "/sync_batches";
   return {
     async push(input) {
       const response = await rest.request({
         method: "POST",
-        path: "/rpc/push_sync_batch",
+        path: pushRpc,
         body: {
           p_user_id: input.userId,
           p_device_id: input.deviceId,
@@ -245,7 +250,7 @@ export function createSupabaseSyncStore(rest: RestClient): SyncStore {
       const [batchAttribution, deviceTouch] = await Promise.all([
         rest.request({
           method: "PATCH",
-          path: "/sync_batches",
+          path: batchesTable,
           query: {
             user_id: `eq.${input.userId}`,
             batch_id: `eq.${input.batchId}`,
@@ -277,7 +282,7 @@ export function createSupabaseSyncStore(rest: RestClient): SyncStore {
       const pageLimit = Math.min(500, Math.max(1, Math.floor(input.limit)));
       const response = await rest.request({
         method: "POST",
-        path: "/rpc/pull_sync_page",
+        path: pullRpc,
         body: {
           p_user_id: input.userId,
           p_cursor: parseCursor(input.cursor),
@@ -296,7 +301,7 @@ export function createSupabaseSyncStore(rest: RestClient): SyncStore {
       const pageLimit = Math.min(500, Math.max(1, Math.floor(input.limit)));
       const response = await rest.request({
         method: "POST",
-        path: "/rpc/bootstrap_sync_page",
+        path: bootstrapRpc,
         body: {
           p_user_id: input.userId,
           p_cursor: input.cursor === null ? null : parseCursor(input.cursor),
@@ -321,7 +326,7 @@ export function createSupabaseSyncStore(rest: RestClient): SyncStore {
     async latestCursor(userId) {
       const response = await rest.request({
         method: "GET",
-        path: "/sync_changes",
+        path: changesTable,
         query: {
           user_id: `eq.${userId}`,
           select: "sequence",

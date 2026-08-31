@@ -5,6 +5,7 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
     public private(set) var authorizeCount = 0
     public private(set) var exchangeCount = 0
     public private(set) var bootstrapCount = 0
+    public var bootstrapReadiness = AccountSyncReadiness()
     public private(set) var logoutTokens: [String] = []
     public private(set) var recordedUsage: [ProductUsageEvent] = []
 
@@ -160,14 +161,15 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
                 syncCursor: "0",
                 featureFlags: [
                     FeatureFlag(key: "managed_qwen", enabled: true),
-                    FeatureFlag(key: "account_sync", enabled: true),
+                    FeatureFlag(key: "account_sync", enabled: bootstrapReadiness.effective),
                     FeatureFlag(key: "cloud_media", enabled: true),
                     FeatureFlag(key: "maintenance_mode", enabled: false)
                 ],
                 quotas: [
                     Quota(key: "qwen_tasks_day", used: 0, limit: 50, periodEndsAt: "9999-12-31T23:59:59.000Z"),
                     Quota(key: "devices", used: Double(devices.count), limit: 2, periodEndsAt: "9999-12-31T23:59:59.000Z")
-                ]
+                ],
+                accountSyncReadiness: bootstrapReadiness
             )
         }
     }

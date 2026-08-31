@@ -164,10 +164,10 @@ private struct VocabularyLearningMetricValue: View {
 private struct VocabularyTodayCards: View {
     private static let previewLimit = 20
 
-    let entries: [VocabEntry]
+    let entries: [VocabularyStudyCard]
     let dueCount: Int
 
-    private var preview: ArraySlice<VocabEntry> {
+    private var preview: ArraySlice<VocabularyStudyCard> {
         entries.prefix(Self.previewLimit)
     }
 

@@ -66,6 +66,23 @@ function callJson(db: PostgresSession, sql: string): Record<string, unknown> {
   return parseJsonObject(execOk(db, sql));
 }
 
+function requireJsonObjectArray(value: unknown): Array<Record<string, unknown>> {
+  if (
+    !Array.isArray(value) ||
+    value.some((item) => typeof item !== "object" || item === null || Array.isArray(item))
+  ) {
+    throw new Error("expected an array of JSON objects");
+  }
+  return value as Array<Record<string, unknown>>;
+}
+
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("expected a JSON object");
+  }
+  return value as Record<string, unknown>;
+}
+
 function scalar(db: PostgresSession, sql: string): string {
   return execOk(db, sql).trim().split("\n").at(-1)?.trim() ?? "";
 }
@@ -137,6 +154,165 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
     `);
     expect(service.ok, service.stderr).toBe(true);
     expect(service.stdout.trim()).toBe(String(TRANSACTION_FUNCTIONS.length));
+  });
+
+  it.each([
+    ["nested media bytes", {
+      localId: "book-a", title: "Book", source: "files",
+      chapters: [{ localId: "chapter-a", index: 0, title: "One", audioData: "AAAA" }],
+    }],
+    ["unknown nested field", {
+      localId: "book-a", title: "Book", source: "files",
+      chapters: [{ localId: "chapter-a", index: 0, title: "One", surprise: true }],
+    }],
+    ["unknown top-level field", {
+      localId: "book-a", title: "Book", source: "files", chapters: [], transcriptData: "{}",
+    }],
+  ])("rejects v2 RPC bypass payload with %s without advancing its cursor", (_label, payload) => {
+    const session = requireDb(db);
+    const before = scalar(
+      session,
+      `select count(*)::text from public.sync_v2_changes where user_id = ${sqlString(USER_A)}::uuid`,
+    );
+    const result = session.exec(`select public.push_sync_v2_batch(
+      ${sqlString(USER_A)}::uuid,
+      ${sqlString(DEVICE_A)}::uuid,
+      gen_random_uuid(),
+      ${sqlJson([{
+        mutationId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        entityType: "book",
+        entityId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        operation: "upsert",
+        baseRevision: 0,
+        occurredAt: "2026-08-31T00:00:00Z",
+        payload,
+      }])}::jsonb
+    )`);
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toMatch(/recursive compact entity schema|outside its entity schema|large immutable content/i);
+    expect(scalar(
+      session,
+      `select count(*)::text from public.sync_v2_changes where user_id = ${sqlString(USER_A)}::uuid`,
+    )).toBe(before);
+  });
+
+  it("rejects an unknown v2 entity type with an empty payload without advancing its cursor", () => {
+    const session = requireDb(db);
+    const before = scalar(
+      session,
+      `select count(*)::text from public.sync_v2_changes where user_id = ${sqlString(USER_A)}::uuid`,
+    );
+    const result = session.exec(`select public.push_sync_v2_batch(
+      ${sqlString(USER_A)}::uuid,
+      ${sqlString(DEVICE_A)}::uuid,
+      gen_random_uuid(),
+      ${sqlJson([{
+        mutationId: "88888888-8888-4888-8888-888888888888",
+        entityType: "unknown_empty_entity",
+        entityId: "89898989-8989-4989-8989-898989898989",
+        operation: "upsert",
+        baseRevision: 0,
+        occurredAt: "2026-08-31T00:00:00Z",
+        payload: {},
+      }])}::jsonb
+    )`);
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toMatch(/unsupported v2 entity type/i);
+    expect(scalar(
+      session,
+      `select count(*)::text from public.sync_v2_changes where user_id = ${sqlString(USER_A)}::uuid`,
+    )).toBe(before);
+  });
+
+  it("dry-runs and idempotently executes complete per-user v1 cleanup", () => {
+    const session = requireDb(db);
+    const userId = "99999999-9999-4999-8999-999999999999";
+    const bookId = "11111111-1111-4111-8111-111111111111";
+    const chapterId = "22222222-2222-4222-8222-222222222222";
+    const revisionId = "33333333-3333-4333-8333-333333333333";
+    execOk(session, `
+      insert into public.profiles (user_id, display_name, account_status)
+      values (${sqlString(userId)}::uuid, 'legacy cleanup', 'active');
+      insert into public.books (
+        id, user_id, title, edition_fingerprint, fingerprint_version, source
+      ) values (
+        ${sqlString(bookId)}::uuid, ${sqlString(userId)}::uuid,
+        'Legacy', 'legacy-cleanup-fingerprint', 1, 'files'
+      );
+      insert into public.book_assets (
+        id, user_id, book_id, kind, content_type, size_bytes, sha256, status, object_key
+      ) values (
+        '55555555-5555-4555-8555-555555555555'::uuid,
+        ${sqlString(userId)}::uuid, ${sqlString(bookId)}::uuid,
+        'audio', 'audio/mp4', 4, repeat('a', 64), 'ready',
+        ${sqlString(`${userId}/legacy-audio.m4b`)}
+      );
+      insert into public.chapters (
+        id, user_id, book_id, index, title, chapter_fingerprint, duration_seconds
+      ) values (
+        ${sqlString(chapterId)}::uuid, ${sqlString(userId)}::uuid,
+        ${sqlString(bookId)}::uuid, 0, 'One', 'legacy-chapter', 1
+      );
+      insert into public.transcript_revisions (
+        id, user_id, book_id, chapter_id, version, engine, locale,
+        chapter_fingerprint, object_key, is_active
+      ) values (
+        ${sqlString(revisionId)}::uuid, ${sqlString(userId)}::uuid,
+        ${sqlString(bookId)}::uuid, ${sqlString(chapterId)}::uuid,
+        1, 'legacy', 'en', 'legacy-chapter',
+        ${sqlString(`${userId}/legacy-transcript.json`)}, true
+      );
+      insert into public.transcript_segments (
+        id, user_id, revision_id, chapter_id, sequence, start_seconds, end_seconds, spoken_text
+      ) values (
+        '44444444-4444-4444-8444-444444444444'::uuid,
+        ${sqlString(userId)}::uuid, ${sqlString(revisionId)}::uuid,
+        ${sqlString(chapterId)}::uuid, 0, 0, 1, 'legacy bytes'
+      );
+      insert into public.sync_changes (
+        user_id, sequence, entity_type, entity_id, operation, revision, payload
+      ) values (${sqlString(userId)}::uuid, 1, 'book', ${sqlString(bookId)}, 'upsert', 1, '{}');
+      insert into public.sync_batches (user_id, batch_id, mutation_fingerprint)
+      values (
+        ${sqlString(userId)}::uuid, '66666666-6666-4666-8666-666666666666'::uuid, 'legacy'
+      );
+      insert into public.sync_mutation_outcomes (
+        user_id, mutation_id, status, problem
+      ) values (
+        ${sqlString(userId)}::uuid,
+        '77777777-7777-4777-8777-777777777777'::uuid, 'rejected', '{}'
+      );
+    `);
+
+    const inspected = callJson(
+      session,
+      `select public.cleanup_obsolete_v1_data(${sqlString(userId)}::uuid, false)`,
+    );
+    expect(inspected).toMatchObject({
+      changes: 1, outcomes: 1, batches: 1, transcriptRevisions: 1,
+      transcriptSegments: 1, assets: 1, executed: false,
+    });
+    expect(inspected.objectKeys).toEqual([
+      `${userId}/legacy-audio.m4b`,
+      `${userId}/legacy-transcript.json`,
+    ]);
+    expect(scalar(
+      session,
+      `select count(*)::text from public.book_assets where user_id = ${sqlString(userId)}::uuid`,
+    )).toBe("1");
+
+    const executed = callJson(
+      session,
+      `select public.cleanup_obsolete_v1_data(${sqlString(userId)}::uuid, true)`,
+    );
+    expect(executed).toMatchObject({ changes: 1, transcriptSegments: 1, assets: 1, executed: true });
+    expect(callJson(
+      session,
+      `select public.cleanup_obsolete_v1_data(${sqlString(userId)}::uuid, true)`,
+    )).toMatchObject({
+      changes: 0, outcomes: 0, batches: 0, transcriptRevisions: 0,
+      transcriptSegments: 0, assets: 0, objectKeys: [], executed: true,
+    });
   });
 
   it("records an idempotency response and replays it for the same fingerprint", () => {
@@ -779,6 +955,95 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
     expect(latest[0]).toMatchObject({ revision: 2, payload: { surface: "latest" } });
   });
 
+  it("publishes one verified v2 transcript manifest atomically and leaves failures invisible", () => {
+    const session = requireDb(db);
+    const uploadId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const revisionId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const chapterId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const sha = "a".repeat(64);
+    execOk(
+      session,
+      `insert into public.asset_manifests_v2 (
+        upload_id, user_id, kind, content_type, encoding, compressed_bytes, original_bytes,
+        sha256, object_key, upload_object_key, revision_id, chapter_id, segment_count
+      ) values (
+        ${sqlString(uploadId)}::uuid, ${sqlString(USER_A)}::uuid, 'transcriptRevision',
+        'application/json', 'identity-json-v1', 3, 3, ${sqlString(sha)},
+        'private/v2/${USER_A}/transcriptRevision/${sha}',
+        'private/v2/${USER_A}/pending/${uploadId}',
+        ${sqlString(revisionId)}::uuid, ${sqlString(chapterId)}::uuid, 1
+      )`,
+    );
+
+    const completed = callJson(
+      session,
+      `select public.complete_v2_asset_and_publish(
+        ${sqlString(USER_A)}::uuid, ${sqlString(uploadId)}::uuid, 3, ${sqlString(sha)}
+      )`,
+    );
+    expect(completed.cursor).toBe(1);
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from sync_v2_changes
+         where user_id = ${sqlString(USER_A)}::uuid and entity_id = ${sqlString(revisionId)}::uuid`,
+      ),
+    ).toBe("1");
+    const replay = callJson(
+      session,
+      `select public.complete_v2_asset_and_publish(
+        ${sqlString(USER_A)}::uuid, ${sqlString(uploadId)}::uuid, 3, ${sqlString(sha)}
+      )`,
+    );
+    expect(replay.cursor).toBe(1);
+    const pulled = callJson(
+      session,
+      `select public.pull_sync_v2_page(${sqlString(USER_A)}::uuid, 0, 100, 1048576)`,
+    );
+    const changes = requireJsonObjectArray(pulled.changes);
+    expect(changes).toHaveLength(1);
+    expect(JSON.stringify(pulled)).not.toContain("transcriptJSON");
+    expect(changes[0]?.entity_type).toBe("transcript");
+    expect(changes[0]?.entity_id).toBe(revisionId);
+    expect(changes[0]?.payload).toMatchObject({
+      revisionId,
+      objectKey: `private/v2/${USER_A}/transcriptRevision/${sha}`,
+      sha256: sha,
+      compressedBytes: 3,
+    });
+
+    const failedUpload = "12121212-1212-4212-8212-121212121212";
+    const failedRevision = "13131313-1313-4313-8313-131313131313";
+    execOk(
+      session,
+      `insert into public.asset_manifests_v2 (
+        upload_id, user_id, kind, content_type, encoding, compressed_bytes, original_bytes,
+        sha256, object_key, upload_object_key, revision_id, chapter_id, segment_count
+      ) values (
+        ${sqlString(failedUpload)}::uuid, ${sqlString(USER_A)}::uuid, 'transcriptRevision',
+        'application/json', 'identity-json-v1', 3, 3, repeat('b', 64),
+        'private/v2/${USER_A}/transcriptRevision/' || repeat('b', 64),
+        'private/v2/${USER_A}/pending/${failedUpload}',
+        ${sqlString(failedRevision)}::uuid, ${sqlString(chapterId)}::uuid, 1
+      )`,
+    );
+    const failed = session.exec(
+      `select public.complete_v2_asset_and_publish(
+        ${sqlString(USER_A)}::uuid, ${sqlString(failedUpload)}::uuid, 4, repeat('b', 64)
+      )`,
+    );
+    expect(failed.ok).toBe(false);
+    expect(
+      scalar(
+        session,
+        `select status || ':' || (
+           select count(*)::text from sync_v2_changes
+           where user_id = ${sqlString(USER_A)}::uuid and entity_id = ${sqlString(failedRevision)}::uuid
+         ) from asset_manifests_v2 where upload_id = ${sqlString(failedUpload)}::uuid`,
+      ),
+    ).toBe("pending:0");
+  });
+
   it("claims one assistant generation per cache key and attaches another user", () => {
     const session = requireDb(db);
     const cacheKey = `cache-key-${crypto.randomUUID()}`;
@@ -1091,6 +1356,211 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
     ).toBe("true");
   }, 30_000);
 
+  it("keeps accepted private output and history after shared cache eviction", () => {
+    const session = requireDb(db);
+    const cacheKey = `cache-lifecycle-${crypto.randomUUID()}`;
+    const claimed = callJson(
+      session,
+      `select public.claim_assistant_generation(
+        ${sqlString(USER_A)}::uuid, ${sqlString(cacheKey)}, 'translate'
+      )`,
+    );
+    const completed = callJson(
+      session,
+      `select public.complete_assistant_job(
+        ${sqlString(String(claimed.job_id))}::uuid,
+        '{"text":"durable accepted text"}'::jsonb,
+        'translate', 'en', 'zh'
+      )`,
+    );
+    execOk(
+      session,
+      `update public.user_assistant_results
+       set status = 'accepted', model = 'qwen-test', decided_at = clock_timestamp()
+       where id = ${sqlString(String(claimed.result_id))}::uuid`,
+    );
+    execOk(
+      session,
+      `delete from public.assistant_cache_entries
+       where id = ${sqlString(String(completed.cache_entry_id))}::uuid`,
+    );
+
+    expect(
+      scalar(
+        session,
+        `select output_text from public.user_assistant_results
+         where id = ${sqlString(String(claimed.result_id))}::uuid`,
+      ),
+    ).toBe("durable accepted text");
+    expect(
+      scalar(
+        session,
+        `select (cache_entry_id is null)::text from public.user_assistant_results
+         where id = ${sqlString(String(claimed.result_id))}::uuid`,
+      ),
+    ).toBe("true");
+    expect(
+      scalar(
+        session,
+        `select jsonb_array_length(history)::text from public.user_assistant_results
+         where id = ${sqlString(String(claimed.result_id))}::uuid`,
+      ),
+    ).not.toBe("0");
+  });
+
+  it("applies native assistant lifecycle mutations to one private row and bootstrap entity", () => {
+    const session = requireDb(db);
+    const resultId = crypto.randomUUID();
+    const cacheId = crypto.randomUUID();
+    const cacheKey = `cache-result-lifecycle-${crypto.randomUUID()}`;
+    execOk(
+      session,
+      `insert into public.assistant_cache_entries (
+         id, cache_key, task_type, source_language, target_language, state, result
+       ) values (
+         ${sqlString(cacheId)}::uuid, ${sqlString(cacheKey)}, 'translation', 'en', 'zh',
+         'active', '{"translation":"shared only"}'::jsonb
+       );
+       insert into public.user_assistant_results (
+         id, user_id, cache_entry_id, task_type, status, output_text,
+         model, prompt_version, model_policy_hash
+       ) values (
+         ${sqlString(resultId)}::uuid, ${sqlString(USER_A)}::uuid,
+         ${sqlString(cacheId)}::uuid, 'translation', 'pending', 'generated',
+         'qwen3.5-plus-2026-08-01', 'qwen-managed-v3', ${sqlString("a".repeat(64))}
+       )`,
+    );
+    const lifecycle = [
+      { status: "accepted", text: "accepted", model: "qwen3.5-plus-2026-08-01", prompt: "qwen-managed-v3", hash: "a".repeat(64) },
+      { status: "edited", text: "edited", model: "qwen3.5-plus-2026-08-01", prompt: "qwen-managed-v3", hash: "a".repeat(64) },
+      { status: "replaced", text: "replacement", model: "qwen3.5-plus-2026-08-31", prompt: "qwen-managed-v4", hash: "b".repeat(64) },
+    ];
+    for (const [index, state] of lifecycle.entries()) {
+      const mutation = {
+        mutationId: crypto.randomUUID(),
+        entityType: "assistant_result",
+        entityId: resultId,
+        operation: "upsert",
+        baseRevision: index,
+        occurredAt: `2026-09-01T00:00:0${String(index + 1)}Z`,
+        payload: {
+          result: {
+            id: resultId,
+            kind: "sentenceGloss",
+            status: state.status,
+            language: "zh-Hans",
+            model: state.model,
+            promptVersion: state.prompt,
+            modelPolicyHash: state.hash,
+            source: "private source",
+            text: state.text,
+            createdAt: "2026-09-01T00:00:00Z",
+            decidedAt: `2026-09-01T00:00:0${String(index + 1)}Z`,
+            sharedCacheEntryID: cacheId,
+          },
+          vocabulary: [],
+        },
+      };
+      const pushed = callJson(
+        session,
+        `select public.push_sync_v2_batch(
+          ${sqlString(USER_A)}::uuid, ${sqlString(DEVICE_A)}::uuid,
+          ${sqlString(crypto.randomUUID())}::uuid, ${sqlJson([mutation])}::jsonb
+        )`,
+      );
+      expect(requireJsonObjectArray(pushed.results)[0]?.status).toBe("applied");
+    }
+
+    expect(
+      scalar(session, `select count(*)::text from user_assistant_results where id = ${sqlString(resultId)}::uuid`),
+    ).toBe("1");
+    expect(
+      scalar(session, `select status || '|' || output_text || '|' || model || '|' || prompt_version || '|' || model_policy_hash from user_assistant_results where id = ${sqlString(resultId)}::uuid`),
+    ).toBe(`replaced|replacement|qwen3.5-plus-2026-08-31|qwen-managed-v4|${"b".repeat(64)}`);
+    expect(
+      Number(scalar(session, `select jsonb_array_length(history)::text from user_assistant_results where id = ${sqlString(resultId)}::uuid`)),
+    ).toBeGreaterThanOrEqual(4);
+    const bootstrap = callJson(
+      session,
+      `select public.bootstrap_sync_v2_page(
+        ${sqlString(USER_A)}::uuid, null, 0, 500, 1048576
+      )`,
+    );
+    const entity = requireJsonObjectArray(bootstrap.entities).find(
+      (item) => item.entity_type === "assistant_result" && item.entity_id === resultId,
+    );
+    expect(entity).toBeDefined();
+    expect(entity?.payload).toMatchObject({ result: { id: resultId, status: "replaced", text: "replacement" } });
+  });
+
+  it("records a complete generated private summary without requiring its shared cache row", () => {
+    const session = requireDb(db);
+    const resultId = crypto.randomUUID();
+    const missingCacheId = crypto.randomUUID();
+    const structured = {
+      overview: "private overview",
+      keyPoints: ["one", "two"],
+      charactersOrIdeas: ["reader"],
+      keyConcepts: [{ name: "concept", explanation: "detail" }],
+      themes: ["theme"],
+    };
+    const outputText = JSON.stringify(structured);
+    const recorded = callJson(
+      session,
+      `select jsonb_build_object('rows', coalesce(jsonb_agg(to_jsonb(recorded)), '[]'::jsonb))
+       from public.record_user_assistant_result(
+         ${sqlString(USER_A)}::uuid,
+         ${sqlJson({
+          id: resultId,
+          task: "chapter_summary",
+          resultKind: "chapterSummary",
+          status: "pending",
+          cacheEntryId: missingCacheId,
+          outputText,
+          privateContent: structured,
+          language: "zh-Hans",
+          sourceText: "private chapter text",
+          bookTitle: "Private Book",
+          chapterTitle: "Private Chapter",
+          targetId: "chapter-local-1",
+          model: "qwen3.7-plus-2026-09-01",
+          promptVersion: "qwen-managed-v4",
+          modelPolicyHash: "c".repeat(64),
+          createdAt: "2026-09-01T00:00:00Z",
+         })}::jsonb
+       ) recorded`,
+    );
+    const rows = requireJsonObjectArray(recorded.rows);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: resultId,
+      cache_entry_id: null,
+      result_kind: "chapterSummary",
+      output_text: outputText,
+      private_content: structured,
+    });
+    expect(
+      callJson(
+        session,
+        `select history -> 0 from public.user_assistant_results
+         where id = ${sqlString(resultId)}::uuid`,
+      ),
+    ).toMatchObject({ privateContent: structured, outputText });
+    const bootstrap = callJson(
+      session,
+      `select public.bootstrap_sync_v2_page(
+        ${sqlString(USER_A)}::uuid, null, 0, 500, 1048576
+      )`,
+    );
+    const bootstrapped = requireJsonObjectArray(bootstrap.entities).find((entity) =>
+      entity.entity_type === "assistant_result" && entity.entity_id === resultId
+    );
+    expect(bootstrapped).toBeDefined();
+    const bootstrappedResult = requireJsonObject(requireJsonObject(bootstrapped?.payload).result);
+    expect(bootstrappedResult.id).toBe(resultId);
+    expect(bootstrappedResult.text).toBe(outputText);
+  });
+
   it("appends an immutable redacted audit event", () => {
     const session = requireDb(db);
     const appended = callJson(
@@ -1239,9 +1709,22 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
     const deletionJobId = "15151515-1515-4515-8515-151515151515";
     const legacyJobId = "17171717-1717-4717-8717-171717171717";
     const otherUserJobId = "18181818-1818-4818-8818-181818181818";
+    const sharedCacheId = "19191919-1919-4919-8919-191919191919";
     execOk(
       session,
       `update public.assistant_jobs set status = 'cancelled' where status = 'queued';
+       insert into public.assistant_cache_entries (
+         id, cache_key, task_type, source_language, target_language, state, result
+       ) values (
+         ${sqlString(sharedCacheId)}::uuid, 'deletion-shared-cache', 'translate',
+         'en', 'zh', 'active', '{"text":"shared reusable result"}'::jsonb
+       );
+       insert into public.user_assistant_results (
+         user_id, cache_entry_id, task_type, status, output_text, model
+       ) values (
+         ${sqlString(USER_B)}::uuid, ${sqlString(sharedCacheId)}::uuid,
+         'translate', 'accepted', 'private accepted result', 'qwen-test'
+       );
        insert into public.assistant_jobs (id, user_id, kind, status, payload)
        values
          (
@@ -1402,6 +1885,13 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
         `${table} retained rows for the deleted account`,
       ).toBe("0");
     }
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.assistant_cache_entries
+         where id = ${sqlString(sharedCacheId)}::uuid`,
+      ),
+    ).toBe("1");
     expect(
       callJson(
         session,

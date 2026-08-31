@@ -6,6 +6,7 @@ import {
 import { RestPersistenceError, createFakeDatabaseClient } from "@audio-reader/database";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
+import { createFakeObjectStore, createUnavailableObjectStore } from "./object-store";
 import { createRuntimeConfigService } from "./runtime-config";
 
 const DEVICE_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
@@ -25,6 +26,142 @@ async function readJson(response: Response): Promise<unknown> {
 }
 
 describe("admin and privacy API", () => {
+  it("audits legacy cleanup dry-runs without enqueueing destructive work", async () => {
+    const database = createFakeDatabaseClient();
+    const cleanup = {
+      changes: 3, outcomes: 2, batches: 1, transcriptRevisions: 4,
+      transcriptSegments: 20, assets: 5, objectKeys: [`${USER_ID}/legacy.epub`], executed: false,
+    };
+    Object.assign(database.ops, {
+      cleanupObsoleteV1Data: () => Promise.resolve(cleanup),
+    });
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({
+        role: "admin", accountId: OPERATOR_ID, adminRoles: ["operator"],
+      }),
+    });
+
+    const response = await app.fetch(new Request("http://localhost/v1/admin/legacy-cleanup", {
+      method: "POST",
+      headers: { authorization: "Bearer admin", "content-type": "application/json" },
+      body: JSON.stringify({ userId: USER_ID, dryRun: true }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(await readJson(response)).toEqual(cleanup);
+    expect(await database.ops.listJobs()).toHaveLength(0);
+    expect(await database.ops.listAudit({ action: "legacy_cleanup_dry_run" })).toMatchObject([
+      { actorId: OPERATOR_ID, resourceId: USER_ID, metadata: { objectKeys: 1 } },
+    ]);
+  });
+
+  it("queues legacy cleanup execution idempotently and records its audit", async () => {
+    const database = createFakeDatabaseClient();
+    const app = createTestApp({
+      database,
+      authenticate: () => createFakePrincipal({
+        role: "admin", accountId: OPERATOR_ID, adminRoles: ["operator"],
+      }),
+    });
+    const request = () => new Request("http://localhost/v1/admin/legacy-cleanup", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer admin",
+        "content-type": "application/json",
+        "idempotency-key": "legacy-cleanup-execute-0001",
+      },
+      body: JSON.stringify({ userId: USER_ID, dryRun: false }),
+    });
+
+    const first = await app.fetch(request());
+    const replay = await app.fetch(request());
+
+    expect(first.status).toBe(202);
+    expect(replay.status).toBe(202);
+    expect(await readJson(replay)).toEqual(await readJson(first));
+    expect(await database.ops.listJobs()).toHaveLength(1);
+    expect(await database.ops.listAudit({ action: "legacy_cleanup_execute_requested" })).toHaveLength(1);
+  });
+
+  it("rejects requested account sync enablement while object storage is unavailable", async () => {
+    const database = createFakeDatabaseClient();
+    await database.ops.patchFlag("account_sync", { enabled: false });
+    const app = createTestApp({
+      database,
+      storage: createUnavailableObjectStore(),
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+
+    const response = await app.fetch(
+      new Request("http://localhost/v1/admin/feature-flags/account_sync", {
+        method: "PATCH",
+        headers: {
+          authorization: "Bearer admin",
+          "content-type": "application/json",
+          "x-device-id": DEVICE_ID,
+          "idempotency-key": "account-sync-readiness-reject",
+        },
+        body: JSON.stringify({ reason: "enable account sync", enabled: true }),
+      }),
+    );
+
+    expect(response.status).toBe(503);
+    expect(await readJson(response)).toMatchObject({
+      code: "account_sync_unavailable",
+    });
+    expect((await database.ops.listFlags()).find((flag) => flag.key === "account_sync")?.enabled).toBe(
+      false,
+    );
+  });
+
+  it("forces a fresh readiness probe before enabling instead of trusting cached success", async () => {
+    const database = createFakeDatabaseClient();
+    await database.ops.patchFlag("account_sync", { enabled: false });
+    const storage = createFakeObjectStore();
+    storage.supportsBoundUpload = () => Promise.resolve(true);
+    let available = true;
+    storage.ping = () => Promise.resolve(available ? "ok" : "unavailable");
+    const app = createTestApp({
+      database,
+      storage,
+      storageDescriptor: () =>
+        Promise.resolve({
+          provider: "gcs",
+          bucket: "private-sync",
+          configured: true,
+          credentialsConfigured: true,
+        }),
+      authenticate: () => createFakePrincipal({ role: "admin" }),
+    });
+    const cached = await app.fetch(
+      new Request("http://localhost/v1/admin/account-sync-readiness", {
+        headers: { authorization: "Bearer admin", "x-device-id": DEVICE_ID },
+      }),
+    );
+    expect(cached.status).toBe(200);
+    expect(await readJson(cached)).toMatchObject({ ready: true });
+    available = false;
+
+    const response = await app.fetch(
+      new Request("http://localhost/v1/admin/feature-flags/account_sync", {
+        method: "PATCH",
+        headers: {
+          authorization: "Bearer admin",
+          "content-type": "application/json",
+          "x-device-id": DEVICE_ID,
+          "idempotency-key": "account-sync-readiness-force-reject",
+        },
+        body: JSON.stringify({ reason: "enable account sync", enabled: true }),
+      }),
+    );
+
+    expect(response.status).toBe(503);
+    expect((await database.ops.listFlags()).find((flag) => flag.key === "account_sync")?.enabled).toBe(
+      false,
+    );
+  });
+
   it.each([
     ["suspend", "suspend_user"],
     ["unsuspend", "unsuspend_user"],
@@ -245,6 +382,7 @@ describe("admin and privacy API", () => {
     ["POST", `/v1/admin/users/${USER_ID}/unsuspend`, ["operator", "superadmin"]],
     ["POST", `/v1/admin/users/${USER_ID}/revoke-sessions`, ["operator", "superadmin"]],
     ["POST", `/v1/admin/users/${USER_ID}/grant-admin`, ["superadmin"]],
+    ["POST", "/v1/admin/legacy-cleanup", ["operator", "superadmin"]],
     ["GET", "/v1/admin/runtime-config", ["superadmin"]],
     ["PUT", "/v1/admin/runtime-config", ["superadmin"]],
     ["GET", "/v1/admin/llm/policies", ["superadmin"]],
@@ -1388,7 +1526,7 @@ describe("admin and privacy API", () => {
     );
     expect(fetched.status).toBe(200);
     const content = await app.fetch(
-      new Request(`http://localhost/v1/assets/${job.assetId}/content`, {
+      new Request(`http://localhost/v2/assets/${job.assetId}/content`, {
         headers: {
           authorization: "Bearer test",
           "X-Device-Id": DEVICE_ID,

@@ -29,6 +29,9 @@ type WorkerEnv = {
   PASSWORDLESS_HMAC_SECRET?: string;
   GCS_BUCKET?: string;
   GCS_SERVICE_ACCOUNT_JSON?: string;
+  R2_ACCOUNT_ID?: string;
+  R2_BUCKET_NAME?: string;
+  R2_MANAGEMENT_API_TOKEN?: string;
   SUPABASE_STORAGE_BUCKET?: string;
   ASSETS?: R2Bucket;
 };
@@ -95,7 +98,15 @@ async function resolveStorage(env: WorkerEnv, ops: OpsStore): Promise<ObjectStor
           bucket: supabaseBucket,
         });
   const store =
-    gcs ?? supabase ?? (env.ASSETS === undefined ? undefined : createR2ObjectStore(env.ASSETS));
+    gcs ??
+    supabase ??
+    (env.ASSETS === undefined
+      ? undefined
+      : createR2ObjectStore(env.ASSETS, {
+          accountId: env.R2_ACCOUNT_ID?.trim() ?? "",
+          bucketName: env.R2_BUCKET_NAME?.trim() ?? "",
+          apiToken: env.R2_MANAGEMENT_API_TOKEN?.trim() ?? "",
+        }));
   if (store === undefined || (await store.ping()) !== "ok") {
     throw new Error("job_worker_storage_unavailable");
   }

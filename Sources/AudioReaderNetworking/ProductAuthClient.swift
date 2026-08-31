@@ -1,13 +1,15 @@
+import CryptoKit
 import Foundation
 
 public struct ProductAuthClient: AuthClient, Sendable {
     private let http: any HTTPPerforming
+    private let baseURL: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
     public init(http: any HTTPPerforming, baseURL: URL = ProductAPI.defaultBaseURL) {
         self.http = http
-        _ = baseURL
+        self.baseURL = baseURL
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         self.encoder = encoder
@@ -138,13 +140,50 @@ public struct ProductAuthClient: AuthClient, Sendable {
     }
 
     public func downloadAccountExport(accessToken: String, deviceID: String, assetID: String) async throws -> Data {
+        let list: AccountAssetList = try await send(
+            method: "GET",
+            path: "/v2/assets?kind=accountExport",
+            headers: authenticatedHeaders(accessToken: accessToken, deviceID: deviceID)
+        )
+        guard let manifest = list.assets.first(where: { $0.id == assetID }) else {
+            throw AuthClientError.invalidResponse
+        }
+        let download: AccountAssetDownload = try await send(
+            method: "POST",
+            path: "/v2/assets/\(assetID)/download",
+            headers: authenticatedHeaders(accessToken: accessToken, deviceID: deviceID),
+            body: EmptyBody()
+        )
+        guard let url = URL(string: download.url, relativeTo: baseURL)?.absoluteURL,
+              url.scheme?.lowercased() == "https" || sameOrigin(url, baseURL)
+        else { throw AuthClientError.invalidResponse }
         let response = try await raw(
             method: "GET",
-            path: "/v1/assets/\(assetID)/content",
-            headers: authenticatedHeaders(accessToken: accessToken, deviceID: deviceID),
+            path: url.absoluteString,
+            headers: sameOrigin(url, baseURL)
+                ? authenticatedHeaders(accessToken: accessToken, deviceID: deviceID)
+                : [:],
             data: nil
         )
+        let digest = SHA256.hash(data: response.body).map { String(format: "%02x", $0) }.joined()
+        guard response.body.count == manifest.compressedBytes, digest == manifest.sha256 else {
+            throw AuthClientError.problem(
+                status: 422,
+                code: "asset_integrity_failed",
+                detail: "Downloaded account export integrity verification failed."
+            )
+        }
         return response.body
+    }
+
+    private func sameOrigin(_ left: URL, _ right: URL) -> Bool {
+        left.scheme?.lowercased() == right.scheme?.lowercased()
+            && left.host?.lowercased() == right.host?.lowercased()
+            && effectivePort(left) == effectivePort(right)
+    }
+
+    private func effectivePort(_ url: URL) -> Int? {
+        url.port ?? (url.scheme?.lowercased() == "https" ? 443 : url.scheme?.lowercased() == "http" ? 80 : nil)
     }
 
     public func recordProductEvents(accessToken: String, deviceID: String, events: [ProductUsageEvent]) async throws {
@@ -290,6 +329,22 @@ private struct EmailOTPVerifyBody: Encodable {
     var code: String
     var deviceId: String
 }
+
+private struct AccountAssetList: Decodable {
+    var assets: [AccountAssetManifest]
+}
+
+private struct AccountAssetManifest: Decodable {
+    var id: String
+    var compressedBytes: Int
+    var sha256: String
+}
+
+private struct AccountAssetDownload: Decodable {
+    var url: String
+}
+
+private struct EmptyBody: Encodable {}
 
 private struct ProductEventBatch: Encodable {
     var events: [ProductUsageEvent]

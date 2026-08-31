@@ -10,6 +10,7 @@ import {
   type QuotaKey,
 } from "./product-limits";
 import { isErrorBody, restOk, restRow, restRows, type RestClient } from "./rest";
+import type { SyncStore } from "./sync-store";
 
 /** Operator-visible Postgres write failure. Admin routes map this to 502; never treat it as an in-memory success. */
 export class RestPersistenceError extends Error {
@@ -22,7 +23,25 @@ export class RestPersistenceError extends Error {
   }
 }
 
-export type AssetKind = "audio" | "ebook" | "cover" | "transcript_export" | "account_export";
+export class AssetReservationError extends Error {
+  constructor(readonly code: "pending_asset_count_exceeded" | "cloud_media_quota_exceeded") {
+    super(code);
+    this.name = "AssetReservationError";
+  }
+}
+
+export type AssetKind =
+  | "audio"
+  | "epub"
+  | "cover"
+  | "transcriptRevision"
+  | "epubReadingPackage"
+  | "alignmentPackage"
+  | "mediaAnalysis"
+  | "transcriptExport"
+  | "accountExport"
+  | "assistantArtifact"
+  | "otherLargeImmutable";
 export type AssetStatus = "pending" | "ready" | "failed" | "deleting";
 
 export type OpsAsset = {
@@ -31,11 +50,18 @@ export type OpsAsset = {
   accountId: string;
   kind: AssetKind;
   contentType: string;
-  sizeBytes: number;
+  compressedBytes: number;
+  originalBytes: number;
   sha256: string;
+  encoding: string;
+  revisionId: string | null;
+  bookId: string | null;
+  chapterId: string | null;
+  segmentCount: number | null;
   fileName: string;
   status: AssetStatus;
   objectKey: string;
+  uploadObjectKey: string;
   createdAt: string;
   deletedAt: string | null;
 };
@@ -57,6 +83,35 @@ export type OpsCacheEntry = {
   payload: Record<string, unknown>;
   createdAt: string;
   lastHitAt: string | null;
+};
+
+export type OpsAssistantResult = {
+  id: string;
+  accountId: string;
+  task: string;
+  resultKind: string | null;
+  status: "pending" | "accepted" | "rejected" | "stale" | "edited" | "replaced";
+  cacheEntryId: string | null;
+  outputText: string | null;
+  privateContent: Record<string, unknown> | null;
+  language: string | null;
+  sourceText: string | null;
+  contextText: string | null;
+  bookTitle: string | null;
+  chapterTitle: string | null;
+  targetId: string | null;
+  timestampSeconds: number | null;
+  replacedText: string | null;
+  replacedModel: string | null;
+  privateEditedOutput: string | null;
+  privateNotes: string | null;
+  model: string | null;
+  promptVersion: string | null;
+  modelPolicyHash: string | null;
+  history: Record<string, unknown>[];
+  createdAt: string;
+  updatedAt: string;
+  decidedAt: string | null;
 };
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "dead_letter";
@@ -240,6 +295,18 @@ export type ObjectWriteLease = {
   objectKey: string;
   expiresAt: string;
 };
+export type AbandonedAssetUpload = { id: string; objectKeys: string[] };
+export type ReadyAssetUploadCleanup = { id: string; uploadObjectKey: string };
+export type LegacyCleanupResult = {
+  changes: number;
+  outcomes: number;
+  batches: number;
+  transcriptRevisions: number;
+  transcriptSegments: number;
+  assets: number;
+  objectKeys: string[];
+  executed: boolean;
+};
 
 export type OperatorSettingsReadResult =
   | { ok: true; value: OperatorSettingsRecord | undefined }
@@ -251,12 +318,26 @@ export type OpsStore = {
     input: {
       kind: AssetKind;
       contentType: string;
-      sizeBytes: number;
+      compressedBytes: number;
+      originalBytes: number;
       sha256: string;
+      encoding: string;
+      revisionId: string | null;
+      bookId: string | null;
+      chapterId: string | null;
+      segmentCount: number | null;
       fileName: string;
+      objectKey: string;
+      uploadObjectKey: string;
+      uploadId: string;
     },
   ): Promise<OpsAsset>;
   getAsset(userId: string, assetId: string): Promise<OpsAsset | undefined>;
+  listAssets(
+    userId: string,
+    filter?: { kind?: AssetKind; bookId?: string; chapterId?: string },
+  ): Promise<OpsAsset[]>;
+  getAssetByContent(userId: string, kind: AssetKind, sha256: string): Promise<OpsAsset | undefined>;
   getAssetByUpload(userId: string, uploadId: string): Promise<OpsAsset | undefined>;
   completeAsset(userId: string, uploadId: string): Promise<OpsAsset | undefined>;
   lookupCache(cacheKey: string): Promise<OpsCacheEntry | undefined>;
@@ -359,6 +440,11 @@ export type OpsStore = {
   putAnalyticsPreference(userId: string, enabled: boolean): Promise<AnalyticsPreferenceRecord>;
   userProgressSummary(userId: string): Promise<UserProgressSummaryRecord | undefined>;
   purgeExpiredUserProgressSummaries(): Promise<number>;
+  gcAbandonedAssetUploads(before: string, limit: number): Promise<AbandonedAssetUpload[]>;
+  finishAbandonedAssetUploadGc(ids: readonly string[]): Promise<void>;
+  claimReadyAssetUploadCleanup(limit: number): Promise<ReadyAssetUploadCleanup[]>;
+  finishReadyAssetUploadCleanup(ids: readonly string[]): Promise<void>;
+  cleanupObsoleteV1Data(userId: string, execute: boolean): Promise<LegacyCleanupResult>;
   deleteAccountData(userId: string): Promise<boolean>;
   requestAccountDeletion(
     userId: string,
@@ -371,8 +457,27 @@ export type OpsStore = {
   accountObjectWriteLeases(userId: string): Promise<ObjectWriteLease[]>;
   recordAssistantUse(
     userId: string,
-    input: { task: string; cacheEntryId: string | null; outputText: string },
-  ): Promise<void>;
+    input: {
+      resultId: string;
+      task: string;
+      status?: "pending" | "replaced";
+      cacheEntryId: string | null;
+      outputText: string;
+      privateContent?: Record<string, unknown>;
+      resultKind?: string;
+      language?: string;
+      sourceText?: string;
+      contextText?: string;
+      bookTitle?: string;
+      chapterTitle?: string;
+      targetId?: string;
+      timestampSeconds?: number;
+      model?: string;
+      promptVersion?: string;
+      modelPolicyHash?: string;
+    },
+  ): Promise<OpsAssistantResult>;
+  listAssistantResults(userId: string): Promise<OpsAssistantResult[]>;
   putChatMessage(message: {
     accountId: string;
     threadId: string;
@@ -406,9 +511,11 @@ export function createMemoryOpsStore(
   options: {
     identity?: IdentityStore;
     catalog?: CatalogStore;
+    syncV2?: SyncStore;
   } = {},
 ): OpsStore {
   const assets = new Map<string, OpsAsset>();
+  const cleanedReadyAssetUploads = new Set<string>();
   const cache = new Map<string, OpsCacheEntry>();
   const jobs = new Map<string, OpsJob>();
   const policies = new Map<string, OpsPolicy>();
@@ -432,6 +539,7 @@ export function createMemoryOpsStore(
       createdAt: string;
     }
   >();
+  const assistantResults: OpsAssistantResult[] = [];
   const now = () => new Date().toISOString();
   seedDefaultPolicies(policies, now());
   seedDefaultFlags(flags);
@@ -440,19 +548,41 @@ export function createMemoryOpsStore(
 
   return {
     createAsset(userId, input) {
+      const owned = [
+        ...new Map(
+          [...assets.values()]
+            .filter((asset) => asset.accountId === userId)
+            .map((asset) => [asset.id, asset]),
+        ).values(),
+      ].filter((asset) => asset.status === "pending" || asset.status === "ready");
+      if (owned.filter((asset) => asset.status === "pending").length >= 32) {
+        return Promise.reject(new AssetReservationError("pending_asset_count_exceeded"));
+      }
+      const reserved = owned.reduce((sum, asset) => sum + asset.compressedBytes, 0);
+      const limit = quotaLimits.get("cloud_media_bytes") ?? 10 * 1_024 * 1_024 * 1_024;
+      if (reserved + input.compressedBytes > limit) {
+        return Promise.reject(new AssetReservationError("cloud_media_quota_exceeded"));
+      }
       const id = crypto.randomUUID();
-      const uploadId = crypto.randomUUID();
+      const uploadId = input.uploadId;
       const created: OpsAsset = {
         id,
         uploadId,
         accountId: userId,
         kind: input.kind,
         contentType: input.contentType,
-        sizeBytes: input.sizeBytes,
+        compressedBytes: input.compressedBytes,
+        originalBytes: input.originalBytes,
         sha256: input.sha256,
+        encoding: input.encoding,
+        revisionId: input.revisionId,
+        bookId: input.bookId,
+        chapterId: input.chapterId,
+        segmentCount: input.segmentCount,
         fileName: input.fileName,
         status: "pending",
-        objectKey: `${userId}/${id}`,
+        objectKey: input.objectKey,
+        uploadObjectKey: input.uploadObjectKey,
         createdAt: now(),
         deletedAt: null,
       };
@@ -466,18 +596,75 @@ export function createMemoryOpsStore(
       return Promise.resolve(asset === undefined ? undefined : { ...asset });
     },
 
+    listAssets(userId, filter) {
+      const rows = [...new Map([...assets.values()].map((asset) => [asset.id, asset])).values()]
+        .filter((asset) => asset.accountId === userId && asset.status === "ready")
+        .filter((asset) => filter?.kind === undefined || asset.kind === filter.kind)
+        .filter((asset) => filter?.bookId === undefined || asset.bookId === filter.bookId)
+        .filter((asset) => filter?.chapterId === undefined || asset.chapterId === filter.chapterId)
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      return Promise.resolve(rows.map((asset) => ({ ...asset })));
+    },
+
+    getAssetByContent(userId, kind, sha256) {
+      const asset = [...assets.values()].find(
+        (candidate) =>
+          candidate.accountId === userId &&
+          candidate.kind === kind &&
+          candidate.sha256 === sha256,
+      );
+      return Promise.resolve(asset === undefined ? undefined : { ...asset });
+    },
+
     getAssetByUpload(userId, uploadId) {
       const asset = assets.get(`upload:${userId}:${uploadId}`);
       return Promise.resolve(asset === undefined ? undefined : { ...asset });
     },
 
-    completeAsset(userId, uploadId) {
+    async completeAsset(userId, uploadId) {
       const asset = assets.get(`upload:${userId}:${uploadId}`);
       if (asset === undefined) {
-        return Promise.resolve(undefined);
+        return undefined;
+      }
+      if (asset.status === "ready") {
+        return { ...asset };
+      }
+      if (options.syncV2 !== undefined) {
+        const isTranscript =
+          asset.kind === "transcriptRevision" &&
+          asset.revisionId !== null &&
+          asset.chapterId !== null;
+        await options.syncV2.push({
+          userId,
+          deviceId: "00000000-0000-4000-8000-000000000000",
+          batchId: asset.id,
+          mutations: [
+            {
+              mutationId: asset.id,
+              entityType: isTranscript ? "transcript" : "asset",
+              entityId: isTranscript ? (asset.revisionId ?? asset.id) : asset.id,
+              operation: "upsert",
+              baseRevision: 0,
+              occurredAt: asset.createdAt,
+              payload: {
+                assetId: asset.id,
+                kind: asset.kind,
+                revisionId: asset.revisionId,
+                bookId: asset.bookId,
+                objectKey: asset.objectKey,
+                sha256: asset.sha256,
+                encoding: asset.encoding,
+                compressedBytes: asset.compressedBytes,
+                originalBytes: asset.originalBytes,
+                segmentCount: asset.segmentCount,
+                chapterId: asset.chapterId,
+              },
+            },
+          ],
+        });
       }
       asset.status = "ready";
-      return Promise.resolve({ ...asset });
+      return { ...asset };
     },
 
     lookupCache(cacheKey) {
@@ -931,7 +1118,62 @@ export function createMemoryOpsStore(
       return Promise.resolve(purged);
     },
 
+    gcAbandonedAssetUploads(before, limit) {
+      const cutoff = Date.parse(before);
+      const pending = [...new Map(
+        [...assets.values()].map((asset) => [asset.id, asset]),
+      ).values()]
+        .filter((asset) =>
+          (asset.status === "pending" && Date.parse(asset.createdAt) < cutoff) ||
+          asset.status === "deleting"
+        )
+        .slice(0, Math.max(0, Math.min(Math.floor(limit), 1_000)));
+      for (const asset of pending) asset.status = "deleting";
+      return Promise.resolve(pending.map((asset) => ({
+        id: asset.id,
+        objectKeys: [...new Set([asset.uploadObjectKey, asset.objectKey])],
+      })));
+    },
+
+    finishAbandonedAssetUploadGc(ids) {
+      for (const id of ids) {
+        const asset = [...assets.values()].find((candidate) => candidate.id === id);
+        if (asset === undefined || asset.status !== "deleting") continue;
+        assets.delete(`${asset.accountId}:${asset.id}`);
+        assets.delete(`upload:${asset.accountId}:${asset.uploadId}`);
+      }
+      return Promise.resolve();
+    },
+
+    claimReadyAssetUploadCleanup(limit) {
+      const ready = [...new Map([...assets.values()].map((asset) => [asset.id, asset])).values()]
+        .filter((asset) => asset.status === "ready" && !cleanedReadyAssetUploads.has(asset.id))
+        .slice(0, Math.max(0, Math.min(Math.floor(limit), 1_000)));
+      return Promise.resolve(ready.map((asset) => ({
+        id: asset.id,
+        uploadObjectKey: asset.uploadObjectKey,
+      })));
+    },
+
+    finishReadyAssetUploadCleanup(ids) {
+      for (const id of ids) cleanedReadyAssetUploads.add(id);
+      return Promise.resolve();
+    },
+
+    cleanupObsoleteV1Data(_userId, execute) {
+      return Promise.resolve({
+        changes: 0, outcomes: 0, batches: 0, transcriptRevisions: 0,
+        transcriptSegments: 0, assets: 0, objectKeys: [], executed: execute,
+      });
+    },
+
     async deleteAccountData(userId) {
+      for (const [key, asset] of assets) {
+        if (asset.accountId === userId) assets.delete(key);
+      }
+      for (let index = assistantResults.length - 1; index >= 0; index -= 1) {
+        if (assistantResults[index]?.accountId === userId) assistantResults.splice(index, 1);
+      }
       const profile = await options.identity?.setAccountStatus(userId, "deleted");
       analyticsPreferences.delete(userId);
       return profile !== undefined;
@@ -989,7 +1231,7 @@ export function createMemoryOpsStore(
           ...new Set(
             [...assets.values()]
               .filter((asset) => asset.accountId === userId)
-              .map((asset) => asset.objectKey),
+              .flatMap((asset) => [asset.objectKey, asset.uploadObjectKey]),
           ),
         ].sort(),
       );
@@ -1019,8 +1261,88 @@ export function createMemoryOpsStore(
       );
     },
 
-    recordAssistantUse() {
-      return Promise.resolve();
+    async recordAssistantUse(userId, input) {
+      const timestamp = now();
+      const existingIndex = assistantResults.findIndex(
+        (result) => result.accountId === userId && result.id === input.resultId,
+      );
+      const prior = existingIndex < 0 ? undefined : assistantResults[existingIndex];
+      const created: OpsAssistantResult = {
+        id: input.resultId,
+        accountId: userId,
+        task: input.task,
+        resultKind: input.resultKind ?? null,
+        status: input.status ?? (prior === undefined ? "pending" : "replaced"),
+        cacheEntryId: input.cacheEntryId,
+        outputText: input.outputText,
+        privateContent: input.privateContent ?? null,
+        language: input.language ?? null,
+        sourceText: input.sourceText ?? null,
+        contextText: input.contextText ?? null,
+        bookTitle: input.bookTitle ?? null,
+        chapterTitle: input.chapterTitle ?? null,
+        targetId: input.targetId ?? null,
+        timestampSeconds: input.timestampSeconds ?? null,
+        replacedText: null,
+        replacedModel: null,
+        privateEditedOutput: null,
+        privateNotes: null,
+        model: input.model ?? null,
+        promptVersion: input.promptVersion ?? null,
+        modelPolicyHash: input.modelPolicyHash ?? null,
+        history: [...(prior?.history ?? []), {
+          status: input.status ?? (prior === undefined ? "pending" : "replaced"),
+          outputText: input.outputText,
+          privateContent: input.privateContent ?? null,
+          resultKind: input.resultKind ?? null,
+          language: input.language ?? null,
+          sourceText: input.sourceText ?? null,
+          contextText: input.contextText ?? null,
+          bookTitle: input.bookTitle ?? null,
+          chapterTitle: input.chapterTitle ?? null,
+          targetId: input.targetId ?? null,
+          timestampSeconds: input.timestampSeconds ?? null,
+          model: input.model ?? null,
+          promptVersion: input.promptVersion ?? null,
+          modelPolicyHash: input.modelPolicyHash ?? null,
+          sharedCacheReference:
+            input.cacheEntryId === null ? null : { entryId: input.cacheEntryId },
+          recordedAt: timestamp,
+        }],
+        createdAt: prior?.createdAt ?? timestamp,
+        updatedAt: timestamp,
+        decidedAt: null,
+      };
+      if (existingIndex < 0) assistantResults.push(created);
+      else assistantResults[existingIndex] = created;
+      if (options.syncV2 !== undefined && input.resultKind !== undefined) {
+        await options.syncV2.push({
+          userId,
+          deviceId: "00000000-0000-4000-8000-000000000000",
+          batchId: crypto.randomUUID(),
+          mutations: [{
+            mutationId: crypto.randomUUID(),
+            entityType: "assistant_result",
+            entityId: input.resultId,
+            operation: "upsert",
+            baseRevision: prior?.history.length ?? 0,
+            occurredAt: timestamp,
+            payload: {
+              result: assistantResultSyncPayload(created),
+              vocabulary: [],
+            },
+          }],
+        });
+      }
+      return { ...created, history: created.history.map((item) => ({ ...item })) };
+    },
+
+    listAssistantResults(userId) {
+      return Promise.resolve(
+        assistantResults
+          .filter((result) => result.accountId === userId)
+          .map((result) => ({ ...result, history: result.history.map((item) => ({ ...item })) })),
+      );
     },
 
     // Isolate-local until a chat table exists. Always store accountId so GET
@@ -1069,6 +1391,8 @@ export function createUnavailableOpsStore(): OpsStore {
   return {
     createAsset: fail,
     getAsset: () => Promise.resolve(undefined),
+    listAssets: () => Promise.resolve([]),
+    getAssetByContent: () => Promise.resolve(undefined),
     getAssetByUpload: () => Promise.resolve(undefined),
     completeAsset: () => Promise.resolve(undefined),
     lookupCache: () => Promise.resolve(undefined),
@@ -1111,13 +1435,46 @@ export function createUnavailableOpsStore(): OpsStore {
     userProgressSummary: () => Promise.resolve(undefined),
     purgeExpiredUserProgressSummaries: fail,
     purgeExpiredProductEvents: fail,
+    gcAbandonedAssetUploads: fail,
+    finishAbandonedAssetUploadGc: fail,
+    claimReadyAssetUploadCleanup: fail,
+    finishReadyAssetUploadCleanup: fail,
+    cleanupObsoleteV1Data: fail,
     deleteAccountData: fail,
     requestAccountDeletion: fail,
     accountObjectKeys: fail,
     beginObjectWrite: fail,
     finishObjectWrite: fail,
     accountObjectWriteLeases: fail,
-    recordAssistantUse: () => Promise.resolve(),
+    recordAssistantUse: (_userId, input) => Promise.resolve({
+      id: input.resultId,
+      accountId: "",
+      task: input.task,
+      resultKind: null,
+      status: "pending",
+      cacheEntryId: input.cacheEntryId,
+      outputText: input.outputText,
+      privateContent: input.privateContent ?? null,
+      language: null,
+      sourceText: null,
+      contextText: null,
+      bookTitle: null,
+      chapterTitle: null,
+      targetId: null,
+      timestampSeconds: null,
+      replacedText: null,
+      replacedModel: null,
+      privateEditedOutput: null,
+      privateNotes: null,
+      model: input.model ?? null,
+      promptVersion: input.promptVersion ?? null,
+      modelPolicyHash: input.modelPolicyHash ?? null,
+      history: [],
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+      decidedAt: null,
+    }),
+    listAssistantResults: () => Promise.resolve([]),
     putChatMessage: () => Promise.resolve(),
     getChatMessage: () => Promise.resolve(undefined),
     getOperatorSettings: () => Promise.resolve(undefined),
@@ -1140,6 +1497,86 @@ export function createSupabaseOpsStore(
   const memory = createMemoryOpsStore(options);
   return {
     ...memory,
+    async createAsset(userId, input) {
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/reserve_v2_asset_upload",
+        body: {
+          p_upload_id: input.uploadId,
+          p_user_id: userId,
+          p_kind: input.kind,
+          p_content_type: input.contentType,
+          p_encoding: input.encoding,
+          p_compressed_bytes: input.compressedBytes,
+          p_original_bytes: input.originalBytes,
+          p_sha256: input.sha256,
+          p_object_key: input.objectKey,
+          p_upload_object_key: input.uploadObjectKey,
+          p_revision_id: input.revisionId,
+          p_book_id: input.bookId,
+          p_chapter_id: input.chapterId,
+          p_segment_count: input.segmentCount,
+        },
+      });
+      const asset = mapAssetManifestRow(restRow(response.body));
+      if (!restOk(response) || asset === undefined) {
+        const detail = restErrorDetail(response.body);
+        if (detail?.includes("pending_asset_count_exceeded") === true) {
+          throw new AssetReservationError("pending_asset_count_exceeded");
+        }
+        if (detail?.includes("cloud_media_quota_exceeded") === true) {
+          throw new AssetReservationError("cloud_media_quota_exceeded");
+        }
+        throw new RestPersistenceError(502, "Postgres did not create the asset manifest.");
+      }
+      return asset;
+    },
+    async getAsset(userId, assetId) {
+      return fetchAssetManifest(rest, userId, { id: assetId });
+    },
+    async listAssets(userId, filter) {
+      const response = await rest.request({
+        method: "GET",
+        path: "/asset_manifests_v2",
+        query: {
+          user_id: `eq.${userId}`,
+          status: "eq.ready",
+          ...(filter?.kind === undefined ? {} : { kind: `eq.${filter.kind}` }),
+          ...(filter?.bookId === undefined ? {} : { book_id: `eq.${filter.bookId}` }),
+          ...(filter?.chapterId === undefined ? {} : { chapter_id: `eq.${filter.chapterId}` }),
+          order: "created_at.asc",
+          limit: "500",
+        },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) return [];
+      return restRows(response.body)
+        .map(mapAssetManifestRow)
+        .filter((asset): asset is OpsAsset => asset !== undefined);
+    },
+    async getAssetByContent(userId, kind, sha256) {
+      return fetchAssetManifest(rest, userId, { kind, sha256 });
+    },
+    async getAssetByUpload(userId, uploadId) {
+      return fetchAssetManifest(rest, userId, { upload_id: uploadId });
+    },
+    async completeAsset(userId, uploadId) {
+      const stored = await fetchAssetManifest(rest, userId, { upload_id: uploadId });
+      if (stored === undefined) return undefined;
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/complete_v2_asset_and_publish",
+        body: {
+          p_user_id: userId,
+          p_upload_id: uploadId,
+          p_verified_compressed_bytes: stored.compressedBytes,
+          p_verified_sha256: stored.sha256,
+        },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(502, "Postgres did not publish the verified asset.");
+      }
+      return fetchAssetManifest(rest, userId, { upload_id: uploadId });
+    },
     async lookupCache(cacheKey) {
       return fetchCacheByKey(rest, cacheKey);
     },
@@ -1321,17 +1758,55 @@ export function createSupabaseOpsStore(
       return mapJobRow(restRow(response.body));
     },
     async recordAssistantUse(userId, input) {
-      await rest.request({
+      const response = await rest.request({
         method: "POST",
-        path: "/user_assistant_results",
+        path: "/rpc/record_user_assistant_result",
         body: {
-          user_id: userId,
-          task_type: input.task,
-          status: "pending",
-          cache_entry_id: input.cacheEntryId,
-          output_text: input.outputText.slice(0, 20000),
+          p_user_id: userId,
+          p_result: {
+            id: input.resultId,
+            task: input.task,
+            status: input.status ?? "pending",
+            cacheEntryId: input.cacheEntryId,
+            outputText: input.outputText.slice(0, 20000),
+            ...(input.privateContent === undefined ? {} : { privateContent: input.privateContent }),
+            ...(input.resultKind === undefined ? {} : { resultKind: input.resultKind }),
+            ...(input.language === undefined ? {} : { language: input.language }),
+            ...(input.sourceText === undefined ? {} : { sourceText: input.sourceText.slice(0, 20000) }),
+            ...(input.contextText === undefined ? {} : { contextText: input.contextText.slice(0, 20000) }),
+            ...(input.bookTitle === undefined ? {} : { bookTitle: input.bookTitle }),
+            ...(input.chapterTitle === undefined ? {} : { chapterTitle: input.chapterTitle }),
+            ...(input.targetId === undefined ? {} : { targetId: input.targetId }),
+            ...(input.timestampSeconds === undefined
+              ? {}
+              : { timestampSeconds: input.timestampSeconds }),
+            ...(input.model === undefined ? {} : { model: input.model }),
+            ...(input.promptVersion === undefined ? {} : { promptVersion: input.promptVersion }),
+            ...(input.modelPolicyHash === undefined
+              ? {}
+              : { modelPolicyHash: input.modelPolicyHash }),
+            createdAt: new Date().toISOString(),
+          },
         },
       });
+      const mapped = mapAssistantResultRow(restRow(response.body));
+      if (!restOk(response) || mapped === undefined) {
+        throw new RestPersistenceError(502, "Postgres did not persist the private assistant result.");
+      }
+      return mapped;
+    },
+    async listAssistantResults(userId) {
+      const response = await rest.request({
+        method: "GET",
+        path: "/user_assistant_results",
+        query: { user_id: `eq.${userId}`, select: "*", order: "created_at.asc,id.asc" },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(502, "Postgres could not list private assistant results.");
+      }
+      return restRows(response.body)
+        .map(mapAssistantResultRow)
+        .filter((result): result is OpsAssistantResult => result !== undefined);
     },
     async adminUsers() {
       const response = await rest.request({
@@ -1453,6 +1928,84 @@ export function createSupabaseOpsStore(
       }
       return Math.floor(count);
     },
+    async gcAbandonedAssetUploads(before, limit) {
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/gc_abandoned_v2_uploads",
+        body: { p_before: before, p_limit: Math.max(0, Math.min(Math.floor(limit), 1_000)) },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(502, "Postgres could not claim abandoned asset uploads.");
+      }
+      return restRows(response.body).flatMap((row) =>
+        typeof row.id === "string"
+          ? [{
+              id: row.id,
+              objectKeys: [...new Set([row.upload_object_key, row.object_key].filter(
+                (key): key is string => typeof key === "string" && key !== "",
+              ))],
+            }]
+          : [],
+      );
+    },
+    async finishAbandonedAssetUploadGc(ids) {
+      if (ids.length === 0) return;
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/finish_v2_asset_upload_gc",
+        body: { p_ids: ids },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(502, "Postgres could not finish asset upload GC.");
+      }
+    },
+    async claimReadyAssetUploadCleanup(limit) {
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/claim_v2_ready_upload_cleanup",
+        body: { p_limit: Math.max(0, Math.min(Math.floor(limit), 1_000)) },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(502, "Postgres could not claim ready upload cleanup.");
+      }
+      return restRows(response.body).flatMap((row) =>
+        typeof row.id === "string" && typeof row.upload_object_key === "string"
+          ? [{ id: row.id, uploadObjectKey: row.upload_object_key }]
+          : [],
+      );
+    },
+    async finishReadyAssetUploadCleanup(ids) {
+      if (ids.length === 0) return;
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/finish_v2_ready_upload_cleanup",
+        body: { p_ids: ids },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(502, "Postgres could not finish ready upload cleanup.");
+      }
+    },
+    async cleanupObsoleteV1Data(userId, execute) {
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/cleanup_obsolete_v1_data",
+        body: { p_user_id: userId, p_execute: execute },
+      });
+      if (!restOk(response) || !isRecord(response.body)) {
+        throw new RestPersistenceError(502, "Postgres could not inspect obsolete v1 data.");
+      }
+      const body = response.body;
+      const count = (key: string) => Math.max(0, finiteNumber(body[key]) ?? 0);
+      return {
+        changes: count("changes"), outcomes: count("outcomes"), batches: count("batches"),
+        transcriptRevisions: count("transcriptRevisions"),
+        transcriptSegments: count("transcriptSegments"), assets: count("assets"),
+        objectKeys: Array.isArray(body.objectKeys)
+          ? body.objectKeys.filter((key): key is string => typeof key === "string")
+          : [],
+        executed: body.executed === true,
+      };
+    },
     async deleteAccountData(userId) {
       const response = await rest.request({
         method: "POST",
@@ -1486,7 +2039,7 @@ export function createSupabaseOpsStore(
       return { request, job };
     },
     async accountObjectKeys(userId) {
-      const [assets, transcripts] = await Promise.all([
+      const [assets, transcripts, v2] = await Promise.all([
         rest.request({
           method: "GET",
           path: "/book_assets",
@@ -1497,19 +2050,29 @@ export function createSupabaseOpsStore(
           path: "/transcript_revisions",
           query: { user_id: `eq.${userId}`, select: "object_key" },
         }),
+        rest.request({
+          method: "GET",
+          path: "/asset_manifests_v2",
+          query: { user_id: `eq.${userId}`, select: "object_key,upload_object_key" },
+        }),
       ]);
       if (
         !restOk(assets) ||
         isErrorBody(assets.body) ||
         !restOk(transcripts) ||
-        isErrorBody(transcripts.body)
+        isErrorBody(transcripts.body) ||
+        !restOk(v2) ||
+        isErrorBody(v2.body)
       ) {
         throw new RestPersistenceError(502, "Postgres could not enumerate account objects.");
       }
       return [
         ...new Set(
-          [...restRows(assets.body), ...restRows(transcripts.body)].flatMap((row) =>
-            typeof row.object_key === "string" && row.object_key !== "" ? [row.object_key] : [],
+          [...restRows(assets.body), ...restRows(transcripts.body), ...restRows(v2.body)].flatMap(
+            (row) =>
+              [row.object_key, row.upload_object_key].filter(
+                (key): key is string => typeof key === "string" && key !== "",
+              ),
           ),
         ),
       ].sort();
@@ -1599,18 +2162,26 @@ export function createSupabaseOpsStore(
       return patchFeatureFlag(rest, key, patch);
     },
     async quotasFor(userId) {
-      const response = await rest.request({
-        method: "GET",
-        path: "/quota_limits",
-        query: { select: "*" },
-      });
+      const [response, readyAssets] = await Promise.all([
+        rest.request({
+          method: "GET",
+          path: "/quota_limits",
+          query: { select: "*" },
+        }),
+        rest.request({
+          method: "GET",
+          path: "/asset_manifests_v2",
+          query: {
+            user_id: `eq.${userId}`,
+            status: "eq.ready",
+            select: "compressed_bytes",
+          },
+        }),
+      ]);
       if (response.status >= 400 || response.status === 0) {
         return memory.quotasFor(userId);
       }
       const rows = restRows(response.body);
-      if (rows.length === 0) {
-        return memory.quotasFor(userId);
-      }
       for (const row of rows) {
         if (typeof row.key === "string" && isQuotaKey(row.key)) {
           const limit = finiteNumber(row.limit_value);
@@ -1619,7 +2190,15 @@ export function createSupabaseOpsStore(
           }
         }
       }
-      return memory.quotasFor(userId);
+      const quotas = await memory.quotasFor(userId);
+      if (!restOk(readyAssets) || isErrorBody(readyAssets.body)) return quotas;
+      const readyBytes = restRows(readyAssets.body).reduce(
+        (total, row) => total + (finiteNumber(row.compressed_bytes) ?? 0),
+        0,
+      );
+      return quotas.map((quota) =>
+        quota.key === "cloud_media_bytes" ? { ...quota, used: readyBytes } : quota,
+      );
     },
     async patchQuota(key, limit) {
       if (!isQuotaKey(key) || limit < 0) {
@@ -2076,6 +2655,85 @@ function mapJobRow(row: Record<string, unknown> | undefined): OpsJob | undefined
   };
 }
 
+function mapAssistantResultRow(
+  row: Record<string, unknown> | undefined,
+): OpsAssistantResult | undefined {
+  if (
+    row === undefined ||
+    typeof row.id !== "string" ||
+    typeof row.user_id !== "string" ||
+    typeof row.task_type !== "string"
+  ) {
+    return undefined;
+  }
+  const status = row.status;
+  if (
+    status !== "pending" && status !== "accepted" && status !== "rejected" &&
+    status !== "stale" && status !== "edited" && status !== "replaced"
+  ) {
+    return undefined;
+  }
+  return {
+    id: row.id,
+    accountId: row.user_id,
+    task: row.task_type,
+    resultKind: typeof row.result_kind === "string" ? row.result_kind : null,
+    status,
+    cacheEntryId: typeof row.cache_entry_id === "string" ? row.cache_entry_id : null,
+    outputText: typeof row.output_text === "string" ? row.output_text : null,
+    privateContent: isRecord(row.private_content) ? row.private_content : null,
+    language: typeof row.language === "string" ? row.language : null,
+    sourceText: typeof row.source_text === "string" ? row.source_text : null,
+    contextText: typeof row.context_text === "string" ? row.context_text : null,
+    bookTitle: typeof row.book_title === "string" ? row.book_title : null,
+    chapterTitle: typeof row.chapter_title === "string" ? row.chapter_title : null,
+    targetId: typeof row.target_id === "string" ? row.target_id : null,
+    timestampSeconds: typeof row.timestamp_seconds === "number" ? row.timestamp_seconds : null,
+    replacedText: typeof row.replaced_text === "string" ? row.replaced_text : null,
+    replacedModel: typeof row.replaced_model === "string" ? row.replaced_model : null,
+    privateEditedOutput:
+      typeof row.private_edited_output === "string" ? row.private_edited_output : null,
+    privateNotes: typeof row.private_notes === "string" ? row.private_notes : null,
+    model: typeof row.model === "string" ? row.model : null,
+    promptVersion: typeof row.prompt_version === "string" ? row.prompt_version : null,
+    modelPolicyHash: typeof row.model_policy_hash === "string" ? row.model_policy_hash : null,
+    history: Array.isArray(row.history)
+      ? row.history.filter(
+          (item): item is Record<string, unknown> =>
+            typeof item === "object" && item !== null && !Array.isArray(item),
+        )
+      : [],
+    createdAt: typeof row.created_at === "string" ? row.created_at : new Date(0).toISOString(),
+    updatedAt: typeof row.updated_at === "string" ? row.updated_at : new Date(0).toISOString(),
+    decidedAt: typeof row.decided_at === "string" ? row.decided_at : null,
+  };
+}
+
+/** Server-generated private results use the same compact shape native lifecycle mutations publish. */
+function assistantResultSyncPayload(result: OpsAssistantResult): Record<string, unknown> {
+  return {
+    id: result.id,
+    kind: result.resultKind ?? (result.task === "chapter_summary" ? "chapterSummary" : "sentenceGloss"),
+    status: result.status,
+    language: result.language ?? "",
+    model: result.model ?? "",
+    promptVersion: result.promptVersion ?? "",
+    modelPolicyHash: result.modelPolicyHash ?? "",
+    source: result.sourceText ?? "",
+    text: result.outputText ?? "",
+    context: result.contextText,
+    bookTitle: result.bookTitle,
+    chapterTitle: result.chapterTitle,
+    targetID: result.targetId,
+    timestamp: result.timestampSeconds,
+    createdAt: result.createdAt,
+    decidedAt: result.decidedAt,
+    sharedCacheEntryID: result.cacheEntryId,
+    privateContentJSON:
+      result.privateContent === null ? null : JSON.stringify(result.privateContent),
+  };
+}
+
 function mapCacheRow(row: Record<string, unknown> | undefined): OpsCacheEntry | undefined {
   if (
     row === undefined ||
@@ -2146,8 +2804,12 @@ async function buildQuotas(
   let storageBytes = 0;
   if (userId !== "") {
     for (const [key, asset] of assets) {
-      if (key.startsWith(`${userId}:`) && !key.startsWith("upload:")) {
-        storageBytes += asset.sizeBytes;
+      if (
+        key.startsWith(`${userId}:`) &&
+        !key.startsWith("upload:") &&
+        asset.status === "ready"
+      ) {
+        storageBytes += asset.compressedBytes;
       }
     }
   }
@@ -2923,6 +3585,70 @@ function restErrorDetail(body: unknown): string | undefined {
     return body.message.trim().slice(0, 280);
   }
   return undefined;
+}
+
+async function fetchAssetManifest(
+  rest: RestClient,
+  userId: string,
+  identity: { id?: string; upload_id?: string; kind?: AssetKind; sha256?: string },
+): Promise<OpsAsset | undefined> {
+  const response = await rest.request({
+    method: "GET",
+    path: "/asset_manifests_v2",
+    query: {
+      user_id: `eq.${userId}`,
+      ...(identity.id === undefined ? {} : { id: `eq.${identity.id}` }),
+      ...(identity.upload_id === undefined ? {} : { upload_id: `eq.${identity.upload_id}` }),
+      ...(identity.kind === undefined ? {} : { kind: `eq.${identity.kind}` }),
+      ...(identity.sha256 === undefined ? {} : { sha256: `eq.${identity.sha256}` }),
+      limit: "1",
+    },
+  });
+  if (!restOk(response) || isErrorBody(response.body)) return undefined;
+  return mapAssetManifestRow(restRows(response.body)[0]);
+}
+
+function mapAssetManifestRow(row: Record<string, unknown> | undefined): OpsAsset | undefined {
+  if (
+    row === undefined ||
+    typeof row.id !== "string" ||
+    typeof row.upload_id !== "string" ||
+    typeof row.user_id !== "string" ||
+    typeof row.kind !== "string" ||
+    typeof row.content_type !== "string" ||
+    typeof row.encoding !== "string" ||
+    typeof row.sha256 !== "string" ||
+    typeof row.object_key !== "string" ||
+    typeof row.upload_object_key !== "string"
+  ) {
+    return undefined;
+  }
+  const kind = row.kind as AssetKind;
+  const status = row.status as AssetStatus;
+  const compressedBytes = finiteNumber(row.compressed_bytes);
+  const originalBytes = finiteNumber(row.original_bytes);
+  if (compressedBytes === undefined || originalBytes === undefined) return undefined;
+  return {
+    id: row.id,
+    uploadId: row.upload_id,
+    accountId: row.user_id,
+    kind,
+    contentType: row.content_type,
+    compressedBytes,
+    originalBytes,
+    sha256: row.sha256,
+    encoding: row.encoding,
+    revisionId: typeof row.revision_id === "string" ? row.revision_id : null,
+    bookId: typeof row.book_id === "string" ? row.book_id : null,
+    chapterId: typeof row.chapter_id === "string" ? row.chapter_id : null,
+    segmentCount: finiteNumber(row.segment_count) ?? null,
+    fileName: "",
+    status,
+    objectKey: row.object_key,
+    uploadObjectKey: row.upload_object_key,
+    createdAt: typeof row.created_at === "string" ? row.created_at : new Date().toISOString(),
+    deletedAt: typeof row.deleted_at === "string" ? row.deleted_at : null,
+  };
 }
 
 function unknownRestColumn(body: unknown): string | undefined {

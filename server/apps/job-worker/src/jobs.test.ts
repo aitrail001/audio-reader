@@ -117,6 +117,74 @@ describe("job worker", () => {
     expect(jobs[0]?.payload.text).toBe("hi");
   });
 
+  it("explicit legacy cleanup enumerates owned v1 objects before deleting database rows", async () => {
+    const database = createFakeDatabaseClient();
+    const accountId = "00000000-0000-4000-8000-000000000002";
+    await database.ops.createJob({ accountId, kind: "legacy_cleanup", payload: {} });
+    const calls: boolean[] = [];
+    Object.assign(database.ops, {
+      cleanupObsoleteV1Data(_userId: string, execute: boolean) {
+        calls.push(execute);
+        return Promise.resolve({
+          changes: 1, outcomes: 1, batches: 1, transcriptRevisions: 1,
+          transcriptSegments: 2, assets: 1,
+          objectKeys: [`${accountId}/manifest-audio.m4b`, "another-user/not-owned"],
+          executed: execute,
+        });
+      },
+    });
+    const objects = deletionStore([
+      `${accountId}/enumerated-cover.jpg`,
+      `private/v1/${accountId}/enumerated-transcript.json`,
+      `private/v2/${accountId}/audio/${"a".repeat(64)}`,
+      "another-user/not-owned",
+    ]);
+
+    await expect(processQueuedJobs(database.ops, createFakeQwenClient(), objects)).resolves.toBe(1);
+
+    expect(calls).toEqual([false, true]);
+    expect(objects.deleted.sort()).toEqual([
+      `${accountId}/enumerated-cover.jpg`,
+      `${accountId}/manifest-audio.m4b`,
+      `private/v1/${accountId}/enumerated-transcript.json`,
+    ].sort());
+    expect(await database.ops.listJobs({ status: "succeeded" })).toHaveLength(1);
+  });
+
+  it("legacy cleanup retries without deleting rows when object deletion fails", async () => {
+    const database = createFakeDatabaseClient();
+    const accountId = "00000000-0000-4000-8000-000000000002";
+    const objectKey = `${accountId}/legacy.epub`;
+    await database.ops.createJob({ accountId, kind: "legacy_cleanup", payload: {} });
+    const calls: boolean[] = [];
+    Object.assign(database.ops, {
+      cleanupObsoleteV1Data(_userId: string, execute: boolean) {
+        calls.push(execute);
+        return Promise.resolve({
+          changes: 1, outcomes: 0, batches: 0, transcriptRevisions: 0,
+          transcriptSegments: 0, assets: 1, objectKeys: [objectKey], executed: execute,
+        });
+      },
+    });
+    let fail = true;
+    const backing = deletionStore([objectKey]);
+    const objects = {
+      ...backing,
+      delete(key: string) {
+        if (fail) return Promise.reject(new Error("object delete failed"));
+        return backing.delete(key);
+      },
+    };
+
+    await expect(processQueuedJobs(database.ops, createFakeQwenClient(), objects)).resolves.toBe(0);
+    expect(calls).toEqual([false]);
+    expect(await database.ops.listJobs({ status: "queued" })).toHaveLength(1);
+    fail = false;
+    await expect(processQueuedJobs(database.ops, createFakeQwenClient(), objects)).resolves.toBe(1);
+    expect(calls).toEqual([false, false, true]);
+    expect(await database.ops.listJobs({ status: "succeeded" })).toHaveLength(1);
+  });
+
   it("acks a queue batch after processing queued jobs", async () => {
     const database = createFakeDatabaseClient();
     await database.ops.createJob({
@@ -159,11 +227,16 @@ describe("job worker", () => {
         return Promise.resolve(true);
       },
     });
-    const objects = deletionStore([`${profile.accountId}/audio.m4b`, "other-user/cover.jpg"]);
+    const v2Key = `private/v2/${profile.accountId}/transcriptRevision/${"a".repeat(64)}`;
+    const objects = deletionStore([
+      `${profile.accountId}/audio.m4b`,
+      v2Key,
+      "other-user/cover.jpg",
+    ]);
     const completed = await processQueuedJobs(database.ops, createFakeQwenClient(), objects);
     expect(completed).toBe(1);
     expect(deleted).toEqual([profile.accountId]);
-    expect(objects.deleted).toEqual([`${profile.accountId}/audio.m4b`]);
+    expect(objects.deleted).toEqual([`${profile.accountId}/audio.m4b`, v2Key]);
     expect(await database.ops.listJobs({ status: "succeeded" })).toHaveLength(1);
   });
 
@@ -217,6 +290,87 @@ describe("job worker", () => {
       runScheduledMaintenance(database.ops, createFakeQwenClient()),
     ).resolves.toMatchObject({ purgedSnapshots: 2, purgedProductEvents: 7, completedJobs: 0 });
     expect(calls).toEqual(["progress-purge", "event-purge", "jobs"]);
+  });
+
+  it("deletes bounded abandoned-upload objects during scheduled maintenance", async () => {
+    const database = createFakeDatabaseClient();
+    const objectKey = `private/v2/00000000-0000-4000-8000-000000000002/pending/abandoned`;
+    Object.assign(database.ops, {
+      gcAbandonedAssetUploads: () => Promise.resolve([{ id: "upload-1", objectKeys: [objectKey] }]),
+      finishAbandonedAssetUploadGc: () => Promise.resolve(),
+    });
+    const objects = deletionStore([objectKey]);
+
+    await expect(
+      runScheduledMaintenance(database.ops, createFakeQwenClient(), objects),
+    ).resolves.toMatchObject({ purgedAssetObjects: 1 });
+    expect(objects.deleted).toEqual([objectKey]);
+  });
+
+  it("retains and retries a ready manifest upload cleanup after storage failure", async () => {
+    const database = createFakeDatabaseClient();
+    const uploadKey = "private/v2/00000000-0000-4000-8000-000000000002/pending/ready-retry";
+    let finished = false;
+    let failDelete = true;
+    Object.assign(database.ops, {
+      claimReadyAssetUploadCleanup: () => Promise.resolve(
+        finished ? [] : [{ id: "ready-retry", uploadObjectKey: uploadKey }],
+      ),
+      finishReadyAssetUploadCleanup: () => {
+        finished = true;
+        return Promise.resolve();
+      },
+      claimJobs: () => Promise.resolve([]),
+    });
+    const objects = {
+      list: () => Promise.resolve([]),
+      delete: () => {
+        if (failDelete) return Promise.reject(new Error("object delete failed"));
+        return Promise.resolve();
+      },
+    };
+
+    await expect(
+      runScheduledMaintenance(database.ops, createFakeQwenClient(), objects),
+    ).rejects.toThrow("object delete failed");
+    expect(finished).toBe(false);
+    failDelete = false;
+    await expect(
+      runScheduledMaintenance(database.ops, createFakeQwenClient(), objects),
+    ).resolves.toMatchObject({ completedJobs: 0 });
+    expect(finished).toBe(true);
+  });
+
+  it("keeps a deleting manifest durable and retries after object storage failure", async () => {
+    const database = createFakeDatabaseClient();
+    const objectKey = "private/v2/00000000-0000-4000-8000-000000000002/pending/retry";
+    let finished = 0;
+    Object.assign(database.ops, {
+      gcAbandonedAssetUploads: () =>
+        Promise.resolve([{ id: "upload-retry", objectKeys: [objectKey] }]),
+      finishAbandonedAssetUploadGc: () => {
+        finished += 1;
+        return Promise.resolve();
+      },
+    });
+    let fail = true;
+    const objects = {
+      ...deletionStore([]),
+      delete() {
+        if (fail) return Promise.reject(new Error("storage unavailable"));
+        return Promise.resolve();
+      },
+    };
+
+    await expect(
+      runScheduledMaintenance(database.ops, createFakeQwenClient(), objects),
+    ).rejects.toThrow("storage unavailable");
+    expect(finished).toBe(0);
+    fail = false;
+    await expect(
+      runScheduledMaintenance(database.ops, createFakeQwenClient(), objects),
+    ).resolves.toMatchObject({ purgedAssetObjects: 1 });
+    expect(finished).toBe(1);
   });
 
   it("does not complete an account deletion job when erasure fails", async () => {

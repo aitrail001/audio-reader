@@ -1,6 +1,10 @@
 import Foundation
 import SQLite3
 
+enum LocalSQLiteError: Error, Equatable, Sendable {
+    case sqlite(String)
+}
+
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 private let sqliteStatic = unsafeBitCast(0, to: sqlite3_destructor_type.self)
 
@@ -31,24 +35,24 @@ final class SQLiteConnection: @unchecked Sendable {
     }
 
     func exec(_ sql: String) throws {
-        guard db != nil else { throw LocalMigrationError.sqlite("closed") }
+        guard db != nil else { throw LocalSQLiteError.sqlite("closed") }
         var errorMessage: UnsafeMutablePointer<CChar>?
         let status = sqlite3_exec(db, sql, nil, nil, &errorMessage)
         if let errorMessage {
             let text = String(cString: errorMessage)
             sqlite3_free(errorMessage)
             if status != SQLITE_OK {
-                throw LocalMigrationError.sqlite("\(sql): \(text)")
+                throw LocalSQLiteError.sqlite("\(sql): \(text)")
             }
         } else if status != SQLITE_OK {
-            throw LocalMigrationError.sqlite("\(sql): \(errmsg())")
+            throw LocalSQLiteError.sqlite("\(sql): \(errmsg())")
         }
     }
 
     func prepare(_ sql: String) throws -> OpaquePointer {
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
-            throw LocalMigrationError.sqlite("prepare \(sql): \(errmsg())")
+            throw LocalSQLiteError.sqlite("prepare \(sql): \(errmsg())")
         }
         return stmt
     }
@@ -62,7 +66,7 @@ final class SQLiteConnection: @unchecked Sendable {
             let step = sqlite3_step(stmt)
             if step == SQLITE_DONE { break }
             guard step == SQLITE_ROW else {
-                throw LocalMigrationError.sqlite("query \(sql): \(errmsg())")
+                throw LocalSQLiteError.sqlite("query \(sql): \(errmsg())")
             }
             var row: [String: String] = [:]
             let cols = sqlite3_column_count(stmt)
@@ -83,7 +87,7 @@ final class SQLiteConnection: @unchecked Sendable {
         defer { sqlite3_finalize(stmt) }
         try bind(stmt)
         guard sqlite3_step(stmt) == SQLITE_DONE else {
-            throw LocalMigrationError.sqlite("run \(sql): \(errmsg())")
+            throw LocalSQLiteError.sqlite("run \(sql): \(errmsg())")
         }
     }
 
@@ -111,7 +115,7 @@ final class SQLiteConnection: @unchecked Sendable {
     static func validateIdentifier(_ value: String) throws {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
         guard !value.isEmpty, value.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
-            throw LocalMigrationError.sqlite("invalid identifier \(value)")
+            throw LocalSQLiteError.sqlite("invalid identifier \(value)")
         }
     }
 
@@ -164,6 +168,10 @@ final class SQLiteConnection: @unchecked Sendable {
     private func errmsg() -> String {
         db.flatMap { sqlite3_errmsg($0) }.map { String(cString: $0) } ?? "unknown"
     }
+
+    var totalChangeCount: Int {
+        db.map { Int(sqlite3_total_changes($0)) } ?? 0
+    }
 }
 
 enum LocalJSON {
@@ -183,29 +191,13 @@ enum LocalJSON {
     static func encode<Value: Encodable>(_ value: Value) throws -> String {
         let data = try encoder.encode(value)
         guard let text = String(data: data, encoding: .utf8) else {
-            throw LocalMigrationError.sqlite("utf8 encode")
+            throw LocalSQLiteError.sqlite("utf8 encode")
         }
         return text
     }
 
     static func decode<Value: Decodable>(_ type: Value.Type, from text: String) throws -> Value {
         try decoder.decode(type, from: Data(text.utf8))
-    }
-
-    static func decodeFile<Value: Decodable>(_ type: Value.Type, at url: URL) -> Value? {
-        guard FileManager.default.fileExists(atPath: url.path),
-              let data = try? Data(contentsOf: url)
-        else { return nil }
-        do {
-            return try decoder.decode(type, from: data)
-        } catch {
-            NSLog(
-                "AudioReader local schema v2: skipped undecodable file %@: %@",
-                url.lastPathComponent,
-                String(describing: error)
-            )
-            return nil
-        }
     }
 }
 
@@ -214,7 +206,7 @@ extension Dictionary where Key == String, Value == String {
 
     func required(_ key: String) throws -> String {
         guard let value = self[key] else {
-            throw LocalMigrationError.sqlite("missing column \(key)")
+            throw LocalSQLiteError.sqlite("missing column \(key)")
         }
         return value
     }

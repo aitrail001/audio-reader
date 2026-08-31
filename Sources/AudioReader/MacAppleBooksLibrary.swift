@@ -2,6 +2,12 @@
 import AppKit
 import AVFoundation
 import Foundation
+import OSLog
+
+private let appleBooksLog = Logger(
+    subsystem: "com.johnsonzhang.AudioReader",
+    category: "apple-books-library"
+)
 
 struct MacAppleBookItem: Identifiable, Hashable, Sendable {
     enum Kind: String, Hashable, Sendable {
@@ -33,8 +39,12 @@ final class MacAppleBooksLibrary {
 
     func reload() async {
         guard !isLoading else { return }
+        let requestID = UUID().uuidString
         isLoading = true
         defer { isLoading = false }
+        appleBooksLog.info(
+            "apple_books_scan_started message=apple_books_scan_started requestId=\(requestID, privacy: .public) component=apple-books-library"
+        )
         do {
             items = try await Task.detached(priority: .userInitiated) {
                 try await Self.readDownloadedBooks()
@@ -44,15 +54,25 @@ final class MacAppleBooksLibrary {
             message = unavailable > 0
                 ? "Found \(available) importable and \(unavailable) protected or unreadable downloaded Apple Books titles."
                 : "Found \(available) accessible downloaded audiobooks and EPUB books in Apple Books."
+            appleBooksLog.info(
+                "apple_books_scan_finished message=apple_books_scan_finished requestId=\(requestID, privacy: .public) component=apple-books-library outcome=success total_count=\(self.items.count, privacy: .public) importable_count=\(available, privacy: .public) unavailable_count=\(unavailable, privacy: .public)"
+            )
         } catch {
             items = []
             message = "Downloaded Apple Books files could not be read: \(error.localizedDescription)"
+            appleBooksLog.error(
+                "apple_books_scan_finished message=apple_books_scan_finished requestId=\(requestID, privacy: .public) component=apple-books-library outcome=failure error_type=\(String(reflecting: type(of: error)), privacy: .public)"
+            )
         }
     }
 
     nonisolated private static func readDownloadedBooks() async throws -> [MacAppleBookItem] {
         let booksRoot = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Containers/com.apple.BKAgentService/Data/Documents/iBooks/Books")
+        return try await readDownloadedBooks(in: booksRoot)
+    }
+
+    nonisolated static func readDownloadedBooks(in booksRoot: URL) async throws -> [MacAppleBookItem] {
         guard FileManager.default.fileExists(atPath: booksRoot.path) else { return [] }
         let keys: [URLResourceKey] = [.isRegularFileKey]
         guard let enumerator = FileManager.default.enumerator(
@@ -131,11 +151,19 @@ final class MacAppleBooksLibrary {
         return try await item?.load(.stringValue)
     }
 
-    func importAudiobook(_ item: MacAppleBookItem, into libraryRoot: URL) throws {
+    func importAudiobook(
+        _ item: MacAppleBookItem,
+        into libraryRoot: URL,
+        duplicatePolicy: AudiobookDuplicateImportPolicy = .keepExisting
+    ) throws {
         guard item.canImport, let location = item.location else {
             throw AudiobookImportError.protectedOrUnavailable
         }
-        let result = try AudiobookImportService.importFiles([location], into: libraryRoot)
+        let result = try AudiobookImportService.importFiles(
+            [location],
+            into: libraryRoot,
+            duplicatePolicy: duplicatePolicy
+        )
         let folder = result.folder
         try AudiobookImportService.writeMarkers(
             source: .appleBooks,

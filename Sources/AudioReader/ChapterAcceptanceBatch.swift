@@ -109,9 +109,23 @@ enum ChapterAcceptanceBatch {
                         recordUpsert(entry)
                     }
                 } else {
+                    let canonicalization = VocabularyCanonicalizer.canonicalize(
+                        surfaceForm: gloss.source,
+                        context: original,
+                        language: defaults.sourceLanguage ?? "und"
+                    )
                     let entry = VocabEntry(
                         id: UUID().uuidString,
                         word: gloss.source,
+                        canonicalForm: canonicalization.canonicalForm,
+                        partOfSpeech: canonicalization.partOfSpeech,
+                        senseID: canonicalization.senseID,
+                        canonicalizationSource: canonicalization.source,
+                        canonicalizationConfidence: canonicalization.confidence,
+                        canonicalizationStatus: canonicalization.status,
+                        canonicalizationTraceID: canonicalization.traceID,
+                        captureSource: .explicitWord,
+                        reviewEligible: true,
                         category: .word,
                         translation: gloss.text,
                         translationLanguage: gloss.language,
@@ -139,12 +153,20 @@ enum ChapterAcceptanceBatch {
                 }
                 if let match {
                     var entry = working[match]
+                    let shouldRemainReferenceOnly = entry.reviewCount == 0 && !entry.isInLearnList
                     if entry.translation != gloss.text
                         || entry.translationLanguage != gloss.language
-                        || entry.translationModel != gloss.model {
+                        || entry.translationModel != gloss.model
+                        || (shouldRemainReferenceOnly && (
+                            entry.captureSource != .acceptedSentenceTranslation || entry.reviewEligible
+                        )) {
                         entry.translation = gloss.text
                         entry.translationLanguage = gloss.language
                         entry.translationModel = gloss.model
+                        if shouldRemainReferenceOnly {
+                            entry.captureSource = .acceptedSentenceTranslation
+                            entry.reviewEligible = false
+                        }
                         working[match] = entry
                         recordUpsert(entry)
                     }
@@ -152,6 +174,12 @@ enum ChapterAcceptanceBatch {
                     let entry = VocabEntry(
                         id: UUID().uuidString,
                         word: String(gloss.source.prefix(80)),
+                        canonicalForm: gloss.source,
+                        partOfSpeech: .sentence,
+                        canonicalizationConfidence: 1,
+                        canonicalizationStatus: .confirmed,
+                        captureSource: .acceptedSentenceTranslation,
+                        reviewEligible: false,
                         category: .sentence,
                         translation: gloss.text,
                         translationLanguage: gloss.language,
@@ -174,11 +202,35 @@ enum ChapterAcceptanceBatch {
 
                 for phrase in GlossPhrases.extract(from: gloss.text) {
                     let phraseKey = PhraseKey(word: phrase.phrase, context: gloss.source)
-                    guard phraseIndices[phraseKey] == nil else { continue }
+                    if let match = phraseIndices[phraseKey] {
+                        var entry = working[match]
+                        if entry.reviewCount == 0, !entry.isInLearnList,
+                           entry.captureSource != .automaticPhraseSuggestion || entry.reviewEligible {
+                            entry.captureSource = .automaticPhraseSuggestion
+                            entry.reviewEligible = false
+                            working[match] = entry
+                            recordUpsert(entry)
+                        }
+                        continue
+                    }
                     let hit = definitionResolver?(phrase.phrase)
+                    let canonicalization = VocabularyCanonicalizer.canonicalize(
+                        surfaceForm: phrase.phrase,
+                        context: gloss.source,
+                        language: defaults.sourceLanguage ?? "und"
+                    )
                     let entry = VocabEntry(
                         id: UUID().uuidString,
                         word: phrase.phrase,
+                        canonicalForm: canonicalization.canonicalForm,
+                        partOfSpeech: canonicalization.partOfSpeech,
+                        senseID: canonicalization.senseID,
+                        canonicalizationSource: canonicalization.source,
+                        canonicalizationConfidence: canonicalization.confidence,
+                        canonicalizationStatus: canonicalization.status,
+                        canonicalizationTraceID: canonicalization.traceID,
+                        captureSource: .automaticPhraseSuggestion,
+                        reviewEligible: false,
                         category: .phrase,
                         definition: hit.map { DictionaryLookup.plainPreview(from: $0.preview) },
                         dictionaryName: hit?.name,

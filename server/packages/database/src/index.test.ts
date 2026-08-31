@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { CORE_TABLES, TRANSACTION_FUNCTIONS, createFakeDatabaseClient, packageId } from "./index";
+import {
+  ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION,
+  CORE_TABLES,
+  TRANSACTION_FUNCTIONS,
+  createFakeDatabaseClient,
+  createSupabaseDatabaseClient,
+  packageId,
+} from "./index";
 
 describe("@audio-reader/database", () => {
   it("identifies the database package", () => {
@@ -7,7 +14,8 @@ describe("@audio-reader/database", () => {
   });
 
   it("exports the core multi-user table contract", () => {
-    expect(CORE_TABLES).toHaveLength(38);
+    expect(CORE_TABLES).toHaveLength(43);
+    expect(CORE_TABLES).toContain("service_schema_versions");
     expect(CORE_TABLES).toContain("chat_messages");
     expect(CORE_TABLES).toContain("passwordless_hits");
     expect(CORE_TABLES).toContain("profiles");
@@ -20,6 +28,10 @@ describe("@audio-reader/database", () => {
     expect(CORE_TABLES).toContain("user_analytics_preferences");
     expect(CORE_TABLES).toContain("user_progress_summaries");
     expect(CORE_TABLES).toContain("object_write_leases");
+    expect(CORE_TABLES).toContain("asset_manifests_v2");
+    expect(CORE_TABLES).toContain("sync_v2_changes");
+    expect(CORE_TABLES).toContain("sync_v2_batches");
+    expect(CORE_TABLES).toContain("sync_v2_mutation_outcomes");
   });
 
   it("exports privileged transaction function names", () => {
@@ -27,6 +39,7 @@ describe("@audio-reader/database", () => {
     expect(TRANSACTION_FUNCTIONS).toContain("claim_assistant_generation");
     expect(TRANSACTION_FUNCTIONS).toContain("append_audit_event");
     expect(TRANSACTION_FUNCTIONS).toContain("admin_user_progress_summary");
+    expect(TRANSACTION_FUNCTIONS).toContain("complete_v2_asset_and_publish");
   });
 
   it("creates a ready fake database client with identity and sync stores", async () => {
@@ -65,6 +78,29 @@ describe("@audio-reader/database", () => {
     await expect(createFakeDatabaseClient({ status: "unavailable" }).ping()).resolves.toBe(
       "unavailable",
     );
+  });
+
+  it.each([
+    [JSON.stringify(ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION), ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION],
+    [JSON.stringify("wrong-version"), "wrong-version"],
+    ["null", undefined],
+  ] as const)("reads the exact account sync migration identity from its dedicated RPC", async (body, expected) => {
+    const requests: string[] = [];
+    const client = createSupabaseDatabaseClient({
+      url: "https://example.supabase.co",
+      serviceRoleKey: "service-role",
+      fetch: (input) => {
+        requests.push(
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+        );
+        return Promise.resolve(new Response(body, { status: 200 }));
+      },
+    });
+
+    await expect(client.accountSyncSchemaVersion()).resolves.toBe(expected);
+    expect(requests).toEqual([
+      "https://example.supabase.co/rest/v1/rpc/account_sync_schema_version",
+    ]);
   });
 
   it("treats the product-event window end as exclusive", async () => {
@@ -107,6 +143,7 @@ describe("@audio-reader/database", () => {
       "managed_qwen",
     ]);
     expect(flags.find((flag) => flag.key === "managed_qwen")?.enabled).toBe(true);
+    expect(flags.find((flag) => flag.key === "account_sync")?.enabled).toBe(false);
     expect(flags.find((flag) => flag.key === "maintenance_mode")?.enabled).toBe(false);
     const quotas = await client.ops.quotasFor(profile.accountId);
     expect(quotas.find((item) => item.key === "qwen_tasks_day")?.limit).toBe(50);

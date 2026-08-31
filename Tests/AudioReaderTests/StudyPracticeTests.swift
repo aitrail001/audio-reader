@@ -289,19 +289,18 @@ struct StudyStreakTests {
     @Test("Study activity round-trips without XP or remote library fields")
     func roundTripsWithoutXP() throws {
         let fixture = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AudioReader-streak-\(UUID().uuidString).json")
+            .appendingPathComponent("AudioReader-streak-\(UUID().uuidString).sqlite")
         defer { try? FileManager.default.removeItem(at: fixture) }
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         let day = Date(timeIntervalSince1970: 1_800_000_000)
         let log = StudyActivityLog.empty.recording(on: day, calendar: calendar)
-        Persistence.saveStudyActivityLog(log, to: fixture)
-        let loaded = Persistence.loadStudyActivityLog(from: fixture)
+        let store = LocalSQLiteStore(fileURL: fixture)
+        try store.saveStudyActivityDays(log.days)
+        let loaded = StudyActivityLog(days: try LocalSQLiteStore(fileURL: fixture).loadStudyActivityDays())
         #expect(loaded.days == log.days)
-        let encoded = try String(contentsOf: fixture, encoding: .utf8)
-        #expect(!encoded.contains("xp"))
-        #expect(!encoded.contains("leaderboard"))
-        #expect(!encoded.contains("libraryURL"))
+        #expect(try !store.columnNames(in: "local_study_activity").contains("xp"))
+        #expect(try !store.tableNames().contains("leaderboard"))
     }
 }
 

@@ -39,6 +39,7 @@ import {
   type RuntimeConfigPut,
   type RuntimeConfigService,
 } from "./runtime-config";
+import type { AccountSyncReadinessService } from "./account-sync-readiness";
 
 type AdminUser = components["schemas"]["AdminUser"];
 type AdminUserProgress = components["schemas"]["AdminUserProgress"];
@@ -148,11 +149,13 @@ export type AdminRouteContext = {
   identity?: IdentityStore;
   catalog?: CatalogStore;
   runtime?: RuntimeConfigService;
+  accountSyncReadiness: AccountSyncReadinessService;
 };
 
 export function isAdminPath(path: string): boolean {
   return (
     path === "/v1/admin/users" ||
+    path === "/v1/admin/legacy-cleanup" ||
     path === "/v1/admin/capabilities" ||
     path === "/v1/admin/llm/policies" ||
     path === "/v1/admin/cache" ||
@@ -164,6 +167,7 @@ export function isAdminPath(path: string): boolean {
     path === "/v1/admin/diagnostics" ||
     path === "/v1/admin/events" ||
     path === "/v1/admin/feature-flags" ||
+    path === "/v1/admin/account-sync-readiness" ||
     path === "/v1/admin/quotas" ||
     path === "/v1/admin/privacy-requests" ||
     path === "/v1/admin/product-events" ||
@@ -202,6 +206,7 @@ export function adminMethodError(
       path === "/v1/admin/product-analytics" ||
       path === "/v1/admin/audit-events" ||
       path === "/v1/admin/feature-flags" ||
+      path === "/v1/admin/account-sync-readiness" ||
       path === "/v1/admin/quotas" ||
       path === "/v1/admin/privacy-requests" ||
       path === "/v1/admin/diagnostics" ||
@@ -216,6 +221,9 @@ export function adminMethodError(
     return methodNotAllowed(["GET", "HEAD"], requestId);
   }
   if ((POLICY_PREVIEW.test(path) || POLICY_PROBE.test(path)) && upper !== "POST") {
+    return methodNotAllowed(["POST"], requestId);
+  }
+  if (path === "/v1/admin/legacy-cleanup" && upper !== "POST") {
     return methodNotAllowed(["POST"], requestId);
   }
   if (path === "/v1/admin/runtime-config") {
@@ -303,6 +311,7 @@ function capabilityFor(path: string, method: string, url: URL): AdminCapability 
   if (USER_SUSPEND.test(path) || USER_UNSUSPEND.test(path) || USER_REVOKE.test(path)) {
     return "users.manage";
   }
+  if (path === "/v1/admin/legacy-cleanup") return "users.manage";
   if (USER_GRANT_ADMIN.test(path)) return "roles.manage";
   if (path === "/v1/admin/runtime-config") {
     return write ? "runtime.manage" : "runtime.read";
@@ -317,6 +326,7 @@ function capabilityFor(path: string, method: string, url: URL): AdminCapability 
   if (CACHE_ACTION.test(path)) return "cache.manage";
   if (JOB_RETRY.test(path) || JOB_CANCEL.test(path)) return "jobs.manage";
   if (path === "/v1/admin/feature-flags") return "flags.read";
+  if (path === "/v1/admin/account-sync-readiness") return "flags.read";
   if (FLAG_ITEM.test(path)) return "flags.manage";
   if (path === "/v1/admin/quotas") return "quotas.read";
   if (QUOTA_ITEM.test(path)) return "quotas.manage";
@@ -385,6 +395,54 @@ export async function handleAdminRoute(context: AdminRouteContext): Promise<Resp
   const ops = context.ops;
   if (ops === undefined) {
     return notFound(context.requestId, "Admin services are not configured.");
+  }
+  if (path === "/v1/admin/legacy-cleanup") {
+    // Execution fingerprints the untouched request body inside the idempotency boundary.
+    const body = await readJsonObject(context.request.clone(), context.requestId);
+    if (!body.ok) return body.response;
+    const userId = body.value.userId;
+    if (typeof userId !== "string" || !UUID_PATTERN.test(userId)) {
+      return fieldError(context.requestId, "userId", "userId must be a UUID.");
+    }
+    if (typeof body.value.dryRun !== "boolean") {
+      return fieldError(context.requestId, "dryRun", "dryRun must be explicit.");
+    }
+    const inspected = await ops.cleanupObsoleteV1Data(userId, false);
+    if (body.value.dryRun) {
+      await ops.appendAudit({
+        actorId: principal.accountId,
+        action: "legacy_cleanup_dry_run",
+        resourceType: "account",
+        resourceId: userId,
+        reason: "Explicit obsolete v1 data cleanup dry-run.",
+        traceId: context.requestId,
+        metadata: { ...inspected, objectKeys: inspected.objectKeys.length },
+      });
+      return jsonResponse(inspected);
+    }
+    return withIdempotency(
+      context.idempotencyStore,
+      context.request,
+      async () => {
+        const job = await ops.createJob({
+          accountId: userId,
+          kind: "legacy_cleanup",
+          payload: { requestedBy: principal.accountId, requestId: context.requestId },
+        });
+        await ops.appendAudit({
+          actorId: principal.accountId,
+          action: "legacy_cleanup_execute_requested",
+          resourceType: "account",
+          resourceId: userId,
+          reason: "Explicit obsolete v1 data cleanup execution.",
+          traceId: context.requestId,
+          metadata: { jobId: job.id, ...inspected, objectKeys: inspected.objectKeys.length },
+        });
+        return jsonResponse({ jobId: job.id, status: job.status, inspected }, 202);
+      },
+      context.requestId,
+      principal,
+    );
   }
   if (path === "/v1/admin/users") {
     const limit = parseLimit(url, context.requestId);
@@ -810,6 +868,18 @@ export async function handleAdminRoute(context: AdminRouteContext): Promise<Resp
     const flags = await ops.listFlags();
     return asHead(context.request, jsonResponse(flags.map(toFeatureFlag)));
   }
+  if (path === "/v1/admin/account-sync-readiness") {
+    const requested =
+      (await ops.listFlags()).find((flag) => flag.key === "account_sync")?.enabled === true;
+    return asHead(
+      context.request,
+      jsonResponse(
+        await context.accountSyncReadiness.read(requested, {
+          force: url.searchParams.get("probe") === "true",
+        }),
+      ),
+    );
+  }
   const flagItem = FLAG_ITEM.exec(path);
   if (flagItem?.[1] !== undefined) {
     return patchFlag(context, principal, ops, decodeURIComponent(flagItem[1]));
@@ -1122,6 +1192,7 @@ async function putRuntimeConfig(
       let view: Awaited<ReturnType<RuntimeConfigService["put"]>>;
       try {
         view = await runtime.put(patch, principal.accountId);
+        context.accountSyncReadiness.invalidate();
       } catch (error: unknown) {
         if (error instanceof RestPersistenceError) {
           return persistenceFailed(context.requestId, "Runtime config update failed", error);
@@ -1723,6 +1794,30 @@ async function patchFlag(
         patch.platforms = body.value.platforms.filter(
           (item): item is string => typeof item === "string",
         );
+      }
+      if (key === "account_sync" && patch.enabled === true) {
+        // Enabling is a state transition and must never trust a cached successful canary.
+        const readiness = await context.accountSyncReadiness.read(true, { force: true });
+        if (!readiness.ready) {
+          console.warn(
+            JSON.stringify({
+              level: "warn",
+              component: "account-sync-readiness",
+              message: "account_sync_enable_rejected",
+              requestId: context.requestId,
+              outcome: "unavailable",
+              reason: readiness.reason,
+              provider: readiness.provider,
+            }),
+          );
+          return problemResponse({
+            status: 503,
+            code: "account_sync_unavailable",
+            title: "Account sync unavailable",
+            detail: readiness.lastFailureDetail ?? "Account sync dependencies are unavailable.",
+            traceId: context.requestId,
+          });
+        }
       }
       let updated: Awaited<ReturnType<OpsStore["patchFlag"]>>;
       try {

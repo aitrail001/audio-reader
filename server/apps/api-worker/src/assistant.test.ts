@@ -3,6 +3,7 @@ import { createFakeDatabaseClient } from "@audio-reader/database";
 import { createFakeQwenClient } from "@audio-reader/qwen";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "./app";
+import { buildAccountExportPayload } from "./account-export";
 import { assistantMethodError, isAssistantPath } from "./assistant-routes";
 import { listOperatorEvents } from "./operator-events";
 
@@ -110,7 +111,9 @@ describe("managed Qwen assistant API", () => {
   });
 
   it("returns a generated translation from the managed Qwen client", async () => {
+    const database = createFakeDatabaseClient();
     const app = createTestApp({
+      database,
       qwen: createFakeQwenClient({ text: '{"translation":"你好","notes":[]}' }),
     });
     const response = await app.fetch(
@@ -143,6 +146,23 @@ describe("managed Qwen assistant API", () => {
     expect(body.translation).toBe("你好");
     expect(body.provenance).toBe("generated");
     expect(body.policyVersion).toBe("qwen-managed-v1");
+    expect(typeof body.id).toBe("string");
+    expect(typeof body.sharedCacheEntryID).toBe("string");
+    expect(body.id).not.toBe(body.sharedCacheEntryID);
+    expect(typeof body.model).toBe("string");
+    expect(body.model).not.toBe("Managed Qwen");
+    expect(body.promptVersion).toBe("qwen-managed-v1");
+    expect(body.modelPolicyHash).toMatch(/^[0-9a-f]{64}$/);
+    const privateRows = await database.ops.listAssistantResults(createFakePrincipal().accountId);
+    expect(privateRows).toHaveLength(1);
+    expect(privateRows[0]).toMatchObject({
+      id: body.id,
+      cacheEntryId: body.sharedCacheEntryID,
+      model: body.model,
+      promptVersion: body.promptVersion,
+      modelPolicyHash: body.modelPolicyHash,
+    });
+    expect(privateRows[0]?.outputText).toContain("你好");
 
     const cached = await app.fetch(
       new Request("http://localhost/v1/ai/translations", {
@@ -168,6 +188,128 @@ describe("managed Qwen assistant API", () => {
     expect(cached.status).toBe(200);
     const cachedBody = await readJson(cached);
     expect(isRecord(cachedBody) && cachedBody.provenance).toBe("cache_shared_exact");
+    if (!isRecord(cachedBody)) return;
+    expect(cachedBody.sharedCacheEntryID).toBe(body.sharedCacheEntryID);
+    expect(cachedBody.id).not.toBe(body.id);
+    expect(cachedBody.id).not.toBe(cachedBody.sharedCacheEntryID);
+  });
+
+  it("creates a private result without a cache reference when the shared cache write fails", async () => {
+    const database = createFakeDatabaseClient();
+    database.ops.putCache = () => Promise.reject(new Error("cache unavailable"));
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({ text: '{"translation":"你好","notes":[]}' }),
+    });
+
+    const response = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      sentenceBody("Private even without cache"),
+      "idempotency-key-cache-write-failure",
+    );
+
+    expect(response.status).toBe(200);
+    const body = await readJson(response);
+    expect(isRecord(body) && body.sharedCacheEntryID).toBeNull();
+    const rows = await database.ops.listAssistantResults(createFakePrincipal().accountId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.cacheEntryId).toBeNull();
+    expect(rows[0]?.outputText).toContain("你好");
+  });
+
+  it("uses the winning shared cache UUID when a concurrent insert wins", async () => {
+    const database = createFakeDatabaseClient();
+    const originalPut = database.ops.putCache.bind(database.ops);
+    const winnerID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    database.ops.putCache = (input) => originalPut({ ...input, id: winnerID });
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({ text: '{"translation":"你好","notes":[]}' }),
+    });
+
+    const response = await postAssistant(
+      app,
+      "/v1/ai/translations",
+      sentenceBody("Concurrent cache winner"),
+      "idempotency-key-cache-conflict-winner",
+    );
+
+    expect(response.status).toBe(200);
+    const body = await readJson(response);
+    expect(isRecord(body) && body.sharedCacheEntryID).toBe(winnerID);
+    const rows = await database.ops.listAssistantResults(createFakePrincipal().accountId);
+    expect(rows[0]?.cacheEntryId).toBe(winnerID);
+  });
+
+  it("keeps a generated structured summary private through cache deletion, bootstrap, and export", async () => {
+    const database = createFakeDatabaseClient();
+    const structured = {
+      overview: "完整概述",
+      keyPoints: ["要点一", "要点二"],
+      charactersOrIdeas: ["人物甲"],
+      keyConcepts: [{ name: "概念", explanation: "解释" }],
+      themes: ["主题"],
+    };
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({ text: JSON.stringify(structured) }),
+    });
+
+    const response = await postAssistant(
+      app,
+      "/v1/ai/chapter-summaries",
+      summaryBody(["chapter text"], {
+        bookTitle: "Private Book",
+        chapterTitle: "Private Chapter",
+      }),
+      "idempotency-key-private-structured-summary",
+    );
+    expect(response.status).toBe(200);
+    const body = await readJson(response);
+    expect(isRecord(body)).toBe(true);
+    if (!isRecord(body)) return;
+    const resultID = String(body.id);
+    const cacheID = String(body.sharedCacheEntryID);
+    await database.ops.actOnCache(cacheID, "purge");
+
+    const rows = await database.ops.listAssistantResults(createFakePrincipal().accountId);
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0]?.outputText ?? "{}")).toEqual(structured);
+    expect(rows[0]?.history[0]).toMatchObject({ privateContent: structured });
+    const bootstrap = await database.syncV2.bootstrap({
+      userId: createFakePrincipal().accountId,
+      cursor: null,
+      offset: 0,
+      limit: 100,
+    });
+    const bootstrapped = bootstrap.entities.find((entity) =>
+      entity.entityType === "assistant_result" && entity.entityId === resultID
+    );
+    expect(bootstrapped).toBeDefined();
+    const bootstrappedResult: unknown = bootstrapped?.payload.result;
+    expect(isRecord(bootstrappedResult)).toBe(true);
+    if (!isRecord(bootstrappedResult)) return;
+    expect(bootstrappedResult.id).toBe(resultID);
+    expect(bootstrappedResult.text).toBe(JSON.stringify(structured));
+    const exported = await buildAccountExportPayload({
+      accountId: createFakePrincipal().accountId,
+      ops: database.ops,
+      sync: database.syncV2,
+    });
+    const exportedResults: unknown = exported.assistantResults;
+    expect(Array.isArray(exportedResults)).toBe(true);
+    if (!Array.isArray(exportedResults)) return;
+    expect(exportedResults).toHaveLength(1);
+    const exportedResult: unknown = exportedResults[0];
+    expect(isRecord(exportedResult)).toBe(true);
+    if (!isRecord(exportedResult)) return;
+    expect(exportedResult.id).toBe(resultID);
+    expect(exportedResult.sharedCacheReference).toEqual({ entryId: cacheID });
+    const privateContent: unknown = exportedResult.privateContent;
+    expect(isRecord(privateContent)).toBe(true);
+    if (!isRecord(privateContent)) return;
+    expect(privateContent.structured).toEqual(structured);
   });
 
   it("single-flights identical translation misses through one Qwen call", async () => {
@@ -306,12 +448,13 @@ describe("managed Qwen assistant API", () => {
     const page = await readJson(listed);
     const items =
       isRecord(page) && Array.isArray(page.items) ? (page.items as Record<string, unknown>[]) : [];
-    const entry = items.find((item) => item.id === body.id);
+    const entry = items.find((item) => item.id === body.sharedCacheEntryID);
     expect(entry).toBeDefined();
     expect(isRecord(entry) && entry.hitCount).toBe(0);
     const payload = isRecord(entry) && isRecord(entry.payload) ? entry.payload : {};
-    expect(payload.source).toBe("ice");
-    expect(payload.bookTitle).toBe("Frankenstein");
+    expect(payload.source).toBeUndefined();
+    expect(payload.context).toBeUndefined();
+    expect(payload.bookTitle).toBeUndefined();
     expect(payload.translation).toContain("frozen sea");
   });
 
@@ -843,7 +986,7 @@ describe("managed Qwen assistant API", () => {
     expect(system).toContain("Simplified Chinese");
   });
 
-  it("stores sentence neighbor context on the cache payload", async () => {
+  it("uses sentence neighbor context without storing it in the shared cache", async () => {
     const users: string[] = [];
     const inner = createFakeQwenClient({ text: '{"translation":"她打破了沉默。","notes":[]}' });
     const database = createFakeDatabaseClient();
@@ -902,7 +1045,9 @@ describe("managed Qwen assistant API", () => {
       isRecord(page) && Array.isArray(page.items) ? (page.items as Record<string, unknown>[]) : [];
     const entry = items.find((item) => isRecord(body) && item.id === body.id);
     const payload = isRecord(entry) && isRecord(entry.payload) ? entry.payload : {};
-    expect(payload.context).toBe(contextBefore);
+    expect(payload.context).toBeUndefined();
+    expect(JSON.stringify(payload)).not.toContain("The room fell silent.");
+    expect(JSON.stringify(payload)).not.toContain("Everyone relaxed.");
   });
 
   it("trims sentence neighbors to the operator Desk context count", async () => {

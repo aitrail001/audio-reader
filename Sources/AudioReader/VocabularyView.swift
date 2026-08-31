@@ -37,7 +37,7 @@ struct VocabularyView: View {
     @State private var pendingDelete: VocabEntry?
     @State private var reviewRequest: VocabularyReviewRequest?
     @State private var showReviewSetup = false
-    @State private var selectedForExport: Set<String> = []
+    @State private var exportSelection = AnkiExportSelectionState()
     @State private var isExporting = false
     @State private var ankiDocument: AnkiArchiveDocument?
     @State private var showAnkiExporter = false
@@ -87,22 +87,41 @@ struct VocabularyView: View {
         .navigationTitle("Vocabulary")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    startDueReview()
-                } label: {
-                    Label("\(projection.due.count) due in this view", systemImage: "rectangle.stack.fill")
+            if exportSelection.isActive {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { cancelAnkiExportSelection() }
                 }
-                .disabled(projection.due.isEmpty || isFiltering)
-                .accessibilityIdentifier("words.reviewDue")
-                .accessibilityHint("Starts a due-first review using the current Words filters.")
-            }
-            ToolbarItem(placement: .secondaryAction) {
-                Button("Review by list or book") { showReviewSetup = true }
-                    .disabled(state.vocab.isEmpty)
-            }
-            ToolbarItem(placement: .secondaryAction) {
-                ankiExportMenu
+                ToolbarItem(placement: .principal) {
+                    Text("\(exportSelection.selectedCount) selected")
+                        .accessibilityLabel("Temporary Anki export selection")
+                        .accessibilityValue("\(exportSelection.selectedCount) selected")
+                        .accessibilityIdentifier("anki.selection.count")
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isExporting ? "Preparing…" : "Export") {
+                        startAnkiExport(scope: .selection)
+                    }
+                    .disabled(exportSelection.selectedCount == 0 || isExporting)
+                    .accessibilityHint("Exports the temporary selection without changing review progress or My List.")
+                }
+            } else {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        startDueReview()
+                    } label: {
+                        Label("\(projection.due.count) due in this view", systemImage: "rectangle.stack.fill")
+                    }
+                    .disabled(projection.due.isEmpty || isFiltering)
+                    .accessibilityIdentifier("words.reviewDue")
+                    .accessibilityHint("Starts a due-first review using the current Words filters.")
+                }
+                ToolbarItem(placement: .secondaryAction) {
+                    Button("Review by list or book") { showReviewSetup = true }
+                        .disabled(state.vocab.isEmpty)
+                }
+                ToolbarItem(placement: .secondaryAction) {
+                    ankiExportMenu
+                }
             }
         }
 #endif
@@ -116,6 +135,14 @@ struct VocabularyView: View {
         .onChange(of: bookFilter) { _, _ in pageIndex = 0 }
         .onChange(of: category) { _, _ in pageIndex = 0 }
         .onChange(of: listFilter) { _, _ in pageIndex = 0 }
+        .onChange(of: workspaceSection) { _, section in
+            if section != .library, exportSelection.isActive {
+                leaveAnkiExportMode()
+            }
+        }
+        .onDisappear {
+            exportSelection.leaveVocabulary()
+        }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
@@ -263,13 +290,10 @@ struct VocabularyView: View {
                                 onToggleLearnList: {
                                     state.setVocabularyLearnList(entry.id, included: !entry.isInLearnList)
                                 },
-                                selectedForExport: selectedForExport.contains(entry.id),
+                                showsExportSelection: exportSelection.isActive,
+                                selectedForExport: exportSelection.isSelected(entry.id),
                                 onToggleExportSelection: {
-                                    if selectedForExport.contains(entry.id) {
-                                        selectedForExport.remove(entry.id)
-                                    } else {
-                                        selectedForExport.insert(entry.id)
-                                    }
+                                    exportSelection.toggle(entry.id)
                                 },
                                 onDelete: {
                                     pendingDelete = entry
@@ -314,29 +338,47 @@ struct VocabularyView: View {
                     .font(.system(size: 12))
             }
             Spacer()
-            VStack(alignment: .trailing, spacing: 4) {
-                Button {
-                    startDueReview()
-                } label: {
-                    Label("Review due — \(projection.due.count)", systemImage: "rectangle.stack.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Palette.terracotta)
-                .frame(minHeight: 44)
-                .disabled(projection.due.isEmpty || isFiltering)
-                .accessibilityIdentifier("words.reviewDue")
-                .accessibilityHint("Starts a due-first review using the current Words filters.")
-                Button {
-                    showReviewSetup = true
-                } label: {
-                    Label("Choose review", systemImage: "slider.horizontal.3")
-                }
+            if exportSelection.isActive {
+                HStack(spacing: 8) {
+                    Text("\(exportSelection.selectedCount) selected")
+                        .foregroundStyle(Palette.dim)
+                        .accessibilityLabel("Temporary Anki export selection")
+                        .accessibilityValue("\(exportSelection.selectedCount) selected")
+                        .accessibilityIdentifier("anki.selection.count")
+                    Button("Cancel") { cancelAnkiExportSelection() }
                     .buttonStyle(.borderless)
-                    .disabled(state.vocab.isEmpty)
-                ankiExportMenu
-                Text("\(projection.listCounts[.saved, default: 0]) in My list")
-                    .font(.caption)
-                    .foregroundStyle(Palette.dim)
+                    Button(isExporting ? "Preparing…" : "Export") {
+                        startAnkiExport(scope: .selection)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(exportSelection.selectedCount == 0 || isExporting)
+                    .accessibilityHint("Exports the temporary selection without changing review progress or My List.")
+                }
+            } else {
+                VStack(alignment: .trailing, spacing: 4) {
+                    Button {
+                        startDueReview()
+                    } label: {
+                        Label("Review due — \(projection.due.count)", systemImage: "rectangle.stack.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Palette.terracotta)
+                    .frame(minHeight: 44)
+                    .disabled(projection.due.isEmpty || isFiltering)
+                    .accessibilityIdentifier("words.reviewDue")
+                    .accessibilityHint("Starts a due-first review using the current Words filters.")
+                    Button {
+                        showReviewSetup = true
+                    } label: {
+                        Label("Choose review", systemImage: "slider.horizontal.3")
+                    }
+                        .buttonStyle(.borderless)
+                        .disabled(state.vocab.isEmpty)
+                    ankiExportMenu
+                    Text("\(projection.listCounts[.saved, default: 0]) in My list")
+                        .font(.caption)
+                        .foregroundStyle(Palette.dim)
+                }
             }
         }
         .padding(.horizontal, 24)
@@ -358,9 +400,9 @@ struct VocabularyView: View {
 
     private var ankiExportMenu: some View {
         Menu {
-            Button(selectedForExport.isEmpty ? "Current filtered view" : "Selected items (\(selectedForExport.count))") {
-                startAnkiExport(scope: .selectionOrFiltered)
-            }
+            Button("Select for Anki export") { beginAnkiExportSelection() }
+            Divider()
+            Button("Current filtered view") { startAnkiExport(scope: .filtered) }
             Button("My List") { startAnkiExport(scope: .learningList) }
             Button("All Vocabulary") { startAnkiExport(scope: .all) }
         } label: {
@@ -373,10 +415,12 @@ struct VocabularyView: View {
     private func startAnkiExport(scope: AnkiExportScope) {
         let entries: [VocabEntry]
         switch scope {
-        case .selectionOrFiltered:
-            entries = selectedForExport.isEmpty
-                ? projection.filtered
-                : state.vocab.filter { selectedForExport.contains($0.id) }
+        case .selection:
+            entries = exportSelection.entriesForExport(from: state.vocab)
+            // The picker must be transient even if archive preparation or saving fails later.
+            exportSelection.completeExport()
+        case .filtered:
+            entries = projection.filtered
         case .learningList:
             entries = state.vocab.filter(\.isInLearnList)
         case .all:
@@ -404,6 +448,22 @@ struct VocabularyView: View {
                 ankiExportError = error.localizedDescription
             }
         }
+    }
+
+    private func beginAnkiExportSelection() {
+        workspaceSection = .library
+        exportSelection.begin()
+        Self.performanceLog.info("message=anki.selection component=vocabulary outcome=started")
+    }
+
+    private func cancelAnkiExportSelection() {
+        exportSelection.cancel()
+        Self.performanceLog.info("message=anki.selection component=vocabulary outcome=cancelled")
+    }
+
+    private func leaveAnkiExportMode() {
+        exportSelection.leaveVocabulary()
+        Self.performanceLog.info("message=anki.selection component=vocabulary outcome=left")
     }
 
     private func ankiCard(for entry: VocabEntry) -> AnkiExportCard? {
@@ -839,7 +899,8 @@ private struct VocabularyReviewRequest: Identifiable {
 }
 
 private enum AnkiExportScope {
-    case selectionOrFiltered
+    case selection
+    case filtered
     case learningList
     case all
 }
@@ -908,11 +969,16 @@ private struct VocabCard: View {
     let assistantBodySize: CGFloat
     let onOpen: () -> Void
     let onToggleLearnList: () -> Void
+    let showsExportSelection: Bool
     let selectedForExport: Bool
     let onToggleExportSelection: () -> Void
     let onDelete: () -> Void
     @State private var dictHeight: CGFloat = 140
     @State private var showDictHTML = false
+    @State private var showCanonicalEditor = false
+    @State private var canonicalDraft = ""
+    @State private var senseDraft = ""
+    @State private var partOfSpeechDraft = VocabularyPartOfSpeech.unknown
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -923,6 +989,8 @@ private struct VocabCard: View {
             Text("\(entry.bookTitle) · \(entry.chapterTitle) · \(formatClock(entry.timestamp))")
                 .font(.system(size: 11))
                 .foregroundStyle(Palette.mute)
+
+            studyIdentityControls
 
             labeled("Original text") {
                 Text(entry.ebookText ?? entry.context)
@@ -968,7 +1036,11 @@ private struct VocabCard: View {
         .padding(14)
         .background(Palette.panel)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("words.card.\(entry.id)")
+        .sheet(isPresented: $showCanonicalEditor) {
+            canonicalEditor
+        }
     }
 
     @ViewBuilder
@@ -1000,7 +1072,82 @@ private struct VocabCard: View {
                 .padding(.vertical, 3)
                 .background(Palette.goldSoft)
                 .clipShape(Capsule())
+            if entry.studyForm.caseInsensitiveCompare(entry.word) != .orderedSame {
+                Text("Study as \(entry.studyForm)")
+                    .font(.caption)
+                    .foregroundStyle(Palette.dim)
+            }
             Spacer(minLength: 8)
+        }
+    }
+
+    @ViewBuilder
+    private var studyIdentityControls: some View {
+        if !entry.reviewEligible {
+            Button {
+                state.acceptVocabularyForReview(entry.id)
+            } label: {
+                Label(
+                    entry.category == .sentence ? "Save sentence as card" : "Accept phrase suggestion",
+                    systemImage: "rectangle.stack.badge.plus"
+                )
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Palette.gold)
+            .foregroundStyle(Palette.inkOnGold)
+            .disabled(entry.canonicalizationStatus == .needsReview)
+            .accessibilityHint(
+                entry.canonicalizationStatus == .needsReview
+                    ? "Confirm the study form before accepting this item."
+                    : "Adds this item to New without changing My list."
+            )
+        }
+        if entry.canonicalizationStatus == .needsReview {
+            Button {
+                canonicalDraft = entry.studyForm
+                senseDraft = entry.senseID ?? ""
+                partOfSpeechDraft = entry.partOfSpeech
+                showCanonicalEditor = true
+            } label: {
+                Label("Confirm study form", systemImage: "pencil")
+            }
+            .buttonStyle(.bordered)
+            .accessibilityHint("Edits the low-confidence canonical form before it can merge with another card.")
+        }
+    }
+
+    private var canonicalEditor: some View {
+        NavigationStack {
+            Form {
+                TextField("Canonical study form", text: $canonicalDraft)
+                TextField("Sense identifier", text: $senseDraft)
+                Picker("Part of speech", selection: $partOfSpeechDraft) {
+                    ForEach(VocabularyPartOfSpeech.allCases, id: \.self) { value in
+                        Text(value.rawValue.capitalized).tag(value)
+                    }
+                }
+            }
+            .navigationTitle("Study identity")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { showCanonicalEditor = false }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        state.updateVocabularyCanonicalForm(
+                            entry.id,
+                            canonicalForm: canonicalDraft,
+                            partOfSpeech: partOfSpeechDraft,
+                            senseID: senseDraft
+                        )
+                        showCanonicalEditor = false
+                    }
+                    .disabled(
+                        VocabularyCanonicalizer.normalizedForm(canonicalDraft).isEmpty
+                            || senseDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
+                }
+            }
         }
     }
 
@@ -1009,7 +1156,9 @@ private struct VocabCard: View {
 #if os(iOS)
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
-                exportSelectionButton
+                if showsExportSelection {
+                    exportSelectionButton
+                }
                 VocabOriginalPlayButton(state: state, entry: entry, labeled: false)
                 openInTextButton
                 learnListButton
@@ -1017,7 +1166,9 @@ private struct VocabCard: View {
             }
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    exportSelectionButton
+                    if showsExportSelection {
+                        exportSelectionButton
+                    }
                     VocabOriginalPlayButton(state: state, entry: entry, labeled: false)
                     openInTextButton
                 }
@@ -1029,7 +1180,9 @@ private struct VocabCard: View {
         }
 #else
         HStack(spacing: 8) {
-            exportSelectionButton
+            if showsExportSelection {
+                exportSelectionButton
+            }
             VocabOriginalPlayButton(state: state, entry: entry, labeled: false)
             openInTextButton
             learnListButton
@@ -1047,7 +1200,15 @@ private struct VocabCard: View {
         .frame(minWidth: 44, minHeight: 44)
 #endif
         .foregroundStyle(selectedForExport ? Palette.terracotta : Palette.dim)
-        .accessibilityLabel(selectedForExport ? "Remove from Anki export selection" : "Select for Anki export")
+        .accessibilityLabel(
+            selectedForExport
+                ? "Remove \(entry.word) from temporary Anki export selection"
+                : "Add \(entry.word) to temporary Anki export selection"
+        )
+        .accessibilityValue(selectedForExport ? "Selected" : "Not selected")
+        .accessibilityHint("Temporary selection. Does not change My List or review progress.")
+        .accessibilityAddTraits(selectedForExport ? .isSelected : [])
+        .accessibilityIdentifier("anki.selection.\(entry.id)")
     }
 
     private var openInTextButton: some View {
@@ -1076,6 +1237,7 @@ private struct VocabCard: View {
         .controlSize(.small)
 #endif
         .tint(entry.isInLearnList ? Palette.gold : Palette.dim)
+        .accessibilityIdentifier("words.myList.\(entry.id)")
         .accessibilityHint(
             entry.isInLearnList
                 ? "Removes this item from your saved list."

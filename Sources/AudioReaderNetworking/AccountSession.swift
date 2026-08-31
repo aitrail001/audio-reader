@@ -21,15 +21,37 @@ public final class AccountSession {
     public private(set) var pendingEmail: String?
     public private(set) var featureFlags: [FeatureFlag] = []
     public private(set) var quotas: [Quota] = []
+    public private(set) var accountSyncReadiness: AccountSyncReadiness = .notConfigured
     public private(set) var lastExportStatus: String?
     public private(set) var pendingExport: AccountExportFile?
     public private(set) var operatorLearningAnalyticsEnabled: Bool?
     var pendingOAuth: PendingOAuth?
     var pendingAuthorizationURL: URL?
     @ObservationIgnored private var syncTask: Task<Void, Never>?
+    @ObservationIgnored private var syncReadinessRetryTask: Task<Void, Never>?
 
     public var persistedRefreshToken: String? {
         try? store.load()?.refreshToken
+    }
+
+    /// Explains server-effective readiness even while the local sync engine is idle or switched off.
+    public var syncReadinessMessage: String? {
+        guard profile != nil, !accountSyncReadiness.effective else { return nil }
+        if syncAvailabilityManagedByOperator {
+            return "Sync unavailable — the service operator has not enabled cross-device sync."
+        }
+        let reason = accountSyncReadiness.pausedDescription
+            .replacingOccurrences(of: "Paused — ", with: "")
+        if accountSyncReadiness.requested {
+            return "Sync paused — \(reason)"
+        }
+        guard !accountSyncReadiness.ready else { return nil }
+        return "Sync unavailable — \(reason). Turn on sync after readiness is restored."
+    }
+
+    /// Native can refresh this server-owned policy, but must not attempt to enable it itself.
+    public var syncAvailabilityManagedByOperator: Bool {
+        profile != nil && accountSyncReadiness.ready && !accountSyncReadiness.requested
     }
 
     public let store: any AuthSessionStoring
@@ -221,6 +243,7 @@ public final class AccountSession {
         profile = bootstrap.profile
         featureFlags = bootstrap.featureFlags
         quotas = bootstrap.quotas
+        accountSyncReadiness = bootstrap.accountSyncReadiness.enforcingAppVersion(environment.appVersion)
     }
 
     public func signOut() async {
@@ -336,13 +359,15 @@ public final class AccountSession {
 
     public func setSyncEnabled(_ enabled: Bool) {
         guard mode.isSignedIn else { return }
-        guard !enabled || flagEnabled("account_sync", default: false) else {
-            errorMessage = "Account sync is turned off for this product right now."
+        guard !enabled || accountSyncReadiness.effective else {
+            errorMessage = accountSyncReadiness.pausedDescription
             return
         }
         let previous = mode
         mode = enabled ? .signedInSyncOn : .signedInSyncOff
         if !enabled {
+            syncReadinessRetryTask?.cancel()
+            syncReadinessRetryTask = nil
             syncStatus = .idle
         }
         recordUsage(name: enabled ? "account.sync_enabled" : "account.sync_disabled")
@@ -371,14 +396,35 @@ public final class AccountSession {
             await self.performSynchronize(runtime: runtime)
         }
         syncTask = task
-        await task.value
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
         syncTask = nil
     }
 
     private func performSynchronize(runtime: AccountSyncRuntime) async {
-        syncStatus = AccountSyncStatus(phase: .preparing)
         await run {
             do {
+                // Bootstrap is the server-owned readiness decision. Check it before reading a
+                // snapshot, creating upload intent, or advancing the local acknowledgement cursor.
+                try await refreshProductBootstrap()
+                guard accountSyncReadiness.effective else {
+                    let pendingCount = (try? runtime.outbox.pendingMutations().count) ?? 0
+                    syncStatus = .paused(
+                        reason: accountSyncReadiness.pausedDescription,
+                        pendingCount: pendingCount
+                    )
+                    scheduleSyncReadinessRetry()
+                    Self.syncLog.info(
+                        "sync_paused message=sync_paused reason=\(self.accountSyncReadiness.reason ?? "unavailable", privacy: .public) pending=\(pendingCount, privacy: .public)"
+                    )
+                    return
+                }
+                syncReadinessRetryTask?.cancel()
+                syncReadinessRetryTask = nil
+                syncStatus = AccountSyncStatus(phase: .preparing)
                 try await drainSync(runtime: runtime)
                 errorMessage = nil
                 recordUsage(
@@ -415,6 +461,18 @@ public final class AccountSession {
                 )
                 throw error
             }
+        }
+    }
+
+    /// A bounded retry automatically resumes a requested-on sync after a transient outage.
+    private func scheduleSyncReadinessRetry() {
+        syncReadinessRetryTask?.cancel()
+        let seconds = max(1, min(accountSyncReadiness.retryAfterSeconds, 300))
+        syncReadinessRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(seconds))
+            guard !Task.isCancelled, let self, self.mode.isSyncEnabled else { return }
+            self.syncReadinessRetryTask = nil
+            await self.synchronize()
         }
     }
 
@@ -530,6 +588,7 @@ public final class AccountSession {
         profile = bootstrap.profile
         featureFlags = bootstrap.featureFlags
         quotas = bootstrap.quotas
+        accountSyncReadiness = bootstrap.accountSyncReadiness.enforcingAppVersion(environment.appVersion)
         mode = .signedInSyncOff
         pendingOAuth = nil
         recoveryMessage = nil
@@ -608,11 +667,16 @@ public final class AccountSession {
         let deviceID = try store.deviceID()
         syncStatus = AccountSyncStatus(phase: .preparing)
         try await bootstrapInitialStateIfNeeded(runtime: runtime, deviceID: deviceID, jobID: jobID)
+        try await publishPendingAssets(runtime: runtime, deviceID: deviceID, jobID: jobID)
         try await Task.detached { try Self.enqueueDirtySnapshot(runtime: runtime) }.value
-        let (pendingBeforeCoalescing, pending, batches) = try await Task.detached {
+        let (pendingBeforeCoalescing, pending, plan) = try await Task.detached {
             let pendingBeforeCoalescing = try runtime.outbox.pendingMutations().count
             let pending = try Self.coalescePendingMutations(runtime: runtime)
-            return (pendingBeforeCoalescing, pending, try Self.syncPushBatches(pending))
+            return (
+                pendingBeforeCoalescing,
+                pending,
+                try Self.syncPushPlan(pending)
+            )
         }.value
         if pending.count != pendingBeforeCoalescing {
             Self.syncLog.info(
@@ -623,18 +687,23 @@ public final class AccountSession {
         var uploaded = 0
         var conflicts = 0
         Self.syncLog.info(
-            "sync_push_start message=sync_push_start requestId=\(jobID, privacy: .public) pending=\(pending.count, privacy: .public)"
+            "sync_push_start message=sync_push_start requestId=\(jobID, privacy: .public) pending=\(pending.count, privacy: .public) uploadable=\(plan.uploadableCount, privacy: .public) skipped=\(plan.skipped.count, privacy: .public) encodedBytes=\(plan.encodedBytes, privacy: .public) maxMutationBytes=\(plan.maximumMutationBytes, privacy: .public)"
         )
-        if !pending.isEmpty {
+        if !plan.skipped.isEmpty {
+            Self.syncLog.error(
+                "sync_push_skipped message=sync_push_skipped requestId=\(jobID, privacy: .public) count=\(plan.skipped.count, privacy: .public) encodedBytes=\(plan.skipped.reduce(0) { $0 + $1.encodedBytes }, privacy: .public) maxMutationBytes=\(plan.skipped.map(\.encodedBytes).max() ?? 0, privacy: .public)"
+            )
+        }
+        if !plan.batches.isEmpty {
             var lookup = Dictionary(uniqueKeysWithValues: pending.map { ($0.id.rawValue, $0) })
-            for (batchOffset, batch) in batches.enumerated() {
+            for (batchOffset, batch) in plan.batches.enumerated() {
                 let entityTypes = Set(batch.map(\.entityType.rawValue))
                 syncStatus = .uploading(
                     entityType: entityTypes.count == 1 ? entityTypes.first : nil,
                     completedCount: uploaded,
                     totalCount: pending.count,
                     batchIndex: batchOffset + 1,
-                    batchCount: batches.count,
+                    batchCount: plan.batches.count,
                     pendingCount: pending.count - uploaded,
                     conflictCount: conflicts,
                     entityProgress: entityProgress
@@ -689,7 +758,12 @@ public final class AccountSession {
                     limit: Self.syncPullPageLimit
                 )
             }
-            let orderedChanges = SyncPulledChange.applying(pulled.changes)
+            let hydratedChanges = try await hydrateAssetChanges(
+                pulled.changes,
+                runtime: runtime,
+                deviceID: deviceID
+            )
+            let orderedChanges = SyncPulledChange.applying(hydratedChanges)
             syncStatus = AccountSyncStatus(
                 phase: .applying,
                 completedCount: 0,
@@ -701,9 +775,15 @@ public final class AccountSession {
                 entityProgress: entityProgress
             )
             let pageVersions = Self.entityVersions(for: orderedChanges)
-            try await Task.detached {
-                try runtime.applyPage(orderedChanges, pageVersions, pulled.cursor)
-            }.value
+            do {
+                try await Task.detached {
+                    try runtime.applyPage(orderedChanges, pageVersions, pulled.cursor)
+                }.value
+                Self.removeHydratedAssetFiles(orderedChanges)
+            } catch {
+                Self.removeHydratedAssetFiles(orderedChanges)
+                throw error
+            }
             applied += orderedChanges.count
             syncStatus = AccountSyncStatus(
                 phase: .applying,
@@ -737,6 +817,157 @@ public final class AccountSession {
         )
         if applied > 0 {
             onLearningDataApplied?()
+        }
+    }
+
+    /// Resolves every v2 asset announcement through the authorized manifest API, then downloads
+    /// and verifies its immutable bytes before the page is allowed to advance its cursor.
+    private func hydrateAssetChanges(
+        _ changes: [SyncPulledChange],
+        runtime: AccountSyncRuntime,
+        deviceID: String
+    ) async throws -> [SyncPulledChange] {
+        var hydrated: [SyncPulledChange] = []
+        hydrated.reserveCapacity(changes.count)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioReaderSyncAssets-v2-\(UUID().uuidString)", isDirectory: true)
+        do {
+            for var change in changes {
+                guard change.entityType == OutboxEntityType.transcript.rawValue
+                        || change.entityType == OutboxEntityType.asset.rawValue else {
+                    hydrated.append(change)
+                    continue
+                }
+                let announcedKind = change.payload["kind"]?.stringValue
+                    ?? (change.entityType == OutboxEntityType.transcript.rawValue
+                        ? SyncAssetKind.transcriptRevision.rawValue : "")
+                guard let assetID = change.payload["assetId"]?.stringValue,
+                      !announcedKind.isEmpty,
+                      let kind = SyncAssetKind(rawValue: announcedKind),
+                      let sha256 = change.payload["sha256"]?.stringValue,
+                      let bytesValue = change.payload["compressedBytes"]?.numberValue,
+                      bytesValue.rounded() == bytesValue,
+                      bytesValue >= 1
+                else { throw AccountSyncRunError.invalidTranscriptManifest }
+                let maximumBytes: Double = kind == .transcriptRevision
+                    ? 67_108_864 : 2_147_483_648
+                guard bytesValue <= maximumBytes else {
+                    throw AccountSyncRunError.invalidTranscriptManifest
+                }
+                let manifest = try await withAccessToken { access in
+                    try await runtime.client.assetManifest(
+                        accessToken: access, deviceID: deviceID, assetID: assetID
+                    )
+                }
+                guard manifest.status == "ready", manifest.kind == kind,
+                      manifest.sha256 == sha256, manifest.compressedBytes == Int(bytesValue)
+                else { throw AccountSyncRunError.invalidTranscriptManifest }
+                let downloadedURL = try await withAccessToken { access in
+                    try await runtime.client.downloadAsset(
+                        accessToken: access,
+                        deviceID: deviceID,
+                        assetID: assetID,
+                        sha256: sha256,
+                        compressedBytes: Int(bytesValue)
+                    )
+                }
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let url = directory.appendingPathComponent("\(change.entityId)-\(UUID().uuidString).object")
+                do {
+                    try FileManager.default.moveItem(at: downloadedURL, to: url)
+                } catch {
+                    try? FileManager.default.removeItem(at: downloadedURL)
+                    throw error
+                }
+                change.payload["kind"] = .string(manifest.kind.rawValue)
+                change.payload["contentType"] = .string(manifest.contentType)
+                change.payload["encoding"] = .string(manifest.encoding)
+                change.payload["originalBytes"] = .number(Double(manifest.originalBytes))
+                change.payload["segmentCount"] = manifest.segmentCount.map { .number(Double($0)) } ?? .null
+                change.payload["revisionId"] = manifest.revisionId.map(SyncJSONValue.string) ?? .null
+                change.payload["bookId"] = manifest.bookId.map(SyncJSONValue.string) ?? .null
+                change.payload["chapterId"] = manifest.chapterId.map(SyncJSONValue.string) ?? .null
+                change.payload["localObjectPath"] = .string(url.path)
+                hydrated.append(change)
+            }
+            return hydrated
+        } catch {
+            Self.removeHydratedAssetFiles(hydrated)
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+    }
+
+    nonisolated private static func removeHydratedAssetFiles(_ changes: [SyncPulledChange]) {
+        let paths = changes.compactMap { $0.payload["localObjectPath"]?.stringValue }
+        for path in paths {
+            try? FileManager.default.removeItem(atPath: path)
+        }
+        for directory in Set(paths.map { URL(fileURLWithPath: $0).deletingLastPathComponent() }) {
+            try? FileManager.default.removeItem(at: directory)
+        }
+    }
+
+    /// Ready-manifest publication is server-atomic; a failed object upload leaves the
+    /// local transcript available and does not mutate the outbox or cursor.
+    private func publishPendingAssets(
+        runtime: AccountSyncRuntime,
+        deviceID: String,
+        jobID: String
+    ) async throws {
+        let stagingDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioReaderSyncAssetUploads-v2-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingDirectory) }
+        let assets = try await Task.detached {
+            try runtime.assetUploads(stagingDirectory)
+        }.value
+        let stagingPath = stagingDirectory.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        guard assets.filter(\.deleteFileAfterUpload).allSatisfy({ asset in
+            asset.fileURL.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(stagingPath)
+        }) else {
+            throw AccountSyncRunError.invalidAssetStaging
+        }
+        var uploaded = 0
+        for asset in assets {
+            if asset.kind == .transcriptRevision,
+               let version = try runtime.versions?.loadVersion(
+                entityType: OutboxEntityType.transcript.rawValue,
+                entityID: asset.revisionID
+            ),
+               let payload = try? SyncJSONCoding.decoder.decode(
+                   [String: SyncJSONValue].self,
+                   from: version.payload
+               ),
+               payload["sha256"]?.stringValue == asset.sha256 {
+                continue
+            }
+            syncStatus = AccountSyncStatus(
+                phase: .uploading,
+                completedCount: uploaded,
+                totalCount: assets.count,
+                appliedCount: 0,
+                batchIndex: uploaded + 1,
+                pendingCount: (try? runtime.outbox.pendingMutations().count) ?? 0,
+                entityProgress: [
+                    AccountSyncEntityProgress(
+                        entityType: OutboxEntityType.transcript.rawValue,
+                        completedCount: uploaded,
+                        totalCount: assets.count
+                    )
+                ]
+            )
+            try await withAccessToken { access in
+                try await runtime.client.publishAsset(
+                    accessToken: access,
+                    deviceID: deviceID,
+                    asset: asset
+                )
+            }
+            uploaded += 1
+            Self.syncLog.info(
+                "sync_asset_publish message=sync_asset_publish requestId=\(jobID, privacy: .public) kind=\(asset.kind.rawValue, privacy: .public) outcome=ready completed=\(uploaded, privacy: .public) total=\(assets.count, privacy: .public)"
+            )
         }
     }
 
@@ -794,13 +1025,21 @@ public final class AccountSession {
             }
             let cursorToPersist = page.hasMore ? "0" : page.cursor
             if !page.entities.isEmpty || cursorToPersist != "0" {
-                try await Task.detached {
-                    try runtime.applyPage(
-                        SyncPulledChange.applying(remoteToApply),
-                        versions,
-                        cursorToPersist
-                    )
-                }.value
+                let hydrated = try await hydrateAssetChanges(
+                    remoteToApply,
+                    runtime: runtime,
+                    deviceID: deviceID
+                )
+                let ordered = SyncPulledChange.applying(hydrated)
+                do {
+                    try await Task.detached {
+                        try runtime.applyPage(ordered, versions, cursorToPersist)
+                    }.value
+                    Self.removeHydratedAssetFiles(ordered)
+                } catch {
+                    Self.removeHydratedAssetFiles(ordered)
+                    throw error
+                }
             }
             pages += 1
             offset = page.nextOffset
@@ -816,13 +1055,15 @@ public final class AccountSession {
 
     private static func entityVersions(for changes: [SyncPulledChange]) -> [SyncEntityVersion] {
         changes.map { change in
-            SyncEntityVersion(
+            var durablePayload = change.payload
+            durablePayload.removeValue(forKey: "localObjectPath")
+            return SyncEntityVersion(
                 entityType: change.entityType,
                 entityID: change.entityId,
                 serverVersion: Int64(change.revision),
                 payload: change.operation == OutboxOperation.delete.rawValue
                     ? SyncJSONCoding.tombstonePayload
-                    : SyncJSONCoding.data(from: change.payload)
+                    : SyncJSONCoding.data(from: durablePayload)
             )
         }
     }
@@ -836,21 +1077,27 @@ public final class AccountSession {
 
     /// Keeps sync pushes below the Worker's sync-only body allowance. Count-only batching is
     /// insufficient because one transcript can be several megabytes while most rows are tiny.
-    nonisolated static func syncPushBatches(_ pending: [OutboxMutation]) throws -> [[OutboxMutation]] {
+    nonisolated static func syncPushPlan(_ pending: [OutboxMutation]) throws -> SyncPushPlan {
         var batches: [[OutboxMutation]] = []
+        var skipped: [SyncSkippedMutation] = []
         var batch: [OutboxMutation] = []
         var encodedBytes = syncPushEnvelopeReserve
+        var totalEncodedBytes = 0
+        var maximumMutationBytes = 0
         let encoder = JSONEncoder()
 
         for mutation in pending {
             let mutationBytes = try encoder.encode(mutation.productMutation()).count + 1
+            maximumMutationBytes = max(maximumMutationBytes, mutationBytes)
             guard syncPushEnvelopeReserve + mutationBytes <= syncPushBatchBytes else {
-                throw AccountSyncRunError.mutationTooLarge(entityType: mutation.entityType.rawValue)
+                skipped.append(SyncSkippedMutation(mutationID: mutation.id, encodedBytes: mutationBytes))
+                continue
             }
             if !batch.isEmpty,
                batch.count >= syncPushBatchSize || encodedBytes + mutationBytes > syncPushBatchBytes
             {
                 batches.append(batch)
+                totalEncodedBytes += encodedBytes
                 batch = []
                 encodedBytes = syncPushEnvelopeReserve
             }
@@ -859,8 +1106,18 @@ public final class AccountSession {
         }
         if !batch.isEmpty {
             batches.append(batch)
+            totalEncodedBytes += encodedBytes
         }
-        return batches
+        return SyncPushPlan(
+            batches: batches,
+            skipped: skipped,
+            encodedBytes: totalEncodedBytes,
+            maximumMutationBytes: maximumMutationBytes
+        )
+    }
+
+    nonisolated static func syncPushBatches(_ pending: [OutboxMutation]) throws -> [[OutboxMutation]] {
+        try syncPushPlan(pending).batches
     }
 
     private func applyPushResult(
@@ -1014,6 +1271,7 @@ public final class AccountSession {
         devices = []
         featureFlags = []
         quotas = []
+        accountSyncReadiness = .notConfigured
         lastExportStatus = nil
         pendingExport = nil
         operatorLearningAnalyticsEnabled = nil
@@ -1021,6 +1279,8 @@ public final class AccountSession {
         pendingAuthorizationURL = nil
         pendingEmail = nil
         syncStatus = .idle
+        syncReadinessRetryTask?.cancel()
+        syncReadinessRetryTask = nil
         errorMessage = nil
         recoveryMessage = recovery
     }
@@ -1079,7 +1339,8 @@ private enum AccountSyncRunError: LocalizedError {
     case pullPageLimitReached
     case inconsistentBootstrapCursor
     case invalidBootstrapPage
-    case mutationTooLarge(entityType: String)
+    case invalidTranscriptManifest
+    case invalidAssetStaging
 
     var errorDescription: String? {
         switch self {
@@ -1089,8 +1350,24 @@ private enum AccountSyncRunError: LocalizedError {
             "Initial sync changed snapshots between pages. Try syncing again."
         case .invalidBootstrapPage:
             "Initial sync returned an invalid page. Try syncing again."
-        case .mutationTooLarge(let entityType):
-            "One \(entityType.replacingOccurrences(of: "_", with: " ")) record is too large to sync safely. Keep it on this device or shorten that chapter transcript."
+        case .invalidTranscriptManifest:
+            "A transcript object manifest is invalid. Sync paused before changing local data."
+        case .invalidAssetStaging:
+            "A generated sync asset escaped its private staging directory. Sync paused without deleting local media."
         }
     }
+}
+
+struct SyncSkippedMutation: Equatable, Sendable {
+    var mutationID: MutationID
+    var encodedBytes: Int
+}
+
+struct SyncPushPlan: Equatable, Sendable {
+    var batches: [[OutboxMutation]]
+    var skipped: [SyncSkippedMutation]
+    var encodedBytes: Int
+    var maximumMutationBytes: Int
+
+    var uploadableCount: Int { batches.reduce(0) { $0 + $1.count } }
 }

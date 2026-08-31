@@ -20,6 +20,12 @@ enum IPadLibraryImportToolbarPlacement: Equatable {
     static let owner: Self = .content
 }
 
+enum IPadAnkiExportToolbarPlacement: Equatable {
+    case detail
+
+    static let owner: Self = .detail
+}
+
 enum IPadEPUBImportPolicy {
     static let appleBooksLibraryEnumerationSupported = false
     static let supportedEquivalent = "Import a DRM-free EPUB with the Files document picker, share sheet, or an export from Apple Books."
@@ -138,6 +144,19 @@ private enum IPadImportRequest: Identifiable {
     }
 }
 
+private enum IPadPendingDuplicateImport {
+    case files([URL], title: String)
+    case folder(URL, title: String)
+    case deviceAudiobook(DeviceAudiobookItem, DeviceAudiobookImportPreflight)
+
+    var title: String {
+        switch self {
+        case .files(_, let title), .folder(_, let title): title
+        case .deviceAudiobook(let item, _): item.title
+        }
+    }
+}
+
 struct IPadRootView: View {
     @Bindable var state: AppState
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
@@ -148,6 +167,7 @@ struct IPadRootView: View {
     @State private var importingDeviceID: UInt64?
     @State private var importMessage: String?
     @State private var importError: String?
+    @State private var pendingDuplicateImport: IPadPendingDuplicateImport?
     @State private var pendingBookDelete: Book?
 
     var body: some View {
@@ -195,6 +215,15 @@ struct IPadRootView: View {
             Button("OK", role: .cancel) { importError = nil }
         } message: {
             Text(importError ?? "Unknown import error")
+        }
+        .alert("Import another copy?", isPresented: Binding(
+            get: { pendingDuplicateImport != nil || state.pendingExternalEPUBDuplicate != nil },
+            set: { if !$0 { cancelPendingDuplicateImport() } }
+        )) {
+            Button("Cancel", role: .cancel) { cancelPendingDuplicateImport() }
+            Button("Import Another Copy") { confirmPendingDuplicateImport() }
+        } message: {
+            Text("“\(duplicateImportTitle)” is already in your AudioReader library. Import another copy anyway?")
         }
         .alert("Delete book?", isPresented: Binding(
             get: { pendingBookDelete != nil },
@@ -549,6 +578,11 @@ struct IPadRootView: View {
     private func importFiles(_ result: Result<[URL], any Error>) {
         do {
             let urls = try result.get()
+            let preflight = try AudiobookImportService.preflightFiles(urls)
+            if let duplicate = preflight.duplicates.first {
+                pendingDuplicateImport = .files(urls, title: duplicate.title)
+                return
+            }
             let imported = try AudiobookImportService.importFiles(urls)
             if imported.createdBook {
                 importMessage = "Imported \(urls.count) selected files."
@@ -586,6 +620,11 @@ struct IPadRootView: View {
     private func importFolder(_ result: Result<[URL], any Error>) {
         do {
             guard let url = try result.get().first else { return }
+            let preflight = try AudiobookImportService.preflightFolder(url)
+            if let duplicate = preflight.duplicates.first {
+                pendingDuplicateImport = .folder(url, title: duplicate.title)
+                return
+            }
             try AudiobookImportService.importFolder(url)
             importMessage = "Imported \(url.lastPathComponent)."
             Task { await state.rescan() }
@@ -600,7 +639,12 @@ struct IPadRootView: View {
         Task {
             defer { importingDeviceID = nil }
             do {
-                let result = try await deviceLibrary.importAudiobook(item)
+                let preflight = try await deviceLibrary.preflightAudiobook(item)
+                if preflight.identity.requiresConfirmation {
+                    pendingDuplicateImport = .deviceAudiobook(item, preflight)
+                    return
+                }
+                let result = try await deviceLibrary.importAudiobook(item, prepared: preflight)
                 importMessage = result.createdBook
                     ? "Imported \(item.title)."
                     : "\(item.title) is already imported; its metadata was updated."
@@ -614,28 +658,74 @@ struct IPadRootView: View {
         }
     }
 
-    private func deleteBook(_ book: Book) {
-        do {
-            if state.selectedBookID == book.id {
-                state.cancelTranscription()
-                state.player.tearDown()
-                state.selectedBookID = nil
-                state.selectedChapterID = nil
-                state.transcript = nil
-                state.tab = .library
-            }
-            try AudiobookImportService.deleteBookFolder(
-                URL(fileURLWithPath: book.folderPath, isDirectory: true),
-                in: Persistence.importedBooksURL
-            )
-            importMessage = "Deleted \(book.title). Vocabulary entries were kept."
-            Task {
-                await state.rescan()
-                if state.selectedBookID == nil {
-                    state.selectedBookID = state.books.first?.id
-                    state.selectedChapterID = state.books.first?.chapters.first?.id
+    private var duplicateImportTitle: String {
+        pendingDuplicateImport?.title
+            ?? state.pendingExternalEPUBDuplicate?.title
+            ?? "This book"
+    }
+
+    private func cancelPendingDuplicateImport() {
+        if case .deviceAudiobook(_, let preflight) = pendingDuplicateImport {
+            preflight.discard()
+        }
+        pendingDuplicateImport = nil
+        state.cancelExternalEPUBImport()
+    }
+
+    /// Confirmation is the only path that passes `confirmedReimport`; picker
+    /// cancellation and alert cancellation perform no library mutation.
+    private func confirmPendingDuplicateImport() {
+        if let pending = pendingDuplicateImport {
+            pendingDuplicateImport = nil
+            switch pending {
+            case .files(let urls, _):
+                do {
+                    let imported = try AudiobookImportService.importFiles(
+                        urls,
+                        duplicatePolicy: .confirmedReimport
+                    )
+                    importMessage = "Imported another copy of \(imported.folder.lastPathComponent)."
+                    Task { await state.rescan() }
+                } catch {
+                    importError = error.localizedDescription
+                }
+            case .folder(let url, _):
+                do {
+                    _ = try AudiobookImportService.importFolder(
+                        url,
+                        duplicatePolicy: .confirmedReimport
+                    )
+                    importMessage = "Imported another copy from \(url.lastPathComponent)."
+                    Task { await state.rescan() }
+                } catch {
+                    importError = error.localizedDescription
+                }
+            case .deviceAudiobook(let item, let preflight):
+                importingDeviceID = item.id
+                Task {
+                    defer { importingDeviceID = nil }
+                    do {
+                        _ = try await deviceLibrary.importAudiobook(
+                            item,
+                            prepared: preflight,
+                            duplicatePolicy: .confirmedReimport
+                        )
+                        importMessage = "Confirmed \(item.title); its device metadata was updated."
+                        await state.rescan()
+                    } catch {
+                        importError = error.localizedDescription
+                    }
                 }
             }
+            return
+        }
+        Task { await state.confirmExternalEPUBImport() }
+    }
+
+    private func deleteBook(_ book: Book) {
+        do {
+            try state.deleteBookFromLibrary(book)
+            importMessage = "Deleted \(book.title). Vocabulary entries were kept."
         } catch {
             importError = error.localizedDescription
         }
@@ -716,9 +806,11 @@ private struct IPadBookList: View {
                             Text(book.author ?? "Unknown author")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
-                            Text(book.mediaAvailability == .ebookOnly
-                                ? "\(book.chapters.count) readable sections"
-                                : "\(book.chapters.lazy.filter { readyChapterIDs.contains($0.id) }.count)/\(book.chapters.count) transcribed")
+                            Text(book.mediaAvailability == .metadataOnly
+                                ? "Local media unavailable — re-import required"
+                                : book.mediaAvailability == .ebookOnly
+                                    ? "\(book.chapters.count) readable sections"
+                                    : "\(book.chapters.lazy.filter { readyChapterIDs.contains($0.id) }.count)/\(book.chapters.count) transcribed")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -739,7 +831,7 @@ private struct IPadBookList: View {
         .accessibilityIdentifier("library.search")
         .overlay {
             if books.isEmpty {
-                ContentUnavailableView("No books", systemImage: "books.vertical", description: Text("Use Import to add audiobook audio, a DRM-free EPUB, or both."))
+                ContentUnavailableView("No books", systemImage: "books.vertical", description: Text(Persistence.localMediaReimportNotice))
             } else if filteredBooks.isEmpty {
                 ContentUnavailableView.search(text: query)
             }
@@ -765,10 +857,14 @@ private struct IPadBookDetail: View {
                             .font(.title3)
                             .foregroundStyle(.secondary)
                         Label(
-                            book.mediaAvailability == .ebookOnly
-                                ? "\(book.chapters.count) readable EPUB sections"
-                                : "\(state.transcribedChapterCount(in: book)) of \(book.chapters.count) chapters transcribed",
-                            systemImage: book.mediaAvailability == .ebookOnly ? "book.pages" : "waveform.badge.checkmark"
+                            book.mediaAvailability == .metadataOnly
+                                ? "Local media unavailable — re-import required"
+                                : book.mediaAvailability == .ebookOnly
+                                    ? "\(book.chapters.count) readable EPUB sections"
+                                    : "\(state.transcribedChapterCount(in: book)) of \(book.chapters.count) chapters transcribed",
+                            systemImage: book.mediaAvailability == .metadataOnly
+                                ? "externaldrive.badge.exclamationmark"
+                                : book.mediaAvailability == .ebookOnly ? "book.pages" : "waveform.badge.checkmark"
                         )
                             .foregroundStyle(.secondary)
                         AudiobookLanguagePicker(state: state, book: book)
@@ -822,12 +918,15 @@ private struct IPadBookDetail: View {
                     Label("Open Book", systemImage: "book.pages")
                 }
                 .accessibilityIdentifier("library.continue")
+                .disabled(book.mediaAvailability == .metadataOnly)
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button(action: onAddEbook) {
                         Label(
-                            book.mediaAvailability == .ebookOnly
+                            book.mediaAvailability == .metadataOnly
+                                ? "Re-import Media"
+                                : book.mediaAvailability == .ebookOnly
                                 ? "Add Audio"
                                 : (book.ebookPath == nil ? "Add EPUB" : "Add Files"),
                             systemImage: "book.closed"

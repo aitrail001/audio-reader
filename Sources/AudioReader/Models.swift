@@ -34,6 +34,7 @@ enum BookMediaAvailability: String, Codable, Hashable, Sendable {
     case audioOnly
     case ebookOnly
     case audioAndEbook
+    case metadataOnly
 }
 
 struct Book: Identifiable, Hashable, Codable, Sendable {
@@ -49,7 +50,7 @@ struct Book: Identifiable, Hashable, Codable, Sendable {
     var mediaAvailability: BookMediaAvailability {
         let hasAudio = chapters.contains(where: \.hasAudio)
         if hasAudio { return ebookPath == nil ? .audioOnly : .audioAndEbook }
-        return .ebookOnly
+        return ebookPath == nil ? .metadataOnly : .ebookOnly
     }
 
     var bookID: BookID {
@@ -494,6 +495,15 @@ enum VocabCategory: String, Codable, CaseIterable, Hashable, Identifiable, Senda
 struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
     var id: String
     var word: String
+    var canonicalForm: String
+    var partOfSpeech: VocabularyPartOfSpeech
+    var senseID: String?
+    var canonicalizationSource: VocabularyCanonicalizationSource
+    var canonicalizationConfidence: Double
+    var canonicalizationStatus: VocabularyCanonicalizationStatus
+    var canonicalizationTraceID: String?
+    var captureSource: VocabularyCaptureSource
+    var reviewEligible: Bool
     var category: VocabCategory
     var definition: String?
     var dictionaryName: String?
@@ -522,7 +532,9 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
     var isInLearnList: Bool
 
     enum CodingKeys: String, CodingKey {
-        case id, word, category, definition, dictionaryName, dictionaryHTML
+        case id, word, canonicalForm, partOfSpeech, senseID
+        case canonicalizationSource, canonicalizationConfidence, canonicalizationStatus, canonicalizationTraceID
+        case captureSource, reviewEligible, category, definition, dictionaryName, dictionaryHTML
         case translation, translationLanguage, translationModel, sourceLanguage, context, spokenText, ebookText
         case bookID, bookTitle, chapterID, chapterTitle, segmentID, wordID
         case timestamp, addedAt, reviewCount, nextReview
@@ -533,6 +545,15 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
     init(
         id: String,
         word: String,
+        canonicalForm: String? = nil,
+        partOfSpeech: VocabularyPartOfSpeech = .unknown,
+        senseID: String? = nil,
+        canonicalizationSource: VocabularyCanonicalizationSource = .normalized,
+        canonicalizationConfidence: Double = 0.4,
+        canonicalizationStatus: VocabularyCanonicalizationStatus = .needsReview,
+        canonicalizationTraceID: String? = nil,
+        captureSource: VocabularyCaptureSource? = nil,
+        reviewEligible: Bool? = nil,
         category: VocabCategory = .word,
         definition: String? = nil,
         dictionaryName: String? = nil,
@@ -562,6 +583,16 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
     ) {
         self.id = id
         self.word = word
+        self.canonicalForm = canonicalForm ?? word
+        self.partOfSpeech = partOfSpeech
+        self.senseID = senseID
+        self.canonicalizationSource = canonicalizationSource
+        self.canonicalizationConfidence = canonicalizationConfidence
+        self.canonicalizationStatus = canonicalizationStatus
+        self.canonicalizationTraceID = canonicalizationTraceID
+        let resolvedCaptureSource = captureSource ?? Self.defaultCaptureSource(for: category)
+        self.captureSource = resolvedCaptureSource
+        self.reviewEligible = reviewEligible ?? resolvedCaptureSource.defaultReviewEligibility
         self.category = category
         self.definition = definition
         self.dictionaryName = dictionaryName
@@ -595,6 +626,20 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
         id = try c.decode(String.self, forKey: .id)
         word = try c.decode(String.self, forKey: .word)
         category = try c.decodeIfPresent(VocabCategory.self, forKey: .category) ?? .word
+        reviewCount = try c.decodeIfPresent(Int.self, forKey: .reviewCount) ?? 0
+        isInLearnList = try c.decodeIfPresent(Bool.self, forKey: .isInLearnList) ?? false
+        canonicalForm = try c.decodeIfPresent(String.self, forKey: .canonicalForm) ?? word
+        partOfSpeech = try c.decodeIfPresent(VocabularyPartOfSpeech.self, forKey: .partOfSpeech) ?? .unknown
+        senseID = try c.decodeIfPresent(String.self, forKey: .senseID)
+        canonicalizationSource = try c.decodeIfPresent(VocabularyCanonicalizationSource.self, forKey: .canonicalizationSource) ?? .normalized
+        canonicalizationConfidence = try c.decodeIfPresent(Double.self, forKey: .canonicalizationConfidence) ?? 0.4
+        canonicalizationStatus = try c.decodeIfPresent(VocabularyCanonicalizationStatus.self, forKey: .canonicalizationStatus) ?? .needsReview
+        canonicalizationTraceID = try c.decodeIfPresent(String.self, forKey: .canonicalizationTraceID)
+        captureSource = try c.decodeIfPresent(VocabularyCaptureSource.self, forKey: .captureSource)
+            ?? Self.defaultCaptureSource(for: category, reviewed: reviewCount > 0, saved: isInLearnList)
+        reviewEligible = reviewCount > 0
+            ? true
+            : (try c.decodeIfPresent(Bool.self, forKey: .reviewEligible) ?? captureSource.defaultReviewEligibility)
         definition = try c.decodeIfPresent(String.self, forKey: .definition)
         dictionaryName = try c.decodeIfPresent(String.self, forKey: .dictionaryName)
         dictionaryHTML = try c.decodeIfPresent(String.self, forKey: .dictionaryHTML)
@@ -613,14 +658,35 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
         wordID = try c.decodeIfPresent(String.self, forKey: .wordID)
         timestamp = try c.decode(TimeInterval.self, forKey: .timestamp)
         addedAt = try c.decode(Date.self, forKey: .addedAt)
-        reviewCount = try c.decodeIfPresent(Int.self, forKey: .reviewCount) ?? 0
         nextReview = try c.decodeIfPresent(Date.self, forKey: .nextReview)
         lastReviewedAt = try c.decodeIfPresent(Date.self, forKey: .lastReviewedAt)
         lastReviewQuality = try c.decodeIfPresent(VocabReviewQuality.self, forKey: .lastReviewQuality)
         reviewIntervalDays = try c.decodeIfPresent(Double.self, forKey: .reviewIntervalDays) ?? 0
         reviewEaseFactor = try c.decodeIfPresent(Double.self, forKey: .reviewEaseFactor) ?? 2.5
-        isInLearnList = try c.decodeIfPresent(Bool.self, forKey: .isInLearnList) ?? false
         sanitizeDictionaryFields()
+    }
+
+    private static func defaultCaptureSource(for category: VocabCategory) -> VocabularyCaptureSource {
+        switch category {
+        case .word: .explicitWord
+        case .phrase: .explicitPhrase
+        case .sentence: .explicitSentence
+        }
+    }
+
+    private static func defaultCaptureSource(
+        for category: VocabCategory,
+        reviewed: Bool,
+        saved: Bool
+    ) -> VocabularyCaptureSource {
+        guard reviewed || saved else {
+            switch category {
+            case .word: return .explicitWord
+            case .phrase: return .automaticPhraseSuggestion
+            case .sentence: return .acceptedSentenceTranslation
+            }
+        }
+        return defaultCaptureSource(for: category)
     }
 
     mutating func sanitizeDictionaryFields() {
@@ -643,6 +709,15 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
     }
 }
 
+extension VocabularyCaptureSource {
+    var defaultReviewEligibility: Bool {
+        switch self {
+        case .explicitWord, .explicitPhrase, .explicitSentence: true
+        case .acceptedSentenceTranslation, .automaticPhraseSuggestion: false
+        }
+    }
+}
+
 enum TextRevealKind: String, Equatable, Sendable {
     case word
     case sentence
@@ -658,6 +733,8 @@ enum GlossStatus: String, Codable, Sendable {
     case accepted
     case rejected
     case stale
+    case edited
+    case replaced
 }
 
 struct GlossEntry: Identifiable, Hashable, Codable, Sendable {
@@ -669,6 +746,9 @@ struct GlossEntry: Identifiable, Hashable, Codable, Sendable {
     var text: String
     var status: GlossStatus
     var model: String
+    var promptVersion: String = "local"
+    var modelPolicyHash: String = "local"
+    var sharedCacheEntryID: String? = nil
     var bookID: String?
     var bookTitle: String?
     var chapterID: String?
@@ -723,7 +803,10 @@ enum GlossBatch {
     ) -> [GlossEntry] {
         let normalizedSources = Set(currentSentenceSources.map(GlossEntry.normalize))
         return entries.filter {
-            guard $0.kind == .sentence, $0.language == language, $0.status == .pending else { return false }
+            guard $0.kind == .sentence,
+                  $0.language == language,
+                  $0.status == .pending || $0.status == .edited || $0.status == .replaced
+            else { return false }
             if $0.bookID == bookID, $0.chapterID == chapterID { return true }
             return $0.bookID == legacyBookID
                 && $0.chapterID == legacyChapterID
@@ -813,11 +896,30 @@ struct ChapterTranslationResult: Decodable, Equatable, Sendable {
     var id: String
     var translation: String
     var notes: [Note]
+    var assistantResultID: String?
+    var model: String?
+    var promptVersion: String?
+    var modelPolicyHash: String?
+    var sharedCacheEntryID: String?
 
-    init(id: String, translation: String, notes: [Note] = []) {
+    init(
+        id: String,
+        translation: String,
+        notes: [Note] = [],
+        assistantResultID: String? = nil,
+        model: String? = nil,
+        promptVersion: String? = nil,
+        modelPolicyHash: String? = nil,
+        sharedCacheEntryID: String? = nil
+    ) {
         self.id = id
         self.translation = translation
         self.notes = notes
+        self.assistantResultID = assistantResultID
+        self.model = model
+        self.promptVersion = promptVersion
+        self.modelPolicyHash = modelPolicyHash
+        self.sharedCacheEntryID = sharedCacheEntryID
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -825,6 +927,11 @@ struct ChapterTranslationResult: Decodable, Equatable, Sendable {
         case translation
         case notes
         case phrases
+        case assistantResultID
+        case model
+        case promptVersion
+        case modelPolicyHash
+        case sharedCacheEntryID
     }
 
     private struct LegacyPhrase: Decodable {
@@ -836,6 +943,11 @@ struct ChapterTranslationResult: Decodable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         translation = try container.decode(String.self, forKey: .translation)
+        assistantResultID = try container.decodeIfPresent(String.self, forKey: .assistantResultID)
+        model = try container.decodeIfPresent(String.self, forKey: .model)
+        promptVersion = try container.decodeIfPresent(String.self, forKey: .promptVersion)
+        modelPolicyHash = try container.decodeIfPresent(String.self, forKey: .modelPolicyHash)
+        sharedCacheEntryID = try container.decodeIfPresent(String.self, forKey: .sharedCacheEntryID)
         if let decodedNotes = try container.decodeIfPresent([Note].self, forKey: .notes) {
             notes = decodedNotes
         } else {

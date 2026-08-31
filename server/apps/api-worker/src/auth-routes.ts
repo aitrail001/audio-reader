@@ -13,6 +13,7 @@ import { readJsonObject } from "./body";
 import { asHead, jsonResponse, problemResponse } from "./http";
 import { withIdempotency, type IdempotencyStore } from "./idempotency";
 import { requireBoundDevice } from "./route-helpers";
+import type { AccountSyncReadinessService } from "./account-sync-readiness";
 
 type Profile = components["schemas"]["Profile"];
 type TokenPair = components["schemas"]["TokenPair"];
@@ -72,6 +73,7 @@ export type AuthRouteContext = {
   localOAuthComplete: boolean;
   turnstileSiteKey?: string;
   ops?: OpsStore;
+  accountSyncReadiness: AccountSyncReadinessService;
 };
 
 export function isAuthPath(path: string): boolean {
@@ -573,6 +575,22 @@ async function bootstrapSession(context: AuthRouteContext): Promise<Response> {
                   item === "macos" || item === "ios" || item === "ipados",
               ),
             }));
+      const requestedAccountSync =
+        flags.find((flag) => flag.key === "account_sync")?.enabled === true;
+      const accountSyncMinimum = "2.0.0";
+      const probedReadiness = await context.accountSyncReadiness.read(requestedAccountSync);
+      const upgradeRequired = compareSemanticVersions(appVersion, accountSyncMinimum) < 0;
+      const accountSyncReadiness = upgradeRequired
+        ? {
+            ...probedReadiness,
+            minAppVersion: accountSyncMinimum,
+            effective: false,
+            reason: "upgrade_required" as const,
+          }
+        : { ...probedReadiness, minAppVersion: accountSyncMinimum };
+      const effectiveFlags = flags.map((flag) =>
+        flag.key === "account_sync" ? { ...flag, enabled: accountSyncReadiness.effective } : flag,
+      );
       const quotas =
         context.ops === undefined
           ? [...bootstrapped.value.quotas]
@@ -581,15 +599,32 @@ async function bootstrapSession(context: AuthRouteContext): Promise<Response> {
         profile: toProfile(bootstrapped.value.profile),
         device: bootstrapped.value.device,
         settings: bootstrapped.value.settings,
-        featureFlags: flags,
+        featureFlags: effectiveFlags,
         quotas,
         syncCursor: bootstrapped.value.syncCursor,
+        accountSyncReadiness,
       };
       return jsonResponse(payload);
     },
     context.requestId,
     principal,
   );
+}
+
+function compareSemanticVersions(left: string, right: string): number {
+  const parse = (value: string) => value.split(".").map((part) => Number(part));
+  const leftParts = parse(left);
+  const rightParts = parse(right);
+  if (
+    leftParts.length !== 3 || rightParts.length !== 3 ||
+    leftParts.some((part) => !Number.isInteger(part) || part < 0) ||
+    rightParts.some((part) => !Number.isInteger(part) || part < 0)
+  ) return -1;
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
 }
 
 async function getProfile(context: AuthRouteContext): Promise<Response> {

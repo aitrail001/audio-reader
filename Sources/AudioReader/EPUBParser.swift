@@ -45,6 +45,10 @@ enum EPUBParser {
         let epub = URL(fileURLWithPath: epubPath)
         guard FileManager.default.fileExists(atPath: epub.path) else { return nil }
 
+        if (try? epub.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+            return document(in: epub)
+        }
+
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("AudioReader-epub-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -52,11 +56,18 @@ enum EPUBParser {
 
         guard (try? FileManager.default.unzipItem(at: epub, to: tmp)) != nil else { return nil }
 
-        let package = packageInfo(in: tmp)
+        return document(in: tmp)
+    }
+
+    /// Apple Books stores downloaded EPUBs as expanded `.epub` directories;
+    /// parse that package root directly without weakening encrypted-spine checks.
+    private static func document(in root: URL) -> EPUBDocument? {
+        let package = packageInfo(in: root)
+        guard !hasEncryptedReadingContent(in: root, package: package) else { return nil }
         let navigation = package.flatMap { navigationEntries(for: $0) } ?? []
         let navigatedSections = navigationSections(from: navigation)
         let sections = navigatedSections.isEmpty
-            ? spineSections(in: tmp, package: package)
+            ? spineSections(in: root, package: package)
             : navigatedSections
         let joined = sections.map(\.text).joined(separator: "\n\n")
         guard !joined.isEmpty else { return nil }
@@ -390,6 +401,28 @@ enum EPUBParser {
         return EPUBCover(data: data, fileExtension: url.pathExtension.lowercased())
     }
 
+    /// Font obfuscation is compatible with reading, but encrypted spine
+    /// documents are not imported because AudioReader must not bypass DRM.
+    private static func hasEncryptedReadingContent(in root: URL, package: PackageInfo?) -> Bool {
+        let encryption = root.appendingPathComponent("META-INF/encryption.xml")
+        guard let data = try? Data(contentsOf: encryption) else { return false }
+        let parser = XMLParser(data: data)
+        let delegate = EPUBEncryptionParser()
+        parser.delegate = delegate
+        guard parser.parse(), !delegate.resourcePaths.isEmpty else { return false }
+
+        let encryptedURLs = delegate.resourcePaths.compactMap {
+            resolvedResource($0, relativeTo: root, within: root)
+        }
+        if let package, !package.spineURLs.isEmpty {
+            let spinePaths = Set(package.spineURLs.map { $0.standardizedFileURL.path })
+            return encryptedURLs.contains { spinePaths.contains($0.standardizedFileURL.path) }
+        }
+        return encryptedURLs.contains {
+            ["htm", "html", "xhtml"].contains($0.pathExtension.lowercased())
+        }
+    }
+
     private static func resolvedResource(_ href: String, relativeTo base: URL, within root: URL) -> URL? {
         let decoded = href.removingPercentEncoding ?? href
         let candidate = URL(fileURLWithPath: decoded, relativeTo: base)
@@ -648,6 +681,23 @@ private final class EPUBPackageParser: NSObject, XMLParserDelegate {
         if local == "creator", author == nil, !value.isEmpty { author = value }
         capturedElement = nil
         capturedText = ""
+    }
+}
+
+private final class EPUBEncryptionParser: NSObject, XMLParserDelegate {
+    var resourcePaths: [String] = []
+
+    func parser(
+        _ parser: XMLParser,
+        didStartElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?,
+        attributes attributeDict: [String: String] = [:]
+    ) {
+        guard xmlLocalName(elementName) == "cipherreference",
+              let uri = xmlAttribute("uri", in: attributeDict)
+        else { return }
+        resourcePaths.append(uri.components(separatedBy: "#").first ?? uri)
     }
 }
 

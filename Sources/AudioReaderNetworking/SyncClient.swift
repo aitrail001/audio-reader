@@ -172,6 +172,7 @@ public struct SyncBootstrapResponse: Codable, Equatable, Sendable {
 
 public enum AccountSyncPhase: String, Equatable, Sendable {
     case idle
+    case paused
     case preparing
     case uploading
     case downloading
@@ -204,8 +205,7 @@ public struct AccountSyncEntityProgress: Equatable, Sendable, Identifiable {
         case OutboxEntityType.reviewEvent.rawValue: "Reviews"
         case OutboxEntityType.transcript.rawValue: "Transcripts"
         case OutboxEntityType.transcriptOverlay.rawValue: "Transcript corrections"
-        case OutboxEntityType.translationDecision.rawValue: "Translation decisions"
-        case OutboxEntityType.summaryDecision.rawValue: "Summary decisions"
+        case OutboxEntityType.assistantResult.rawValue: "Assistant results"
         case OutboxEntityType.chatMessage.rawValue: "Chat messages"
         case OutboxEntityType.studyActivity.rawValue: "Study activity"
         default: entityType.replacingOccurrences(of: "_", with: " ").capitalized
@@ -229,6 +229,15 @@ public struct AccountSyncStatus: Equatable, Sendable {
     public var entityProgress: [AccountSyncEntityProgress]
 
     public static let idle = AccountSyncStatus(phase: .idle)
+
+    /// Readiness pauses preserve the user's requested-on preference and all local sync state.
+    public static func paused(reason: String, pendingCount: Int) -> AccountSyncStatus {
+        AccountSyncStatus(
+            phase: .paused,
+            pendingCount: pendingCount,
+            errorMessage: reason
+        )
+    }
 
     public init(
         phase: AccountSyncPhase,
@@ -302,12 +311,13 @@ public struct AccountSyncStatus: Equatable, Sendable {
     }
 
     public var requiresAttention: Bool {
-        phase == .failed || conflictCount > 0
+        phase == .paused || phase == .failed || conflictCount > 0
     }
 
     public var title: String {
         switch phase {
         case .idle: "Up to date"
+        case .paused: "Sync paused"
         case .preparing: "Preparing sync"
         case .uploading:
             if let entityType {
@@ -332,6 +342,8 @@ public struct AccountSyncStatus: Equatable, Sendable {
     public var detail: String {
         var parts: [String] = []
         switch phase {
+        case .paused:
+            if let errorMessage, !errorMessage.isEmpty { parts.append(errorMessage) }
         case .preparing:
             parts.append("Checking local changes")
         case .uploading:
@@ -424,6 +436,26 @@ public enum SyncJSONValue: Codable, Equatable, Sendable {
 }
 
 public protocol SyncClient: Sendable {
+    func publishAsset(accessToken: String, deviceID: String, asset: SyncAssetUpload) async throws
+    func downloadAsset(
+        accessToken: String,
+        deviceID: String,
+        assetID: String,
+        sha256: String,
+        compressedBytes: Int
+    ) async throws -> URL
+    func assetManifest(
+        accessToken: String,
+        deviceID: String,
+        assetID: String
+    ) async throws -> SyncAssetManifest
+    func discoverAssets(
+        accessToken: String,
+        deviceID: String,
+        kind: SyncAssetKind?,
+        bookID: String?,
+        chapterID: String?
+    ) async throws -> [SyncAssetManifest]
     func push(accessToken: String, deviceID: String, request: SyncPushRequest) async throws -> SyncPushResponse
     func bootstrap(
         accessToken: String,
@@ -436,6 +468,80 @@ public protocol SyncClient: Sendable {
 }
 
 public extension SyncClient {
+    func publishAsset(accessToken: String, deviceID: String, asset: SyncAssetUpload) async throws {
+        _ = accessToken
+        _ = deviceID
+        _ = asset
+        throw AuthClientError.problem(
+            status: 503,
+            code: "asset_transfer_unavailable",
+            detail: "This sync client cannot publish private assets."
+        )
+    }
+
+    func downloadAsset(
+        accessToken: String,
+        deviceID: String,
+        assetID: String,
+        sha256: String,
+        compressedBytes: Int
+    ) async throws -> URL {
+        _ = accessToken
+        _ = deviceID
+        _ = assetID
+        _ = sha256
+        _ = compressedBytes
+        throw AuthClientError.problem(
+            status: 503,
+            code: "asset_transfer_unavailable",
+            detail: "This sync client cannot download private assets."
+        )
+    }
+
+    func assetManifest(
+        accessToken: String,
+        deviceID: String,
+        assetID: String
+    ) async throws -> SyncAssetManifest {
+        _ = accessToken
+        _ = deviceID
+        _ = assetID
+        throw AuthClientError.problem(
+            status: 503,
+            code: "asset_transfer_unavailable",
+            detail: "This sync client cannot discover private assets."
+        )
+    }
+
+    func discoverAssets(
+        accessToken: String,
+        deviceID: String,
+        kind: SyncAssetKind?,
+        bookID: String?,
+        chapterID: String?
+    ) async throws -> [SyncAssetManifest] {
+        _ = accessToken
+        _ = deviceID
+        _ = kind
+        _ = bookID
+        _ = chapterID
+        return []
+    }
+
+    func downloadAsset(
+        accessToken: String,
+        deviceID: String,
+        manifest: SyncAssetManifest
+    ) async throws -> URL {
+        try await downloadAsset(
+            accessToken: accessToken,
+            deviceID: deviceID,
+            assetID: manifest.id,
+            sha256: manifest.sha256,
+            compressedBytes: manifest.compressedBytes
+        )
+    }
+
     func bootstrap(
         accessToken: String,
         deviceID: String,
@@ -452,12 +558,171 @@ public extension SyncClient {
     }
 }
 
+public enum SyncAssetKind: String, Codable, CaseIterable, Sendable {
+    case audio
+    case epub
+    case cover
+    case transcriptRevision
+    case epubReadingPackage
+    case alignmentPackage
+    case mediaAnalysis
+    case transcriptExport
+    case accountExport
+    case assistantArtifact
+    case otherLargeImmutable
+}
+
+public struct SyncAssetManifest: Codable, Equatable, Sendable {
+    public var id: String
+    public var kind: SyncAssetKind
+    public var contentType: String
+    public var compressedBytes: Int
+    public var originalBytes: Int
+    public var sha256: String
+    public var encoding: String
+    public var revisionId: String?
+    public var bookId: String?
+    public var chapterId: String?
+    public var segmentCount: Int?
+    public var status: String
+
+    public init(
+        id: String,
+        kind: SyncAssetKind,
+        contentType: String,
+        compressedBytes: Int,
+        originalBytes: Int,
+        sha256: String,
+        encoding: String,
+        revisionId: String? = nil,
+        bookId: String? = nil,
+        chapterId: String? = nil,
+        segmentCount: Int? = nil,
+        status: String = "ready"
+    ) {
+        self.id = id
+        self.kind = kind
+        self.contentType = contentType
+        self.compressedBytes = compressedBytes
+        self.originalBytes = originalBytes
+        self.sha256 = sha256
+        self.encoding = encoding
+        self.revisionId = revisionId
+        self.bookId = bookId
+        self.chapterId = chapterId
+        self.segmentCount = segmentCount
+        self.status = status
+    }
+}
+
+public struct SyncAssetUpload: Equatable, Sendable {
+    public var kind: SyncAssetKind
+    public var revisionID: String
+    public var bookID: String?
+    public var chapterID: String
+    public var contentType: String
+    public var encoding: String
+    public var sha256: String
+    public var originalBytes: Int
+    public var segmentCount: Int
+    public var fileURL: URL
+    public var compressedBytes: Int
+    public var deleteFileAfterUpload: Bool
+
+    public init(
+        revisionID: String,
+        bookID: String? = nil,
+        chapterID: String,
+        contentType: String = "application/json",
+        encoding: String = "identity-json-v1",
+        sha256: String,
+        originalBytes: Int,
+        segmentCount: Int,
+        fileURL: URL,
+        compressedBytes: Int,
+        deleteFileAfterUpload: Bool = false
+    ) {
+        self.kind = .transcriptRevision
+        self.revisionID = revisionID
+        self.bookID = bookID
+        self.chapterID = chapterID
+        self.contentType = contentType
+        self.encoding = encoding
+        self.sha256 = sha256
+        self.originalBytes = originalBytes
+        self.segmentCount = segmentCount
+        self.fileURL = fileURL
+        self.compressedBytes = compressedBytes
+        self.deleteFileAfterUpload = deleteFileAfterUpload
+    }
+
+    public init(
+        kind: SyncAssetKind,
+        revisionID: String? = nil,
+        bookID: String? = nil,
+        chapterID: String? = nil,
+        contentType: String,
+        encoding: String = "identity",
+        sha256: String,
+        originalBytes: Int,
+        segmentCount: Int? = nil,
+        fileURL: URL,
+        compressedBytes: Int,
+        deleteFileAfterUpload: Bool = false
+    ) {
+        self.kind = kind
+        self.revisionID = revisionID ?? UUID().uuidString.lowercased()
+        self.bookID = bookID
+        self.chapterID = chapterID ?? ""
+        self.contentType = contentType
+        self.encoding = encoding
+        self.sha256 = sha256
+        self.originalBytes = originalBytes
+        self.segmentCount = segmentCount ?? 0
+        self.fileURL = fileURL
+        self.compressedBytes = compressedBytes
+        self.deleteFileAfterUpload = deleteFileAfterUpload
+    }
+}
+
+public struct SyncAssetFileDigest: Equatable, Sendable {
+    public var sha256: String
+    public var byteCount: Int
+    public var maximumChunkBytes: Int
+}
+
+public enum SyncAssetFileIO {
+    public static let chunkBytes = 64 * 1024
+
+    /// Hashes immutable asset files incrementally so large media never becomes one `Data` value.
+    public static func digest(fileURL: URL) throws -> SyncAssetFileDigest {
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        var total = 0
+        var largest = 0
+        while let chunk = try handle.read(upToCount: chunkBytes), !chunk.isEmpty {
+            hasher.update(data: chunk)
+            let addition = total.addingReportingOverflow(chunk.count)
+            guard !addition.overflow else { throw CocoaError(.fileReadTooLarge) }
+            total = addition.partialValue
+            largest = max(largest, chunk.count)
+        }
+        return SyncAssetFileDigest(
+            sha256: hasher.finalize().map { String(format: "%02x", $0) }.joined(),
+            byteCount: total,
+            maximumChunkBytes: largest
+        )
+    }
+}
+
 public struct AccountSyncRuntime: Sendable {
     public var client: any SyncClient
     public var outbox: any SyncOutboxRepository
     public var cursor: any SyncCursorStoring
     public var versions: (any SyncEntityVersionStoring)?
     public var snapshot: @Sendable () throws -> [OutboxMutation]
+    public var assetUploads: @Sendable (URL) throws -> [SyncAssetUpload]
     public var applyPage: @Sendable ([SyncPulledChange], [SyncEntityVersion], String) throws -> Void
     public var handleConflict: @Sendable (OutboxMutation, Int64) throws -> Void
 
@@ -467,6 +732,7 @@ public struct AccountSyncRuntime: Sendable {
         cursor: any SyncCursorStoring,
         versions: (any SyncEntityVersionStoring)? = nil,
         snapshot: @escaping @Sendable () throws -> [OutboxMutation] = { [] },
+        assetUploads: @escaping @Sendable (URL) throws -> [SyncAssetUpload] = { _ in [] },
         applyChange: @escaping @Sendable (SyncPulledChange) throws -> Void = { _ in },
         applyPage: (@Sendable ([SyncPulledChange], [SyncEntityVersion], String) throws -> Void)? = nil,
         handleConflict: @escaping @Sendable (OutboxMutation, Int64) throws -> Void = { _, _ in }
@@ -476,6 +742,7 @@ public struct AccountSyncRuntime: Sendable {
         self.cursor = cursor
         self.versions = versions
         self.snapshot = snapshot
+        self.assetUploads = assetUploads
         self.applyPage = applyPage ?? { changes, pageVersions, nextCursor in
             for change in changes { try applyChange(change) }
             for version in pageVersions { try versions?.saveVersion(version) }

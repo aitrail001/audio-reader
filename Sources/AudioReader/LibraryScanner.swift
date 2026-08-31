@@ -221,9 +221,13 @@ enum LibraryScanner {
     }
 
     static func persistentPathIdentity(_ path: String) -> String {
-        let marker = "/ImportedBooks/"
-        guard let range = path.range(of: marker) else { return path }
-        return "ImportedBooks/" + path[range.upperBound...]
+        for directory in ["ImportedBooks-vNext", "ImportedBooks"] {
+            let marker = "/\(directory)/"
+            if let range = path.range(of: marker) {
+                return "\(directory)/" + path[range.upperBound...]
+            }
+        }
+        return path
     }
 
     static func containsAudio(in folder: URL) -> Bool {

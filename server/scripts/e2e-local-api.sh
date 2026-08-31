@@ -99,7 +99,7 @@ auth = {"Authorization": f"Bearer {access}", "X-Device-Id": device_id}
 status, payload, raw = request(
     "POST",
     "/v1/auth/bootstrap",
-    {"deviceId": device_id, "platform": "macos", "appVersion": "1.0.60", "buildNumber": "61"},
+    {"deviceId": device_id, "platform": "macos", "appVersion": "2.0.0", "buildNumber": "91"},
     {**auth, "Idempotency-Key": "local-e2e-bootstrap-01"},
 )
 require(status in {200, 201}, f"bootstrap failed: {status} {raw}")

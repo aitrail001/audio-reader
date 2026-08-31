@@ -6,6 +6,7 @@ import {
   policyDraftErrors,
   quotaReductionNeedsConfirmation,
   isCurrentAdminLoad,
+  canToggleAccountSync,
 } from "./operator-state";
 
 describe("operator URL state", () => {
@@ -56,6 +57,12 @@ describe("operator URL state", () => {
 });
 
 describe("safe mutations", () => {
+  it("prevents enabling account sync until storage is ready but still allows requested-on to be disabled", () => {
+    expect(canToggleAccountSync({ enabled: false }, { ready: false })).toBe(false);
+    expect(canToggleAccountSync({ enabled: false }, { ready: true })).toBe(true);
+    expect(canToggleAccountSync({ enabled: true }, { ready: false })).toBe(true);
+  });
+
   it("summarizes before and after values without exposing secret input", () => {
     expect(mutationSummary("Managed Qwen", "enabled", "disabled")).toBe(
       "Managed Qwen: enabled → disabled",

@@ -14,6 +14,7 @@ import {
   type IdentityStore,
   type ManagedPromptAssembly,
   type ManagedPromptSubtask,
+  type OpsAssistantResult,
   type OpsStore,
 } from "@audio-reader/database";
 import {
@@ -40,7 +41,7 @@ type ChapterSummary = components["schemas"]["ChapterSummary"];
 type ChatAccepted = components["schemas"]["ChatAccepted"];
 type ChatMessage = components["schemas"]["ChatMessage"];
 type HeardQuizResponse = components["schemas"]["HeardQuizResponse"];
-type TranslationSentence = { id: string; text: string };
+type TranslationSentence = { id: string; text: string; assistantResultId?: string };
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CHAT_MESSAGE_PATH =
@@ -206,6 +207,13 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
       const targetId = typeof body.value.targetId === "string" ? body.value.targetId : "";
       const editionFingerprint =
         typeof body.value.editionFingerprint === "string" ? body.value.editionFingerprint : "";
+      const modelPolicyHash = await sha256Hex(
+        `${policy.model}|${policy.systemPrompt}|${policy.userPrompt}|${wordTask ? WORD_IN_SENTENCE_INSTRUCTIONS : SENTENCE_TRANSLATION_INSTRUCTIONS}`,
+      );
+      const requestedResultId =
+        typeof body.value.assistantResultId === "string" && UUID_PATTERN.test(body.value.assistantResultId)
+          ? body.value.assistantResultId
+          : undefined;
       const cacheKey = await cacheKeyFor(context, {
         taskType: "translation",
         sourceLanguage,
@@ -219,15 +227,39 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
         promptVersion: policy.promptVersion,
         // Layout extras are not stored on the policy row; include them so
         // older English-note or gloss-only cache entries miss after a change.
-        modelPolicyHash: await sha256Hex(
-          `${policy.model}|${policy.systemPrompt}|${policy.userPrompt}|${wordTask ? WORD_IN_SENTENCE_INSTRUCTIONS : SENTENCE_TRANSLATION_INSTRUCTIONS}`,
-        ),
+        modelPolicyHash,
       });
       if (!refresh) {
         const hit = await cacheHitTranslation(context, cacheKey);
         if (hit !== undefined) {
-          const payload = withTranslationIdentity(hit, { targetId, source });
-          await recordUse(context, principal.accountId, "translation", hit.id, hit.translation);
+          const resultId = requestedResultId ?? crypto.randomUUID();
+          const exactModel = hit.model || policy.model;
+          const exactPromptVersion = hit.promptVersion || policy.promptVersion;
+          const exactModelPolicyHash = hit.modelPolicyHash || modelPolicyHash;
+          const payload = withTranslationIdentity({
+            ...hit,
+            id: resultId,
+            sharedCacheEntryID: hit.id,
+            model: exactModel,
+            promptVersion: exactPromptVersion,
+            modelPolicyHash: exactModelPolicyHash,
+          }, { targetId, source });
+          const recorded = await recordUse(
+            context, principal.accountId, resultId, "translation",
+            requestedResultId === undefined ? "pending" : "replaced", hit.id,
+            translationPrivateText(payload),
+            exactModel, exactPromptVersion, exactModelPolicyHash,
+            {
+              resultKind: wordTask ? "wordGloss" : "sentenceGloss",
+              language: targetLanguage,
+              sourceText: source,
+              contextText: managedContext,
+              bookTitle,
+              chapterTitle,
+              targetId,
+              privateContent: translationPrivateContent(payload),
+            },
+          );
           await captureProductEvent(context.ops, {
             accountId: principal.accountId,
             name: "ai.translation.cache_hit",
@@ -243,7 +275,10 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
               lookupOnly,
             }),
           );
-          return jsonResponse(payload);
+          return jsonResponse({
+            ...payload,
+            sharedCacheEntryID: recorded?.cacheEntryId ?? null,
+          });
         }
       }
       if (lookupOnly) {
@@ -335,9 +370,7 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
           wordTask && connection !== "" ? `${translationCore}\n${connection}` : translationCore;
         const notes = [...learningNotes(parsed.notes), ...exampleNotes(parsed.examples)];
         const id = crypto.randomUUID();
-        const chapterFingerprint =
-          typeof body.value.chapterFingerprint === "string" ? body.value.chapterFingerprint : "";
-        await persistAssistantCache(context, principal.accountId, {
+        const cacheEntryId = await persistAssistantCache(context, principal.accountId, {
           id,
           cacheKey,
           task: "translation",
@@ -347,26 +380,25 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
           editionFingerprint,
           policyVersion: policy.promptVersion,
           payload: {
-            task: taskKind,
-            source,
-            context: managedContext,
             translation,
             connection,
             notes,
-            editionFingerprint,
-            chapterFingerprint,
-            bookTitle,
-            chapterTitle,
-            targetId,
+            model: completed.model,
+            promptVersion: policy.promptVersion,
+            modelPolicyHash,
           },
         });
         const payload: TranslationResult = withTranslationIdentity(
           {
             id,
+            sharedCacheEntryID: cacheEntryId,
             translation,
             notes,
             provenance: "generated",
             policyVersion: policy.promptVersion,
+            model: completed.model,
+            promptVersion: policy.promptVersion,
+            modelPolicyHash,
             createdAt: new Date().toISOString(),
           },
           { targetId, source },
@@ -376,14 +408,38 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
       if (generated instanceof Response) {
         return generated;
       }
-      await recordUse(
+      const cacheEntryId = generated.sharedCacheEntryID ?? null;
+      const resultId = requestedResultId ?? crypto.randomUUID();
+      const recorded = await recordUse(
         context,
         principal.accountId,
+        resultId,
         "translation",
-        generated.id,
-        generated.translation,
+        requestedResultId === undefined ? "pending" : "replaced",
+        cacheEntryId,
+        translationPrivateText(generated),
+        generated.model,
+        policy.promptVersion,
+        modelPolicyHash,
+        {
+          resultKind: wordTask ? "wordGloss" : "sentenceGloss",
+          language: targetLanguage,
+          sourceText: source,
+          contextText: managedContext,
+          bookTitle,
+          chapterTitle,
+          targetId,
+          privateContent: translationPrivateContent(generated),
+        },
       );
-      return jsonResponse(generated);
+      return jsonResponse({
+        ...generated,
+        id: resultId,
+        sharedCacheEntryID: recorded?.cacheEntryId ?? null,
+        model: generated.model,
+        promptVersion: policy.promptVersion,
+        modelPolicyHash,
+      });
     },
     context.requestId,
     principal,
@@ -437,8 +493,6 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
         typeof body.value.learnerLevel === "string" ? body.value.learnerLevel : "intermediate";
       const editionFingerprint =
         typeof body.value.editionFingerprint === "string" ? body.value.editionFingerprint : "";
-      const chapterFingerprint =
-        typeof body.value.chapterFingerprint === "string" ? body.value.chapterFingerprint : "";
       const bookTitle = typeof body.value.bookTitle === "string" ? body.value.bookTitle : "";
       const author = typeof body.value.author === "string" ? body.value.author : "";
       const chapterTitle =
@@ -450,6 +504,11 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
       const policy = await resolveAssistantPolicy(context, "translation", principal.accountId);
       const modelPolicyHash = await sha256Hex(
         `${policy.model}|${policy.systemPrompt}|${policy.userPrompt}|${SENTENCE_TRANSLATION_INSTRUCTIONS}`,
+      );
+      const requestedResultIDs = new Map(
+        sentences.flatMap((sentence) =>
+          sentence.assistantResultId === undefined ? [] : [[sentence.id, sentence.assistantResultId] as const],
+        ),
       );
       const sentenceContextCount =
         (await context.runtime?.view())?.assistant.sentenceContextCount ?? 1;
@@ -498,22 +557,18 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
         }),
       );
       if (pending.length === 0) {
-        for (const result of results) {
-          await recordUse(
-            context,
-            principal.accountId,
-            "translation",
-            result.id,
-            result.translation,
-          );
-        }
+        const privateResults = await materializePrivateTranslationResults(
+          context, principal.accountId, results, policy.model, policy.promptVersion, modelPolicyHash,
+          requestedResultIDs,
+          { language: targetLanguage, contextText: contextBefore, bookTitle, chapterTitle },
+        );
         await captureProductEvent(context.ops, {
           accountId: principal.accountId,
           name: "ai.translation.cache_hit",
           requestId: context.requestId,
           properties: { cacheHitCount: results.length, batch: true },
         });
-        return jsonResponse(batchResult(results, [], results.length, 0));
+        return jsonResponse(batchResult(privateResults, [], results.length, 0));
       }
       if (lookupOnly) {
         return jsonResponse(
@@ -636,7 +691,7 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
             continue;
           }
           const id = crypto.randomUUID();
-          await persistAssistantCache(context, principal.accountId, {
+          const cacheEntryId = await persistAssistantCache(context, principal.accountId, {
             id,
             cacheKey: item.cacheKey,
             task: "translation",
@@ -646,26 +701,25 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
             editionFingerprint,
             policyVersion: policy.promptVersion,
             payload: {
-              task: "chapter_batch",
-              source: item.sentence.text,
-              context: managedContext,
               translation: unit.translation,
               notes: unit.notes,
-              editionFingerprint,
-              chapterFingerprint,
-              bookTitle,
-              chapterTitle,
-              targetId: item.sentence.id,
+              model: completed.model,
+              promptVersion: policy.promptVersion,
+              modelPolicyHash,
             },
           });
           generatedResults.push(
             withTranslationIdentity(
               {
                 id,
+                sharedCacheEntryID: cacheEntryId,
                 translation: unit.translation,
                 notes: unit.notes,
                 provenance: "generated",
                 policyVersion: policy.promptVersion,
+                model: completed.model,
+                promptVersion: policy.promptVersion,
+                modelPolicyHash,
                 createdAt,
               },
               { targetId: item.sentence.id, source: item.sentence.text },
@@ -678,12 +732,14 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
         return generated;
       }
       const combined = [...results, ...generated.generated];
-      for (const result of generated.generated) {
-        await recordUse(context, principal.accountId, "translation", result.id, result.translation);
-      }
+      const privateResults = await materializePrivateTranslationResults(
+        context, principal.accountId, combined, policy.model, policy.promptVersion, modelPolicyHash,
+        requestedResultIDs,
+        { language: targetLanguage, contextText: contextBefore, bookTitle, chapterTitle },
+      );
       return jsonResponse(
         batchResult(
-          combined,
+          privateResults,
           generated.missingIds,
           results.length,
           generated.generated.filter((item) => item.provenance === "generated").length,
@@ -736,6 +792,13 @@ async function createSummary(context: AssistantRouteContext): Promise<Response> 
       const author = typeof body.value.author === "string" ? body.value.author : "";
       const chapterTitle =
         typeof body.value.chapterTitle === "string" ? body.value.chapterTitle : "";
+      const modelPolicyHash = await sha256Hex(
+        `${policy.model}|${policy.systemPrompt}|${policy.userPrompt}|${CHAPTER_SUMMARY_INSTRUCTIONS}`,
+      );
+      const requestedResultId =
+        typeof body.value.assistantResultId === "string" && UUID_PATTERN.test(body.value.assistantResultId)
+          ? body.value.assistantResultId
+          : undefined;
       const cacheKey = await cacheKeyFor(context, {
         taskType: "chapter_summary",
         sourceLanguage,
@@ -745,14 +808,30 @@ async function createSummary(context: AssistantRouteContext): Promise<Response> 
           typeof body.value.editionFingerprint === "string" ? body.value.editionFingerprint : "",
         learnerProfileBucket: learnerLevel,
         promptVersion: policy.promptVersion,
-        modelPolicyHash: await sha256Hex(
-          `${policy.model}|${policy.systemPrompt}|${policy.userPrompt}|${CHAPTER_SUMMARY_INSTRUCTIONS}`,
-        ),
+        modelPolicyHash,
       });
       if (!refresh) {
         const hit = await cacheHitSummary(context, cacheKey);
         if (hit !== undefined) {
-          await recordUse(context, principal.accountId, "chapter_summary", hit.id, hit.overview);
+          const resultId = requestedResultId ?? crypto.randomUUID();
+          const exactModel = hit.model || policy.model;
+          const exactPromptVersion = hit.promptVersion || policy.promptVersion;
+          const exactModelPolicyHash = hit.modelPolicyHash || modelPolicyHash;
+          const recorded = await recordUse(
+            context, principal.accountId, resultId, "chapter_summary",
+            requestedResultId === undefined ? "pending" : "replaced", hit.id,
+            JSON.stringify(summaryPrivateContent(hit)),
+            exactModel, exactPromptVersion, exactModelPolicyHash,
+            {
+              resultKind: "chapterSummary",
+              language: targetLanguage,
+              sourceText: segments.join("\n").slice(0, 20_000),
+              bookTitle,
+              chapterTitle,
+              targetId: chapterId,
+              privateContent: summaryPrivateContent(hit),
+            },
+          );
           await captureProductEvent(context.ops, {
             accountId: principal.accountId,
             name: "ai.summary.cache_hit",
@@ -767,7 +846,15 @@ async function createSummary(context: AssistantRouteContext): Promise<Response> 
               lookupOnly,
             }),
           );
-          return jsonResponse(hit);
+          return jsonResponse({
+            ...hit,
+            id: resultId,
+            sharedCacheEntryID: recorded?.cacheEntryId ?? null,
+            model: exactModel,
+            promptVersion: exactPromptVersion,
+            modelPolicyHash: exactModelPolicyHash,
+            policyVersion: exactPromptVersion,
+          });
         }
       }
       if (lookupOnly) {
@@ -840,15 +927,20 @@ async function createSummary(context: AssistantRouteContext): Promise<Response> 
         const id = crypto.randomUUID();
         const payload: ChapterSummary = {
           id,
+          sharedCacheEntryID: id,
           overview: stringField(parsed, "overview") ?? completed.text,
           keyPoints: stringArray(parsed, "keyPoints"),
           charactersOrIdeas: stringArray(parsed, "charactersOrIdeas"),
           keyConcepts: conceptArray(parsed.keyConcepts),
           themes: stringArray(parsed, "themes"),
           provenance: "generated",
+          model: completed.model,
+          promptVersion: policy.promptVersion,
+          modelPolicyHash,
+          policyVersion: policy.promptVersion,
           createdAt: new Date().toISOString(),
         };
-        await persistAssistantCache(context, principal.accountId, {
+        const cacheEntryId = await persistAssistantCache(context, principal.accountId, {
           id,
           cacheKey,
           task: "chapter_summary",
@@ -860,34 +952,45 @@ async function createSummary(context: AssistantRouteContext): Promise<Response> 
           policyVersion: policy.promptVersion,
           payload: {
             ...payload,
-            chapterId,
-            source: segments.join("\n").slice(0, 4000),
-            bookTitle: typeof body.value.bookTitle === "string" ? body.value.bookTitle : "",
-            chapterTitle:
-              typeof body.value.chapterTitle === "string" ? body.value.chapterTitle : "",
-            editionFingerprint:
-              typeof body.value.editionFingerprint === "string"
-                ? body.value.editionFingerprint
-                : "",
-            chapterFingerprint:
-              typeof body.value.chapterFingerprint === "string"
-                ? body.value.chapterFingerprint
-                : "",
           },
         });
-        return payload;
+        return { ...payload, sharedCacheEntryID: cacheEntryId };
       });
       if (generated instanceof Response) {
         return generated;
       }
-      await recordUse(
+      const cacheEntryId = generated.sharedCacheEntryID ?? null;
+      const resultId = requestedResultId ?? crypto.randomUUID();
+      const recorded = await recordUse(
         context,
         principal.accountId,
+        resultId,
         "chapter_summary",
-        generated.id,
-        generated.overview,
+        requestedResultId === undefined ? "pending" : "replaced",
+        cacheEntryId,
+        JSON.stringify(summaryPrivateContent(generated)),
+        generated.model,
+        policy.promptVersion,
+        modelPolicyHash,
+        {
+          resultKind: "chapterSummary",
+          language: targetLanguage,
+          sourceText: segments.join("\n").slice(0, 20_000),
+          bookTitle,
+          chapterTitle,
+          targetId: chapterId,
+          privateContent: summaryPrivateContent(generated),
+        },
       );
-      return jsonResponse(generated);
+      return jsonResponse({
+        ...generated,
+        id: resultId,
+        sharedCacheEntryID: recorded?.cacheEntryId ?? null,
+        model: generated.model,
+        promptVersion: policy.promptVersion,
+        modelPolicyHash,
+        policyVersion: policy.promptVersion,
+      });
     },
     context.requestId,
     principal,
@@ -1003,7 +1106,11 @@ async function createChat(context: AssistantRouteContext): Promise<Response> {
         text: answer,
         createdAt,
       });
-      await recordUse(context, principal.accountId, "chat", null, answer);
+      await recordUse(
+        context, principal.accountId, messageId, "chat", "pending", null, answer,
+        completed.model, policy.promptVersion,
+        await sha256Hex(`${completed.model}|${policy.systemPrompt}|${policy.userPrompt}`),
+      );
       const payload: ChatAccepted = {
         threadId,
         messageId,
@@ -1690,7 +1797,11 @@ function translationSentences(value: unknown, requestId: string): TranslationSen
       continue;
     }
     seen.add(id);
-    sentences.push({ id, text });
+    const assistantResultId =
+      typeof record.assistantResultId === "string" && UUID_PATTERN.test(record.assistantResultId)
+        ? record.assistantResultId
+        : undefined;
+    sentences.push({ id, text, ...(assistantResultId === undefined ? {} : { assistantResultId }) });
   }
   if (sentences.length === 0) {
     return problemResponse({
@@ -1772,10 +1883,14 @@ async function cacheHitTranslation(
   return withTranslationIdentity(
     {
       id: cached.id,
+      sharedCacheEntryID: cached.id,
       translation: stringField(cached.payload, "translation") ?? "",
       notes,
       provenance: "cache_shared_exact",
       policyVersion: cached.policyVersion,
+      model: stringField(cached.payload, "model") ?? "",
+      promptVersion: stringField(cached.payload, "promptVersion") ?? cached.policyVersion,
+      modelPolicyHash: stringField(cached.payload, "modelPolicyHash") ?? "",
       createdAt: cached.createdAt,
     },
     { targetId, source },
@@ -1793,12 +1908,17 @@ async function cacheHitSummary(
   await context.ops?.touchCache(cached.id);
   return {
     id: cached.id,
+    sharedCacheEntryID: cached.id,
     overview: stringField(cached.payload, "overview") ?? "",
     keyPoints: stringArray(cached.payload, "keyPoints"),
     charactersOrIdeas: stringArray(cached.payload, "charactersOrIdeas"),
     keyConcepts: conceptArray(cached.payload.keyConcepts),
     themes: stringArray(cached.payload, "themes"),
     provenance: "cache_shared_exact",
+    model: stringField(cached.payload, "model") ?? "",
+    promptVersion: stringField(cached.payload, "promptVersion") ?? cached.policyVersion,
+    modelPolicyHash: stringField(cached.payload, "modelPolicyHash") ?? "",
+    policyVersion: cached.policyVersion,
     createdAt: cached.createdAt,
   };
 }
@@ -1806,11 +1926,114 @@ async function cacheHitSummary(
 async function recordUse(
   context: AssistantRouteContext,
   userId: string,
+  resultId: string,
   task: string,
+  status: "pending" | "replaced",
   cacheEntryId: string | null,
   outputText: string,
-): Promise<void> {
-  await context.ops?.recordAssistantUse(userId, { task, cacheEntryId, outputText });
+  model?: string,
+  promptVersion?: string,
+  modelPolicyHash?: string,
+  details: {
+    resultKind?: "sentenceGloss" | "wordGloss" | "chapterSummary" | "chapterTranslation";
+    language?: string;
+    sourceText?: string;
+    contextText?: string;
+    bookTitle?: string;
+    chapterTitle?: string;
+    targetId?: string;
+    timestampSeconds?: number;
+    privateContent?: Record<string, unknown>;
+  } = {},
+): Promise<OpsAssistantResult | undefined> {
+  return context.ops?.recordAssistantUse(userId, {
+    resultId,
+    task,
+    status,
+    cacheEntryId,
+    outputText,
+    ...(model === undefined ? {} : { model }),
+    ...(promptVersion === undefined ? {} : { promptVersion }),
+    ...(modelPolicyHash === undefined ? {} : { modelPolicyHash }),
+    ...details,
+  });
+}
+
+function translationPrivateContent(result: TranslationResult): Record<string, unknown> {
+  return {
+    translation: result.translation,
+    notes: result.notes,
+    ...(result.targetId === undefined ? {} : { targetId: result.targetId }),
+    ...(result.source === undefined ? {} : { source: result.source }),
+  };
+}
+
+function translationPrivateText(result: TranslationResult): string {
+  const notes = result.notes.length === 0
+    ? "LEARNING NOTES:\nNone"
+    : `LEARNING NOTES:\n${result.notes.map((note) =>
+      `• ${note.source} — [${note.category.replaceAll("_", " ")}] ${note.explanation}`).join("\n")}`;
+  return `TRANSLATION:\n${result.translation}\n\n${notes}`;
+}
+
+function summaryPrivateContent(result: ChapterSummary): Record<string, unknown> {
+  return {
+    overview: result.overview,
+    keyPoints: result.keyPoints,
+    charactersOrIdeas: result.charactersOrIdeas ?? [],
+    keyConcepts: result.keyConcepts,
+    themes: result.themes,
+  };
+}
+
+/** A cache UUID is shared provenance; every user-visible use gets its own private result UUID. */
+async function materializePrivateTranslationResults(
+  context: AssistantRouteContext,
+  userId: string,
+  results: TranslationResult[],
+  model: string,
+  promptVersion: string,
+  modelPolicyHash: string,
+  requestedResultIDs: ReadonlyMap<string, string> = new Map(),
+  details: {
+    language?: string;
+    contextText?: string;
+    bookTitle?: string;
+    chapterTitle?: string;
+  } = {},
+): Promise<TranslationResult[]> {
+  return Promise.all(results.map(async (cached) => {
+    const resultId = requestedResultIDs.get(cached.targetId ?? "") ?? crypto.randomUUID();
+    const exactModel = cached.model || model;
+    const exactPromptVersion = cached.promptVersion || promptVersion;
+    const exactModelPolicyHash = cached.modelPolicyHash || modelPolicyHash;
+    const cacheEntryId = cached.sharedCacheEntryID ?? null;
+    const recorded = await recordUse(
+      context, userId, resultId, "translation",
+      requestedResultIDs.has(cached.targetId ?? "") ? "replaced" : "pending",
+      cacheEntryId, translationPrivateText(cached),
+      exactModel, exactPromptVersion, exactModelPolicyHash,
+      {
+        resultKind: "sentenceGloss",
+        ...details,
+        ...(cached.source === undefined
+          ? {}
+          : { sourceText: cached.source }),
+        ...(cached.targetId === undefined || cached.targetId === null
+          ? {}
+          : { targetId: cached.targetId }),
+        privateContent: translationPrivateContent(cached),
+      },
+    );
+    return {
+      ...cached,
+      id: resultId,
+      sharedCacheEntryID: recorded?.cacheEntryId ?? null,
+      model: exactModel,
+      promptVersion: exactPromptVersion,
+      modelPolicyHash: exactModelPolicyHash,
+    };
+  }));
 }
 
 /** Persist a shared cache row without failing the caller. The generated payload is already in hand. */
@@ -1818,7 +2041,7 @@ async function persistAssistantCache(
   context: AssistantRouteContext,
   accountId: string,
   entry: Parameters<NonNullable<OpsStore["putCache"]>>[0],
-): Promise<void> {
+): Promise<string | null> {
   if (context.ops === undefined) {
     console.warn(
       JSON.stringify({
@@ -1829,7 +2052,7 @@ async function persistAssistantCache(
         reason: "ops_unavailable",
       }),
     );
-    return;
+    return null;
   }
   try {
     const stored = await context.ops.putCache(entry);
@@ -1849,6 +2072,7 @@ async function persistAssistantCache(
       requestId: context.requestId,
       properties: { cacheId: stored.id },
     });
+    return stored.id;
   } catch (error: unknown) {
     console.warn(
       JSON.stringify({
@@ -1866,6 +2090,7 @@ async function persistAssistantCache(
       requestId: context.requestId,
       properties: { detail: error instanceof Error ? error.message.slice(0, 180) : "unknown" },
     });
+    return null;
   }
 }
 

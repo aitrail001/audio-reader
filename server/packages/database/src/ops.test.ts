@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createMemoryOpsStore, createSupabaseOpsStore, RestPersistenceError } from "./ops";
+import {
+  AssetReservationError,
+  createMemoryOpsStore,
+  createSupabaseOpsStore,
+  RestPersistenceError,
+} from "./ops";
 import type { RestClient, RestRequest, RestResponse } from "./rest";
 
 const POLICY_ID = "00000000-0000-4000-8000-0000000000aa";
@@ -349,6 +354,26 @@ describe("supabase flag, quota, settings, and audit writes", () => {
     );
     await expect(ops.patchQuota(QUOTA_KEY, 9)).rejects.toBeInstanceOf(RestPersistenceError);
     expect(finiteFromRow(quotas[0]?.limit_value)).toBe(50);
+  });
+
+  it("counts cloud-media quota from ready v2 manifests only", async () => {
+    const userId = "00000000-0000-4000-8000-000000000002";
+    const ops = createSupabaseOpsStore(
+      opsRest({
+        tables: {
+          "/quota_limits": [],
+          "/asset_manifests_v2": [
+            { user_id: userId, status: "ready", compressed_bytes: 40 },
+            { user_id: userId, status: "ready", compressed_bytes: 2 },
+            { user_id: userId, status: "pending", compressed_bytes: 9_999 },
+          ],
+        },
+      }),
+    );
+
+    const quotas = await ops.quotasFor(userId);
+
+    expect(quotas.find((quota) => quota.key === "cloud_media_bytes")?.used).toBe(42);
   });
 
   it("throws when operator settings POST is 401 and leaves GET data unchanged", async () => {
@@ -709,6 +734,17 @@ describe("supabase progress privacy operations", () => {
             body: [{ object_key: "account/transcript.json" }],
           });
         }
+        if (input.path === "/asset_manifests_v2") {
+          return Promise.resolve({
+            status: 200,
+            body: [
+              {
+                object_key: "private/v2/account/transcriptRevision/final",
+                upload_object_key: "private/v2/account/pending/upload",
+              },
+            ],
+          });
+        }
         return Promise.resolve({ status: 404, body: { message: "not found" } });
       },
     });
@@ -726,6 +762,8 @@ describe("supabase progress privacy operations", () => {
     await expect(ops.accountObjectKeys("00000000-0000-4000-8000-000000000002")).resolves.toEqual([
       "account/audio.m4b",
       "account/transcript.json",
+      "private/v2/account/pending/upload",
+      "private/v2/account/transcriptRevision/final",
     ]);
     expect(calls[0]).toMatchObject({
       path: "/rpc/request_account_deletion",
@@ -776,6 +814,37 @@ describe("supabase progress privacy operations", () => {
       "/rpc/purge_expired_product_events",
       "/rpc/delete_account_data",
     ]);
+  });
+});
+
+describe("asset reservation", () => {
+  it("counts pending bytes against quota before another manifest is created", async () => {
+    const ops = createMemoryOpsStore();
+    await ops.patchQuota("cloud_media_bytes", 3);
+    const base = {
+      kind: "cover" as const,
+      contentType: "image/png",
+      compressedBytes: 2,
+      originalBytes: 2,
+      sha256: "a".repeat(64),
+      encoding: "identity",
+      revisionId: null,
+      bookId: null,
+      chapterId: null,
+      segmentCount: null,
+      fileName: "cover.png",
+      objectKey: "private/v2/user/cover/a",
+      uploadObjectKey: "private/v2/user/pending/a",
+      uploadId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    };
+    await expect(ops.createAsset("user", base)).resolves.toMatchObject({ status: "pending" });
+    await expect(ops.createAsset("user", {
+      ...base,
+      sha256: "b".repeat(64),
+      objectKey: "private/v2/user/cover/b",
+      uploadObjectKey: "private/v2/user/pending/b",
+      uploadId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    })).rejects.toEqual(new AssetReservationError("cloud_media_quota_exceeded"));
   });
 });
 

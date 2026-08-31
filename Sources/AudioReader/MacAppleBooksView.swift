@@ -4,8 +4,10 @@ import SwiftUI
 
 struct MacAppleBooksView: View {
     @Bindable var library: MacAppleBooksLibrary
+    @Binding var pendingDuplicateImport: MacAppleBookItem?
     let importingID: String?
     let onImport: (MacAppleBookItem) -> Void
+    let onConfirmDuplicate: (MacAppleBookItem) -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -96,6 +98,18 @@ struct MacAppleBooksView: View {
         .frame(minWidth: 760, minHeight: 560)
         .task {
             if library.items.isEmpty { await library.reload() }
+        }
+        .alert("Import another copy?", isPresented: Binding(
+            get: { pendingDuplicateImport != nil },
+            set: { if !$0 { pendingDuplicateImport = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { pendingDuplicateImport = nil }
+            Button("Import Another Copy") {
+                guard let item = pendingDuplicateImport else { return }
+                onConfirmDuplicate(item)
+            }
+        } message: {
+            Text("“\(pendingDuplicateImport?.title ?? "This book")” is already in your AudioReader library. Import another copy anyway?")
         }
     }
 

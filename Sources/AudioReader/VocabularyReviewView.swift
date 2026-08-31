@@ -9,6 +9,7 @@ struct VocabularyReviewView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var currentIndex = 0
+    @State private var occurrenceIndex = 0
     @State private var isRevealed = false
     @State private var reviewedCount = 0
     @State private var dictHeight: CGFloat = 160
@@ -18,10 +19,19 @@ struct VocabularyReviewView: View {
     @State private var isPreparingAnswer = false
     @State private var isSavingReview = false
 
-    private var entry: VocabEntry? {
+    private var card: VocabularyStudyCard? {
         guard entryIDs.indices.contains(currentIndex) else { return nil }
-        let id = entryIDs[currentIndex]
-        return state.vocab.first { $0.id == id }
+        return VocabularyStudyCards.card(containing: entryIDs[currentIndex], in: state.vocab)
+    }
+
+    private var reviewOccurrence: VocabEntry? {
+        guard let card, card.occurrences.indices.contains(occurrenceIndex) else { return card?.occurrences.first }
+        return card.occurrences[occurrenceIndex]
+    }
+
+    private var entry: VocabEntry? {
+        guard let card, let reviewOccurrence else { return nil }
+        return reviewOccurrence.applyingStudySchedule(card.schedule)
     }
 
     private var reviewCardMinimumHeight: CGFloat {
@@ -35,8 +45,8 @@ struct VocabularyReviewView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if let entry {
-                    review(entry)
+                if let card {
+                    review(card)
                 } else {
                     completion
                 }
@@ -52,6 +62,7 @@ struct VocabularyReviewView: View {
         .interactiveDismissDisabled(isSavingReview)
         .background(Palette.bg)
         .onChange(of: currentIndex) { _, _ in
+            occurrenceIndex = 0
             state.stopVocabSentencePlayback()
         }
         .onDisappear {
@@ -59,8 +70,9 @@ struct VocabularyReviewView: View {
         }
     }
 
-    private func review(_ entry: VocabEntry) -> some View {
-        ScrollView {
+    private func review(_ card: VocabularyStudyCard) -> some View {
+        let entry = reviewOccurrence?.applyingStudySchedule(card.schedule) ?? card.studyEntry
+        return ScrollView {
             VStack(spacing: 18) {
                 HStack {
                     Text("Card \(currentIndex + 1) of \(entryIDs.count)")
@@ -72,6 +84,33 @@ struct VocabularyReviewView: View {
 
                 VocabOriginalPlayButton(state: state, entry: entry)
                     .frame(maxWidth: .infinity, alignment: .leading)
+
+                if card.occurrences.count > 1 {
+                    HStack {
+                        Button("Previous occurrence") {
+                            occurrenceIndex = max(0, occurrenceIndex - 1)
+                        }
+                        .disabled(occurrenceIndex == 0)
+                        Spacer()
+                        Text("Occurrence \(occurrenceIndex + 1) of \(card.occurrences.count)")
+                            .font(.caption)
+                            .foregroundStyle(Palette.dim)
+                        Spacer()
+                        Button("Next occurrence") {
+                            occurrenceIndex = min(card.occurrences.count - 1, occurrenceIndex + 1)
+                        }
+                        .disabled(occurrenceIndex == card.occurrences.count - 1)
+                    }
+                }
+
+                Button {
+                    if let reviewOccurrence, state.jumpToVocab(reviewOccurrence) { dismiss() }
+                } label: {
+                    Label("Open in text", systemImage: "text.alignleft")
+                }
+                .buttonStyle(.bordered)
+                .disabled(reviewOccurrence == nil)
+                .accessibilityHint("Opens this exact occurrence in its source chapter.")
 
                 Group {
                     if isRevealed {
@@ -120,7 +159,7 @@ struct VocabularyReviewView: View {
             VStack(alignment: .leading, spacing: 22) {
                 switch prompt(for: entry) {
                 case .recognition:
-                    Text(entry.word)
+                    Text(entry.studyForm)
                         .font(.system(.largeTitle, design: .serif, weight: .semibold))
                         .foregroundStyle(Palette.ink)
                         .textSelection(.enabled)
@@ -138,7 +177,7 @@ struct VocabularyReviewView: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 case .reverse:
-                    Text(VocabReversePrompt.promptText(for: entry) ?? entry.word)
+                    Text(VocabReversePrompt.promptText(for: entry) ?? entry.studyForm)
                         .font(.system(.title, design: .serif, weight: .semibold))
                         .foregroundStyle(Palette.ink)
                         .fixedSize(horizontal: false, vertical: true)
@@ -167,13 +206,13 @@ struct VocabularyReviewView: View {
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(entry.word). \(entry.context). From \(entry.bookTitle), \(entry.chapterTitle).")
+        .accessibilityLabel("\(entry.studyForm). \(entry.context). From \(entry.bookTitle), \(entry.chapterTitle).")
         .accessibilityHint("Double tap to show the answer.")
     }
 
     private func back(of entry: VocabEntry) -> some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text(entry.word)
+            Text(entry.studyForm)
                 .font(.system(.title, design: .serif, weight: .semibold))
                 .foregroundStyle(Palette.ink)
                 .textSelection(.enabled)
@@ -286,7 +325,8 @@ struct VocabularyReviewView: View {
         Task { @MainActor in
             defer { isSavingReview = false }
             guard await state.reviewVocabulary(
-                entry.id,
+                card?.id ?? entry.id,
+                occurrenceID: reviewOccurrence?.id,
                 quality: quality,
                 face: prompt(for: entry)
             ) else { return }
@@ -378,7 +418,9 @@ private enum VocabularyReviewCompletion {
         let snapshot = VocabularyLearningAnalytics.snapshot(entries: entries, events: events, at: date)
         let progress = "Today: \(snapshot.todayReviewCount). Streak: \(snapshot.streakDays) \(snapshot.streakDays == 1 ? "day" : "days")."
         let sessionIDs = Set(entryIDs)
-        let sessionEntries = entries.filter { sessionIDs.contains($0.id) }
+        let sessionEntries = VocabularyStudyCards.cards(entries)
+            .filter { sessionIDs.contains($0.id) }
+            .map(\.studyEntry)
         guard let next = VocabReviewScheduler.nextReviewDate(in: sessionEntries, after: date) else {
             return "\(count) \(progress)"
         }

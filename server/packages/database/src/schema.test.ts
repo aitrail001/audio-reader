@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION,
   CORE_TABLES,
   GLOBAL_TABLES,
   OPTIONAL_OWNER_TABLES,
@@ -24,8 +25,11 @@ const JSON_COLUMNS_ALLOWED = new Map<string, readonly string[]>([
   ["user_settings", ["field_clocks"]],
   ["transcript_revisions", ["quality", "ebook_alignment"]],
   ["assistant_cache_entries", ["result"]],
+  ["user_assistant_results", ["history", "private_content"]],
   ["sync_changes", ["payload"]],
   ["sync_mutation_outcomes", ["problem"]],
+  ["sync_v2_changes", ["payload"]],
+  ["sync_v2_mutation_outcomes", ["problem"]],
   ["idempotency_records", ["response_headers"]],
   ["audit_events", ["metadata", "before_metadata", "after_metadata"]],
   ["operator_settings", ["payload"]],
@@ -76,6 +80,37 @@ function hasForeignKey(
 }
 
 describe("multi-user postgres schema migrations", () => {
+  it("isolates v2 object manifests and sync history from every legacy table", () => {
+    const sql = loadMigrationSql();
+    const schema = parsePostgresSchema(sql);
+    for (const table of [
+      "asset_manifests_v2",
+      "sync_v2_changes",
+      "sync_v2_batches",
+      "sync_v2_mutation_outcomes",
+    ]) {
+      expect(schema.tables.has(table), table).toBe(true);
+    }
+    expect(schema.hasUnique("asset_manifests_v2", ["object_key"])).toBe(true);
+    expect(schema.hasUnique("asset_manifests_v2", ["user_id", "kind", "sha256"])).toBe(true);
+    expect(schema.hasCheck("asset_manifests_v2", "kind")).toBe(true);
+    expect(schema.hasCheck("asset_manifests_v2", "status")).toBe(true);
+    expect(sql).toContain("function public.complete_v2_asset_and_publish");
+    expect(sql).toMatch(/set status = 'deleting'[\s\S]*finish_v2_asset_upload_gc/i);
+    expect(sql).not.toMatch(/insert into public\.asset_manifests_v2[\s\S]{0,500}transcript_json/i);
+  });
+
+  it("seeds account sync requested-off in a new environment", () => {
+    expect(loadMigrationSql()).toMatch(/\('account_sync',\s*false,\s*100\)/i);
+  });
+
+  it("publishes an exact service-role-only account sync migration identity", () => {
+    const sql = loadMigrationSql();
+    expect(sql).toContain("create function public.account_sync_schema_version()");
+    expect(sql).toContain(`'${ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION}'`);
+    expect(sql).toContain("grant execute on function public.account_sync_schema_version() to service_role");
+  });
+
   it("tracks versioned SQL under server/supabase/migrations", () => {
     expect(existsSync(migrationsDir)).toBe(true);
     const files = readdirSync(migrationsDir)
@@ -468,6 +503,17 @@ describe("multi-user postgres schema migrations", () => {
     expect(schema.hasCheck("privacy_requests", "kind")).toBe(true);
   });
 
+  it("separates durable assistant result history from disposable shared cache content", () => {
+    const sql = loadMigrationSql();
+    const schema = parsePostgresSchema(sql);
+    const result = schema.tables.get("user_assistant_results");
+    expect(result?.columns.has("history")).toBe(true);
+    expect(result?.columns.has("model")).toBe(true);
+    expect(sql).toMatch(/status in \('pending', 'accepted', 'rejected', 'stale', 'edited', 'replaced'\)/i);
+    expect(sql).toMatch(/cache_entry_id uuid references public\.assistant_cache_entries \(id\) on delete set null/i);
+    expect(sql).toMatch(/append_user_assistant_result_history/i);
+  });
+
   it("documents core tables in the ER notes", () => {
     expect(existsSync(erNotesPath)).toBe(true);
     const notes = readFileSync(erNotesPath, "utf8");
@@ -493,7 +539,7 @@ describe("multi-user postgres schema migrations", () => {
       expect(sql).toMatch(new RegExp(`revoke\\s+all\\s+on\\s+function\\s+public\\.${name}`, "i"));
       expect(sql).toMatch(
         new RegExp(
-          `grant\\s+execute\\s+on\\s+function\\s+public\\.${name}\\s+to\\s+service_role`,
+          `grant\\s+execute\\s+on\\s+function\\s+public\\.${name}(?:\\([^)]*\\))?\\s+to\\s+service_role`,
           "i",
         ),
       );

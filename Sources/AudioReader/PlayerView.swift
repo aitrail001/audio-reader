@@ -1686,7 +1686,7 @@ private struct ChapterAssistantView: View {
                     if let summary = state.chapterSummary {
                         assistantCard(title: "Chapter summary") {
                             ChapterSummaryView(summary: summary.summary)
-                            if summary.status == .pending {
+                    if summary.status == .pending || summary.status == .edited || summary.status == .replaced {
                                 Text("Draft saved locally · \(summary.model). Accept to keep it as this chapter's summary.")
                                     .font(.system(size: 12))
                                     .foregroundStyle(Palette.gold)
@@ -2336,11 +2336,24 @@ private struct TranscriptTextColumn: View {
                             onTranslate: { state.translateSentence(segment) },
                             onAccept: { if let g = state.sentenceGloss(for: segment) { state.acceptGloss(g) } },
                             onReject: { if let g = state.sentenceGloss(for: segment) { state.rejectGloss(g) } },
+                            onEditTranslation: { text in
+                                if let gloss = state.sentenceGloss(for: segment) {
+                                    state.editGloss(gloss, text: text)
+                                }
+                            },
                             onRetry: { state.retranslateSentence(segment) },
                             type: type
                         )
                         .equatable()
                         .id(segment.id)
+                    }
+                    if state.canLoadMoreTranscriptSegments {
+                        Button("Load next \(Persistence.transcriptPageSize) segments") {
+                            state.loadMoreTranscriptSegments()
+                        }
+                        .buttonStyle(.bordered)
+                        .frame(maxWidth: .infinity)
+                        .accessibilityIdentifier("reader.loadMoreSegments")
                     }
                 } else if state.selectedChapter != nil {
                     emptyTranscript
@@ -2463,9 +2476,12 @@ private struct SentenceRow: View {
     let onTranslate: () -> Void
     let onAccept: () -> Void
     let onReject: () -> Void
+    let onEditTranslation: (String) -> Void
     let onRetry: () -> Void
     let type: ReaderType
     @State private var showRetranslateConfirmation = false
+    @State private var showTranslationEditor = false
+    @State private var editedTranslation = ""
 
     private var isCurrent: Bool { segment.id == currentID }
     private var isFocused: Bool { segment.id == focusedSegmentID }
@@ -2624,7 +2640,7 @@ private struct SentenceRow: View {
             } else if let gloss {
                 GlossBody(text: gloss.text, size: type.gloss)
                 HStack(spacing: 8) {
-                    if gloss.status == .pending {
+            if gloss.status == .pending || gloss.status == .edited || gloss.status == .replaced {
                         Text("Draft · Model: \(gloss.model)")
                             .font(.system(size: 11))
                             .foregroundStyle(Palette.gold)
@@ -2634,12 +2650,22 @@ private struct SentenceRow: View {
                             .controlSize(.small)
                         Button("Reject", action: onReject)
                             .controlSize(.small)
+                        Button("Edit") {
+                            editedTranslation = gloss.text
+                            showTranslationEditor = true
+                        }
+                        .controlSize(.small)
                         Button("Retranslate") { showRetranslateConfirmation = true }
                             .controlSize(.small)
                     } else if gloss.status == .accepted {
                         Text("Saved · Model: \(gloss.model)")
                             .font(.system(size: 11))
                             .foregroundStyle(Palette.gold)
+                        Button("Edit") {
+                            editedTranslation = gloss.text
+                            showTranslationEditor = true
+                        }
+                        .controlSize(.small)
                         Button("Retranslate") { showRetranslateConfirmation = true }
                             .controlSize(.small)
                     }
@@ -2662,6 +2688,39 @@ private struct SentenceRow: View {
         } message: {
             Text("This replaces the current translation with a new draft for review.")
         }
+        .sheet(isPresented: $showTranslationEditor) {
+            AssistantResultEditSheet(text: $editedTranslation) {
+                onEditTranslation(editedTranslation)
+                showTranslationEditor = false
+            }
+        }
+    }
+}
+
+/// Shared editor keeps macOS and iPad lifecycle semantics identical: saving creates an edited draft.
+private struct AssistantResultEditSheet: View {
+    @Binding var text: String
+    let onSave: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Edit assistant result")
+                .font(.headline)
+            TextEditor(text: $text)
+                .frame(minHeight: 180)
+                .accessibilityIdentifier("assistantResult.editText")
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Save draft", action: onSave)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityIdentifier("assistantResult.saveEdit")
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 360, idealWidth: 520, minHeight: 280)
     }
 }
 
@@ -2952,6 +3011,8 @@ private struct WordInspector: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var webHeight: CGFloat = 180
     @State private var showRetranslateConfirmation = false
+    @State private var showTranslationEditor = false
+    @State private var editedTranslation = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -3071,7 +3132,7 @@ private struct WordInspector: View {
                                 .padding(.vertical, 8)
                             } else if let gloss = state.selectedWordGloss {
                                 GlossBody(text: gloss.text, size: type.gloss)
-                                if gloss.status == .pending {
+                if gloss.status == .pending || gloss.status == .edited || gloss.status == .replaced {
                                     Text("Draft from \(gloss.model). Accept to keep it in the library.")
                                         .font(.system(size: 12))
                                         .foregroundStyle(Palette.gold)
@@ -3081,6 +3142,10 @@ private struct WordInspector: View {
                                             .buttonStyle(.borderedProminent)
                                             .tint(Palette.terracotta)
                                         Button("Reject") { state.rejectGloss(gloss) }
+                                        Button("Edit") {
+                                            editedTranslation = gloss.text
+                                            showTranslationEditor = true
+                                        }
                                         Button("Retranslate") { showRetranslateConfirmation = true }
                                     }
                                     .controlSize(.small)
@@ -3089,6 +3154,11 @@ private struct WordInspector: View {
                                     Text("Saved · Model: \(gloss.model)")
                                         .font(.system(size: 12))
                                         .foregroundStyle(Palette.gold)
+                                    Button("Edit") {
+                                        editedTranslation = gloss.text
+                                        showTranslationEditor = true
+                                    }
+                                    .buttonStyle(.bordered)
                                     Button("Retranslate") { showRetranslateConfirmation = true }
                                         .buttonStyle(.bordered)
                                 }
@@ -3158,6 +3228,14 @@ private struct WordInspector: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This replaces the current in-sentence meaning with a new draft for review.")
+        }
+        .sheet(isPresented: $showTranslationEditor) {
+            AssistantResultEditSheet(text: $editedTranslation) {
+                if let gloss = state.selectedWordGloss {
+                    state.editGloss(gloss, text: editedTranslation)
+                }
+                showTranslationEditor = false
+            }
         }
     }
 

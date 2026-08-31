@@ -3,55 +3,24 @@ import Foundation
 import AudioReaderDomain
 #endif
 
-public struct SyncMirrorRepairRecord: Codable, Equatable, Sendable {
-    public var sequence: Int
-    public var entityType: String
-    public var entityID: String
-    public var operation: String
-    public var revision: Int
-    public var changedAt: String
-    public var payload: Data
-
-    public init(
-        sequence: Int,
-        entityType: String,
-        entityID: String,
-        operation: String,
-        revision: Int,
-        changedAt: String,
-        payload: Data
-    ) {
-        self.sequence = sequence
-        self.entityType = entityType
-        self.entityID = entityID
-        self.operation = operation
-        self.revision = revision
-        self.changedAt = changedAt
-        self.payload = payload
-    }
+private enum LocalSQLiteStoreError: Error {
+    case missingReviewVocabulary
+    case invalidAssistantDecisionMutation
+    case invalidBookMutation
+    case invalidTranscriptOverlayMutation
+    case missingTranscriptCatalogParent
 }
 
-public struct SyncMirrorRepair: Codable, Equatable, Sendable {
-    public var changes: [SyncMirrorRepairRecord]
-    public var refreshVocabulary: Bool
-
-    public init(changes: [SyncMirrorRepairRecord], refreshVocabulary: Bool) {
-        self.changes = changes
-        self.refreshVocabulary = refreshVocabulary
-    }
-}
-
-public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, SyncEntityVersionStoring, TranscriptOverlayRepository, ReaderProgressRepository, ReviewEventRepository, @unchecked Sendable {
+public final class LocalSQLiteStore: SettingsRepository, BookRepository, TranscriptRepository, VocabularyRepository, KnownLemmaRepository, AssistantResultRepository, TranslationCheckpointRepository, StudyActivityRepository, SyncOutboxRepository, SyncCursorStoring, SyncEntityVersionStoring, TranscriptOverlayRepository, ReaderProgressRepository, ReviewEventRepository, @unchecked Sendable {
     public let url: URL
-    #if DEBUG
-    var interruptAfterTable: String?
-    #endif
 
     private let lock = NSRecursiveLock()
     private let connection: SQLiteConnection
     private var schemaIsReady = false
     private var syncPageTransactionDepth = 0
     private(set) var schemaApplicationCount = 0
+    public private(set) var lastTranscriptSegmentQueryCount = 0
+    public private(set) var maximumTranscriptSegmentQueryCount = 0
 
     public init(fileURL: URL) {
         url = fileURL
@@ -71,7 +40,8 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
             try body()
             return
         }
-        try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+        let ownsTransaction = syncPageTransactionDepth == 0
+        if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
         syncPageTransactionDepth += 1
         do {
             try body()
@@ -84,56 +54,37 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         }
     }
 
-    public func migrateLegacyData(from sources: LegacyLocalDataSources) throws -> LocalMigrationReceipt {
-        lock.lock()
-        defer { lock.unlock() }
-        try applySchemaUnlocked()
-        if let receipt = try loadReceiptUnlocked() {
-            return receipt
-        }
-        try connection.exec("BEGIN IMMEDIATE TRANSACTION")
-        do {
-            if let receipt = try loadReceiptUnlocked() {
-                try connection.exec("COMMIT")
-                return receipt
-            }
-            try clearMigratedDataUnlocked()
-            let payload = try LegacyImportLoader.load(sources: sources, connection: connection, storeURL: url)
-            try insertPayload(payload)
-            let receipt = LocalMigrationReceipt(
-                schemaVersion: LocalSchemaV2.version,
-                completedAt: Date(),
-                bookCount: payload.books.count,
-                assetCount: payload.assets.count,
-                chapterCount: payload.chapters.count,
-                transcriptRevisionCount: payload.transcripts.count,
-                vocabularyCount: payload.vocabulary.count,
-                knownLemmaCount: payload.knownLemmas.count,
-                reviewCardCount: payload.reviewCards.count,
-                reviewEventCount: payload.reviewEvents.count,
-                assistantResultCount: payload.assistantResults.count
-            )
-            try insertReceipt(receipt)
-            try connection.exec("COMMIT")
-            return try loadReceiptUnlocked() ?? receipt
-        } catch {
-            try? connection.exec("ROLLBACK")
-            throw error
-        }
-    }
-
-    public func loadReceipt() throws -> LocalMigrationReceipt? {
-        lock.lock()
-        defer { lock.unlock() }
-        return try loadReceiptUnlocked()
-    }
-
     public func tableNames() throws -> [String] {
         lock.lock()
         defer { lock.unlock() }
-        return try connection.query(
+        let rows = try connection.query(
             "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
         ).compactMap { $0["name"] }
+        return rows
+    }
+
+    /// Exposes SQLite durability mode without opening a second connection that
+    /// could perturb the WAL under acceptance test.
+    public func journalMode() throws -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        return try connection.query("PRAGMA journal_mode").first?.required("journal_mode") ?? ""
+    }
+
+    /// Counts rows changed by this connection so segment-edit tests can prove
+    /// an isolated update does not rewrite the surrounding transcript.
+    public var totalChangeCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return connection.totalChangeCount
+    }
+
+    public func columnNames(in table: String) throws -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        try SQLiteConnection.validateIdentifier(table)
+        return try connection.query("PRAGMA table_info(\(table))").compactMap { $0["name"] }
     }
 
     public func rowCount(_ table: String) throws -> Int {
@@ -339,55 +290,36 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         }
     }
 
-    public func loadSyncMirrorRepair() throws -> SyncMirrorRepair? {
+    public func loadSettings() throws -> StoredSettings {
         lock.lock()
         defer { lock.unlock() }
         try applySchemaUnlocked()
-        let rows = try connection.query(
-            "SELECT changes_json, refresh_vocabulary FROM sync_mirror_repairs WHERE id = 'local' LIMIT 1"
-        )
-        guard let row = rows.first,
-              let changesJSON = row["changes_json"]
-        else { return nil }
-        return SyncMirrorRepair(
-            changes: try LocalJSON.decoder.decode([SyncMirrorRepairRecord].self, from: Data(changesJSON.utf8)),
-            refreshVocabulary: row.int("refresh_vocabulary") != 0
-        )
+        guard let json = try connection.query(
+            "SELECT payload_json FROM local_settings WHERE id = 'local' LIMIT 1"
+        ).first?["payload_json"] else { return .default }
+        return try LocalJSON.decode(StoredSettings.self, from: json)
     }
 
-    public func saveSyncMirrorRepair(_ repair: SyncMirrorRepair) throws {
+    public func saveSettings(_ settings: StoredSettings) throws {
         lock.lock()
         defer { lock.unlock() }
         try applySchemaUnlocked()
-        let changesJSON = try LocalJSON.encode(repair.changes)
         try connection.run(
             """
-            INSERT INTO sync_mirror_repairs(id, changes_json, refresh_vocabulary, updated_at)
-            VALUES ('local', ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              changes_json = excluded.changes_json,
-              refresh_vocabulary = excluded.refresh_vocabulary,
-              updated_at = excluded.updated_at
+            INSERT INTO local_settings(id, payload_json, updated_at) VALUES ('local', ?, ?)
+            ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at
             """
-        ) { [connection] stmt in
-            connection.bind(stmt, 1, changesJSON)
-            connection.bind(stmt, 2, repair.refreshVocabulary ? 1 : 0)
-            connection.bindDate(stmt, 3, Date())
+        ) { [connection] statement in
+            connection.bind(statement, 1, try LocalJSON.encode(settings))
+            connection.bindDate(statement, 2, Date())
         }
-    }
-
-    public func clearSyncMirrorRepair() throws {
-        lock.lock()
-        defer { lock.unlock() }
-        try applySchemaUnlocked()
-        try connection.exec("DELETE FROM sync_mirror_repairs WHERE id = 'local'")
     }
 
     public func loadBooks() throws -> [StoredBook] {
         lock.lock()
         defer { lock.unlock() }
-        let bookRows = try connection.query("SELECT * FROM local_books ORDER BY title, id")
-        let chapterRows = try connection.query("SELECT * FROM local_chapters ORDER BY book_id, position, id")
+        let bookRows = try connection.query("SELECT * FROM local_books WHERE deleted_at IS NULL ORDER BY title, id")
+        let chapterRows = try connection.query("SELECT * FROM local_chapters WHERE deleted_at IS NULL ORDER BY book_id, position, id")
         let chaptersByBook = Dictionary(grouping: chapterRows) { $0["book_id"] ?? "" }
         return try bookRows.map { row in
             let id = try row.required("id")
@@ -410,15 +342,323 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         }
     }
 
+    /// Soft-deleted catalog IDs suppress scan resurrection without touching
+    /// unmanaged media that may still exist outside AudioReader's managed root.
+    public func loadDeletedBookIDs() throws -> [BookID] {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        return try connection.query(
+            """
+            SELECT book_id AS id FROM local_book_tombstones
+            UNION SELECT id FROM local_books WHERE deleted_at IS NOT NULL
+            ORDER BY id
+            """
+        ).compactMap { $0["id"] }
+            .map(BookID.init(rawValue:))
+    }
+
+    public func saveBook(_ book: StoredBook) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let now = Date()
+        let ownsTransaction = syncPageTransactionDepth == 0
+        if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
+        do {
+            try connection.run(
+                """
+                INSERT INTO local_books(id, title, author, source, created_at, updated_at)
+                VALUES (?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET title=excluded.title, author=excluded.author,
+                  source=excluded.source, updated_at=excluded.updated_at, deleted_at=NULL
+                """
+            ) { [connection] statement in
+                connection.bind(statement, 1, book.id.rawValue)
+                connection.bind(statement, 2, book.title)
+                connection.bind(statement, 3, book.author)
+                connection.bind(statement, 4, book.source)
+                connection.bindDate(statement, 5, now)
+                connection.bindDate(statement, 6, now)
+            }
+            try connection.run("DELETE FROM local_book_tombstones WHERE book_id = ?") { [connection] statement in
+                connection.bind(statement, 1, book.id.rawValue)
+            }
+            for chapter in book.chapters {
+                try connection.run(
+                    """
+                    INSERT INTO local_chapters(
+                      id, book_id, position, title, duration, start_time, created_at, updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?)
+                    ON CONFLICT(id) DO UPDATE SET book_id=excluded.book_id, position=excluded.position,
+                      title=excluded.title, duration=excluded.duration, start_time=excluded.start_time,
+                      updated_at=excluded.updated_at, deleted_at=NULL
+                    """
+                ) { [connection] statement in
+                    connection.bind(statement, 1, chapter.id.rawValue)
+                    connection.bind(statement, 2, book.id.rawValue)
+                    connection.bind(statement, 3, chapter.index)
+                    connection.bind(statement, 4, chapter.title)
+                    connection.bind(statement, 5, chapter.duration)
+                    connection.bind(statement, 6, chapter.startTime)
+                    connection.bindDate(statement, 7, now)
+                    connection.bindDate(statement, 8, now)
+                }
+            }
+            let retainedChapterIDs = Set(book.chapters.map(\.id.rawValue))
+            let staleChapterIDs = try connection.query(
+                "SELECT id FROM local_chapters WHERE book_id = ? AND deleted_at IS NULL",
+                bind: { [connection] statement in connection.bind(statement, 1, book.id.rawValue) }
+            ).compactMap { $0["id"] }.filter { !retainedChapterIDs.contains($0) }
+            for chapterID in staleChapterIDs {
+                try connection.run(
+                    "UPDATE local_chapters SET deleted_at = ?, updated_at = ? WHERE id = ?"
+                ) { [connection] statement in
+                    connection.bindDate(statement, 1, now)
+                    connection.bindDate(statement, 2, now)
+                    connection.bind(statement, 3, chapterID)
+                }
+            }
+            if ownsTransaction { try connection.exec("COMMIT") }
+        } catch {
+            if ownsTransaction { try? connection.exec("ROLLBACK") }
+            throw error
+        }
+    }
+
+    /// Catalog metadata and its upload intent are a single local-import commit.
+    public func saveBook(_ book: StoredBook, mutation: OutboxMutation) throws {
+        try saveBook(book, assets: nil, mutation: mutation)
+    }
+
+    public func saveBook(
+        _ book: StoredBook,
+        assets: [StoredLocalAsset]?,
+        mutation: OutboxMutation
+    ) throws {
+        try performSyncPageTransaction {
+            try saveBook(book)
+            if let assets { try saveAssets(assets, bookID: book.id) }
+            guard mutation.entityType == .book else { throw LocalSQLiteStoreError.invalidBookMutation }
+            try enqueue(mutation)
+        }
+    }
+
+    public func deleteBook(id: BookID) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let ownsTransaction = syncPageTransactionDepth == 0
+        if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
+        do {
+            let deletedAt = Date()
+            try connection.run(
+                """
+                INSERT INTO local_book_tombstones(book_id, deleted_at) VALUES (?,?)
+                ON CONFLICT(book_id) DO UPDATE SET deleted_at=excluded.deleted_at
+                """
+            ) { [connection] statement in
+                connection.bind(statement, 1, id.rawValue)
+                connection.bindDate(statement, 2, deletedAt)
+            }
+            try deleteAssets(bookID: id)
+            try connection.run("UPDATE local_chapters SET deleted_at = ?, updated_at = ? WHERE book_id = ?") { [connection] statement in
+                connection.bindDate(statement, 1, deletedAt)
+                connection.bindDate(statement, 2, deletedAt)
+                connection.bind(statement, 3, id.rawValue)
+            }
+            try connection.run("UPDATE local_books SET deleted_at = ?, updated_at = ? WHERE id = ?") { [connection] statement in
+                connection.bindDate(statement, 1, deletedAt)
+                connection.bindDate(statement, 2, deletedAt)
+                connection.bind(statement, 3, id.rawValue)
+            }
+            if ownsTransaction { try connection.exec("COMMIT") }
+        } catch {
+            if ownsTransaction { try? connection.exec("ROLLBACK") }
+            throw error
+        }
+    }
+
+    /// Catalog disappearance, local asset removal, and the cloud tombstone are
+    /// committed together; filesystem cleanup is performed by the app bridge.
+    @discardableResult
+    public func deleteBook(id: BookID, mutation: OutboxMutation) throws -> [StoredLocalAsset] {
+        var removedAssets: [StoredLocalAsset] = []
+        try performSyncPageTransaction {
+            guard mutation.entityType == .book, mutation.operation == .delete else {
+                throw LocalSQLiteStoreError.invalidBookMutation
+            }
+            removedAssets = try loadAssets(bookID: id)
+            try connection.run(
+                "UPDATE sync_outbox SET status = ? WHERE status = ? AND entity_type = ? AND entity_id = ?"
+            ) { [connection] statement in
+                connection.bind(statement, 1, OutboxMutationStatus.acknowledged.rawValue)
+                connection.bind(statement, 2, OutboxMutationStatus.pending.rawValue)
+                connection.bind(statement, 3, OutboxEntityType.book.rawValue)
+                connection.bind(statement, 4, mutation.entityID)
+            }
+            try deleteBook(id: id)
+            try enqueue(mutation)
+        }
+        return removedAssets
+    }
+
     public func loadAssets() throws -> [StoredLocalAsset] {
         lock.lock()
         defer { lock.unlock() }
-        return try connection.query("SELECT * FROM local_assets ORDER BY id").map { row in
+        return try loadAssetsUnlocked(bookID: nil)
+    }
+
+    public func loadSyncAssetManifests() throws -> [StoredSyncAssetManifest] {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        return try connection.query("SELECT * FROM local_sync_asset_manifests ORDER BY kind, id").map { row in
+            StoredSyncAssetManifest(
+                id: try row.required("id"), kind: try row.required("kind"),
+                revisionID: row.string("revision_id"), bookID: row.string("book_id"),
+                chapterID: row.string("chapter_id"), contentType: try row.required("content_type"),
+                encoding: try row.required("encoding"), sha256: try row.required("sha256"),
+                compressedBytes: Int64(try row.required("compressed_bytes")) ?? 0,
+                originalBytes: Int64(try row.required("original_bytes")) ?? 0,
+                segmentCount: row.string("segment_count").flatMap(Int.init),
+                localObjectPath: try row.required("local_object_path")
+            )
+        }
+    }
+
+    /// Persists only the verified manifest/path; immutable bytes remain in the filesystem.
+    public func saveSyncAssetManifest(_ asset: StoredSyncAssetManifest) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try connection.run(
+            """
+            INSERT INTO local_sync_asset_manifests(
+              id, kind, revision_id, book_id, chapter_id, content_type, encoding, sha256,
+              compressed_bytes, original_bytes, segment_count, local_object_path, created_at, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET
+              kind=excluded.kind, revision_id=excluded.revision_id, book_id=excluded.book_id,
+              chapter_id=excluded.chapter_id, content_type=excluded.content_type,
+              encoding=excluded.encoding, sha256=excluded.sha256,
+              compressed_bytes=excluded.compressed_bytes, original_bytes=excluded.original_bytes,
+              segment_count=excluded.segment_count, local_object_path=excluded.local_object_path,
+              updated_at=excluded.updated_at
+            """
+        ) { [connection] statement in
+            connection.bind(statement, 1, asset.id); connection.bind(statement, 2, asset.kind)
+            connection.bind(statement, 3, asset.revisionID); connection.bind(statement, 4, asset.bookID)
+            connection.bind(statement, 5, asset.chapterID); connection.bind(statement, 6, asset.contentType)
+            connection.bind(statement, 7, asset.encoding); connection.bind(statement, 8, asset.sha256)
+            connection.bind(statement, 9, Int(clamping: asset.compressedBytes))
+            connection.bind(statement, 10, Int(clamping: asset.originalBytes))
+            connection.bind(statement, 11, asset.segmentCount); connection.bind(statement, 12, asset.localObjectPath)
+            connection.bindDate(statement, 13, Date()); connection.bindDate(statement, 14, Date())
+        }
+    }
+
+    public func loadAssets(bookID: BookID) throws -> [StoredLocalAsset] {
+        lock.lock()
+        defer { lock.unlock() }
+        return try loadAssetsUnlocked(bookID: bookID)
+    }
+
+    public func saveAssets(_ assets: [StoredLocalAsset], bookID: BookID) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let ownsTransaction = syncPageTransactionDepth == 0
+        if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
+        do {
+            let now = Date()
+            for asset in assets {
+                guard asset.bookID == bookID else { throw LocalSQLiteStoreError.invalidBookMutation }
+                try connection.run(
+                    """
+                    INSERT INTO local_assets(
+                      id, book_id, kind, local_media_key, content_hash, byte_count,
+                      metadata_json, created_at, updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(id) DO UPDATE SET
+                      book_id=excluded.book_id, kind=excluded.kind,
+                      local_media_key=excluded.local_media_key,
+                      content_hash=excluded.content_hash, byte_count=excluded.byte_count,
+                      metadata_json=excluded.metadata_json, updated_at=excluded.updated_at,
+                      deleted_at=NULL
+                    """
+                ) { [connection] statement in
+                    connection.bind(statement, 1, asset.id.rawValue)
+                    connection.bind(statement, 2, asset.bookID.rawValue)
+                    connection.bind(statement, 3, asset.kind)
+                    connection.bind(statement, 4, asset.localMediaKey)
+                    connection.bind(statement, 5, asset.contentHash)
+                    connection.bind(statement, 6, asset.byteCount.map { Int(clamping: $0) })
+                    connection.bind(statement, 7, try LocalJSON.encode(asset.metadata))
+                    connection.bindDate(statement, 8, now)
+                    connection.bindDate(statement, 9, now)
+                }
+            }
+            let retained = Set(assets.map(\.id.rawValue))
+            let stale = try connection.query(
+                "SELECT id FROM local_assets WHERE book_id = ? AND deleted_at IS NULL",
+                bind: { [connection] statement in connection.bind(statement, 1, bookID.rawValue) }
+            ).compactMap { $0["id"] }.filter { !retained.contains($0) }
+            try connection.run("UPDATE local_chapters SET asset_id = NULL WHERE book_id = ?") { [connection] statement in
+                connection.bind(statement, 1, bookID.rawValue)
+            }
+            for asset in assets where asset.kind == "audio" {
+                guard let chapterID = asset.metadata["chapterID"] else { continue }
+                try connection.run(
+                    "UPDATE local_chapters SET asset_id = ? WHERE id = ? AND book_id = ?"
+                ) { [connection] statement in
+                    connection.bind(statement, 1, asset.id.rawValue)
+                    connection.bind(statement, 2, chapterID)
+                    connection.bind(statement, 3, bookID.rawValue)
+                }
+            }
+            for id in stale {
+                try connection.run("DELETE FROM local_assets WHERE id = ?") { [connection] statement in
+                    connection.bind(statement, 1, id)
+                }
+            }
+            if ownsTransaction { try connection.exec("COMMIT") }
+        } catch {
+            if ownsTransaction { try? connection.exec("ROLLBACK") }
+            throw error
+        }
+    }
+
+    public func deleteAssets(bookID: BookID) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try connection.run("UPDATE local_chapters SET asset_id = NULL WHERE book_id = ?") { [connection] statement in
+            connection.bind(statement, 1, bookID.rawValue)
+        }
+        try connection.run("DELETE FROM local_assets WHERE book_id = ?") { [connection] statement in
+            connection.bind(statement, 1, bookID.rawValue)
+        }
+    }
+
+    private func loadAssetsUnlocked(bookID: BookID?) throws -> [StoredLocalAsset] {
+        let rows: [[String: String]]
+        if let bookID {
+            rows = try connection.query(
+                "SELECT * FROM local_assets WHERE book_id = ? AND deleted_at IS NULL ORDER BY id",
+                bind: { [connection] statement in connection.bind(statement, 1, bookID.rawValue) }
+            )
+        } else {
+            rows = try connection.query("SELECT * FROM local_assets WHERE deleted_at IS NULL ORDER BY id")
+        }
+        return try rows.map { row in
             StoredLocalAsset(
                 id: AssetID(rawValue: try row.required("id")),
                 bookID: BookID(rawValue: try row.required("book_id")),
                 kind: try row.required("kind"),
-                localMediaKey: try row.required("local_media_key")
+                localMediaKey: try row.required("local_media_key"),
+                contentHash: row.string("content_hash"),
+                byteCount: row.string("byte_count").flatMap(Int64.init),
+                metadata: try LocalJSON.decode([String: String].self, from: row.string("metadata_json") ?? "{}")
             )
         }
     }
@@ -426,9 +666,211 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
     public func loadTranscripts() throws -> [StoredTranscript] {
         lock.lock()
         defer { lock.unlock() }
-        return try connection.query(
+        let rows = try connection.query(
             "SELECT * FROM local_transcript_revisions WHERE is_active = 1 ORDER BY chapter_id"
-        ).map(Self.transcript(from:))
+        ).map { try loadTranscriptUnlocked(from: $0) }
+        return rows
+    }
+
+    public func loadAllTranscripts() throws -> [StoredTranscript] {
+        try loadTranscripts()
+    }
+
+    public func activeTranscriptChapterIDs() throws -> Set<ChapterID> {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        return Set(try connection.query(
+            "SELECT chapter_id FROM local_transcript_revisions WHERE is_active = 1 AND deleted_at IS NULL"
+        ).compactMap { $0["chapter_id"].map(ChapterID.init(rawValue:)) })
+    }
+
+    public func loadTranscript(chapterID: ChapterID) throws -> StoredTranscript? {
+        try loadTranscript(chapterID: chapterID, range: nil)
+    }
+
+    /// Reader-facing loads request a bounded sequence range; a nil range is
+    /// reserved for background workflows that explicitly require a full revision.
+    public func loadTranscript(
+        chapterID: ChapterID,
+        range: Range<Int>?
+    ) throws -> StoredTranscript? {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        guard let row = try connection.query(
+            "SELECT * FROM local_transcript_revisions WHERE chapter_id = ? AND is_active = 1 ORDER BY created_at DESC, id LIMIT 1",
+            bind: { [connection] statement in connection.bind(statement, 1, chapterID.rawValue) }
+        ).first else { return nil }
+        return try loadTranscriptUnlocked(from: row, range: range)
+    }
+
+    public func transcriptSegmentCount(chapterID: ChapterID) throws -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        return try connection.query(
+            """
+            SELECT COUNT(*) AS count FROM local_transcript_segments AS segment
+            JOIN local_transcript_revisions AS revision ON revision.id = segment.revision_id
+            WHERE segment.chapter_id = ? AND revision.is_active = 1
+            """,
+            bind: { [connection] statement in connection.bind(statement, 1, chapterID.rawValue) }
+        ).first?.int("count") ?? 0
+    }
+
+    /// Whole-chapter jobs assemble the revision through bounded range queries;
+    /// reader-facing callers continue to request only the visible page.
+    public func loadCompleteTranscript(
+        chapterID: ChapterID,
+        pageSize: Int
+    ) throws -> StoredTranscript? {
+        precondition(pageSize > 0)
+        lock.lock()
+        defer { lock.unlock() }
+        maximumTranscriptSegmentQueryCount = 0
+        let total = try transcriptSegmentCount(chapterID: chapterID)
+        var complete: StoredTranscript?
+        var start = 0
+        repeat {
+            let end = min(start + pageSize, total)
+            guard let page = try loadTranscript(chapterID: chapterID, range: start..<end) else {
+                return nil
+            }
+            if complete == nil {
+                complete = page
+            } else {
+                complete?.segments.append(contentsOf: page.segments)
+            }
+            start = end
+        } while start < total
+        return complete
+    }
+
+    /// Saving a generated revision is atomic, while later corrections can use
+    /// `updateTranscriptSegment` to avoid rewriting unrelated segment rows.
+    public func saveTranscript(_ transcript: StoredTranscript) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let ownsTransaction = syncPageTransactionDepth == 0
+        if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
+        do {
+            try ensureTranscriptParent(for: transcript)
+            let revisionID = Self.revisionID(for: transcript.chapterID)
+            try connection.run(
+                "UPDATE local_transcript_revisions SET is_active = 0 WHERE chapter_id = ?"
+            ) { [connection] statement in
+                connection.bind(statement, 1, transcript.chapterID.rawValue)
+            }
+            try connection.run(
+                """
+                INSERT INTO local_transcript_revisions(
+                  id, chapter_id, local_media_key, chapter_start, created_at, locale, source,
+                  ebook_aligned, ebook_use_override, alignment_status, alignment_reason,
+                  alignment_extracted_word_count, alignment_extracted_sentence_count,
+                  alignment_sampled_anchor_count, alignment_matched_anchor_count,
+                  alignment_matched_coverage, alignment_median_score, alignment_lower_percentile_score,
+                  alignment_backward_jumps, alignment_longest_unmatched_passage,
+                  alignment_title_similarity, alignment_author_similarity,
+                  alignment_candidate_comparisons, alignment_detailed_performed,
+                  is_active, server_version
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0)
+                ON CONFLICT(id) DO UPDATE SET
+                  local_media_key=excluded.local_media_key, chapter_start=excluded.chapter_start,
+                  created_at=excluded.created_at, locale=excluded.locale, source=excluded.source,
+                  ebook_aligned=excluded.ebook_aligned, ebook_use_override=excluded.ebook_use_override,
+                  alignment_status=excluded.alignment_status, alignment_reason=excluded.alignment_reason,
+                  alignment_extracted_word_count=excluded.alignment_extracted_word_count,
+                  alignment_extracted_sentence_count=excluded.alignment_extracted_sentence_count,
+                  alignment_sampled_anchor_count=excluded.alignment_sampled_anchor_count,
+                  alignment_matched_anchor_count=excluded.alignment_matched_anchor_count,
+                  alignment_matched_coverage=excluded.alignment_matched_coverage,
+                  alignment_median_score=excluded.alignment_median_score,
+                  alignment_lower_percentile_score=excluded.alignment_lower_percentile_score,
+                  alignment_backward_jumps=excluded.alignment_backward_jumps,
+                  alignment_longest_unmatched_passage=excluded.alignment_longest_unmatched_passage,
+                  alignment_title_similarity=excluded.alignment_title_similarity,
+                  alignment_author_similarity=excluded.alignment_author_similarity,
+                  alignment_candidate_comparisons=excluded.alignment_candidate_comparisons,
+                  alignment_detailed_performed=excluded.alignment_detailed_performed,
+                  is_active=1, deleted_at=NULL
+                """
+            ) { [connection] statement in
+                connection.bind(statement, 1, revisionID)
+                connection.bind(statement, 2, transcript.chapterID.rawValue)
+                connection.bind(statement, 3, transcript.localMediaKey)
+                connection.bind(statement, 4, transcript.chapterStart)
+                connection.bindDate(statement, 5, transcript.createdAt)
+                connection.bind(statement, 6, transcript.locale)
+                connection.bind(statement, 7, transcript.source)
+                connection.bind(statement, 8, transcript.ebookAligned ? 1 : 0)
+                connection.bind(statement, 9, transcript.ebookUseOverride)
+                Self.bindAlignment(transcript.ebookAlignment, to: statement, startingAt: 10, connection: connection)
+            }
+            try connection.run("DELETE FROM local_transcript_segments WHERE revision_id = ?") { [connection] statement in
+                connection.bind(statement, 1, revisionID)
+            }
+            try insertTranscriptSegments(transcript.segments, chapterID: transcript.chapterID, revisionID: revisionID)
+            if ownsTransaction { try connection.exec("COMMIT") }
+        } catch {
+            if ownsTransaction { try? connection.exec("ROLLBACK") }
+            throw error
+        }
+    }
+
+    /// A generated revision and its first correction share one commit so a crash
+    /// cannot expose an overlay without the immutable base it targets.
+    public func saveTranscript(
+        _ transcript: StoredTranscript,
+        merging overlay: StoredTranscriptOverlay,
+        revision: Int64
+    ) throws {
+        try performSyncPageTransaction {
+            try saveTranscript(transcript)
+            _ = try mergeTranscriptOverlay(overlay, revision: revision)
+        }
+    }
+
+    /// Range loading is expressed in segment sequence so callers do not decode
+    /// or allocate the remainder of a large chapter.
+    public func loadTranscriptSegments(
+        chapterID: ChapterID,
+        range: Range<Int>
+    ) throws -> [StoredTranscriptSegment] {
+        guard !range.isEmpty else { return [] }
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let rows = try connection.query(
+            """
+            SELECT segment.* FROM local_transcript_segments AS segment
+            JOIN local_transcript_revisions AS revision ON revision.id = segment.revision_id
+            WHERE segment.chapter_id = ? AND revision.is_active = 1
+              AND segment.sequence >= ? AND segment.sequence < ?
+            ORDER BY segment.sequence
+            """,
+            bind: { [connection] statement in
+                connection.bind(statement, 1, chapterID.rawValue)
+                connection.bind(statement, 2, range.lowerBound)
+                connection.bind(statement, 3, range.upperBound)
+            }
+        )
+        lastTranscriptSegmentQueryCount = rows.count
+        return try rows.map(Self.transcriptSegment(from:))
+    }
+
+    /// A correction to generated segment data updates one row and leaves all
+    /// other sequences untouched, bounding WAL growth to the changed record.
+    public func updateTranscriptSegment(
+        chapterID: ChapterID,
+        segment: StoredTranscriptSegment
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        guard let revisionID = try activeRevisionID(chapterID: chapterID) else { return }
+        try updateTranscriptSegment(segment, chapterID: chapterID, revisionID: revisionID)
     }
 
     public func loadTranscriptOverlays(chapterID: ChapterID) throws -> [StoredTranscriptOverlay] {
@@ -480,6 +922,24 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         return try mergeTranscriptOverlayUnlocked(overlay, revision: revision)
     }
 
+    /// A user edit and its sync mutation are indivisible, including conflict retention.
+    @discardableResult
+    public func mergeTranscriptOverlay(
+        _ overlay: StoredTranscriptOverlay,
+        revision: Int64,
+        mutation: OutboxMutation
+    ) throws -> TranscriptOverlayMergeOutcome {
+        var outcome = TranscriptOverlayMergeOutcome.unchanged
+        try performSyncPageTransaction {
+            outcome = try mergeTranscriptOverlay(overlay, revision: revision)
+            guard mutation.entityType == .transcriptOverlay else {
+                throw LocalSQLiteStoreError.invalidTranscriptOverlayMutation
+            }
+            try enqueue(mutation)
+        }
+        return outcome
+    }
+
     /// Resolution promotes exactly one candidate and clears competing values;
     /// the immutable transcript and stale candidate payload are never rewritten.
     public func resolveTranscriptOverlay(
@@ -495,14 +955,31 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         }
         let choices = [state.current] + state.conflicts
         guard let chosen = choices.first(where: { $0.id == candidateID }) else { return }
-        try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+        let ownsTransaction = syncPageTransactionDepth == 0
+        if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
         do {
             try upsertCurrentTranscriptOverlay(chosen.overlay, revision: chosen.revision)
             try deleteTranscriptOverlayConflicts(chapterID: chapterID, segmentID: segmentID)
-            try connection.exec("COMMIT")
+            if ownsTransaction { try connection.exec("COMMIT") }
         } catch {
-            try? connection.exec("ROLLBACK")
+            if ownsTransaction { try? connection.exec("ROLLBACK") }
             throw error
+        }
+    }
+
+    /// Conflict selection and the replacement upload intent share one commit.
+    public func resolveTranscriptOverlay(
+        chapterID: ChapterID,
+        segmentID: String,
+        choosing candidateID: String,
+        mutation: OutboxMutation
+    ) throws {
+        try performSyncPageTransaction {
+            try resolveTranscriptOverlay(chapterID: chapterID, segmentID: segmentID, choosing: candidateID)
+            guard mutation.entityType == .transcriptOverlay else {
+                throw LocalSQLiteStoreError.invalidTranscriptOverlayMutation
+            }
+            try enqueue(mutation)
         }
     }
 
@@ -605,6 +1082,48 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
                 chapterID: ChapterID(rawValue: chapterID),
                 segmentID: segmentID
             )
+        }
+    }
+
+    /// Restore deletion and its tombstone cannot be observed separately.
+    public func deleteTranscriptOverlay(id: String, mutation: OutboxMutation) throws {
+        try performSyncPageTransaction {
+            guard mutation.entityType == .transcriptOverlay else {
+                throw LocalSQLiteStoreError.invalidTranscriptOverlayMutation
+            }
+            let pending = try connection.query(
+                """
+                SELECT base_revision, occurred_at FROM sync_outbox
+                WHERE status = ? AND entity_type = ? AND entity_id = ?
+                ORDER BY occurred_at DESC, id DESC
+                """,
+                bind: { [connection] statement in
+                    connection.bind(statement, 1, OutboxMutationStatus.pending.rawValue)
+                    connection.bind(statement, 2, OutboxEntityType.transcriptOverlay.rawValue)
+                    connection.bind(statement, 3, mutation.entityID)
+                }
+            )
+            var tombstone = mutation
+            if let latest = pending.first {
+                tombstone.baseRevision = max(
+                    tombstone.baseRevision,
+                    ServerVersion(Int64(latest.int("base_revision")))
+                )
+                let latestDate = latest.date("occurred_at")
+                if tombstone.occurredAt <= latestDate {
+                    tombstone.occurredAt = latestDate.addingTimeInterval(0.001)
+                }
+            }
+            try connection.run(
+                "UPDATE sync_outbox SET status = ? WHERE status = ? AND entity_type = ? AND entity_id = ?"
+            ) { [connection] statement in
+                connection.bind(statement, 1, OutboxMutationStatus.acknowledged.rawValue)
+                connection.bind(statement, 2, OutboxMutationStatus.pending.rawValue)
+                connection.bind(statement, 3, OutboxEntityType.transcriptOverlay.rawValue)
+                connection.bind(statement, 4, mutation.entityID)
+            }
+            try deleteTranscriptOverlay(id: id)
+            try enqueue(tombstone)
         }
     }
 
@@ -719,6 +1238,68 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         ).map(Self.vocabulary(from:))
     }
 
+    public func saveVocabulary(_ entries: [StoredVocabularyOccurrence]) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            let existing = Dictionary(
+                uniqueKeysWithValues: try connection.query(
+                    "SELECT * FROM local_vocabulary_occurrences"
+                ).map(Self.vocabulary(from:)).map { ($0.id, $0) }
+            )
+            let merged = entries.map { entry in
+                guard let current = existing[entry.id] else { return entry }
+                return StoredVocabularyReviewSchedule(current).merging(into: entry)
+            }
+            for entry in merged { try ensureLearningParents(for: entry, at: entry.addedAt) }
+            try insertVocabulary(merged)
+            try connection.exec("COMMIT")
+        } catch {
+            try? connection.exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    public func updateVocabularyReviewSchedule(_ schedule: StoredVocabularyReviewSchedule) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try updateVocabularyReviewScheduleUnlocked(schedule)
+    }
+
+    public func updateVocabularyReviewSchedules(_ schedules: [StoredVocabularyReviewSchedule]) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            for schedule in schedules { try updateVocabularyReviewScheduleUnlocked(schedule) }
+            try connection.exec("COMMIT")
+        } catch {
+            try? connection.exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    public func updateVocabularyLearnList(id: VocabularyOccurrenceID, included: Bool) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try connection.run(
+            "UPDATE local_vocabulary_occurrences SET is_in_learn_list = ?, updated_at = ? WHERE id = ?"
+        ) { [connection] statement in
+            connection.bind(statement, 1, included ? 1 : 0)
+            connection.bindDate(statement, 2, Date())
+            connection.bind(statement, 3, id.rawValue)
+        }
+    }
+
+    public func deleteVocabulary(id: VocabularyOccurrenceID) throws {
+        try deleteVocabularyAndEnqueueTombstone(localID: id, entityID: id.rawValue)
+    }
+
     /// Sync writes the vocabulary row and its lightweight relational parents in
     /// one transaction so dependent progress and review events can be retried safely.
     public func upsertVocabulary(_ vocabulary: StoredVocabularyOccurrence) throws {
@@ -805,9 +1386,6 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         lock.lock()
         defer { lock.unlock() }
         try applySchemaUnlocked()
-        let legacyTableExists = try !connection.query(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vocab' LIMIT 1"
-        ).isEmpty
         let version = try connection.query(
             "SELECT server_version FROM entity_versions WHERE entity_type = ? AND entity_id = ? LIMIT 1",
             bind: { [connection] stmt in
@@ -835,11 +1413,6 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
             }
             try connection.run("DELETE FROM local_vocabulary_occurrences WHERE id = ?") { [connection] stmt in
                 connection.bind(stmt, 1, localID.rawValue)
-            }
-            if legacyTableExists {
-                try connection.run("DELETE FROM vocab WHERE id = ?") { [connection] stmt in
-                    connection.bind(stmt, 1, localID.rawValue)
-                }
             }
             if var tombstone {
                 try connection.run(
@@ -889,6 +1462,30 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         }
     }
 
+    public func saveKnownLemmas(_ lemmas: [StoredKnownLemma]) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let ownsTransaction = syncPageTransactionDepth == 0
+        if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
+        do {
+            try connection.exec("DELETE FROM local_known_lemmas")
+            try insertKnownLemmas(lemmas)
+            if ownsTransaction { try connection.exec("COMMIT") }
+        } catch {
+            if ownsTransaction { try? connection.exec("ROLLBACK") }
+            throw error
+        }
+    }
+
+    /// Remote lemma pages merge one row without replacing unrelated local knowledge.
+    public func upsertKnownLemma(_ lemma: StoredKnownLemma) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try insertKnownLemmas([lemma])
+    }
+
     public func loadReviewCards() throws -> [StoredLocalReviewCard] {
         lock.lock()
         defer { lock.unlock() }
@@ -916,6 +1513,7 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
             StoredReviewEvent(
                 id: ReviewEventID(rawValue: try row.required("id")),
                 vocabularyID: VocabularyOccurrenceID(rawValue: try row.required("vocabulary_id")),
+                cardID: row.string("card_id"),
                 face: try row.required("face"),
                 rating: try row.required("rating"),
                 reviewedAt: row.date("reviewed_at")
@@ -949,6 +1547,15 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         _ event: StoredReviewEvent,
         vocabulary: StoredVocabularyOccurrence
     ) throws {
+        try appendReviewEvent(event, vocabularies: [vocabulary])
+    }
+
+    /// Canonical reviews update every occurrence schedule and append one event
+    /// attributed to the shared card, without removing any location row.
+    public func appendReviewEvent(
+        _ event: StoredReviewEvent,
+        vocabularies: [StoredVocabularyOccurrence]
+    ) throws {
         lock.lock()
         defer { lock.unlock() }
         try applySchemaUnlocked()
@@ -959,11 +1566,17 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
                 if ownsTransaction { try connection.exec("COMMIT") }
                 return
             }
-            try ensureLearningParents(for: vocabulary, at: event.reviewedAt)
-            try upsertVocabularyReviewSchedule(vocabulary)
+            for vocabulary in vocabularies {
+                try ensureLearningParents(for: vocabulary, at: event.reviewedAt)
+                try upsertVocabularyReviewSchedule(vocabulary)
+            }
+            guard let vocabulary = vocabularies.first(where: { $0.id == event.vocabularyID })
+                ?? vocabularies.first
+            else { throw LocalSQLiteStoreError.missingReviewVocabulary }
+            let cardID = event.cardID ?? "card:\(vocabulary.id.rawValue):\(event.face)"
             try insertReviewCards([
                 StoredLocalReviewCard(
-                    id: "card:\(vocabulary.id.rawValue):\(event.face)",
+                    id: cardID,
                     vocabularyID: vocabulary.id,
                     face: event.face,
                     reviewCount: vocabulary.reviewCount,
@@ -990,202 +1603,362 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         ).map(Self.assistantResult(from:))
     }
 
+    public func loadAssistantResultHistory(resultID: String) throws -> [StoredAssistantResultHistory] {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        return try connection.query(
+            "SELECT * FROM local_assistant_result_history WHERE result_id = ? ORDER BY sequence",
+            bind: { statement in self.connection.bind(statement, 1, resultID) }
+        ).map { row in
+            StoredAssistantResultHistory(
+                resultID: try row.required("result_id"),
+                sequence: Int64(row.int("sequence")),
+                status: AssistantResultStatus(rawValue: try row.required("status")) ?? .pending,
+                text: try row.required("text"),
+                model: try row.required("model"),
+                promptVersion: try row.required("prompt_version"),
+                modelPolicyHash: try row.required("model_policy_hash"),
+                recordedAt: row.date("recorded_at"),
+                sharedCacheEntryID: row.string("shared_cache_entry_id")
+            )
+        }
+    }
+
+    public func saveAssistantResult(_ result: StoredAssistantResult) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try insertAssistantResults([result])
+    }
+
+    /// A lifecycle transition and its v2 upload intent commit together so cloud history cannot lag local state.
+    public func updateAssistantResult(_ result: StoredAssistantResult, mutation: OutboxMutation) throws {
+        try performSyncPageTransaction {
+            guard mutation.entityType == .assistantResult, mutation.entityID == result.id else {
+                throw LocalSQLiteStoreError.invalidAssistantDecisionMutation
+            }
+            try insertAssistantResults([result])
+            try enqueue(mutation)
+        }
+    }
+
+    /// Accepting generated text is one durable decision: the result status,
+    /// derived vocabulary occurrences, and upload intent cannot diverge.
+    public func acceptAssistantResult(
+        _ result: StoredAssistantResult,
+        vocabulary: [StoredVocabularyOccurrence],
+        mutation: OutboxMutation
+    ) throws {
+        try acceptAssistantResults([result], vocabulary: vocabulary, mutations: [mutation])
+    }
+
+    /// Decision rows, derived learning rows, and their sync intent are one
+    /// commit; callers must not perform any of these writes separately.
+    public func acceptAssistantResults(
+        _ results: [StoredAssistantResult],
+        vocabulary: [StoredVocabularyOccurrence],
+        mutations: [OutboxMutation]
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try insertAssistantResults(results)
+            let mergedVocabulary = try vocabularyPreservingNewerReviewState(vocabulary)
+            for entry in mergedVocabulary { try ensureLearningParents(for: entry, at: entry.addedAt) }
+            try insertVocabulary(mergedVocabulary)
+            try insertReviewCards(mergedVocabulary.map(Self.reviewCard(for:)))
+            guard mutations.allSatisfy({ $0.entityType == .assistantResult }) else {
+                throw LocalSQLiteStoreError.invalidAssistantDecisionMutation
+            }
+            for mutation in mutations { try enqueue(mutation) }
+            try connection.exec("COMMIT")
+        } catch {
+            try? connection.exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Pulled decisions share the same canonical transaction but never enqueue
+    /// a new mutation back to the originating device.
+    public func applyAssistantResults(
+        _ results: [StoredAssistantResult],
+        vocabulary: [StoredVocabularyOccurrence],
+        removingVocabularyIDs: [VocabularyOccurrenceID] = []
+    ) throws {
+        try performSyncPageTransaction {
+            try insertAssistantResults(results)
+            try deleteUnreviewedDerivedVocabulary(ids: removingVocabularyIDs)
+            let mergedVocabulary = try vocabularyPreservingNewerReviewState(vocabulary)
+            for entry in mergedVocabulary { try ensureLearningParents(for: entry, at: entry.addedAt) }
+            try insertVocabulary(mergedVocabulary)
+            try insertReviewCards(mergedVocabulary.map(Self.reviewCard(for:)))
+        }
+    }
+
+    /// Rejection status, safe derived-row removal, and its portable decision
+    /// are one commit. Reviewed or explicitly captured vocabulary is retained.
+    public func rejectAssistantResult(
+        _ result: StoredAssistantResult,
+        derivedVocabularyIDs: [VocabularyOccurrenceID],
+        mutation: OutboxMutation
+    ) throws {
+        try performSyncPageTransaction {
+            try insertAssistantResults([result])
+            try deleteUnreviewedDerivedVocabulary(ids: derivedVocabularyIDs)
+            guard mutation.entityType == .assistantResult else {
+                throw LocalSQLiteStoreError.invalidAssistantDecisionMutation
+            }
+            try enqueue(mutation)
+        }
+    }
+
+    public func replaceAssistantResults(_ results: [StoredAssistantResult]) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try connection.exec("DELETE FROM local_assistant_results")
+            try insertAssistantResults(results)
+            try connection.exec("COMMIT")
+        } catch {
+            try? connection.exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    public func loadTranslationCheckpoints() throws -> [StoredTranslationCheckpoint] {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        return try connection.query(
+            "SELECT * FROM local_translation_checkpoints ORDER BY chapter_id, language"
+        ).map { row in
+            StoredTranslationCheckpoint(
+                chapterID: ChapterID(rawValue: try row.required("chapter_id")),
+                language: try row.required("language"),
+                mode: try row.required("mode"),
+                completedSegmentCount: row.int("completed_segment_count"),
+                totalSegmentCount: row.int("total_segment_count"),
+                status: try row.required("status"),
+                updatedAt: row.date("updated_at")
+            )
+        }
+    }
+
+    public func saveTranslationCheckpoint(_ checkpoint: StoredTranslationCheckpoint) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try connection.run(
+            """
+            INSERT INTO local_translation_checkpoints(
+              chapter_id, language, mode, completed_segment_count, total_segment_count, status, updated_at
+            ) VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(chapter_id, language) DO UPDATE SET
+              mode=excluded.mode, completed_segment_count=excluded.completed_segment_count,
+              total_segment_count=excluded.total_segment_count, status=excluded.status,
+              updated_at=excluded.updated_at
+            """
+        ) { [connection] statement in
+            connection.bind(statement, 1, checkpoint.chapterID.rawValue)
+            connection.bind(statement, 2, checkpoint.language)
+            connection.bind(statement, 3, checkpoint.mode)
+            connection.bind(statement, 4, checkpoint.completedSegmentCount)
+            connection.bind(statement, 5, checkpoint.totalSegmentCount)
+            connection.bind(statement, 6, checkpoint.status)
+            connection.bindDate(statement, 7, checkpoint.updatedAt)
+        }
+    }
+
+    public func deleteTranslationCheckpoint(chapterID: ChapterID, language: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try connection.run(
+            "DELETE FROM local_translation_checkpoints WHERE chapter_id = ? AND language = ?"
+        ) { [connection] statement in
+            connection.bind(statement, 1, chapterID.rawValue)
+            connection.bind(statement, 2, language)
+        }
+    }
+
     public func loadStudyActivityDays() throws -> [String] {
         lock.lock()
         defer { lock.unlock() }
-        let rows = try connection.query(
-            "SELECT payload_json FROM entity_versions WHERE entity_type = ? AND entity_id = ? LIMIT 1",
-            bind: { stmt in
-                self.connection.bind(stmt, 1, OutboxEntityType.studyActivity.rawValue)
-                self.connection.bind(stmt, 2, "local")
-            }
-        )
-        guard let json = rows.first?["payload_json"],
-              let activity = try? LocalJSON.decode(LegacyActivityJSON.self, from: json)
-        else { return [] }
-        return activity.days
+        try applySchemaUnlocked()
+        return try connection.query("SELECT day FROM local_study_activity ORDER BY day").compactMap { $0["day"] }
     }
 
-    public func loadMigratedSettings() throws -> StoredSettings? {
+    public func saveStudyActivityDays(_ days: [String]) throws {
         lock.lock()
         defer { lock.unlock() }
-        let rows = try connection.query(
-            "SELECT payload_json FROM entity_versions WHERE entity_type = ? AND entity_id = ? LIMIT 1",
-            bind: { stmt in
-                self.connection.bind(stmt, 1, OutboxEntityType.settings.rawValue)
-                self.connection.bind(stmt, 2, "local")
+        try applySchemaUnlocked()
+        let ownsTransaction = syncPageTransactionDepth == 0
+        if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
+        do {
+            try connection.exec("DELETE FROM local_study_activity")
+            for day in Set(days) {
+                try connection.run("INSERT INTO local_study_activity(day, created_at) VALUES (?,?)") { [connection] statement in
+                    connection.bind(statement, 1, day)
+                    connection.bindDate(statement, 2, Date())
+                }
             }
-        )
-        guard let json = rows.first?["payload_json"] else { return nil }
-        return try LocalJSON.decode(StoredSettings.self, from: json)
+            if ownsTransaction { try connection.exec("COMMIT") }
+        } catch {
+            if ownsTransaction { try? connection.exec("ROLLBACK") }
+            throw error
+        }
     }
 
     private func applySchemaUnlocked() throws {
         guard !schemaIsReady else { return }
-        for sql in LocalSchemaV4.createStatements {
+        for sql in LocalSchemaVNext.createStatements {
             try connection.exec(sql)
         }
-        try connection.exec("PRAGMA user_version = \(LocalSchemaV4.version)")
+        try connection.exec("PRAGMA user_version = \(LocalSchemaVNext.version)")
         schemaIsReady = true
         schemaApplicationCount += 1
     }
 
-    private func loadReceiptUnlocked() throws -> LocalMigrationReceipt? {
-        let rows = try connection.query(
-            "SELECT * FROM local_migration_receipts WHERE schema_version = ? LIMIT 1",
-            bind: { stmt in self.connection.bind(stmt, 1, LocalSchemaV2.version) }
-        )
-        guard let row = rows.first else { return nil }
-        return LocalMigrationReceipt(
-            schemaVersion: row.int("schema_version"),
-            completedAt: row.date("completed_at"),
-            bookCount: row.int("book_count"),
-            assetCount: row.int("asset_count"),
-            chapterCount: row.int("chapter_count"),
-            transcriptRevisionCount: row.int("transcript_revision_count"),
-            vocabularyCount: row.int("vocabulary_count"),
-            knownLemmaCount: row.int("known_lemma_count"),
-            reviewCardCount: row.int("review_card_count"),
-            reviewEventCount: row.int("review_event_count"),
-            assistantResultCount: row.int("assistant_result_count")
-        )
-    }
-
-    private func clearMigratedDataUnlocked() throws {
-        for table in LocalSchemaV2.dataTablesInDeleteOrder {
-            try SQLiteConnection.validateIdentifier(table)
-            try connection.exec("DELETE FROM \(table)")
-        }
-    }
-
-    private func insertPayload(_ payload: LegacyImportPayload) throws {
-        try insertBooks(payload.books)
-        try interruptIfNeeded("local_books")
-        try insertAssets(payload.assets)
-        try interruptIfNeeded("local_assets")
-        try insertChapters(payload.chapters)
-        try interruptIfNeeded("local_chapters")
-        try insertTranscripts(payload.transcripts)
-        try interruptIfNeeded("local_transcript_revisions")
-        try insertVocabulary(payload.vocabulary)
-        try interruptIfNeeded("local_vocabulary_occurrences")
-        try insertKnownLemmas(payload.knownLemmas)
-        try interruptIfNeeded("local_known_lemmas")
-        try insertReviewCards(payload.reviewCards)
-        try interruptIfNeeded("local_review_cards")
-        try insertReviewEvents(payload.reviewEvents)
-        try interruptIfNeeded("local_review_events")
-        try insertAssistantResults(payload.assistantResults)
-        try interruptIfNeeded("local_assistant_results")
-        try insertSyncState(payload)
-        try interruptIfNeeded("sync_state")
-        try insertEntityVersions(payload)
-        try interruptIfNeeded("entity_versions")
-    }
-
-    #if DEBUG
-    private func interruptIfNeeded(_ table: String) throws {
-        if interruptAfterTable == table {
-            throw LocalMigrationError.interrupted(table: table)
-        }
-    }
-    #else
-    private func interruptIfNeeded(_: String) throws {}
-    #endif
-
-    private func insertBooks(_ books: [BookDraft]) throws {
+    private func insertTranscriptSegments(
+        _ segments: [StoredTranscriptSegment],
+        chapterID: ChapterID,
+        revisionID: String
+    ) throws {
         let sql = """
-            INSERT INTO local_books(id, title, author, source, created_at, updated_at, server_version)
-            VALUES (?,?,?,?,?,?,0)
+            INSERT INTO local_transcript_segments(
+              revision_id, chapter_id, sequence, segment_id, start_time, end_time,
+              spoken_text, words_json, ebook_text, sentence_hash, alignment_score,
+              individual_ebook_match_trusted, document_ebook_use_allowed
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """
-        for book in books {
-            try connection.run(sql) { stmt in
-                connection.bind(stmt, 1, book.id)
-                connection.bind(stmt, 2, book.title)
-                connection.bind(stmt, 3, book.author)
-                connection.bind(stmt, 4, book.source)
-                connection.bindDate(stmt, 5, book.createdAt)
-                connection.bindDate(stmt, 6, book.createdAt)
+        for (sequence, segment) in segments.enumerated() {
+            try connection.run(sql) { statement in
+                connection.bind(statement, 1, revisionID)
+                connection.bind(statement, 2, chapterID.rawValue)
+                connection.bind(statement, 3, sequence)
+                connection.bind(statement, 4, segment.id)
+                connection.bind(statement, 5, segment.start)
+                connection.bind(statement, 6, segment.end)
+                connection.bind(statement, 7, Self.spokenText(for: segment))
+                connection.bind(statement, 8, try LocalJSON.encode(segment.words))
+                connection.bind(statement, 9, segment.ebookText)
+                connection.bind(statement, 10, Self.sentenceHash(for: segment))
+                connection.bind(statement, 11, segment.alignmentScore)
+                connection.bind(statement, 12, segment.individualEbookMatchTrusted ?? false)
+                connection.bind(statement, 13, segment.documentEbookUseAllowed ?? false)
             }
         }
     }
 
-    private func insertAssets(_ assets: [AssetDraft]) throws {
-        let sql = """
-            INSERT INTO local_assets(id, book_id, kind, local_media_key, created_at, updated_at, server_version)
-            VALUES (?,?,?,?,?,?,0)
+    private func updateTranscriptSegment(
+        _ segment: StoredTranscriptSegment,
+        chapterID: ChapterID,
+        revisionID: String
+    ) throws {
+        try connection.run(
             """
-        for asset in assets {
-            try connection.run(sql) { stmt in
-                connection.bind(stmt, 1, asset.id)
-                connection.bind(stmt, 2, asset.bookID)
-                connection.bind(stmt, 3, asset.kind)
-                connection.bind(stmt, 4, asset.localMediaKey)
-                connection.bindDate(stmt, 5, asset.createdAt)
-                connection.bindDate(stmt, 6, asset.createdAt)
-            }
+            UPDATE local_transcript_segments SET
+              start_time=?, end_time=?, spoken_text=?, words_json=?, ebook_text=?,
+              sentence_hash=?, alignment_score=?, individual_ebook_match_trusted=?,
+              document_ebook_use_allowed=?
+            WHERE revision_id=? AND chapter_id=? AND segment_id=?
+            """
+        ) { [connection] statement in
+            connection.bind(statement, 1, segment.start)
+            connection.bind(statement, 2, segment.end)
+            connection.bind(statement, 3, Self.spokenText(for: segment))
+            connection.bind(statement, 4, try LocalJSON.encode(segment.words))
+            connection.bind(statement, 5, segment.ebookText)
+            connection.bind(statement, 6, Self.sentenceHash(for: segment))
+            connection.bind(statement, 7, segment.alignmentScore)
+            connection.bind(statement, 8, segment.individualEbookMatchTrusted ?? false)
+            connection.bind(statement, 9, segment.documentEbookUseAllowed ?? false)
+            connection.bind(statement, 10, revisionID)
+            connection.bind(statement, 11, chapterID.rawValue)
+            connection.bind(statement, 12, segment.id)
         }
     }
 
-    private func insertChapters(_ chapters: [ChapterDraft]) throws {
-        let sql = """
-            INSERT INTO local_chapters(
-              id, book_id, asset_id, position, title, duration, start_time,
-              created_at, updated_at, server_version
-            ) VALUES (?,?,?,?,?,?,?,?,?,0)
-            """
-        for chapter in chapters {
-            try connection.run(sql) { stmt in
-                connection.bind(stmt, 1, chapter.id)
-                connection.bind(stmt, 2, chapter.bookID)
-                connection.bind(stmt, 3, chapter.assetID)
-                connection.bind(stmt, 4, chapter.position)
-                connection.bind(stmt, 5, chapter.title)
-                connection.bind(stmt, 6, chapter.duration)
-                connection.bind(stmt, 7, chapter.startTime)
-                connection.bindDate(stmt, 8, chapter.createdAt)
-                connection.bindDate(stmt, 9, chapter.createdAt)
-            }
-        }
+    private func activeRevisionID(chapterID: ChapterID) throws -> String? {
+        try connection.query(
+            "SELECT id FROM local_transcript_revisions WHERE chapter_id=? AND is_active=1 ORDER BY created_at DESC, id LIMIT 1",
+            bind: { [connection] statement in connection.bind(statement, 1, chapterID.rawValue) }
+        ).first?["id"]
     }
 
-    private func insertTranscripts(_ transcripts: [StoredTranscript]) throws {
-        let sql = """
-            INSERT INTO local_transcript_revisions(
-              id, chapter_id, local_media_key, chapter_start, created_at, locale, source,
-              ebook_aligned, ebook_alignment_json, ebook_use_override, segments_json,
-              is_active, server_version
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,1,0)
-            """
-        for transcript in transcripts {
-            try connection.run(sql) { stmt in
-                connection.bind(stmt, 1, "revision:\(transcript.chapterID.rawValue)")
-                connection.bind(stmt, 2, transcript.chapterID.rawValue)
-                connection.bind(stmt, 3, transcript.localMediaKey)
-                connection.bind(stmt, 4, transcript.chapterStart)
-                connection.bindDate(stmt, 5, transcript.createdAt)
-                connection.bind(stmt, 6, transcript.locale)
-                connection.bind(stmt, 7, transcript.source)
-                connection.bind(stmt, 8, transcript.ebookAligned ? 1 : 0)
-                connection.bind(stmt, 9, try transcript.ebookAlignment.map(LocalJSON.encode))
-                connection.bind(stmt, 10, transcript.ebookUseOverride)
-                connection.bind(stmt, 11, try LocalJSON.encode(transcript.segments))
-            }
-        }
+    private func ensureTranscriptParent(for transcript: StoredTranscript) throws {
+        let hasChapter = try !connection.query(
+            "SELECT id FROM local_chapters WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+            bind: { [connection] statement in connection.bind(statement, 1, transcript.chapterID.rawValue) }
+        ).isEmpty
+        guard hasChapter else { throw LocalSQLiteStoreError.missingTranscriptCatalogParent }
+    }
+
+    private static func revisionID(for chapterID: ChapterID) -> String {
+        "revision:\(chapterID.rawValue)"
+    }
+
+    private static func spokenText(for segment: StoredTranscriptSegment) -> String {
+        segment.words.map(\.text).joined(separator: " ")
+    }
+
+    private static func sentenceHash(for segment: StoredTranscriptSegment) -> String {
+        String(spokenText(for: segment).utf8.reduce(UInt64(14_695_981_039_346_656_037)) {
+            ($0 ^ UInt64($1)) &* 1_099_511_628_211
+        }, radix: 16)
+    }
+
+    private static func bindAlignment(
+        _ alignment: StoredEPUBAlignment?,
+        to statement: OpaquePointer,
+        startingAt start: Int32,
+        connection: SQLiteConnection
+    ) {
+        connection.bind(statement, start, alignment?.status)
+        connection.bind(statement, start + 1, alignment?.reason)
+        connection.bind(statement, start + 2, alignment?.metrics.extractedWordCount)
+        connection.bind(statement, start + 3, alignment?.metrics.extractedSentenceCount)
+        connection.bind(statement, start + 4, alignment?.metrics.sampledAnchorCount)
+        connection.bind(statement, start + 5, alignment?.metrics.matchedAnchorCount)
+        connection.bind(statement, start + 6, alignment?.metrics.matchedCoverage)
+        connection.bind(statement, start + 7, alignment?.metrics.medianScore)
+        connection.bind(statement, start + 8, alignment?.metrics.lowerPercentileScore)
+        connection.bind(statement, start + 9, alignment?.metrics.backwardJumps)
+        connection.bind(statement, start + 10, alignment?.metrics.longestUnmatchedPassage)
+        connection.bind(statement, start + 11, alignment?.metrics.titleSimilarity)
+        connection.bind(statement, start + 12, alignment?.metrics.authorSimilarity)
+        connection.bind(statement, start + 13, alignment?.metrics.candidateComparisons)
+        connection.bind(statement, start + 14, alignment?.metrics.detailedAlignmentPerformed)
     }
 
     private func insertVocabulary(_ entries: [StoredVocabularyOccurrence]) throws {
         let sql = """
             INSERT INTO local_vocabulary_occurrences(
-              id, surface, category, definition, dictionary_name, dictionary_html,
+              id, surface, canonical_form, part_of_speech, sense_id,
+              canonicalization_source, canonicalization_confidence, canonicalization_status, canonicalization_trace_id,
+              capture_source, review_eligible, category, definition, dictionary_name, dictionary_html,
               translation, translation_language, translation_model, source_language,
               context, spoken_text, ebook_text, book_id, book_title, chapter_id, chapter_title,
               segment_id, word_id, timestamp, added_at, review_count, next_review,
               last_reviewed_at, last_review_quality, review_interval_days, review_ease_factor,
               is_in_learn_list, created_at, updated_at, server_version
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
             ON CONFLICT(id) DO UPDATE SET
               surface=excluded.surface,
+              canonical_form=excluded.canonical_form,
+              part_of_speech=excluded.part_of_speech,
+              sense_id=excluded.sense_id,
+              canonicalization_source=excluded.canonicalization_source,
+              canonicalization_confidence=excluded.canonicalization_confidence,
+              canonicalization_status=excluded.canonicalization_status,
+              canonicalization_trace_id=excluded.canonicalization_trace_id,
+              capture_source=excluded.capture_source,
+              review_eligible=excluded.review_eligible,
               category=excluded.category,
               definition=excluded.definition,
               dictionary_name=excluded.dictionary_name,
@@ -1217,34 +1990,104 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
             try connection.run(sql) { stmt in
                 connection.bind(stmt, 1, entry.id.rawValue)
                 connection.bind(stmt, 2, entry.surface)
-                connection.bind(stmt, 3, entry.category)
-                connection.bind(stmt, 4, entry.definition)
-                connection.bind(stmt, 5, entry.dictionaryName)
-                connection.bind(stmt, 6, entry.dictionaryHTML)
-                connection.bind(stmt, 7, entry.translation)
-                connection.bind(stmt, 8, entry.translationLanguage)
-                connection.bind(stmt, 9, entry.translationModel)
-                connection.bind(stmt, 10, entry.sourceLanguage)
-                connection.bind(stmt, 11, entry.context)
-                connection.bind(stmt, 12, entry.spokenText)
-                connection.bind(stmt, 13, entry.ebookText)
-                connection.bind(stmt, 14, entry.bookID.rawValue)
-                connection.bind(stmt, 15, entry.bookTitle)
-                connection.bind(stmt, 16, entry.chapterID.rawValue)
-                connection.bind(stmt, 17, entry.chapterTitle)
-                connection.bind(stmt, 18, entry.segmentID)
-                connection.bind(stmt, 19, entry.wordID)
-                connection.bind(stmt, 20, entry.timestamp)
-                connection.bindDate(stmt, 21, entry.addedAt)
-                connection.bind(stmt, 22, entry.reviewCount)
-                connection.bindDate(stmt, 23, entry.nextReview)
-                connection.bindDate(stmt, 24, entry.lastReviewedAt)
-                connection.bind(stmt, 25, entry.lastReviewQuality)
-                connection.bind(stmt, 26, entry.reviewIntervalDays)
-                connection.bind(stmt, 27, entry.reviewEaseFactor)
-                connection.bind(stmt, 28, entry.isInLearnList ? 1 : 0)
-                connection.bindDate(stmt, 29, entry.addedAt)
+                connection.bind(stmt, 3, entry.canonicalForm)
+                connection.bind(stmt, 4, entry.partOfSpeech)
+                connection.bind(stmt, 5, entry.senseID)
+                connection.bind(stmt, 6, entry.canonicalizationSource)
+                connection.bind(stmt, 7, entry.canonicalizationConfidence)
+                connection.bind(stmt, 8, entry.canonicalizationStatus)
+                connection.bind(stmt, 9, entry.canonicalizationTraceID)
+                connection.bind(stmt, 10, entry.captureSource)
+                connection.bind(stmt, 11, entry.reviewEligible ? 1 : 0)
+                connection.bind(stmt, 12, entry.category)
+                connection.bind(stmt, 13, entry.definition)
+                connection.bind(stmt, 14, entry.dictionaryName)
+                connection.bind(stmt, 15, entry.dictionaryHTML)
+                connection.bind(stmt, 16, entry.translation)
+                connection.bind(stmt, 17, entry.translationLanguage)
+                connection.bind(stmt, 18, entry.translationModel)
+                connection.bind(stmt, 19, entry.sourceLanguage)
+                connection.bind(stmt, 20, entry.context)
+                connection.bind(stmt, 21, entry.spokenText)
+                connection.bind(stmt, 22, entry.ebookText)
+                connection.bind(stmt, 23, entry.bookID.rawValue)
+                connection.bind(stmt, 24, entry.bookTitle)
+                connection.bind(stmt, 25, entry.chapterID.rawValue)
+                connection.bind(stmt, 26, entry.chapterTitle)
+                connection.bind(stmt, 27, entry.segmentID)
+                connection.bind(stmt, 28, entry.wordID)
+                connection.bind(stmt, 29, entry.timestamp)
                 connection.bindDate(stmt, 30, entry.addedAt)
+                connection.bind(stmt, 31, entry.reviewCount)
+                connection.bindDate(stmt, 32, entry.nextReview)
+                connection.bindDate(stmt, 33, entry.lastReviewedAt)
+                connection.bind(stmt, 34, entry.lastReviewQuality)
+                connection.bind(stmt, 35, entry.reviewIntervalDays)
+                connection.bind(stmt, 36, entry.reviewEaseFactor)
+                connection.bind(stmt, 37, entry.isInLearnList ? 1 : 0)
+                connection.bindDate(stmt, 38, entry.addedAt)
+                connection.bindDate(stmt, 39, entry.addedAt)
+            }
+        }
+    }
+
+    private func vocabularyPreservingNewerReviewState(
+        _ incoming: [StoredVocabularyOccurrence]
+    ) throws -> [StoredVocabularyOccurrence] {
+        let existing = Dictionary(uniqueKeysWithValues: try loadVocabulary().map { ($0.id, $0) })
+        let cards = Dictionary(uniqueKeysWithValues: try loadReviewCards().map { ($0.vocabularyID, $0) })
+        return incoming.map { entry in
+            guard let local = existing[entry.id] else { return entry }
+            var strongest = local
+            if let card = cards[entry.id],
+               card.reviewCount > strongest.reviewCount
+                || (card.reviewCount == strongest.reviewCount
+                    && (card.lastReviewedAt ?? .distantPast) > (strongest.lastReviewedAt ?? .distantPast)) {
+                strongest.reviewCount = card.reviewCount
+                strongest.nextReview = card.nextReview
+                strongest.lastReviewedAt = card.lastReviewedAt
+                strongest.lastReviewQuality = card.lastReviewQuality
+                strongest.reviewIntervalDays = card.reviewIntervalDays
+                strongest.reviewEaseFactor = card.reviewEaseFactor
+            }
+            let localIsNewer = strongest.reviewCount > entry.reviewCount
+                || (strongest.reviewCount == entry.reviewCount
+                    && (strongest.lastReviewedAt ?? .distantPast) > (entry.lastReviewedAt ?? .distantPast))
+            var merged = localIsNewer
+                ? StoredVocabularyReviewSchedule(strongest).merging(into: entry)
+                : entry
+            merged.isInLearnList = entry.isInLearnList || local.isInLearnList
+            if merged.reviewCount > 0 { merged.reviewEligible = true }
+            return merged
+        }
+    }
+
+    private func deleteUnreviewedDerivedVocabulary(ids: [VocabularyOccurrenceID]) throws {
+        for id in ids {
+            let deletable = try !connection.query(
+                """
+                SELECT 1 FROM local_vocabulary_occurrences AS vocabulary
+                WHERE vocabulary.id = ?
+                  AND vocabulary.capture_source IN (?, ?)
+                  AND vocabulary.review_count = 0
+                  AND NOT EXISTS (
+                    SELECT 1 FROM local_review_events AS event
+                    WHERE event.vocabulary_id = vocabulary.id
+                  )
+                LIMIT 1
+                """,
+                bind: { [connection] statement in
+                    connection.bind(statement, 1, id.rawValue)
+                    connection.bind(statement, 2, VocabularyCaptureSource.acceptedSentenceTranslation.rawValue)
+                    connection.bind(statement, 3, VocabularyCaptureSource.automaticPhraseSuggestion.rawValue)
+                }
+            ).isEmpty
+            guard deletable else { continue }
+            try connection.run("DELETE FROM local_review_cards WHERE vocabulary_id = ?") { [connection] statement in
+                connection.bind(statement, 1, id.rawValue)
+            }
+            try connection.run("DELETE FROM local_vocabulary_occurrences WHERE id = ?") { [connection] statement in
+                connection.bind(statement, 1, id.rawValue)
             }
         }
     }
@@ -1282,10 +2125,33 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         }
     }
 
+    private func updateVocabularyReviewScheduleUnlocked(_ schedule: StoredVocabularyReviewSchedule) throws {
+        try connection.run(
+            """
+            UPDATE local_vocabulary_occurrences SET
+              review_count=?, next_review=?, last_reviewed_at=?, last_review_quality=?,
+              review_interval_days=?, review_ease_factor=?, updated_at=?
+            WHERE id=?
+            """
+        ) { [connection] statement in
+            connection.bind(statement, 1, schedule.reviewCount)
+            connection.bindDate(statement, 2, schedule.nextReview)
+            connection.bindDate(statement, 3, schedule.lastReviewedAt)
+            connection.bind(statement, 4, schedule.lastReviewQuality)
+            connection.bind(statement, 5, schedule.reviewIntervalDays)
+            connection.bind(statement, 6, schedule.reviewEaseFactor)
+            connection.bindDate(statement, 7, schedule.lastReviewedAt ?? Date())
+            connection.bind(statement, 8, schedule.vocabularyID.rawValue)
+        }
+    }
+
     private func insertKnownLemmas(_ lemmas: [StoredKnownLemma]) throws {
         let sql = """
             INSERT INTO local_known_lemmas(language, form, updated_at, created_at, server_version)
             VALUES (?,?,?,?,0)
+            ON CONFLICT(language, form) DO UPDATE SET
+              updated_at = MAX(local_known_lemmas.updated_at, excluded.updated_at),
+              deleted_at = NULL
             """
         for lemma in lemmas {
             try connection.run(sql) { stmt in
@@ -1331,6 +2197,20 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         }
     }
 
+    private static func reviewCard(for vocabulary: StoredVocabularyOccurrence) -> StoredLocalReviewCard {
+        StoredLocalReviewCard(
+            id: "card:\(vocabulary.id.rawValue):recognition",
+            vocabularyID: vocabulary.id,
+            face: "recognition",
+            reviewCount: vocabulary.reviewCount,
+            nextReview: vocabulary.nextReview,
+            lastReviewedAt: vocabulary.lastReviewedAt,
+            lastReviewQuality: vocabulary.lastReviewQuality,
+            reviewIntervalDays: vocabulary.reviewIntervalDays,
+            reviewEaseFactor: vocabulary.reviewEaseFactor
+        )
+    }
+
     private func insertReviewEvents(
         _ events: [StoredReviewEvent],
         includeCard: Bool = true
@@ -1344,7 +2224,11 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
             try connection.run(sql) { stmt in
                 connection.bind(stmt, 1, event.id.rawValue)
                 connection.bind(stmt, 2, event.vocabularyID.rawValue)
-                connection.bind(stmt, 3, includeCard ? "card:\(event.vocabularyID.rawValue):\(event.face)" : nil)
+                connection.bind(
+                    stmt,
+                    3,
+                    includeCard ? event.cardID : nil
+                )
                 connection.bind(stmt, 4, event.face)
                 connection.bind(stmt, 5, event.rating)
                 connection.bindDate(stmt, 6, event.reviewedAt)
@@ -1401,148 +2285,143 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
     private func insertAssistantResults(_ results: [StoredAssistantResult]) throws {
         let sql = """
             INSERT INTO local_assistant_results(
-              id, kind, status, language, model, book_id, book_title, chapter_id, chapter_title,
+              id, kind, status, language, model, prompt_version, model_policy_hash,
+              book_id, book_title, chapter_id, chapter_title,
               source, text, context, timestamp, created_at, decided_at, replaced_text,
-              replaced_model, updated_at, server_version
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+              replaced_model, shared_cache_entry_id, updated_at, server_version
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+            ON CONFLICT(id) DO UPDATE SET
+              kind=excluded.kind, status=excluded.status, language=excluded.language,
+              model=excluded.model, prompt_version=excluded.prompt_version,
+              model_policy_hash=excluded.model_policy_hash,
+              book_id=excluded.book_id, book_title=excluded.book_title,
+              chapter_id=excluded.chapter_id, chapter_title=excluded.chapter_title,
+              source=excluded.source, text=excluded.text, context=excluded.context,
+              timestamp=excluded.timestamp, decided_at=excluded.decided_at,
+              replaced_text=excluded.replaced_text, replaced_model=excluded.replaced_model,
+              shared_cache_entry_id=excluded.shared_cache_entry_id,
+              updated_at=excluded.updated_at, deleted_at=NULL
             """
         for result in results {
+            try insertAssistantResultHistory(result)
             try connection.run(sql) { stmt in
                 connection.bind(stmt, 1, result.id)
                 connection.bind(stmt, 2, result.kind.rawValue)
                 connection.bind(stmt, 3, result.status.rawValue)
                 connection.bind(stmt, 4, result.language)
                 connection.bind(stmt, 5, result.model)
-                connection.bind(stmt, 6, result.bookID?.rawValue)
-                connection.bind(stmt, 7, result.bookTitle)
-                connection.bind(stmt, 8, result.chapterID?.rawValue)
-                connection.bind(stmt, 9, result.chapterTitle)
-                connection.bind(stmt, 10, result.source)
-                connection.bind(stmt, 11, result.text)
-                connection.bind(stmt, 12, result.context)
-                connection.bind(stmt, 13, result.timestamp)
-                connection.bindDate(stmt, 14, result.createdAt)
-                connection.bindDate(stmt, 15, result.decidedAt)
-                connection.bind(stmt, 16, result.replacedText)
-                connection.bind(stmt, 17, result.replacedModel)
-                connection.bindDate(stmt, 18, result.decidedAt ?? result.createdAt)
+                connection.bind(stmt, 6, result.promptVersion)
+                connection.bind(stmt, 7, result.modelPolicyHash)
+                connection.bind(stmt, 8, result.bookID?.rawValue)
+                connection.bind(stmt, 9, result.bookTitle)
+                connection.bind(stmt, 10, result.chapterID?.rawValue)
+                connection.bind(stmt, 11, result.chapterTitle)
+                connection.bind(stmt, 12, result.source)
+                connection.bind(stmt, 13, result.text)
+                connection.bind(stmt, 14, result.context)
+                connection.bind(stmt, 15, result.timestamp)
+                connection.bindDate(stmt, 16, result.createdAt)
+                connection.bindDate(stmt, 17, result.decidedAt)
+                connection.bind(stmt, 18, result.replacedText)
+                connection.bind(stmt, 19, result.replacedModel)
+                connection.bind(stmt, 20, result.sharedCacheEntryID)
+                connection.bindDate(stmt, 21, result.decidedAt ?? result.createdAt)
             }
         }
     }
 
-    private func insertSyncState(_ payload: LegacyImportPayload) throws {
-        let body: [String: [String]] = ["studyActivityDays": payload.studyActivityDays]
-        try connection.run(
-            "INSERT INTO sync_state(id, cursor, last_pull_at, last_push_at, payload_json) VALUES ('local', NULL, NULL, NULL, ?)"
-        ) { stmt in
-            connection.bind(stmt, 1, try LocalJSON.encode(body))
+    /// Append-only snapshots preserve user decisions even when the current result row is replaced.
+    private func insertAssistantResultHistory(_ result: StoredAssistantResult) throws {
+        let latest = try connection.query(
+            "SELECT * FROM local_assistant_result_history WHERE result_id = ? ORDER BY sequence DESC LIMIT 1",
+            bind: { statement in self.connection.bind(statement, 1, result.id) }
+        ).first
+        if let latest,
+           latest.string("status") == result.status.rawValue,
+           latest.string("text") == result.text,
+           latest.string("model") == result.model,
+           latest.string("prompt_version") == result.promptVersion,
+           latest.string("model_policy_hash") == result.modelPolicyHash,
+           latest.string("shared_cache_entry_id") == result.sharedCacheEntryID {
+            return
         }
-    }
-
-    private func insertEntityVersions(_ payload: LegacyImportPayload) throws {
-        let now = Date()
-        try upsertEntityVersion(
-            OutboxEntityType.settings.rawValue,
-            "local",
-            at: now,
-            json: try LocalJSON.encode(payload.settings ?? StoredSettings.default)
-        )
-        try upsertEntityVersion(
-            OutboxEntityType.studyActivity.rawValue,
-            "local",
-            at: now,
-            json: try LocalJSON.encode(LegacyActivityJSON(days: payload.studyActivityDays))
-        )
-        for book in payload.books {
-            try upsertEntityVersion(OutboxEntityType.book.rawValue, book.id, at: book.createdAt, json: nil)
-        }
-        for chapter in payload.chapters {
-            try upsertEntityVersion(OutboxEntityType.chapter.rawValue, chapter.id, at: chapter.createdAt, json: nil)
-        }
-        for transcript in payload.transcripts {
-            try upsertEntityVersion(
-                OutboxEntityType.transcript.rawValue,
-                transcript.chapterID.rawValue,
-                at: transcript.createdAt,
-                json: nil
-            )
-        }
-        for entry in payload.vocabulary {
-            try upsertEntityVersion(
-                OutboxEntityType.vocabulary.rawValue,
-                entry.id.rawValue,
-                at: entry.addedAt,
-                json: nil
-            )
-        }
-        for lemma in payload.knownLemmas {
-            try upsertEntityVersion(
-                OutboxEntityType.lexemeState.rawValue,
-                "\(lemma.language):\(lemma.form)",
-                at: lemma.updatedAt,
-                json: nil
-            )
-        }
-        for event in payload.reviewEvents {
-            try upsertEntityVersion(
-                OutboxEntityType.reviewEvent.rawValue,
-                event.id.rawValue,
-                at: event.reviewedAt,
-                json: nil
-            )
-        }
-        for result in payload.assistantResults {
-            let type: OutboxEntityType
-            switch result.kind {
-            case .chapterSummary: type = .summaryDecision
-            case .chapterTranslation: type = .translationDecision
-            case .sentenceGloss, .wordGloss: type = .translationDecision
-            }
-            try upsertEntityVersion(type.rawValue, result.id, at: result.createdAt, json: nil)
-        }
-    }
-
-    private func upsertEntityVersion(_ type: String, _ id: String, at date: Date, json: String?) throws {
+        let sequence = Int64(latest?.int("sequence") ?? 0) + 1
         try connection.run(
             """
-            INSERT INTO entity_versions(entity_type, entity_id, server_version, updated_at, last_mutation_id, payload_json)
-            VALUES (?,?,0,?,NULL,?)
+            INSERT INTO local_assistant_result_history(
+              result_id, sequence, status, text, model, prompt_version, model_policy_hash,
+              recorded_at, shared_cache_entry_id
+            ) VALUES (?,?,?,?,?,?,?,?,?)
             """
-        ) { stmt in
-            connection.bind(stmt, 1, type)
-            connection.bind(stmt, 2, id)
-            connection.bindDate(stmt, 3, date)
-            connection.bind(stmt, 4, json)
+        ) { statement in
+            connection.bind(statement, 1, result.id)
+            connection.bind(statement, 2, Int(sequence))
+            connection.bind(statement, 3, result.status.rawValue)
+            connection.bind(statement, 4, result.text)
+            connection.bind(statement, 5, result.model)
+            connection.bind(statement, 6, result.promptVersion)
+            connection.bind(statement, 7, result.modelPolicyHash)
+            connection.bindDate(statement, 8, result.decidedAt ?? result.createdAt)
+            connection.bind(statement, 9, result.sharedCacheEntryID)
         }
     }
 
-    private func insertReceipt(_ receipt: LocalMigrationReceipt) throws {
-        try connection.run(
-            """
-            INSERT INTO local_migration_receipts(
-              schema_version, completed_at, book_count, asset_count, chapter_count,
-              transcript_revision_count, vocabulary_count, known_lemma_count,
-              review_card_count, review_event_count, assistant_result_count
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-            """
-        ) { stmt in
-            connection.bind(stmt, 1, receipt.schemaVersion)
-            connection.bindDate(stmt, 2, receipt.completedAt)
-            connection.bind(stmt, 3, receipt.bookCount)
-            connection.bind(stmt, 4, receipt.assetCount)
-            connection.bind(stmt, 5, receipt.chapterCount)
-            connection.bind(stmt, 6, receipt.transcriptRevisionCount)
-            connection.bind(stmt, 7, receipt.vocabularyCount)
-            connection.bind(stmt, 8, receipt.knownLemmaCount)
-            connection.bind(stmt, 9, receipt.reviewCardCount)
-            connection.bind(stmt, 10, receipt.reviewEventCount)
-            connection.bind(stmt, 11, receipt.assistantResultCount)
+    private func loadTranscriptUnlocked(
+        from row: [String: String],
+        range: Range<Int>? = nil
+    ) throws -> StoredTranscript {
+        let revisionID = try row.required("id")
+        let segmentRows: [[String: String]]
+        if let range {
+            guard !range.isEmpty else { segmentRows = []; lastTranscriptSegmentQueryCount = 0; return try transcript(from: row, segmentRows: segmentRows) }
+            segmentRows = try connection.query(
+                "SELECT * FROM local_transcript_segments WHERE revision_id = ? AND sequence >= ? AND sequence < ? ORDER BY sequence",
+                bind: { [connection] statement in
+                    connection.bind(statement, 1, revisionID)
+                    connection.bind(statement, 2, range.lowerBound)
+                    connection.bind(statement, 3, range.upperBound)
+                }
+            )
+        } else {
+            segmentRows = try connection.query(
+                "SELECT * FROM local_transcript_segments WHERE revision_id = ? ORDER BY sequence",
+                bind: { [connection] statement in connection.bind(statement, 1, revisionID) }
+            )
         }
+        lastTranscriptSegmentQueryCount = segmentRows.count
+        maximumTranscriptSegmentQueryCount = max(maximumTranscriptSegmentQueryCount, segmentRows.count)
+        return try transcript(from: row, segmentRows: segmentRows)
     }
 
-    private static func transcript(from row: [String: String]) throws -> StoredTranscript {
-        let segmentsJSON = try row.required("segments_json")
-        let alignmentJSON = row.string("ebook_alignment_json")
+    private func transcript(
+        from row: [String: String],
+        segmentRows: [[String: String]]
+    ) throws -> StoredTranscript {
+        let alignment: StoredEPUBAlignment?
+        if let status = row.string("alignment_status"),
+           let reason = row.string("alignment_reason") {
+            alignment = StoredEPUBAlignment(
+                status: status,
+                reason: reason,
+                metrics: StoredEPUBAlignmentMetrics(
+                    extractedWordCount: row.int("alignment_extracted_word_count"),
+                    extractedSentenceCount: row.int("alignment_extracted_sentence_count"),
+                    sampledAnchorCount: row.int("alignment_sampled_anchor_count"),
+                    matchedAnchorCount: row.int("alignment_matched_anchor_count"),
+                    matchedCoverage: row.double("alignment_matched_coverage"),
+                    medianScore: row.double("alignment_median_score"),
+                    lowerPercentileScore: row.double("alignment_lower_percentile_score"),
+                    backwardJumps: row.int("alignment_backward_jumps"),
+                    longestUnmatchedPassage: row.int("alignment_longest_unmatched_passage"),
+                    titleSimilarity: row.optionalDouble("alignment_title_similarity"),
+                    authorSimilarity: row.optionalDouble("alignment_author_similarity"),
+                    candidateComparisons: row.int("alignment_candidate_comparisons"),
+                    detailedAlignmentPerformed: row.bool("alignment_detailed_performed")
+                )
+            )
+        } else {
+            alignment = nil
+        }
         return StoredTranscript(
             chapterID: ChapterID(rawValue: try row.required("chapter_id")),
             localMediaKey: try row.required("local_media_key"),
@@ -1551,9 +2430,25 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
             locale: try row.required("locale"),
             source: try row.required("source"),
             ebookAligned: row.bool("ebook_aligned"),
-            ebookAlignment: try alignmentJSON.map { try LocalJSON.decode(StoredEPUBAlignment.self, from: $0) },
+            ebookAlignment: alignment,
             ebookUseOverride: row.optionalBool("ebook_use_override"),
-            segments: try LocalJSON.decode([StoredTranscriptSegment].self, from: segmentsJSON)
+            segments: try segmentRows.map(Self.transcriptSegment(from:))
+        )
+    }
+
+    private static func transcriptSegment(from row: [String: String]) throws -> StoredTranscriptSegment {
+        StoredTranscriptSegment(
+            id: try row.required("segment_id"),
+            start: row.double("start_time"),
+            end: row.double("end_time"),
+            words: try LocalJSON.decode(
+                [StoredTranscriptWord].self,
+                from: try row.required("words_json")
+            ),
+            ebookText: row.string("ebook_text"),
+            alignmentScore: row.optionalDouble("alignment_score"),
+            individualEbookMatchTrusted: row.optionalBool("individual_ebook_match_trusted"),
+            documentEbookUseAllowed: row.optionalBool("document_ebook_use_allowed")
         )
     }
 
@@ -1687,6 +2582,15 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
         StoredVocabularyOccurrence(
             id: VocabularyOccurrenceID(rawValue: try row.required("id")),
             surface: try row.required("surface"),
+            canonicalForm: try row.required("canonical_form"),
+            partOfSpeech: try row.required("part_of_speech"),
+            senseID: row.string("sense_id"),
+            canonicalizationSource: try row.required("canonicalization_source"),
+            canonicalizationConfidence: row.double("canonicalization_confidence"),
+            canonicalizationStatus: try row.required("canonicalization_status"),
+            canonicalizationTraceID: row.string("canonicalization_trace_id"),
+            captureSource: try row.required("capture_source"),
+            reviewEligible: row.bool("review_eligible"),
             category: try row.required("category"),
             definition: row.string("definition"),
             dictionaryName: row.string("dictionary_name"),
@@ -1723,6 +2627,8 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
             status: AssistantResultStatus(rawValue: try row.required("status")) ?? .pending,
             language: try row.required("language"),
             model: try row.required("model"),
+            promptVersion: try row.required("prompt_version"),
+            modelPolicyHash: try row.required("model_policy_hash"),
             bookID: row.string("book_id").map(BookID.init(rawValue:)),
             bookTitle: row.string("book_title"),
             chapterID: row.string("chapter_id").map(ChapterID.init(rawValue:)),
@@ -1734,349 +2640,9 @@ public final class LocalSQLiteStore: SyncOutboxRepository, SyncCursorStoring, Sy
             createdAt: row.date("created_at"),
             decidedAt: row.optionalDate("decided_at"),
             replacedText: row.string("replaced_text"),
-            replacedModel: row.string("replaced_model")
+            replacedModel: row.string("replaced_model"),
+            sharedCacheEntryID: row.string("shared_cache_entry_id")
         )
     }
 
-}
-
-struct BookDraft {
-    var id: String
-    var title: String
-    var author: String?
-    var source: String
-    var createdAt: Date
-}
-
-struct AssetDraft {
-    var id: String
-    var bookID: String
-    var kind: String
-    var localMediaKey: String
-    var createdAt: Date
-}
-
-struct ChapterDraft {
-    var id: String
-    var bookID: String
-    var title: String
-    var duration: TimeInterval?
-    var startTime: TimeInterval?
-    var assetID: String?
-    var position: Int
-    var createdAt: Date
-}
-
-struct LegacyImportPayload {
-    var books: [BookDraft] = []
-    var assets: [AssetDraft] = []
-    var chapters: [ChapterDraft] = []
-    var transcripts: [StoredTranscript] = []
-    var vocabulary: [StoredVocabularyOccurrence] = []
-    var knownLemmas: [StoredKnownLemma] = []
-    var reviewCards: [StoredLocalReviewCard] = []
-    var reviewEvents: [StoredReviewEvent] = []
-    var assistantResults: [StoredAssistantResult] = []
-    var settings: StoredSettings?
-    var studyActivityDays: [String] = []
-}
-
-enum LegacyImportLoader {
-    static func load(
-        sources: LegacyLocalDataSources,
-        connection: SQLiteConnection,
-        storeURL: URL
-    ) throws -> LegacyImportPayload {
-        let sqliteConnection: SQLiteConnection
-        let closeExtra: Bool
-        if sources.sqliteURL.standardizedFileURL.path == storeURL.standardizedFileURL.path {
-            sqliteConnection = connection
-            closeExtra = false
-        } else {
-            sqliteConnection = SQLiteConnection(fileURL: sources.sqliteURL)
-            closeExtra = true
-        }
-        defer { _ = closeExtra }
-
-        let sqliteTranscripts = try decodeList(
-            LegacyTranscriptJSON.self,
-            fromSQLite: sqliteConnection,
-            table: "transcripts"
-        ).map { $0.stored() }
-        let sqliteVocab = try decodeList(
-            LegacyVocabJSON.self,
-            fromSQLite: sqliteConnection,
-            table: "vocab"
-        ).map { $0.stored() }
-        let sqliteGlosses = try decodeList(
-            LegacyGlossJSON.self,
-            fromSQLite: sqliteConnection,
-            table: "glosses"
-        ).compactMap { $0.stored() }
-
-        let jsonTranscripts = try loadTranscriptFiles(in: sources.transcriptsDirectory)
-        let jsonVocab = (LocalJSON.decodeFile([LegacyVocabJSON].self, at: sources.vocabJSON) ?? []).map { $0.stored() }
-        let jsonGlosses = (LocalJSON.decodeFile([LegacyGlossJSON].self, at: sources.glossesJSON) ?? []).compactMap { $0.stored() }
-        let lemmas = (LocalJSON.decodeFile([LegacyLemmaJSON].self, at: sources.lexiconJSON) ?? []).map { $0.stored() }
-        let activity = LocalJSON.decodeFile(LegacyActivityJSON.self, at: sources.studyActivityJSON)?.days ?? []
-        let settings = decodeSettings(at: sources.settingsJSON)
-        let summaries = try (LocalJSON.decodeFile([LegacySummaryJSON].self, at: sources.summariesJSON) ?? []).map { try $0.stored() }
-        let checkpoints = try (LocalJSON.decodeFile([LegacyCheckpointJSON].self, at: sources.checkpointsJSON) ?? []).map { try $0.stored() }
-
-        var transcriptsByChapter: [String: StoredTranscript] = [:]
-        for transcript in sqliteTranscripts {
-            transcriptsByChapter[transcript.chapterID.rawValue] = transcript
-        }
-        for transcript in jsonTranscripts where transcriptsByChapter[transcript.chapterID.rawValue] == nil {
-            transcriptsByChapter[transcript.chapterID.rawValue] = transcript
-        }
-
-        let vocabulary = sqliteVocab.isEmpty ? jsonVocab : sqliteVocab
-        let glosses = sqliteGlosses.isEmpty ? jsonGlosses : sqliteGlosses
-        let assistantResults = glosses + summaries + checkpoints
-        let face = settings?.vocabReviewPrompt ?? StoredSettings.default.vocabReviewPrompt
-
-        var catalog = CatalogBuilder()
-        for entry in vocabulary {
-            catalog.ensureBook(id: entry.bookID.rawValue, title: entry.bookTitle, at: entry.addedAt)
-            catalog.ensureChapter(
-                id: entry.chapterID.rawValue,
-                bookID: entry.bookID.rawValue,
-                title: entry.chapterTitle,
-                at: entry.addedAt
-            )
-        }
-        for result in assistantResults {
-            if let bookID = result.bookID {
-                catalog.ensureBook(
-                    id: bookID.rawValue,
-                    title: result.bookTitle ?? "Untitled",
-                    at: result.createdAt
-                )
-            }
-            if let chapterID = result.chapterID {
-                let bookID = result.bookID?.rawValue ?? catalog.inferredBookID(
-                    mediaKey: nil,
-                    chapterID: chapterID.rawValue,
-                    at: result.createdAt
-                )
-                catalog.ensureChapter(
-                    id: chapterID.rawValue,
-                    bookID: bookID,
-                    title: result.chapterTitle ?? chapterID.rawValue,
-                    at: result.createdAt
-                )
-            }
-        }
-        for transcript in transcriptsByChapter.values {
-            let bookID = catalog.inferredBookID(
-                mediaKey: transcript.localMediaKey,
-                chapterID: transcript.chapterID.rawValue,
-                at: transcript.createdAt
-            )
-            catalog.ensureChapter(
-                id: transcript.chapterID.rawValue,
-                bookID: bookID,
-                title: catalog.chapters[transcript.chapterID.rawValue]?.title ?? transcript.chapterID.rawValue,
-                at: transcript.createdAt
-            )
-            let assetID = catalog.ensureAsset(
-                bookID: bookID,
-                mediaKey: transcript.localMediaKey,
-                at: transcript.createdAt
-            )
-            catalog.chapters[transcript.chapterID.rawValue]?.assetID = assetID
-            catalog.chapters[transcript.chapterID.rawValue]?.startTime = transcript.chapterStart
-        }
-        catalog.assignPositions()
-
-        let cards: [StoredLocalReviewCard] = vocabulary.map { entry in
-            StoredLocalReviewCard(
-                id: "card:\(entry.id.rawValue):\(face)",
-                vocabularyID: entry.id,
-                face: face,
-                reviewCount: entry.reviewCount,
-                nextReview: entry.nextReview,
-                lastReviewedAt: entry.lastReviewedAt,
-                lastReviewQuality: entry.lastReviewQuality,
-                reviewIntervalDays: entry.reviewIntervalDays,
-                reviewEaseFactor: entry.reviewEaseFactor
-            )
-        }
-        let events: [StoredReviewEvent] = vocabulary.compactMap { entry in
-            guard let reviewedAt = entry.lastReviewedAt, let rating = entry.lastReviewQuality else {
-                return nil
-            }
-            return StoredReviewEvent(
-                id: ReviewEventID(rawValue: "event:\(entry.id.rawValue):last"),
-                vocabularyID: entry.id,
-                face: face,
-                rating: rating,
-                reviewedAt: reviewedAt
-            )
-        }
-
-        return LegacyImportPayload(
-            books: catalog.books.values.sorted { $0.id < $1.id },
-            assets: catalog.assets.values.sorted { $0.id < $1.id },
-            chapters: catalog.chapters.values.sorted { $0.id < $1.id },
-            transcripts: transcriptsByChapter.values.sorted { $0.chapterID.rawValue < $1.chapterID.rawValue },
-            vocabulary: vocabulary,
-            knownLemmas: lemmas,
-            reviewCards: cards,
-            reviewEvents: events,
-            assistantResults: assistantResults,
-            settings: settings,
-            studyActivityDays: activity
-        )
-    }
-
-    private static func decodeList<Value: Decodable>(
-        _ type: Value.Type,
-        fromSQLite connection: SQLiteConnection,
-        table: String
-    ) throws -> [Value] {
-        try SQLiteConnection.validateIdentifier(table)
-        guard try tableExists(table, connection: connection) else { return [] }
-        let rows = try connection.query("SELECT json FROM \(table)")
-        return rows.compactMap { row in
-            guard let json = row["json"] else { return nil }
-            do {
-                return try LocalJSON.decode(type, from: json)
-            } catch {
-                NSLog(
-                    "AudioReader local schema v2: skipped undecodable %@ row: %@",
-                    table,
-                    String(describing: error)
-                )
-                return nil
-            }
-        }
-    }
-
-    private static func tableExists(_ name: String, connection: SQLiteConnection) throws -> Bool {
-        let rows = try connection.query(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
-            bind: { stmt in connection.bind(stmt, 1, name) }
-        )
-        return !rows.isEmpty
-    }
-
-    private static func loadTranscriptFiles(in directory: URL) throws -> [StoredTranscript] {
-        guard FileManager.default.fileExists(atPath: directory.path),
-              let files = try? FileManager.default.contentsOfDirectory(
-                at: directory,
-                includingPropertiesForKeys: nil
-              )
-        else { return [] }
-        return files
-            .filter { $0.pathExtension.lowercased() == "json" }
-            .compactMap { url in
-                guard let data = try? Data(contentsOf: url) else { return nil }
-                do {
-                    return try LocalJSON.decoder.decode(LegacyTranscriptJSON.self, from: data).stored()
-                } catch {
-                    NSLog(
-                        "AudioReader local schema v2: skipped undecodable transcript %@: %@",
-                        url.lastPathComponent,
-                        String(describing: error)
-                    )
-                    return nil
-                }
-            }
-    }
-
-    private static func decodeSettings(at url: URL) -> StoredSettings? {
-        guard FileManager.default.fileExists(atPath: url.path),
-              let data = try? Data(contentsOf: url)
-        else { return nil }
-        return try? JSONDecoder().decode(LegacySettingsJSON.self, from: data).stored()
-    }
-}
-
-struct CatalogBuilder {
-    var books: [String: BookDraft] = [:]
-    var chapters: [String: ChapterDraft] = [:]
-    var assets: [String: AssetDraft] = [:]
-
-    mutating func ensureBook(id: String, title: String, at date: Date) {
-        if var existing = books[id] {
-            if existing.title == "Local media" || existing.title.isEmpty {
-                existing.title = title
-                books[id] = existing
-            }
-            return
-        }
-        books[id] = BookDraft(
-            id: id,
-            title: title.isEmpty ? "Untitled" : title,
-            author: nil,
-            source: "localFolder",
-            createdAt: date
-        )
-    }
-
-    mutating func ensureChapter(id: String, bookID: String, title: String, at date: Date) {
-        ensureBook(id: bookID, title: "Local media", at: date)
-        if var existing = chapters[id] {
-            if existing.title == existing.id, title != existing.id {
-                existing.title = title
-            }
-            chapters[id] = existing
-            return
-        }
-        chapters[id] = ChapterDraft(
-            id: id,
-            bookID: bookID,
-            title: title,
-            duration: nil,
-            startTime: nil,
-            assetID: nil,
-            position: 0,
-            createdAt: date
-        )
-    }
-
-    mutating func inferredBookID(mediaKey: String?, chapterID: String, at date: Date) -> String {
-        if let chapter = chapters[chapterID] {
-            return chapter.bookID
-        }
-        if let mediaKey {
-            let folder = URL(fileURLWithPath: mediaKey).deletingLastPathComponent().lastPathComponent
-            if let match = books.values.first(where: { $0.title == folder }) {
-                return match.id
-            }
-            let inferred = folder.isEmpty ? "legacy-unassigned" : "legacy-folder:\(folder)"
-            ensureBook(id: inferred, title: folder.isEmpty ? "Local media" : folder, at: date)
-            return inferred
-        }
-        ensureBook(id: "legacy-unassigned", title: "Local media", at: date)
-        return "legacy-unassigned"
-    }
-
-    mutating func ensureAsset(bookID: String, mediaKey: String, at date: Date) -> String {
-        let id = "\(bookID)|audio|\(mediaKey)"
-        assets[id] = AssetDraft(
-            id: id,
-            bookID: bookID,
-            kind: "audio",
-            localMediaKey: mediaKey,
-            createdAt: date
-        )
-        return id
-    }
-
-    mutating func assignPositions() {
-        let grouped = Dictionary(grouping: chapters.values) { $0.bookID }
-        for (bookID, group) in grouped {
-            let ordered = group.sorted {
-                if $0.title != $1.title { return $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-                return $0.id < $1.id
-            }
-            for (index, chapter) in ordered.enumerated() {
-                chapters[chapter.id]?.position = index
-                chapters[chapter.id]?.bookID = bookID
-            }
-        }
-    }
 }

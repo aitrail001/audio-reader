@@ -4,6 +4,153 @@ import Testing
 
 @Suite("Native account session flow")
 struct AccountSessionFlowTests {
+    @Test("expanded EPUB directories produce deterministic bounded reading-package archives")
+    func deterministicExpandedEPUBPackage() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("epub-package-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory.appendingPathComponent("OPS", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("chapter".utf8).write(to: directory.appendingPathComponent("OPS/chapter.xhtml"))
+        try Data("package".utf8).write(to: directory.appendingPathComponent("OPS/package.opf"))
+
+        let first = try AccountSyncApplicator.deterministicReadingPackage(from: directory)
+        defer { try? FileManager.default.removeItem(at: first) }
+        let second = try AccountSyncApplicator.deterministicReadingPackage(from: directory)
+        defer { try? FileManager.default.removeItem(at: second) }
+        #expect(try Data(contentsOf: first) == Data(contentsOf: second))
+    }
+
+    @Test("verified audio manifest installs atomically and associates its chapter before cursor commit")
+    func installsAudioManifestWithChapterAssociation() throws {
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sync-audio-\(UUID().uuidString).sqlite")
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sync-audio-\(UUID().uuidString).tmp")
+        defer { try? FileManager.default.removeItem(at: databaseURL) }
+        defer { try? FileManager.default.removeItem(at: source) }
+        try Data([1, 2, 3]).write(to: source)
+        let store = LocalSQLiteStore(fileURL: databaseURL)
+        let bookID = BookID(rawValue: "local-book")
+        let chapterID = ChapterID(rawValue: "local-chapter")
+        try store.saveBook(StoredBook(
+            id: bookID, title: "Book", author: "Author", source: "files",
+            chapters: [StoredChapter(id: chapterID, index: 0, title: "Chapter")]
+        ))
+        let assetID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let sha = String(repeating: "e", count: 64)
+        let change = SyncPulledChange(
+            sequence: 1, entityType: OutboxEntityType.asset.rawValue, entityId: assetID,
+            operation: OutboxOperation.upsert.rawValue, revision: 1,
+            changedAt: "2026-08-31T00:00:00Z",
+            payload: [
+                "assetId": .string(assetID), "kind": .string(SyncAssetKind.audio.rawValue),
+                "bookId": .string(AccountSyncApplicator.syncEntityID(bookID.rawValue, kind: "book")),
+                "chapterId": .string(AccountSyncApplicator.syncEntityID(chapterID.rawValue, kind: "chapter")),
+                "contentType": .string("audio/mpeg"), "encoding": .string("identity"),
+                "sha256": .string(sha), "compressedBytes": .number(3),
+                "originalBytes": .number(3), "localObjectPath": .string(source.path),
+            ]
+        )
+        try AccountSyncApplicator.applyPage([change], versions: [], cursor: "1", to: store)
+        let manifest = try #require(try store.loadSyncAssetManifests().first)
+        defer { try? FileManager.default.removeItem(atPath: manifest.localObjectPath) }
+        #expect(FileManager.default.fileExists(atPath: manifest.localObjectPath))
+        #expect(try store.loadAssets(bookID: bookID).first?.metadata["chapterID"] == chapterID.rawValue)
+        #expect(try store.loadCursor() == "1")
+    }
+
+    @Test("a hydrated EPUB reading package is produced again with its exact remote kind")
+    func preservesReadingPackageSyncKind() throws {
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sync-reading-package-\(UUID().uuidString).sqlite")
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sync-reading-package-\(UUID().uuidString).zip")
+        defer { try? FileManager.default.removeItem(at: databaseURL) }
+        defer { try? FileManager.default.removeItem(at: source) }
+        try Data([1, 2, 3]).write(to: source)
+        let store = LocalSQLiteStore(fileURL: databaseURL)
+        let bookID = BookID(rawValue: "local-book")
+        try store.saveBook(StoredBook(
+            id: bookID, title: "Book", author: "Author", source: "files", chapters: []
+        ))
+        let assetID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let change = SyncPulledChange(
+            sequence: 1, entityType: OutboxEntityType.asset.rawValue, entityId: assetID,
+            operation: OutboxOperation.upsert.rawValue, revision: 1,
+            changedAt: "2026-08-31T00:00:00Z",
+            payload: [
+                "assetId": .string(assetID),
+                "kind": .string(SyncAssetKind.epubReadingPackage.rawValue),
+                "bookId": .string(AccountSyncApplicator.syncEntityID(bookID.rawValue, kind: "book")),
+                "contentType": .string("application/zip"), "encoding": .string("identity"),
+                "sha256": .string(String(repeating: "e", count: 64)),
+                "compressedBytes": .number(3), "originalBytes": .number(3),
+                "localObjectPath": .string(source.path),
+            ]
+        )
+        try AccountSyncApplicator.applyPage([change], versions: [], cursor: "1", to: store)
+        let local = try #require(try store.loadAssets(bookID: bookID).first)
+        defer { try? FileManager.default.removeItem(atPath: local.localMediaKey) }
+
+        let upload = try #require(try AccountSyncApplicator.assetUpload(local))
+
+        #expect(local.kind == SyncAssetKind.epub.rawValue)
+        #expect(local.metadata["syncKind"] == SyncAssetKind.epubReadingPackage.rawValue)
+        #expect(upload.kind == .epubReadingPackage)
+        #expect(upload.fileURL.path == local.localMediaKey)
+    }
+
+    @MainActor
+    @Test("Shared account UI explains paused and never-enabled storage readiness while sync is idle")
+    func sharedAccountUIExplainsIdleStorageReadiness() async throws {
+        let client = FakeAuthClient()
+        client.bootstrapReadiness = AccountSyncReadiness(
+            schemaReady: true,
+            provider: "gcs",
+            bucket: "private-sync",
+            credentialStatus: "failed",
+            ready: false,
+            requested: true,
+            effective: false,
+            reason: "storage_credentials_invalid"
+        )
+        let account = AccountSession.isolated(client: client)
+        await account.requestEmailCode("paused-ui@example.com")
+        await account.verifyEmailCode("123456")
+        #expect(account.mode == .signedInSyncOff)
+        #expect(account.syncStatus.phase == .idle)
+        #expect(account.syncReadinessMessage?.contains("Sync paused") == true)
+        #expect(account.syncReadinessMessage?.contains("storage credentials") == true)
+
+        client.bootstrapReadiness.requested = false
+        await account.refreshSession()
+        #expect(account.syncReadinessMessage?.contains("Sync unavailable") == true)
+        #expect(account.syncReadinessMessage?.contains("Turn on sync after") == true)
+
+        client.bootstrapReadiness = AccountSyncReadiness(
+            schemaReady: true,
+            provider: "gcs",
+            bucket: "private-sync",
+            credentialStatus: "ok",
+            ready: true,
+            requested: false,
+            effective: false,
+            reason: nil
+        )
+        await account.refreshSession()
+        #expect(account.syncReadinessMessage == "Sync unavailable — the service operator has not enabled cross-device sync.")
+        #expect(account.syncAvailabilityManagedByOperator)
+
+        let view = try source("Sources/AudioReader/AccountSessionView.swift")
+        #expect(view.contains("session.syncReadinessMessage"))
+        #expect(view.contains("accessibilityLabel(\"Account sync readiness\")"))
+        #expect(view.contains("session.syncAvailabilityManagedByOperator"))
+        #expect(view.contains("Button(\"Refresh sync availability\")"))
+    }
+
     @MainActor
     @Test("Signing out does not silently delete local books")
     func signingOutDoesNotSilentlyDeleteLocalBooks() async throws {
@@ -140,6 +287,8 @@ struct AccountSessionFlowTests {
         #expect(view.contains("AccountExportDocument"))
         #expect(view.contains(".accessibilityLabel(\"Delete AudioReader account\")"))
         #expect(view.contains(".accessibilityLabel(\"Sync learning data across devices\")"))
+        #expect(view.contains("session.accountSyncReadiness.effective"))
+        #expect(view.contains("session.mode.isSyncEnabled"))
         #expect(view.contains("Share aggregate learning progress with Operator support"))
         #expect(view.contains("Reading text, transcripts, saved words, translations, notes, and prompts are never shared"))
         #expect(view.contains("setOperatorLearningAnalyticsEnabled"))
@@ -178,7 +327,9 @@ struct AccountSessionFlowTests {
         #expect(iPadRoot.contains("case .settings:"))
         #expect(settings.contains("accountSection"))
         #expect(appState.contains("account.restore()"))
-        #expect(appState.contains("async let accountRestore"))
+        #expect(!appState.contains("async let accountRestore"))
+        #expect(appState.contains("await account.restore()"))
+        #expect(appState.contains("reloadSyncedLearningData()"))
         #expect(appState.contains("ManagedProductLLM.translateBatch"))
         #expect(appState.contains("ManagedProductLLM.lookupSummary"))
         #expect(appState.contains("ManagedProductLLM.summarize"))
@@ -435,6 +586,7 @@ struct AccountSessionFlowTests {
                 StoredReviewEvent(
                     id: ReviewEventID(rawValue: "dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
                     vocabularyID: VocabularyOccurrenceID(rawValue: vocabID),
+                    cardID: "study:give-up",
                     face: "recognition",
                     rating: "remember",
                     reviewedAt: Date(timeIntervalSince1970: 1_777_000_100)
@@ -442,12 +594,14 @@ struct AccountSessionFlowTests {
             ]
         )
         #expect(mutations.contains(where: { $0.entityType == .book && $0.entityID == bookID }))
-        #expect(mutations.contains(where: { $0.entityType == .transcript && $0.entityID == chapterID }))
+        #expect(!mutations.contains(where: { $0.entityType == .transcript }))
         let overlay = try #require(mutations.first(where: { $0.entityType == .transcriptOverlay }))
         let overlayPayload = try JSONDecoder().decode([String: SyncJSONValue].self, from: overlay.payload)
         #expect(overlayPayload["localChapterId"]?.stringValue == chapterID)
         #expect(overlayPayload["overlayJSON"]?.stringValue?.contains("Corrected") == true)
-        #expect(mutations.contains(where: { $0.entityType == .reviewEvent }))
+        let reviewMutation = try #require(mutations.first(where: { $0.entityType == .reviewEvent }))
+        let reviewPayload = try JSONDecoder().decode([String: SyncJSONValue].self, from: reviewMutation.payload)
+        #expect(reviewPayload["cardId"]?.stringValue == "study:give-up")
         let vocabularyProgress = try #require(mutations.first(where: {
             $0.entityType == .progress && $0.entityID == vocabID
         }))
@@ -466,6 +620,44 @@ struct AccountSessionFlowTests {
         let progressPayload = try JSONDecoder().decode([String: SyncJSONValue].self, from: readerProgress.payload)
         #expect(progressPayload["relativeSeconds"]?.numberValue == 12.875)
         #expect(progressPayload["localChapterId"]?.stringValue == chapterID)
+    }
+
+    @Test("Sync snapshot keeps transcript bytes out of structured records")
+    func syncSnapshotExcludesTranscriptBytes() throws {
+        let chapterID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        let sentence = "Listening changes us and careful repeated practice builds durable understanding. "
+            + "Listening changes us and careful repeated practice builds durable understanding. "
+        let template = StoredTranscriptSegment(
+            id: "segment",
+            start: 0,
+            end: 1,
+            words: [
+                StoredTranscriptWord(id: "word-1", text: sentence, start: 0, end: 0.5, confidence: 0.98),
+                StoredTranscriptWord(id: "word-2", text: sentence, start: 0.5, end: 1, confidence: 0.97)
+            ],
+            ebookText: sentence,
+            alignmentScore: 0.99,
+            individualEbookMatchTrusted: true,
+            documentEbookUseAllowed: true
+        )
+        let segments = Array(repeating: template, count: 8_914)
+        let stored = StoredTranscript(
+            chapterID: ChapterID(rawValue: chapterID),
+            localMediaKey: "",
+            createdAt: Date(timeIntervalSince1970: 1_777_000_000),
+            locale: "en-US",
+            source: "spoken",
+            ebookAligned: true,
+            segments: segments
+        )
+
+        let mutations = try AccountSyncApplicator.snapshot(
+            settings: .default,
+            vocabulary: [],
+            lemmas: [],
+            transcripts: [stored]
+        )
+        #expect(!mutations.contains { $0.entityType == OutboxEntityType.transcript })
     }
 
     @Test("Pulled vocabulary, SRS progress, and review history share durable parents")
@@ -487,8 +679,17 @@ struct AccountSessionFlowTests {
                 "chapterId": .string("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
                 "bookTitle": .string("Moby-Dick"),
                 "chapterTitle": .string("Loomings"),
-                "surface": .string("ice"),
-                "category": .string("word"),
+                "surface": .string("gave up"),
+                "lemma": .string("give up"),
+                "partOfSpeech": .string("verb"),
+                "senseId": .string("give-up:stop"),
+                "canonicalizationSource": .string("irregularRule"),
+                "canonicalizationConfidence": .number(0.99),
+                "canonicalizationStatus": .string("confirmed"),
+                "canonicalizationTraceId": .string("trace-pulled"),
+                "captureSource": .string("explicitPhrase"),
+                "reviewEligible": .bool(true),
+                "category": .string("phrase"),
                 "context": .string("The ice closed over."),
                 "timestampSeconds": .number(3),
                 "state": .string("learning")
@@ -520,6 +721,7 @@ struct AccountSessionFlowTests {
             changedAt: "2026-08-30T02:10:00Z",
             payload: [
                 "vocabularyId": .string(vocabularyID),
+                "cardId": .string("study:give-up"),
                 "face": .string("recognition"),
                 "rating": .string(VocabReviewQuality.remember.rawValue),
                 "reviewedAt": .string("2026-08-30T02:10:00Z")
@@ -534,6 +736,13 @@ struct AccountSessionFlowTests {
         #expect(stored.reviewCount == 4)
         #expect(stored.reviewIntervalDays == 12)
         #expect(stored.reviewEaseFactor == 2.8)
+        #expect(stored.surface == "gave up")
+        #expect(stored.senseID == "give-up:stop")
+        #expect(stored.canonicalizationTraceID == "trace-pulled")
+        #expect(stored.canonicalForm == "give up")
+        #expect(stored.partOfSpeech == "verb")
+        #expect(stored.captureSource == "explicitPhrase")
+        #expect(stored.reviewEligible)
         #expect(try store.loadReviewEvents().map(\.id.rawValue) == [review.entityId])
 
         var newerProgress = progress
@@ -553,10 +762,9 @@ struct AccountSessionFlowTests {
             .appendingPathComponent("audio-reader-sync-delete-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let url = root.appendingPathComponent("library.sqlite")
-        let legacy = LibraryStore(fileURL: url)
-        let repository = LibraryStoreVocabularyRepository(store: legacy)
+        let url = root.appendingPathComponent("library-vNext.sqlite")
         let relational = LocalSQLiteStore(fileURL: url)
+        let repository: any VocabularyRepository = relational
         let vocabularyID = VocabularyOccurrenceID(rawValue: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
         let item = StoredVocabularyOccurrence(
             id: vocabularyID,
@@ -571,7 +779,6 @@ struct AccountSessionFlowTests {
             addedAt: Date(timeIntervalSince1970: 1_777_000_000)
         )
         try repository.saveVocabulary([item])
-        try relational.upsertVocabulary(item)
         try relational.appendReviewEvent(
             StoredReviewEvent(
                 id: ReviewEventID(rawValue: "dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
@@ -727,6 +934,7 @@ struct AccountSessionFlowTests {
             changedAt: "2026-08-30T02:10:00Z",
             payload: [
                 "vocabularyId": .string("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                "cardId": .string("study:give-up"),
                 "face": .string("recognition"),
                 "rating": .string(VocabReviewQuality.remember.rawValue),
                 "reviewedAt": .string("2026-08-30T02:10:00Z")
@@ -751,6 +959,7 @@ struct AccountSessionFlowTests {
             changedAt: "2026-08-30T02:15:00Z",
             payload: [
                 "vocabularyId": .string("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                "cardId": .string("study:give-up"),
                 "face": .string("recognition"),
                 "rating": .string(VocabReviewQuality.remember.rawValue),
                 "reviewedAt": .string("2026-08-30T02:14:30Z")
@@ -765,6 +974,7 @@ struct AccountSessionFlowTests {
         #expect(events.count == 1)
         #expect(event.id.rawValue == change.entityId)
         #expect(event.vocabularyID.rawValue == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        #expect(event.cardID == "study:give-up")
         #expect(event.face == "recognition")
         #expect(event.rating == VocabReviewQuality.remember.rawValue)
         #expect(event.reviewedAt == ISO8601DateFormatter().date(from: "2026-08-30T02:14:30Z"))
@@ -774,7 +984,17 @@ struct AccountSessionFlowTests {
     func vocabularySyncCarriesPortableFields() throws {
         let item = VocabEntry(
             id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            word: "ice",
+            word: "gave up",
+            canonicalForm: "give up",
+            partOfSpeech: .verb,
+            senseID: "give-up:stop",
+            canonicalizationSource: .irregularRule,
+            canonicalizationConfidence: 0.99,
+            canonicalizationStatus: .confirmed,
+            canonicalizationTraceID: "trace-123",
+            captureSource: .explicitPhrase,
+            reviewEligible: true,
+            category: .phrase,
             definition: "frozen water",
             translation: "冰",
             translationLanguage: "zh-Hans",
@@ -802,6 +1022,15 @@ struct AccountSessionFlowTests {
         #expect(payload["segmentId"]?.stringValue == "segment")
         #expect(payload["wordId"]?.stringValue == "word")
         #expect(payload["spokenText"]?.stringValue == "The ice closed over.")
+        #expect(payload["surface"]?.stringValue == "gave up")
+        #expect(payload["lemma"]?.stringValue == "give up")
+        #expect(payload["partOfSpeech"]?.stringValue == "verb")
+        #expect(payload["canonicalizationSource"]?.stringValue == "irregularRule")
+        #expect(payload["canonicalizationStatus"]?.stringValue == "confirmed")
+        #expect(payload["senseId"]?.stringValue == "give-up:stop")
+        #expect(payload["canonicalizationTraceId"]?.stringValue == "trace-123")
+        #expect(payload["captureSource"]?.stringValue == "explicitPhrase")
+        #expect(payload["reviewEligible"] == .bool(true))
         #expect(payload["ebookText"]?.stringValue == "The ice had closed over.")
         #expect(payload["translationLanguage"]?.stringValue == "zh-Hans")
         #expect(payload["translationModel"]?.stringValue == "qwen")
@@ -892,14 +1121,282 @@ struct AccountSessionFlowTests {
         #expect(merged.nextReview == existing.nextReview)
     }
 
-    @Test("A failed sync page rolls back rows, entity versions, and cursor without refreshing the mirror")
+    @Test("Legacy bootstrap vocabulary never resurrects automatic material into New")
+    func legacyBootstrapInfersAutomaticCaptureEligibility() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-legacy-bootstrap-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LocalSQLiteStore(fileURL: url)
+        let sentence = legacyVocabularyChange(id: "legacy-sentence", category: .sentence, state: "unknown")
+        let phrase = legacyVocabularyChange(id: "legacy-phrase", category: .phrase, state: "unknown")
+        let savedPhrase = legacyVocabularyChange(id: "saved-phrase", category: .phrase, state: "learning")
+
+        try AccountSyncApplicator.applyPage(
+            [sentence, phrase, savedPhrase],
+            cursor: "3",
+            to: store
+        )
+
+        let entries = try store.loadVocabulary().map(VocabEntry.init)
+        let byID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
+        #expect(byID["legacy-sentence"]?.captureSource == .acceptedSentenceTranslation)
+        #expect(byID["legacy-sentence"]?.reviewEligible == false)
+        #expect(byID["legacy-phrase"]?.captureSource == .automaticPhraseSuggestion)
+        #expect(byID["legacy-phrase"]?.reviewEligible == false)
+        #expect(byID["saved-phrase"]?.captureSource == .explicitPhrase)
+        #expect(byID["saved-phrase"]?.reviewEligible == true)
+        #expect(VocabularyLearningAnalytics.queue(entries: entries, at: .now).new.map(\.id) == ["saved-phrase"])
+    }
+
+    @Test("Legacy reviewed progress makes an automatic capture eligible without changing provenance")
+    func legacyReviewedProgressRestoresEligibility() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-legacy-reviewed-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LocalSQLiteStore(fileURL: url)
+        let sentence = legacyVocabularyChange(id: "reviewed-sentence", category: .sentence, state: "unknown")
+        let progress = SyncPulledChange(
+            sequence: 2,
+            entityType: OutboxEntityType.progress.rawValue,
+            entityId: "reviewed-sentence-progress",
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T00:00:00Z",
+            payload: [
+                "vocabularyId": .string("reviewed-sentence"),
+                "reviewCount": .number(2),
+                "lastReviewedAt": .string("2026-08-30T00:00:00Z")
+            ]
+        )
+
+        try AccountSyncApplicator.applyPage(
+            [sentence, progress],
+            cursor: "2",
+            to: store
+        )
+
+        let entry = try #require(try store.loadVocabulary().first.map(VocabEntry.init))
+        #expect(entry.reviewCount == 2)
+        #expect(entry.captureSource == .acceptedSentenceTranslation)
+        #expect(entry.reviewEligible)
+    }
+
+    @Test("Incremental legacy vocabulary preserves local canonical and eligibility metadata")
+    func legacyIncrementalMergePreservesLocalMetadata() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-legacy-incremental-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LocalSQLiteStore(fileURL: url)
+        let existing = VocabEntry(
+            id: "legacy-phrase",
+            word: "axes",
+            canonicalForm: "axis",
+            partOfSpeech: .noun,
+            senseID: "axis:geometry",
+            canonicalizationSource: .userEdited,
+            canonicalizationConfidence: 1,
+            canonicalizationStatus: .confirmed,
+            captureSource: .automaticPhraseSuggestion,
+            reviewEligible: false,
+            category: .phrase,
+            context: "The axes crossed.",
+            bookID: "book",
+            bookTitle: "Book",
+            chapterID: "chapter",
+            chapterTitle: "Chapter",
+            timestamp: 1,
+            addedAt: Date(timeIntervalSince1970: 1)
+        )
+        try store.upsertVocabulary(StoredVocabularyOccurrence(existing))
+
+        _ = try AccountSyncApplicator.applyLearning(
+            legacyVocabularyChange(id: existing.id, category: .phrase, state: "unknown"),
+            to: store
+        )
+        let merged = try #require(try store.loadVocabulary().first.map(VocabEntry.init))
+
+        #expect(merged.canonicalForm == "axis")
+        #expect(merged.partOfSpeech == .noun)
+        #expect(merged.senseID == "axis:geometry")
+        #expect(merged.canonicalizationSource == .userEdited)
+        #expect(merged.canonicalizationStatus == .confirmed)
+        #expect(merged.captureSource == .automaticPhraseSuggestion)
+        #expect(merged.reviewEligible == false)
+    }
+
+    @Test("Explicit new-format sync metadata replaces local canonical metadata")
+    func newFormatIncrementalMergeUsesExplicitFields() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-new-format-incremental-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LocalSQLiteStore(fileURL: url)
+        var existing = VocabEntry(
+            id: "new-format",
+            word: "bank",
+            context: "A bank.",
+            bookID: "book",
+            bookTitle: "Book",
+            chapterID: "chapter",
+            chapterTitle: "Chapter",
+            timestamp: 1,
+            addedAt: Date(timeIntervalSince1970: 1)
+        )
+        existing.confirmCanonicalForm("bank", partOfSpeech: .noun, senseID: "bank:river-edge")
+        try store.upsertVocabulary(StoredVocabularyOccurrence(existing))
+        var change = legacyVocabularyChange(id: existing.id, category: .word, state: "unknown")
+        change.payload["lemma"] = .string("bank")
+        change.payload["partOfSpeech"] = .string("noun")
+        change.payload["senseId"] = .string("bank:financial-institution")
+        change.payload["canonicalizationSource"] = .string("cachedLLM")
+        change.payload["canonicalizationConfidence"] = .number(0.94)
+        change.payload["canonicalizationStatus"] = .string("confirmed")
+        change.payload["canonicalizationTraceId"] = .string("provider-message-17")
+        change.payload["captureSource"] = .string("explicitWord")
+        change.payload["reviewEligible"] = .bool(true)
+
+        _ = try AccountSyncApplicator.applyLearning(change, to: store)
+        let merged = try #require(try store.loadVocabulary().first.map(VocabEntry.init))
+
+        #expect(merged.senseID == "bank:financial-institution")
+        #expect(merged.canonicalizationSource == .cachedLLM)
+        #expect(merged.canonicalizationTraceID == "provider-message-17")
+        #expect(merged.reviewEligible)
+    }
+
+    @Test("Versioned vocabulary snapshot bootstraps intentional nil canonical fields")
+    func versionedVocabularyBootstrapRoundTripsNilCanonicalFields() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-versioned-bootstrap-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LocalSQLiteStore(fileURL: url)
+        let entry = VocabEntry(
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            word: "bank",
+            canonicalForm: "bank",
+            partOfSpeech: .noun,
+            senseID: nil,
+            canonicalizationSource: .userEdited,
+            canonicalizationConfidence: 0.5,
+            canonicalizationStatus: .needsReview,
+            canonicalizationTraceID: nil,
+            context: "Bank.",
+            bookID: "book",
+            bookTitle: "Book",
+            chapterID: "chapter",
+            chapterTitle: "Chapter",
+            timestamp: 1,
+            addedAt: Date(timeIntervalSince1970: 1)
+        )
+        let mutation = try #require(AccountSyncApplicator.snapshot(
+            settings: .default,
+            vocabulary: [entry],
+            lemmas: []
+        ).first { $0.entityType == .vocabulary })
+        let payload = try JSONDecoder().decode([String: SyncJSONValue].self, from: mutation.payload)
+        #expect(payload["vocabularySchemaVersion"] == .number(1))
+
+        try AccountSyncApplicator.applyPage(
+            [pulledVocabularyChange(from: mutation, payload: payload)],
+            cursor: "1",
+            to: store
+        )
+
+        let restored = try #require(try store.loadVocabulary().first.map(VocabEntry.init))
+        #expect(restored.canonicalizationSource == .userEdited)
+        #expect(restored.senseID == nil)
+        #expect(restored.canonicalizationTraceID == nil)
+    }
+
+    @Test("Versioned incremental vocabulary clears an old provider sense and trace")
+    func versionedVocabularyIncrementalRoundTripsNilCanonicalFields() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-versioned-incremental-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LocalSQLiteStore(fileURL: url)
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let existing = VocabEntry(
+            id: id,
+            word: "bank",
+            canonicalForm: "bank",
+            partOfSpeech: .noun,
+            senseID: "bank:financial-institution",
+            canonicalizationSource: .cachedLLM,
+            canonicalizationConfidence: 0.94,
+            canonicalizationStatus: .confirmed,
+            canonicalizationTraceID: "provider-message-old",
+            context: "Bank.",
+            bookID: "book",
+            bookTitle: "Book",
+            chapterID: "chapter",
+            chapterTitle: "Chapter",
+            timestamp: 1,
+            addedAt: Date(timeIntervalSince1970: 1)
+        )
+        try store.upsertVocabulary(StoredVocabularyOccurrence(existing))
+        var edited = existing
+        edited.confirmCanonicalForm("bank", partOfSpeech: .noun, senseID: nil)
+        let mutation = try #require(AccountSyncApplicator.snapshot(
+            settings: .default,
+            vocabulary: [edited],
+            lemmas: []
+        ).first { $0.entityType == .vocabulary })
+        let payload = try JSONDecoder().decode([String: SyncJSONValue].self, from: mutation.payload)
+
+        _ = try AccountSyncApplicator.applyLearning(
+            pulledVocabularyChange(from: mutation, payload: payload),
+            to: store
+        )
+        let merged = try #require(try store.loadVocabulary().first.map(VocabEntry.init))
+
+        #expect(merged.canonicalizationSource == .userEdited)
+        #expect(merged.senseID == nil)
+        #expect(merged.canonicalizationTraceID == nil)
+    }
+
+    @Test("Unversioned legacy absence preserves a cached provider sense and trace")
+    func legacyAbsentOptionalCanonicalFieldsPreserveLocalValues() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-legacy-optional-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LocalSQLiteStore(fileURL: url)
+        let existing = VocabEntry(
+            id: "legacy-provider",
+            word: "bank",
+            canonicalForm: "bank",
+            partOfSpeech: .noun,
+            senseID: "bank:financial-institution",
+            canonicalizationSource: .cachedLLM,
+            canonicalizationConfidence: 0.94,
+            canonicalizationStatus: .confirmed,
+            canonicalizationTraceID: "provider-message-17",
+            context: "The bank approved it.",
+            bookID: "book",
+            bookTitle: "Book",
+            chapterID: "chapter",
+            chapterTitle: "Chapter",
+            timestamp: 1,
+            addedAt: Date(timeIntervalSince1970: 1)
+        )
+        try store.upsertVocabulary(StoredVocabularyOccurrence(existing))
+
+        _ = try AccountSyncApplicator.applyLearning(
+            legacyVocabularyChange(id: existing.id, category: .word, state: "unknown"),
+            to: store
+        )
+        let merged = try #require(try store.loadVocabulary().first.map(VocabEntry.init))
+
+        #expect(merged.senseID == "bank:financial-institution")
+        #expect(merged.canonicalizationSource == .cachedLLM)
+        #expect(merged.canonicalizationTraceID == "provider-message-17")
+    }
+
+    @Test("A failed sync page rolls back rows, entity versions, and cursor")
     func failedSyncPageIsAtomic() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("audio-reader-sync-page-failure-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
-        let mirrorWrites = LockingCounter()
         let vocabulary = syncVocabularyChange(index: 1)
         let invalidProgress = SyncPulledChange(
             sequence: 2,
@@ -915,25 +1412,22 @@ struct AccountSessionFlowTests {
             try AccountSyncApplicator.applyPage(
                 [vocabulary, invalidProgress],
                 cursor: "2",
-                to: store,
-                persistVocabularyMirror: { _ in mirrorWrites.increment() }
+                to: store
             )
         }
 
         #expect(try store.loadVocabulary().isEmpty)
         #expect(try store.loadVersion(entityType: vocabulary.entityType, entityID: vocabulary.entityId) == nil)
         #expect(try store.loadCursor() == "0")
-        #expect(mirrorWrites.value == 0)
     }
 
-    @Test("A failed mixed sync page does not refresh non-vocabulary legacy mirrors")
-    func failedMixedSyncPageDoesNotRefreshDerivedState() throws {
+    @Test("A failed mixed sync page rolls back structured settings")
+    func failedMixedSyncPageRollsBackStructuredSettings() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("audio-reader-sync-page-derived-failure-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
-        let derivedWrites = LockingCounter()
         let settings = SyncPulledChange(
             sequence: 1,
             entityType: OutboxEntityType.settings.rawValue,
@@ -957,114 +1451,51 @@ struct AccountSessionFlowTests {
             try AccountSyncApplicator.applyPage(
                 [settings, invalidProgress],
                 cursor: "2",
-                to: store,
-                persistDerivedMirrors: { _ in derivedWrites.increment() }
+                to: store
             )
         }
 
         #expect(try store.loadVersion(entityType: settings.entityType, entityID: settings.entityId) == nil)
         #expect(try store.loadCursor() == "0")
-        #expect(derivedWrites.value == 0)
+        #expect(try store.loadSettings().targetLanguage == StoredSettings.default.targetLanguage)
     }
 
-    @Test("A post-commit mirror failure is durably retried without replaying canonical history")
-    func failedMirrorRefreshIsRepairedOnNextPageEntry() throws {
+    @Test("Repeated lemma revisions update idempotently and advance the page cursor")
+    func repeatedLemmaPageAdvancesCursor() throws {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("audio-reader-sync-page-mirror-repair-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("audio-reader-sync-page-lemma-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
-        let derivedAttempts = LockingCounter()
-        let vocabularyWrites = LockingCounter()
-        let failDerived = LockingValue(true)
-        let failVocabulary = LockingValue(true)
-        let settings = SyncPulledChange(
+        let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library-vNext.sqlite"))
+        let first = SyncPulledChange(
             sequence: 1,
-            entityType: OutboxEntityType.settings.rawValue,
-            entityId: "settings",
+            entityType: OutboxEntityType.lexemeState.rawValue,
+            entityId: "lemma-read",
             operation: OutboxOperation.upsert.rawValue,
             revision: 1,
             changedAt: "2026-08-30T00:00:00Z",
-            payload: ["targetLanguage": .string("fr")]
+            payload: ["language": .string("en"), "lemma": .string("read")]
         )
-        let vocabulary = syncVocabularyChange(index: 1)
+        var revision = first
+        revision.sequence = 2
+        revision.revision = 2
+        revision.changedAt = "2026-08-31T00:00:00Z"
 
-        #expect(throws: (any Error).self) {
-            try AccountSyncApplicator.applyPage(
-                [settings, vocabulary],
-                cursor: "2",
-                to: store,
-                persistVocabularyMirror: { _ in
-                    vocabularyWrites.increment()
-                    if failVocabulary.value { throw MirrorRepairTestError.writeFailed }
-                },
-                persistDerivedMirrors: { _ in
-                    derivedAttempts.increment()
-                    if failDerived.value { throw MirrorRepairTestError.writeFailed }
-                }
-            )
-        }
+        try AccountSyncApplicator.applyPage([first], cursor: "1", to: store)
+        try AccountSyncApplicator.applyPage([revision], cursor: "2", to: store)
 
+        #expect(try store.loadKnownLemmas().map(\.form) == ["read"])
+        #expect(try store.loadVersion(entityType: revision.entityType, entityID: revision.entityId)?.serverVersion == 2)
         #expect(try store.loadCursor() == "2")
-        #expect(try store.loadVocabulary().count == 1)
-        #expect(try store.loadVersion(entityType: settings.entityType, entityID: settings.entityId) != nil)
-        #expect(try store.loadSyncMirrorRepair()?.refreshVocabulary == true)
-        #expect(derivedAttempts.value == 1)
-        #expect(vocabularyWrites.value == 0)
-
-        let repairedChanges = LockingValue<[SyncPulledChange]>([])
-        failDerived.value = false
-        #expect(throws: (any Error).self) {
-            try AccountSyncApplicator.applyPage(
-                [],
-                cursor: "2",
-                to: store,
-                persistVocabularyMirror: { entries in
-                    #expect(entries.count == 1)
-                    vocabularyWrites.increment()
-                    if failVocabulary.value { throw MirrorRepairTestError.writeFailed }
-                },
-                persistDerivedMirrors: { changes in
-                    repairedChanges.value = changes
-                    derivedAttempts.increment()
-                }
-            )
-        }
-        #expect(try store.loadSyncMirrorRepair()?.refreshVocabulary == true)
-        #expect(derivedAttempts.value == 2)
-        #expect(vocabularyWrites.value == 1)
-
-        failVocabulary.value = false
-        try AccountSyncApplicator.applyPage(
-            [],
-            cursor: "2",
-            to: store,
-            persistVocabularyMirror: { entries in
-                #expect(entries.count == 1)
-                vocabularyWrites.increment()
-            },
-            persistDerivedMirrors: { changes in
-                repairedChanges.value = changes
-                derivedAttempts.increment()
-            }
-        )
-
-        #expect(repairedChanges.value.map(\.entityType) == [OutboxEntityType.settings.rawValue])
-        #expect(try store.loadVocabulary().count == 1)
-        #expect(try store.loadCursor() == "2")
-        #expect(try store.loadSyncMirrorRepair() == nil)
-        #expect(derivedAttempts.value == 3)
-        #expect(vocabularyWrites.value == 2)
     }
 
-    @Test("A 7,000-record bootstrap uses bounded page transactions and one mirror refresh per page")
+    @Test("A 7,000-record bootstrap uses bounded page transactions")
     func largeBootstrapUsesBoundedPageWork() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("audio-reader-sync-page-large-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
-        let mirrorWrites = LockingCounter()
         let changes = (1...7_000).map(syncVocabularyChange(index:))
 
         for start in stride(from: 0, to: changes.count, by: 100) {
@@ -1072,14 +1503,12 @@ struct AccountSessionFlowTests {
             try AccountSyncApplicator.applyPage(
                 page,
                 cursor: String(start + page.count),
-                to: store,
-                persistVocabularyMirror: { _ in mirrorWrites.increment() }
+                to: store
             )
         }
 
         #expect(try store.loadVocabulary().count == 7_000)
         #expect(try store.loadCursor() == "7000")
-        #expect(mirrorWrites.value == 70)
     }
 
     @Test("A successful learning page commits vocabulary, progress, review, versions, and cursor together")
@@ -1089,7 +1518,6 @@ struct AccountSessionFlowTests {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
-        let mirrorWrites = LockingCounter()
         let vocabulary = syncVocabularyChange(index: 1)
         let progress = SyncPulledChange(
             sequence: 2,
@@ -1125,15 +1553,408 @@ struct AccountSessionFlowTests {
         try AccountSyncApplicator.applyPage(
             [review, progress, vocabulary],
             cursor: "3",
-            to: store,
-            persistVocabularyMirror: { _ in mirrorWrites.increment() }
+            to: store
         )
 
         #expect(try store.loadVocabulary().first?.reviewCount == 1)
         #expect(try store.loadReviewEvents().map(\.id.rawValue) == [review.entityId])
         #expect(try store.loadVersion(entityType: review.entityType, entityID: review.entityId)?.serverVersion == 1)
         #expect(try store.loadCursor() == "3")
-        #expect(mirrorWrites.value == 1)
+    }
+
+    @Test("Incremental vocabulary apply preserves existing review schedule and history")
+    func vocabularySyncApplyPreservesReviewHistory() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-review-preservation-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LocalSQLiteStore(fileURL: url)
+        let incoming = syncVocabularyChange(index: 1)
+        try AccountSyncApplicator.applyPage([incoming], cursor: "1", to: store)
+        var existing = try #require(try store.loadVocabulary().first.map(VocabEntry.init))
+        existing.reviewCount = 6
+        existing.nextReview = Date(timeIntervalSince1970: 1_800_000_000)
+        existing.lastReviewedAt = Date(timeIntervalSince1970: 1_799_000_000)
+        existing.lastReviewQuality = .remember
+        existing.reviewIntervalDays = 14
+        existing.reviewEaseFactor = 2.8
+        try store.upsertVocabulary(StoredVocabularyOccurrence(existing))
+        let event = StoredReviewEvent(
+            id: ReviewEventID(rawValue: "review-preserved"),
+            vocabularyID: VocabularyOccurrenceID(rawValue: existing.id),
+            face: "recognition",
+            rating: VocabReviewQuality.remember.rawValue,
+            reviewedAt: existing.lastReviewedAt!
+        )
+        try store.appendReviewEvent(event, vocabulary: StoredVocabularyOccurrence(existing))
+
+        try AccountSyncApplicator.applyPage([incoming], cursor: "1", to: store)
+
+        let restored = try #require(try store.loadVocabulary().first.map(VocabEntry.init))
+        #expect(restored.reviewCount == 6)
+        #expect(restored.nextReview == existing.nextReview)
+        #expect(restored.reviewIntervalDays == 14)
+        #expect(restored.reviewEaseFactor == 2.8)
+        #expect(try store.loadReviewEvents() == [event])
+    }
+
+    @Test("Canonical structured page excludes transcript bytes while persisting other rows and cursor")
+    func canonicalPagePersistsStructuredEntitiesTogether() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-structured-page-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LocalSQLiteStore(fileURL: url)
+        let book = StoredBook(
+            id: BookID(rawValue: "cloud-book"),
+            title: "Cloud Book",
+            author: "Author",
+            source: BookSource.files.rawValue,
+            chapters: [StoredChapter(id: ChapterID(rawValue: "cloud-chapter"), index: 0, title: "Chapter")]
+        )
+        let transcript = StoredTranscript(
+            chapterID: ChapterID(rawValue: "cloud-chapter"),
+            localMediaKey: "",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            locale: "en",
+            source: "cloud",
+            ebookAligned: false,
+            segments: [StoredTranscriptSegment(
+                id: "cloud-segment",
+                start: 0,
+                end: 1,
+                words: [StoredTranscriptWord(id: "cloud-word", text: "hello", start: 0, end: 1)]
+            )]
+        )
+        var settings = AppSettings.default
+        settings.targetLanguage = "fr"
+        let mutations = try AccountSyncApplicator.snapshot(
+            settings: settings,
+            vocabulary: [],
+            lemmas: [KnownLemmaRecord(
+                language: "en",
+                form: "hello",
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+            )],
+            books: [book],
+            transcripts: [transcript]
+        )
+        let pulled = try mutations.enumerated().map { index, mutation in
+            pulledVocabularyChange(
+                from: mutation,
+                payload: try JSONDecoder().decode([String: SyncJSONValue].self, from: mutation.payload),
+                sequence: index + 1
+            )
+        }
+
+        try AccountSyncApplicator.applyPage(pulled, cursor: "4", to: store)
+
+        #expect(try store.loadBooks() == [book])
+        #expect(try store.loadTranscript(chapterID: transcript.chapterID) == nil)
+        #expect(try store.loadKnownLemmas().map(\.form) == ["hello"])
+        #expect(try store.loadSettings().targetLanguage == "fr")
+        #expect(try store.loadCursor() == "4")
+        #expect(Book(book).mediaAvailability == .metadataOnly)
+        for change in pulled {
+            #expect(try store.loadVersion(entityType: change.entityType, entityID: change.entityId) != nil)
+        }
+    }
+
+    @Test("One assistant result identity and provenance round-trips every lifecycle state")
+    func assistantResultLifecycleRoundTripsAcrossDevices() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-result-lifecycle-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = LocalSQLiteStore(fileURL: root.appendingPathComponent("first.sqlite"))
+        let second = LocalSQLiteStore(fileURL: root.appendingPathComponent("second.sqlite"))
+        let resultID = "11111111-1111-4111-8111-111111111111"
+        var result = StoredAssistantResult(
+            id: resultID,
+            kind: .sentenceGloss,
+            status: .pending,
+            language: "zh-Hans",
+            model: "qwen3.5-plus-2026-08-01",
+            promptVersion: "qwen-managed-v3",
+            modelPolicyHash: String(repeating: "a", count: 64),
+            chapterID: ChapterID(rawValue: "chapter-decision"),
+            source: "Source sentence",
+            text: "accepted",
+            createdAt: Date(timeIntervalSince1970: 1),
+            sharedCacheEntryID: "22222222-2222-4222-8222-222222222222"
+        )
+
+        func change(sequence: Int, revision: Int) throws -> SyncPulledChange {
+            let data = try JSONEncoder.iso.encode(
+                StoredAssistantDecisionPayload(result: result, vocabulary: [])
+            )
+            return SyncPulledChange(
+                sequence: sequence,
+                entityType: OutboxEntityType.assistantResult.rawValue,
+                entityId: resultID,
+                operation: OutboxOperation.upsert.rawValue,
+                revision: revision,
+                changedAt: "2026-09-01T00:00:0\(sequence)Z",
+                payload: try JSONDecoder().decode([String: SyncJSONValue].self, from: data)
+            )
+        }
+
+        let generated = try change(sequence: 1, revision: 1)
+        try AccountSyncApplicator.applyPage([generated], cursor: "1", to: first)
+        try AccountSyncApplicator.applyPage([generated], cursor: "1", to: second)
+
+        func transition(
+            to status: AssistantResultStatus,
+            text: String,
+            sequence: Int,
+            configure: (inout StoredAssistantResult) -> Void = { _ in }
+        ) throws {
+            result.status = status
+            result.text = text
+            result.decidedAt = Date(timeIntervalSince1970: TimeInterval(sequence + 1))
+            configure(&result)
+            let encoded = try JSONEncoder.iso.encode(
+                StoredAssistantDecisionPayload(result: result, vocabulary: [])
+            )
+            let mutation = OutboxMutation(
+                id: MutationID(rawValue: UUID().uuidString.lowercased()),
+                entityType: .assistantResult,
+                entityID: resultID,
+                operation: .upsert,
+                baseRevision: ServerVersion(Int64(sequence - 1)),
+                occurredAt: result.decidedAt ?? result.createdAt,
+                payload: encoded
+            )
+            try first.updateAssistantResult(result, mutation: mutation)
+            let queued = try #require(try first.pendingMutations().first { $0.id == mutation.id })
+            #expect(queued.entityType == .assistantResult)
+            #expect(queued.entityID == resultID)
+            let queuedPayload = try JSONDecoder.iso.decode(
+                StoredAssistantDecisionPayload.self,
+                from: queued.payload
+            )
+            #expect(queuedPayload.result == result)
+            let pulledPayload = try JSONDecoder().decode([String: SyncJSONValue].self, from: queued.payload)
+            try AccountSyncApplicator.applyPage([
+                SyncPulledChange(
+                    sequence: sequence,
+                    entityType: queued.entityType.rawValue,
+                    entityId: queued.entityID,
+                    operation: queued.operation.rawValue,
+                    revision: sequence,
+                    changedAt: "2026-09-01T00:00:0\(sequence)Z",
+                    payload: pulledPayload
+                ),
+            ], cursor: String(sequence), to: second)
+            try first.markAcknowledged(id: mutation.id)
+        }
+
+        try transition(to: .accepted, text: "accepted", sequence: 2)
+        try transition(to: .edited, text: "edited", sequence: 3)
+        try transition(to: .replaced, text: "replacement", sequence: 4) { replacement in
+            replacement.model = "qwen3.5-plus-2026-08-31"
+            replacement.promptVersion = "qwen-managed-v4"
+            replacement.modelPolicyHash = String(repeating: "b", count: 64)
+        }
+
+        for store in [first, second] {
+            let current = try #require(try store.loadAssistantResults().first)
+            #expect(current.id == resultID)
+            #expect(current.status == .replaced)
+            #expect(current.model == "qwen3.5-plus-2026-08-31")
+            #expect(current.promptVersion == "qwen-managed-v4")
+            #expect(current.modelPolicyHash == String(repeating: "b", count: 64))
+            #expect(current.sharedCacheEntryID == "22222222-2222-4222-8222-222222222222")
+            #expect(try store.loadAssistantResultHistory(resultID: resultID).map(\.status) == [
+                .pending, .accepted, .edited, .replaced,
+            ])
+        }
+    }
+
+    @Test("Pulled assistant result restores result and derived vocabulary canonically")
+    func pulledTranslationDecisionRestoresLearningState() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-decision-pull-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library-vNext.sqlite"))
+        let result = StoredAssistantResult(
+            id: "decision-result",
+            kind: .sentenceGloss,
+            status: .accepted,
+            language: "zh-Hans",
+            model: "managed",
+            chapterID: ChapterID(rawValue: "chapter-decision"),
+            source: "Source sentence",
+            text: "译文",
+            createdAt: Date(timeIntervalSince1970: 1),
+            decidedAt: Date(timeIntervalSince1970: 2)
+        )
+        let vocabulary = StoredVocabularyOccurrence(
+            id: VocabularyOccurrenceID(rawValue: "decision-vocabulary"),
+            surface: "Source sentence",
+            captureSource: VocabularyCaptureSource.acceptedSentenceTranslation.rawValue,
+            reviewEligible: false,
+            category: VocabCategory.sentence.rawValue,
+            context: "Source sentence",
+            bookID: BookID(rawValue: "book-decision"),
+            bookTitle: "Book",
+            chapterID: ChapterID(rawValue: "chapter-decision"),
+            chapterTitle: "Chapter",
+            timestamp: 1,
+            addedAt: Date(timeIntervalSince1970: 2)
+        )
+        let payloadData = try JSONEncoder.iso.encode(
+            StoredAssistantDecisionPayload(result: result, vocabulary: [vocabulary])
+        )
+        let payload = try JSONDecoder().decode([String: SyncJSONValue].self, from: payloadData)
+        let change = SyncPulledChange(
+            sequence: 1,
+            entityType: OutboxEntityType.assistantResult.rawValue,
+            entityId: "11111111-1111-4111-8111-111111111111",
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 3,
+            changedAt: "2026-08-31T00:00:00Z",
+            payload: payload
+        )
+
+        try AccountSyncApplicator.applyPage([change], cursor: "1", to: store)
+
+        #expect(try store.loadAssistantResults() == [result])
+        #expect(try store.loadVocabulary() == [vocabulary])
+        #expect(try store.loadReviewCards().map(\.vocabularyID) == [vocabulary.id])
+        #expect(try store.loadVersion(entityType: change.entityType, entityID: change.entityId)?.serverVersion == 3)
+        #expect(try store.loadCursor() == "1")
+    }
+
+    @Test("Pulled decision cannot reduce a newer reviewed local schedule")
+    func pulledDecisionPreservesReviewedLocalRow() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-reviewed-decision-pull-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library-vNext.sqlite"))
+        var reviewed = StoredVocabularyOccurrence(
+            id: VocabularyOccurrenceID(rawValue: "reviewed-decision-vocabulary"),
+            surface: "Source sentence",
+            captureSource: VocabularyCaptureSource.acceptedSentenceTranslation.rawValue,
+            reviewEligible: true,
+            category: VocabCategory.sentence.rawValue,
+            context: "Source sentence",
+            bookID: BookID(rawValue: "book-decision"),
+            bookTitle: "Book",
+            chapterID: ChapterID(rawValue: "chapter-decision"),
+            chapterTitle: "Chapter",
+            timestamp: 1,
+            addedAt: Date(timeIntervalSince1970: 2)
+        )
+        reviewed.reviewCount = 5
+        reviewed.lastReviewedAt = Date(timeIntervalSince1970: 50)
+        reviewed.nextReview = Date(timeIntervalSince1970: 500)
+        reviewed.reviewIntervalDays = 14
+        reviewed.reviewEaseFactor = 2.8
+        try store.upsertVocabulary(reviewed)
+        let event = StoredReviewEvent(
+            id: ReviewEventID(rawValue: "reviewed-decision-event"),
+            vocabularyID: reviewed.id,
+            face: "recognition",
+            rating: "easy",
+            reviewedAt: reviewed.lastReviewedAt!
+        )
+        try store.appendReviewEvent(event, vocabulary: reviewed)
+        var pulled = reviewed
+        pulled.translation = "remote translation"
+        pulled.reviewCount = 0
+        pulled.lastReviewedAt = nil
+        pulled.nextReview = nil
+        pulled.reviewIntervalDays = 0
+        pulled.reviewEaseFactor = 2.5
+        let result = StoredAssistantResult(
+            id: "reviewed-decision-result",
+            kind: .sentenceGloss,
+            status: .accepted,
+            language: "zh-Hans",
+            model: "managed",
+            source: pulled.context,
+            text: "remote translation",
+            createdAt: Date(timeIntervalSince1970: 3)
+        )
+        let data = try JSONEncoder.iso.encode(StoredAssistantDecisionPayload(result: result, vocabulary: [pulled]))
+        let change = SyncPulledChange(
+            sequence: 1,
+            entityType: OutboxEntityType.assistantResult.rawValue,
+            entityId: "reviewed-decision-entity",
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-08-31T00:00:00Z",
+            payload: try JSONDecoder().decode([String: SyncJSONValue].self, from: data)
+        )
+
+        try AccountSyncApplicator.applyPage([change], cursor: "reviewed-1", to: store)
+
+        let persisted = try #require(try store.loadVocabulary().first)
+        #expect(persisted.translation == "remote translation")
+        #expect(persisted.reviewCount == 5)
+        #expect(persisted.lastReviewedAt == reviewed.lastReviewedAt)
+        #expect(persisted.nextReview == reviewed.nextReview)
+        #expect(try store.loadReviewEvents() == [event])
+        #expect(try store.loadCursor() == "reviewed-1")
+    }
+
+    @Test("Pulled rejected decision removes only its unreviewed derived row")
+    func pulledRejectedDecisionDoesNotResurrectAfterRelaunch() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-rejected-decision-pull-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("library-vNext.sqlite")
+        let store = LocalSQLiteStore(fileURL: url)
+        let derived = StoredVocabularyOccurrence(
+            id: VocabularyOccurrenceID(rawValue: "rejected-derived-vocabulary"),
+            surface: "Source sentence",
+            captureSource: VocabularyCaptureSource.acceptedSentenceTranslation.rawValue,
+            reviewEligible: false,
+            category: VocabCategory.sentence.rawValue,
+            context: "Source sentence",
+            bookID: BookID(rawValue: "book-decision"),
+            bookTitle: "Book",
+            chapterID: ChapterID(rawValue: "chapter-decision"),
+            chapterTitle: "Chapter",
+            timestamp: 1,
+            addedAt: Date(timeIntervalSince1970: 2)
+        )
+        try store.upsertVocabulary(derived)
+        let result = StoredAssistantResult(
+            id: "rejected-pulled-result",
+            kind: .sentenceGloss,
+            status: .rejected,
+            language: "zh-Hans",
+            model: "managed",
+            source: derived.context,
+            text: "rejected",
+            createdAt: Date(timeIntervalSince1970: 3),
+            decidedAt: Date(timeIntervalSince1970: 4)
+        )
+        let data = try JSONEncoder.iso.encode(StoredAssistantDecisionPayload(
+            result: result,
+            vocabulary: [],
+            removedVocabularyIDs: [derived.id]
+        ))
+        let change = SyncPulledChange(
+            sequence: 1,
+            entityType: OutboxEntityType.assistantResult.rawValue,
+            entityId: "rejected-decision-entity",
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-08-31T00:00:00Z",
+            payload: try JSONDecoder().decode([String: SyncJSONValue].self, from: data)
+        )
+
+        try AccountSyncApplicator.applyPage([change], cursor: "rejected-1", to: store)
+
+        let relaunched = LocalSQLiteStore(fileURL: url)
+        #expect(try relaunched.loadAssistantResults() == [result])
+        #expect(try relaunched.loadVocabulary().isEmpty)
+        #expect(try relaunched.loadReviewCards().isEmpty)
+        #expect(try relaunched.loadCursor() == "rejected-1")
     }
 
     @MainActor
@@ -1185,35 +2006,46 @@ struct AccountSessionFlowTests {
             ]
         )
     }
-}
 
-private enum MirrorRepairTestError: Error {
-    case writeFailed
-}
-
-private final class LockingValue<Value>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storage: Value
-
-    init(_ value: Value) {
-        storage = value
+    private func legacyVocabularyChange(
+        id: String,
+        category: VocabCategory,
+        state: String
+    ) -> SyncPulledChange {
+        SyncPulledChange(
+            sequence: id == "legacy-sentence" ? 1 : (id == "legacy-phrase" ? 2 : 3),
+            entityType: OutboxEntityType.vocabulary.rawValue,
+            entityId: id,
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T00:00:00Z",
+            payload: [
+                "bookId": .string("book"),
+                "chapterId": .string("chapter"),
+                "bookTitle": .string("Book"),
+                "chapterTitle": .string("Chapter"),
+                "surface": .string(category == .sentence ? "A translated sentence." : "axes"),
+                "category": .string(category.rawValue),
+                "context": .string("The axes crossed."),
+                "timestampSeconds": .number(1),
+                "state": .string(state)
+            ]
+        )
     }
 
-    var value: Value {
-        get { lock.withLock { storage } }
-        set { lock.withLock { storage = newValue } }
-    }
-}
-
-private final class LockingCounter: @unchecked Sendable {
-    private let lock = NSLock()
-    private var count = 0
-
-    var value: Int {
-        lock.withLock { count }
-    }
-
-    func increment() {
-        lock.withLock { count += 1 }
+    private func pulledVocabularyChange(
+        from mutation: OutboxMutation,
+        payload: [String: SyncJSONValue],
+        sequence: Int = 1
+    ) -> SyncPulledChange {
+        SyncPulledChange(
+            sequence: sequence,
+            entityType: mutation.entityType.rawValue,
+            entityId: mutation.entityID,
+            operation: mutation.operation.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T00:00:00Z",
+            payload: payload
+        )
     }
 }

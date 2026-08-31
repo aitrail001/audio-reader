@@ -37,6 +37,11 @@ export const CORE_TABLES = [
   "user_analytics_preferences",
   "user_progress_summaries",
   "object_write_leases",
+  "service_schema_versions",
+  "asset_manifests_v2",
+  "sync_v2_changes",
+  "sync_v2_batches",
+  "sync_v2_mutation_outcomes",
 ] as const;
 
 export type CoreTable = (typeof CORE_TABLES)[number];
@@ -68,6 +73,10 @@ export const PRIVATE_TABLES = [
   "admin_roles",
   "privacy_requests",
   "object_write_leases",
+  "asset_manifests_v2",
+  "sync_v2_changes",
+  "sync_v2_batches",
+  "sync_v2_mutation_outcomes",
 ] as const;
 
 export const OPTIONAL_OWNER_TABLES = ["assistant_jobs"] as const;
@@ -81,6 +90,7 @@ export const TENANT_PARENT_TABLES = [
   "transcript_revisions",
   "review_cards",
   "user_assistant_results",
+  "asset_manifests_v2",
 ] as const;
 
 export const GLOBAL_TABLES = [
@@ -92,13 +102,20 @@ export const GLOBAL_TABLES = [
   "model_policies",
   "audit_events",
   "operator_settings",
+  "service_schema_versions",
 ] as const;
 
 /** Synchronized private rows plus user-filed privacy requests. */
 export const USER_OWNED_TABLES = [...SYNC_TABLES, "privacy_requests"] as const;
 
 /** Server-written private rows a user JWT may read for themselves only. */
-export const USER_READ_OWN_TABLES = ["assistant_jobs", "usage_ledger", "sync_changes"] as const;
+export const USER_READ_OWN_TABLES = [
+  "assistant_jobs",
+  "usage_ledger",
+  "sync_changes",
+  "asset_manifests_v2",
+  "sync_v2_changes",
+] as const;
 
 /** Named tables a normal user JWT must not read or write. */
 export const JWT_DENIED_TABLES = [
@@ -115,6 +132,9 @@ export const JWT_DENIED_TABLES = [
   "user_analytics_preferences",
   "user_progress_summaries",
   "object_write_leases",
+  "service_schema_versions",
+  "sync_v2_batches",
+  "sync_v2_mutation_outcomes",
 ] as const;
 
 /** RLS enabled, no authenticated policies. Includes JWT-denied tables. */
@@ -134,6 +154,16 @@ export const TRANSACTION_FUNCTIONS = [
   "claim_idempotency_record",
   "record_idempotency_response",
   "abort_idempotency_record",
+  "reserve_v2_asset_upload",
+  "sync_v2_json_is_bounded",
+  "complete_v2_asset_and_publish",
+  "push_sync_v2_batch",
+  "record_user_assistant_result",
+  "pull_sync_v2_page",
+  "bootstrap_sync_v2_page",
+  "gc_abandoned_v2_uploads",
+  "finish_v2_asset_upload_gc",
+  "cleanup_obsolete_v1_data",
   "push_sync_batch",
   "pull_sync_page",
   "append_sync_change",
@@ -149,6 +179,9 @@ export const TRANSACTION_FUNCTIONS = [
   "request_account_deletion",
   "claim_assistant_jobs",
 ] as const;
+
+/** Latest database contract that account sync must prove before it can become effective. */
+export const ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION = "20260831133000" as const;
 
 export const AUDIT_ACTOR_TYPES = ["user", "admin", "system"] as const;
 

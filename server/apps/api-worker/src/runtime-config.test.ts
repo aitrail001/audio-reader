@@ -36,10 +36,76 @@ describe("runtime config wrapping", () => {
       wrappingSecret: "test-operator-secret-key",
     });
 
-    await expect((await runtime.resolveStorage({ useFakes: false })).ping()).resolves.toBe(
+    await expect((await runtime.resolveStorage({ useFakes: false })).store.ping()).resolves.toBe(
       "unavailable",
     );
     await expect(runtime.view()).resolves.toMatchObject({ storage: { provider: "none" } });
+  });
+
+  it("returns one atomic provider selection and never falls back from malformed selected GCS to Supabase", async () => {
+    const database = createFakeDatabaseClient();
+    const runtime = createRuntimeConfigService({
+      env: {
+        ENVIRONMENT: "production",
+        GCS_BUCKET: "selected-gcs",
+        GCS_SERVICE_ACCOUNT_JSON: "{malformed",
+        SUPABASE_URL: "https://example.supabase.co",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+        SUPABASE_STORAGE_BUCKET: "fallback-that-must-not-be-used",
+      },
+      ops: database.ops,
+      wrappingSecret: "test-operator-secret-key",
+    });
+
+    const resolved = await runtime.resolveStorage({ useFakes: false });
+    expect(resolved.descriptor).toMatchObject({
+      provider: "gcs",
+      bucket: "selected-gcs",
+      credentialsConfigured: false,
+    });
+    await expect(resolved.store.ping()).resolves.toBe("unavailable");
+    await expect(runtime.view()).resolves.toMatchObject({
+      storage: { provider: "gcs", bucket: "selected-gcs", credentialsConfigured: false },
+    });
+  });
+
+  it("does not relabel a stale partial GCS environment as the valid Supabase provider", async () => {
+    const database = createFakeDatabaseClient();
+    const runtime = createRuntimeConfigService({
+      env: {
+        ENVIRONMENT: "production",
+        GCS_SERVICE_ACCOUNT_JSON: "{}",
+        SUPABASE_URL: "https://example.supabase.co",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+        SUPABASE_STORAGE_BUCKET: "supabase-assets",
+      },
+      ops: database.ops,
+      wrappingSecret: "test-operator-secret-key",
+    });
+
+    const resolved = await runtime.resolveStorage({ useFakes: false });
+    expect(resolved.descriptor.provider).toBe("gcs");
+    expect(resolved.descriptor.bucket).toBeUndefined();
+    await expect(resolved.store.ping()).resolves.toBe("unavailable");
+  });
+
+  it("selects an R2 binding but fails credentials closed without scoped privacy proof", async () => {
+    const database = createFakeDatabaseClient();
+    const runtime = createRuntimeConfigService({
+      env: {
+        ENVIRONMENT: "production",
+        ASSETS: {} as R2Bucket,
+      },
+      ops: database.ops,
+      wrappingSecret: "test-operator-secret-key",
+    });
+
+    await expect(runtime.resolveStorage({ useFakes: false })).resolves.toMatchObject({
+      descriptor: {
+        provider: "r2",
+        credentialsConfigured: false,
+      },
+    });
   });
 
   it("marks saved secrets undecryptable when the wrapping key changed", async () => {

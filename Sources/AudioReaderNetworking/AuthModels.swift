@@ -217,6 +217,137 @@ public struct FeatureFlag: Codable, Equatable, Sendable {
     }
 }
 
+/// Server-derived readiness is authoritative; native code must not infer cloud safety from config.
+public struct AccountSyncReadiness: Codable, Equatable, Sendable {
+    public var minAppVersion: String?
+    public var requiredSchemaVersion: String
+    public var schemaReady: Bool
+    public var provider: String
+    public var bucket: String?
+    public var credentialStatus: String
+    public var uploadStatus: String
+    public var downloadStatus: String
+    public var checksumStatus: String
+    public var deleteStatus: String
+    public var notFoundStatus: String
+    public var ready: Bool
+    public var requested: Bool
+    public var effective: Bool
+    public var reason: String?
+    public var checkedAt: String
+    public var cachedUntil: String
+    public var retryAfterSeconds: Int
+    public var lastSuccessAt: String?
+    public var lastFailureAt: String?
+    public var lastFailureCode: String?
+    public var lastFailureDetail: String?
+
+    public init(
+        minAppVersion: String? = "2.0.0",
+        requiredSchemaVersion: String = "20260830123000",
+        schemaReady: Bool = true,
+        provider: String = "memory",
+        bucket: String? = "local-test",
+        credentialStatus: String = "ok",
+        uploadStatus: String = "ok",
+        downloadStatus: String = "ok",
+        checksumStatus: String = "ok",
+        deleteStatus: String = "ok",
+        notFoundStatus: String = "ok",
+        ready: Bool = true,
+        requested: Bool = true,
+        effective: Bool = true,
+        reason: String? = nil,
+        checkedAt: String = "1970-01-01T00:00:00Z",
+        cachedUntil: String = "1970-01-01T00:00:30Z",
+        retryAfterSeconds: Int = 30,
+        lastSuccessAt: String? = nil,
+        lastFailureAt: String? = nil,
+        lastFailureCode: String? = nil,
+        lastFailureDetail: String? = nil
+    ) {
+        self.minAppVersion = minAppVersion
+        self.requiredSchemaVersion = requiredSchemaVersion
+        self.schemaReady = schemaReady
+        self.provider = provider
+        self.bucket = bucket
+        self.credentialStatus = credentialStatus
+        self.uploadStatus = uploadStatus
+        self.downloadStatus = downloadStatus
+        self.checksumStatus = checksumStatus
+        self.deleteStatus = deleteStatus
+        self.notFoundStatus = notFoundStatus
+        self.ready = ready
+        self.requested = requested
+        self.effective = effective
+        self.reason = reason
+        self.checkedAt = checkedAt
+        self.cachedUntil = cachedUntil
+        self.retryAfterSeconds = retryAfterSeconds
+        self.lastSuccessAt = lastSuccessAt
+        self.lastFailureAt = lastFailureAt
+        self.lastFailureCode = lastFailureCode
+        self.lastFailureDetail = lastFailureDetail
+    }
+
+    public static let notConfigured = AccountSyncReadiness(
+        schemaReady: false,
+        provider: "none",
+        bucket: nil,
+        credentialStatus: "not_checked",
+        uploadStatus: "not_checked",
+        downloadStatus: "not_checked",
+        checksumStatus: "not_checked",
+        deleteStatus: "not_checked",
+        notFoundStatus: "not_checked",
+        ready: false,
+        requested: false,
+        effective: false,
+        reason: "storage_not_configured",
+        retryAfterSeconds: 5
+    )
+
+    public var pausedDescription: String {
+        switch reason {
+        case "upgrade_required": "Paused — update AudioReader to continue syncing"
+        case "required_schema_unavailable": "Paused — required sync schema unavailable"
+        case "storage_not_configured": "Paused — object storage not configured"
+        case "storage_bucket_missing": "Paused — storage bucket missing"
+        case "storage_credentials_missing": "Paused — storage credentials missing"
+        case "storage_credentials_invalid": "Paused — storage credentials unavailable"
+        case "storage_public_access_allowed": "Paused — storage is publicly accessible"
+        case "storage_privacy_verification_failed": "Paused — storage privacy verification unavailable"
+        case "storage_upload_failed": "Paused — storage upload unavailable"
+        case "storage_download_failed": "Paused — storage download unavailable"
+        case "storage_checksum_mismatch": "Paused — storage verification failed"
+        case "storage_delete_failed", "storage_delete_verification_failed":
+            "Paused — storage cleanup verification failed"
+        default: "Paused — account sync unavailable"
+        }
+    }
+}
+
+public extension AccountSyncReadiness {
+    /// Bootstrap remains authoritative, with a native semver fence before sync controls become usable.
+    func enforcingAppVersion(_ appVersion: String) -> AccountSyncReadiness {
+        guard let minAppVersion,
+              Self.semanticVersion(appVersion).lexicographicallyPrecedes(Self.semanticVersion(minAppVersion)) else {
+            return self
+        }
+        var copy = self
+        copy.effective = false
+        copy.reason = "upgrade_required"
+        return copy
+    }
+
+    private static func semanticVersion(_ value: String) -> [Int] {
+        let parts = value.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return [Int.max, Int.max, Int.max] }
+        let parsed = parts.compactMap { Int($0) }
+        return parsed.count == 3 ? parsed : [Int.max, Int.max, Int.max]
+    }
+}
+
 public struct Quota: Codable, Equatable, Sendable {
     public var key: String
     public var used: Double
@@ -285,19 +416,22 @@ public struct BootstrapResponse: Codable, Equatable, Sendable {
     public var syncCursor: String?
     public var featureFlags: [FeatureFlag]
     public var quotas: [Quota]
+    public var accountSyncReadiness: AccountSyncReadiness
 
     public init(
         profile: AccountProfile,
         device: AccountDevice,
         syncCursor: String?,
         featureFlags: [FeatureFlag] = [],
-        quotas: [Quota] = []
+        quotas: [Quota] = [],
+        accountSyncReadiness: AccountSyncReadiness = AccountSyncReadiness()
     ) {
         self.profile = profile
         self.device = device
         self.syncCursor = syncCursor
         self.featureFlags = featureFlags
         self.quotas = quotas
+        self.accountSyncReadiness = accountSyncReadiness
     }
 
     public init(from decoder: Decoder) throws {
@@ -307,6 +441,7 @@ public struct BootstrapResponse: Codable, Equatable, Sendable {
         syncCursor = try container.decodeIfPresent(String.self, forKey: .syncCursor)
         featureFlags = try container.decodeIfPresent([FeatureFlag].self, forKey: .featureFlags) ?? []
         quotas = try container.decodeIfPresent([Quota].self, forKey: .quotas) ?? []
+        accountSyncReadiness = try container.decode(AccountSyncReadiness.self, forKey: .accountSyncReadiness)
     }
 }
 

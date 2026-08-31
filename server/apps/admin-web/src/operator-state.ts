@@ -90,6 +90,14 @@ export function quotaReductionNeedsConfirmation(before: number, after: number): 
   return before > 0 && after <= before * 0.5;
 }
 
+/** A temporary outage must not erase requested-on; it only blocks a new enable request. */
+export function canToggleAccountSync(
+  flag: Pick<{ enabled: boolean }, "enabled">,
+  readiness: Pick<{ ready: boolean }, "ready"> | null,
+): boolean {
+  return flag.enabled || readiness?.ready === true;
+}
+
 export function policyDraftErrors(draft: PolicyDraft): Record<string, string> {
   const errors: Record<string, string> = {};
   if (draft.model.trim() === "") errors.model = "Model is required.";

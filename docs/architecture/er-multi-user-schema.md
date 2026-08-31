@@ -11,7 +11,7 @@ transaction functions. Tables, policies, and RPCs come from versioned SQL in
 | Private, synchronized | `profiles`, `devices`, `user_settings`, `books`, `book_assets`, `chapters`, `reading_progress`, `transcript_revisions`, `transcript_segments`, `vocabulary_occurrences`, `known_lemmas`, `review_cards`, `review_events`, `user_assistant_results`  |
 | Private, user-filed   | `privacy_requests` (authenticated JWT may CRUD own rows)                                                                                                                                                                                            |
 | Private, server-owned | `assistant_jobs`, `usage_ledger`, `sync_changes`, `sync_batches`, `sync_mutation_outcomes`, `idempotency_records`, `admin_roles`, `chat_messages`, `product_events`, `user_analytics_preferences`, `user_progress_summaries`, `object_write_leases` |
-| Global / operational  | `canonical_works`, `canonical_editions`, `assistant_cache_entries`, `feature_flags`, `quota_limits`, `model_policies`, `audit_events`, `operator_settings`, `passwordless_hits`, `passwordless_cooldowns`, `passwordless_blocked_attempts`          |
+| Global / operational  | `canonical_works`, `canonical_editions`, `assistant_cache_entries`, `feature_flags`, `quota_limits`, `model_policies`, `audit_events`, `operator_settings`, `service_schema_versions`, `passwordless_hits`, `passwordless_cooldowns`, `passwordless_blocked_attempts`          |
 
 Synchronized private rows carry `id`, `user_id`, `created_at`, `updated_at`,
 `server_version`, `deleted_at`, and `last_mutation_id`. Authorization fields are
@@ -19,6 +19,9 @@ relational columns, not JSON. Child rows use composite tenant FKs such as
 `(user_id, book_id) REFERENCES books (user_id, id)`. `assistant_cache_entries`
 stores no `user_id` and no source passage. Sentence rows key on source text plus
 languages/level/edition/policy; word rows also digest the containing sentence.
+`user_assistant_results` stores complete private output plus append-only decision
+history and model provenance. Its optional cache foreign key uses `ON DELETE SET
+NULL`, so shared-cache eviction cannot remove accepted or edited content.
 In-flight `assistant_jobs` keep their
 `cache_key` claim if the first requester is deleted (`user_id` is `ON DELETE SET NULL`).
 
@@ -136,3 +139,10 @@ final provider sweep before the profile cascade removes the lease rows.
 `audit_events` are immutable: a before-row trigger stamps `created_at`, redacts
 sensitive metadata, and rejects update/delete. The partial unique index
 `assistant_jobs_inflight_cache_key_uidx` is the final single-flight guarantee.
+
+The clean object-backed generation uses `asset_manifests_v2`, `sync_v2_changes`,
+`sync_v2_batches`, and `sync_v2_mutation_outcomes`. It never bootstraps from the
+legacy sync log. `complete_v2_asset_and_publish` is the transaction boundary that
+makes a verified immutable manifest ready and publishes its compact v2 cursor
+reference. Abandoned pending uploads and obsolete v1 records are removed only by
+explicit bounded maintenance operations.

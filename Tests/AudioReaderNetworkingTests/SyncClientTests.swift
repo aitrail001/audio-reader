@@ -4,8 +4,105 @@ import Testing
 @testable import AudioReaderLocalStore
 @testable import AudioReaderNetworking
 
+private func syncAssetFile(_ bytes: Data) throws -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("AudioReaderSyncTest-\(UUID().uuidString).object")
+    try bytes.write(to: url)
+    return url
+}
+
 @Suite("Product sync client")
 struct SyncClientTests {
+    @MainActor
+    @Test("Native refuses a new sync request when bootstrap says effective sync is unavailable")
+    func unavailableBootstrapPreventsEnablingSync() async {
+        let auth = FakeAuthClient()
+        auth.bootstrapReadiness = AccountSyncReadiness(
+            schemaReady: true,
+            provider: "r2",
+            bucket: "ASSETS",
+            credentialStatus: "failed",
+            ready: false,
+            requested: false,
+            effective: false,
+            reason: "storage_credentials_invalid",
+            retryAfterSeconds: 5
+        )
+        let session = AccountSession.isolated(client: auth)
+        await session.requestEmailCode("unavailable-sync@example.com")
+        await session.verifyEmailCode("123456")
+
+        session.setSyncEnabled(true)
+
+        #expect(session.mode == .signedInSyncOff)
+        #expect(session.errorMessage?.contains("storage credentials") == true)
+    }
+
+    @MainActor
+    @Test("A storage outage pauses without local mutation and automatically resumes after recovery")
+    func storageOutagePausesWithoutMutationAndLaterResumes() async throws {
+        let auth = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        let outbox = InMemorySyncOutboxRepository()
+        let cursor = InMemorySyncCursorStore(cursor: "7")
+        let mutation = OutboxMutation(
+            id: MutationID(rawValue: "00000000-0000-4000-8000-000000000101"),
+            entityType: .vocabulary,
+            entityID: "10000000-0000-4000-8000-000000000101",
+            operation: .upsert,
+            baseRevision: .zero,
+            occurredAt: Date(timeIntervalSince1970: 1_777_000_000),
+            payload: Data(#"{"surface":"pause"}"#.utf8)
+        )
+        try outbox.enqueue(mutation)
+        let session = AccountSession(
+            client: auth,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(client: sync, outbox: outbox, cursor: cursor)
+        )
+        await session.requestEmailCode("paused-sync@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+        try cursor.saveCursor("7")
+        auth.bootstrapReadiness = AccountSyncReadiness(
+            schemaReady: true,
+            provider: "gcs",
+            bucket: "private-sync",
+            credentialStatus: "failed",
+            uploadStatus: "not_checked",
+            downloadStatus: "not_checked",
+            checksumStatus: "not_checked",
+            deleteStatus: "not_checked",
+            notFoundStatus: "not_checked",
+            ready: false,
+            requested: true,
+            effective: false,
+            reason: "storage_credentials_invalid",
+            retryAfterSeconds: 1,
+            lastFailureAt: "2026-08-31T00:00:00Z",
+            lastFailureCode: "storage_credentials_invalid",
+            lastFailureDetail: "Object storage credentials could not access the configured bucket."
+        )
+
+        await session.synchronize()
+
+        #expect(session.mode == .signedInSyncOn)
+        #expect(session.syncStatus.phase == .paused)
+        #expect(session.syncStatus.detail.contains("storage credentials"))
+        #expect(try outbox.pendingMutations().map(\.id) == [mutation.id])
+        #expect(try cursor.loadCursor() == "7")
+        #expect(sync.pushed.isEmpty)
+
+        auth.bootstrapReadiness = AccountSyncReadiness()
+        try await Task.sleep(for: .milliseconds(1_200))
+
+        #expect(session.syncStatus.phase == .completed)
+        #expect(try outbox.pendingMutations().isEmpty)
+    }
+
     @Test("pulled transcript overlays apply after their immutable base transcript")
     func transcriptOverlayOrdering() {
         let overlay = SyncPulledChange(
@@ -69,7 +166,7 @@ struct SyncClientTests {
         )
         #expect(pushed.cursor == "1")
         #expect(pushed.results.first?.status == "applied")
-        #expect(http.requests.first?.path == "/v1/sync/push")
+        #expect(http.requests.first?.path == "/v2/sync/push")
         let pushBody = try #require(http.requests.first?.body)
         let expectedDigest = SHA256.hash(data: pushBody).map { String(format: "%02x", $0) }.joined()
         #expect(http.requests.first?.headers["X-Content-SHA256"] == expectedDigest)
@@ -82,7 +179,7 @@ struct SyncClientTests {
         )
         #expect(pulled.changes.count == 1)
         #expect(pulled.changes.first?.payload["targetLanguage"]?.stringValue == "zh")
-        #expect(http.requests.last?.path.contains("/v1/sync/pull") == true)
+        #expect(http.requests.last?.path.contains("/v2/sync/pull") == true)
     }
 
     @Test("bootstrap reads latest entity state, manifest hashes, and a consistent cursor")
@@ -107,7 +204,7 @@ struct SyncClientTests {
         #expect(bootstrapped.cursor == "9")
         #expect(bootstrapped.entities.first?.revision == 3)
         #expect(bootstrapped.entities.first?.payloadHash.count == 64)
-        #expect(http.requests.first?.path.contains("/v1/sync/bootstrap?offset=0&limit=100") == true)
+        #expect(http.requests.first?.path.contains("/v2/sync/bootstrap?offset=0&limit=100") == true)
     }
 
     @Test("pulled changes apply vocabulary before progress and reviews")
@@ -363,6 +460,271 @@ struct AccountSessionSyncTests {
         #expect(session.syncStatus.appliedCount == 0)
     }
 
+    @MainActor
+    @Test("a new device hydrates and verifies transcript manifests during bootstrap before committing its cursor")
+    func bootstrapHydratesTranscriptManifestBeforeApply() async throws {
+        let auth = FakeAuthClient()
+        let sync = FakeSyncClient()
+        let bytes = Data(#"{"chapterID":"local-chapter","segments":[]}"#.utf8)
+        let sha = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let assetID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let revisionID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        sync.seedAssetBody(assetID: assetID, bytes: bytes)
+        sync.pullCursor = "7"
+        sync.bootstrapPages = [
+            SyncBootstrapResponse(
+                entities: [
+                    SyncBootstrapEntity(
+                        sequence: 7,
+                        entityType: OutboxEntityType.transcript.rawValue,
+                        entityId: revisionID,
+                        operation: OutboxOperation.upsert.rawValue,
+                        revision: 1,
+                        changedAt: "2026-08-31T00:00:00Z",
+                        payload: [
+                            "assetId": .string(assetID),
+                            "revisionId": .string(revisionID),
+                            "chapterId": .string("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+                            "sha256": .string(sha),
+                            "encoding": .string("identity-json-v1"),
+                            "compressedBytes": .number(Double(bytes.count)),
+                            "originalBytes": .number(Double(bytes.count)),
+                            "segmentCount": .number(0),
+                        ],
+                        payloadHash: SyncJSONCoding.payloadHash(
+                            SyncJSONCoding.data(from: ["assetId": .string(assetID)])
+                        )
+                    )
+                ],
+                cursor: "7",
+                nextOffset: 1,
+                hasMore: false
+            )
+        ]
+        let cursor = InMemorySyncCursorStore()
+        let hydrated = LockingBox<(bytes: Data?, path: String?)>((nil, nil))
+        let session = AccountSession(
+            client: auth,
+            store: InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: InMemorySyncOutboxRepository(),
+                cursor: cursor,
+                snapshot: { [] },
+                applyPage: { changes, _, committedCursor in
+                    if let path = changes.first?.payload["localObjectPath"]?.stringValue {
+                        hydrated.value = (try Data(contentsOf: URL(fileURLWithPath: path)), path)
+                    }
+                    try cursor.saveCursor(committedCursor)
+                }
+            )
+        )
+        await session.requestEmailCode("bootstrap-transcript@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        #expect(hydrated.value.bytes == bytes)
+        #expect(try cursor.loadCursor() == "7")
+        #expect(hydrated.value.path.map { !FileManager.default.fileExists(atPath: $0) } == true)
+    }
+
+    @MainActor
+    @Test("a failed bootstrap download removes earlier transcript temp files and keeps the cursor")
+    func bootstrapTranscriptDownloadFailureCleansTempsAndRollsBackCursor() async throws {
+        let auth = FakeAuthClient()
+        let sync = FakeSyncClient()
+        let bytes = Data(#"{"chapterID":"local-chapter","segments":[]}"#.utf8)
+        let sha = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let presentAssetID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        sync.seedAssetBody(assetID: presentAssetID, bytes: bytes)
+        let manifest: (Int, String, String) -> SyncBootstrapEntity = { sequence, assetID, revisionID in
+            SyncBootstrapEntity(
+                sequence: sequence,
+                entityType: OutboxEntityType.transcript.rawValue,
+                entityId: revisionID,
+                operation: OutboxOperation.upsert.rawValue,
+                revision: 1,
+                changedAt: "2026-08-31T00:00:00Z",
+                payload: [
+                    "assetId": .string(assetID),
+                    "revisionId": .string(revisionID),
+                    "chapterId": .string("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+                    "sha256": .string(sha),
+                    "encoding": .string("identity-json-v1"),
+                    "compressedBytes": .number(Double(bytes.count)),
+                    "originalBytes": .number(Double(bytes.count)),
+                    "segmentCount": .number(0),
+                ],
+                payloadHash: sha
+            )
+        }
+        sync.bootstrapPages = [
+            SyncBootstrapResponse(
+                entities: [
+                    manifest(1, presentAssetID, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1"),
+                    manifest(
+                        2,
+                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+                        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2"
+                    ),
+                ],
+                cursor: "2",
+                nextOffset: 2,
+                hasMore: false
+            )
+        ]
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioReaderSyncAssets-v2", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let before = Set(try FileManager.default.contentsOfDirectory(atPath: directory.path))
+        let cursor = InMemorySyncCursorStore()
+        let applied = LockingBox(false)
+        let session = AccountSession(
+            client: auth,
+            store: InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: InMemorySyncOutboxRepository(),
+                cursor: cursor,
+                snapshot: { [] },
+                applyPage: { _, _, _ in applied.value = true }
+            )
+        )
+        await session.requestEmailCode("bootstrap-transcript-failure@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        #expect(session.syncStatus.phase == .failed)
+        #expect(!applied.value)
+        #expect(try cursor.loadCursor() == "0")
+        #expect(Set(try FileManager.default.contentsOfDirectory(atPath: directory.path)) == before)
+    }
+
+    @MainActor
+    @Test("a new device discovers and hydrates every v2 immutable asset kind before cursor commit")
+    func bootstrapHydratesEveryAssetKind() async throws {
+        let auth = FakeAuthClient()
+        let sync = FakeSyncClient()
+        var expected: [String: Data] = [:]
+        let entities = SyncAssetKind.allCases.enumerated().map { index, kind in
+            let assetID = String(format: "aaaaaaaa-aaaa-4aaa-8aaa-%012d", index + 1)
+            let entityID = String(format: "bbbbbbbb-bbbb-4bbb-8bbb-%012d", index + 1)
+            let bytes = kind == .transcriptRevision
+                ? Data(#"{"segments":[]}"#.utf8) : Data([UInt8(index + 1)])
+            let sha = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+            sync.seedAssetBody(assetID: assetID, bytes: bytes, kind: kind)
+            expected[kind.rawValue] = bytes
+            return SyncBootstrapEntity(
+                sequence: index + 1,
+                entityType: kind == .transcriptRevision
+                    ? OutboxEntityType.transcript.rawValue : OutboxEntityType.asset.rawValue,
+                entityId: entityID, operation: OutboxOperation.upsert.rawValue,
+                revision: 1, changedAt: "2026-08-31T00:00:00Z",
+                payload: [
+                    "assetId": .string(assetID), "kind": .string(kind.rawValue),
+                    "revisionId": .string(entityID), "sha256": .string(sha),
+                    "encoding": .string(kind == .transcriptRevision ? "identity-json-v1" : "identity"),
+                    "compressedBytes": .number(Double(bytes.count)),
+                    "originalBytes": .number(Double(bytes.count)),
+                    "segmentCount": kind == .transcriptRevision ? .number(0) : .null,
+                ],
+                payloadHash: sha
+            )
+        }
+        sync.bootstrapPages = [SyncBootstrapResponse(
+            entities: entities, cursor: "11", nextOffset: 11, hasMore: false
+        )]
+        sync.pullCursor = "11"
+        let cursor = InMemorySyncCursorStore()
+        let hydrated = LockingBox<[String: Data]>([:])
+        let session = AccountSession(
+            client: auth, store: InMemoryAuthSessionStore(),
+            oauth: ScriptedOAuthBrowserSession.passthrough(), environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync, outbox: InMemorySyncOutboxRepository(), cursor: cursor,
+                snapshot: { [] },
+                applyPage: { changes, _, committedCursor in
+                    for change in changes {
+                        guard let kind = change.payload["kind"]?.stringValue,
+                              let path = change.payload["localObjectPath"]?.stringValue else { continue }
+                        hydrated.value[kind] = try Data(contentsOf: URL(fileURLWithPath: path))
+                    }
+                    try cursor.saveCursor(committedCursor)
+                }
+            )
+        )
+        await session.requestEmailCode("bootstrap-all-assets@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+        await session.synchronize()
+
+        #expect(hydrated.value == expected)
+        #expect(try cursor.loadCursor() == "11")
+    }
+
+    @MainActor
+    @Test("native hydration resolves an announced 501st asset directly by ID")
+    func hydrationResolvesAssetBeyondDiscoveryWindow() async throws {
+        let auth = FakeAuthClient()
+        let sync = FakeSyncClient()
+        var targetID = ""
+        var targetBytes = Data()
+        for index in 0...500 {
+            let assetID = String(format: "aaaaaaaa-aaaa-4aaa-8aaa-%012d", index + 1)
+            let bytes = Data([UInt8(index % 251)])
+            sync.seedAssetBody(assetID: assetID, bytes: bytes, kind: .cover)
+            targetID = assetID
+            targetBytes = bytes
+        }
+        let sha = SHA256.hash(data: targetBytes).map { String(format: "%02x", $0) }.joined()
+        sync.bootstrapPages = [SyncBootstrapResponse(entities: [SyncBootstrapEntity(
+            sequence: 1, entityType: OutboxEntityType.asset.rawValue,
+            entityId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", operation: OutboxOperation.upsert.rawValue,
+            revision: 1, changedAt: "2026-08-31T00:00:00Z",
+            payload: [
+                "assetId": .string(targetID), "kind": .string(SyncAssetKind.cover.rawValue),
+                "sha256": .string(sha), "encoding": .string("identity"),
+                "compressedBytes": .number(Double(targetBytes.count)),
+                "originalBytes": .number(Double(targetBytes.count)),
+            ], payloadHash: sha
+        )], cursor: "1", nextOffset: 1, hasMore: false)]
+        sync.pullCursor = "1"
+        let cursor = InMemorySyncCursorStore()
+        let hydrated = LockingBox<Data?>(nil)
+        let session = AccountSession(
+            client: auth, store: InMemoryAuthSessionStore(),
+            oauth: ScriptedOAuthBrowserSession.passthrough(), environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync, outbox: InMemorySyncOutboxRepository(), cursor: cursor,
+                snapshot: { [] },
+                applyPage: { changes, _, committedCursor in
+                    if let path = changes.first?.payload["localObjectPath"]?.stringValue {
+                        hydrated.value = try Data(contentsOf: URL(fileURLWithPath: path))
+                    }
+                    try cursor.saveCursor(committedCursor)
+                }
+            )
+        )
+        await session.requestEmailCode("direct-asset@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        #expect(hydrated.value == targetBytes)
+        #expect(sync.manifestLookups == [targetID])
+        #expect(sync.discoveryQueryCount == 0)
+        #expect(try cursor.loadCursor() == "1")
+    }
+
     @Test("payload hashing canonicalizes JSON but preserves raw fallback semantics")
     func payloadHashCanonicalizesJSON() {
         let left = Data("{ \"z\": [ { \"b\": 2, \"a\": 1 } ], \"a\": { \"y\": true, \"x\": null } }".utf8)
@@ -372,6 +734,312 @@ struct AccountSessionSyncTests {
         let malformed = Data("not-json".utf8)
         let expectedRawHash = SHA256.hash(data: malformed).map { String(format: "%02x", $0) }.joined()
         #expect(SyncJSONCoding.payloadHash(malformed) == expectedRawHash)
+    }
+
+    @Test("transcript revisions use the private v2 asset lifecycle")
+    func transcriptRevisionPublishesAsPrivateAsset() async throws {
+        let http = StubHTTPClient()
+        let bytes = Data(#"{"chapterID":"chapter","segments":[]}"#.utf8)
+        let fileURL = try syncAssetFile(bytes)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let sha = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        http.enqueue(status: 200, json: #"{"uploadId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","url":"https://objects.example/private/v2/pending/upload"}"#)
+        http.enqueue(status: 200, body: Data())
+        http.enqueue(status: 200, json: #"{"id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","status":"ready"}"#)
+
+        try await ProductSyncClient(http: http).publishAsset(
+            accessToken: "access",
+            deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            asset: SyncAssetUpload(
+                revisionID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                chapterID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                sha256: sha,
+                originalBytes: bytes.count,
+                segmentCount: 0,
+                fileURL: fileURL,
+                compressedBytes: bytes.count
+            )
+        )
+
+        #expect(http.requests.map(\.path) == [
+            "/v2/assets/uploads",
+            "https://objects.example/private/v2/pending/upload",
+            "/v2/assets/uploads/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/complete",
+        ])
+        #expect(http.requests[1].body == nil)
+        #expect(http.uploadedFiles == [fileURL])
+        #expect(http.requests[1].headers["Authorization"] == nil)
+        let draft = try #require(http.requests.first?.body)
+        #expect(!String(decoding: draft, as: UTF8.self).contains("transcriptJSON"))
+    }
+
+    @Test("a ready content-addressed revision skips duplicate object transfer")
+    func readyTranscriptRevisionSkipsTransfer() async throws {
+        let http = StubHTTPClient()
+        let bytes = Data(#"{"segments":[]}"#.utf8)
+        let fileURL = try syncAssetFile(bytes)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let sha = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        http.enqueue(
+            status: 200,
+            json: #"{"uploadId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","url":"https://objects.example/private/v2/pending/upload","ready":true}"#
+        )
+
+        try await ProductSyncClient(http: http).publishAsset(
+            accessToken: "access",
+            deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            asset: SyncAssetUpload(
+                revisionID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                chapterID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                sha256: sha,
+                originalBytes: bytes.count,
+                segmentCount: 0,
+                fileURL: fileURL,
+                compressedBytes: bytes.count
+            )
+        )
+
+        #expect(http.requests.map(\.path) == ["/v2/assets/uploads"])
+    }
+
+    @Test("asset download rejects bytes before local commit when checksum differs")
+    func transcriptRevisionDownloadChecksIntegrity() async {
+        let http = StubHTTPClient()
+        http.enqueue(status: 200, json: #"{"url":"https://objects.example/private/v2/revision"}"#)
+        http.enqueue(status: 200, body: Data("tampered".utf8))
+
+        await #expect(throws: (any Error).self) {
+            _ = try await ProductSyncClient(http: http).downloadAsset(
+                accessToken: "access",
+                deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                assetID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                sha256: String(repeating: "0", count: 64),
+                compressedBytes: 8
+            )
+        }
+        #expect(http.requests[1].path == "https://objects.example/private/v2/revision")
+        #expect(http.requests[1].headers["Authorization"] == nil)
+    }
+
+    @Test("shared iPad asset hashing keeps large sparse files within the fixed chunk bound")
+    func largeAssetHashingIsBounded() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioReaderSparse-\(UUID().uuidString).object")
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: 32 * 1024 * 1024)
+        try handle.close()
+
+        let digest = try SyncAssetFileIO.digest(fileURL: url)
+
+        #expect(digest.byteCount == 32 * 1024 * 1024)
+        #expect(digest.maximumChunkBytes <= SyncAssetFileIO.chunkBytes)
+    }
+
+    @MainActor
+    @Test("producer failure cleans every partially generated asset temp")
+    func assetProducerFailureCleansScopedTemps() async throws {
+        let fixture = try AssetCleanupFixture()
+        defer { fixture.remove() }
+        let sync = CleanupAssetSyncClient(mode: .success)
+        let staging = LockingBox<URL?>(nil)
+        let session = await cleanupSession(client: sync) { directory in
+            staging.value = directory
+            try fixture.writeGeneratedFiles(in: directory)
+            throw TestSyncError.localApplyFailed
+        }
+
+        await session.synchronize()
+
+        #expect(fixture.contents == fixture.baseline)
+        #expect(FileManager.default.fileExists(atPath: fixture.userOwnedFile.path))
+        #expect(staging.value.map { !FileManager.default.fileExists(atPath: $0.path) } == true)
+    }
+
+    @MainActor
+    @Test("early upload failure cleans later unattempted transcript and EPUB temps")
+    func assetUploadFailureCleansAllScopedTemps() async throws {
+        let fixture = try AssetCleanupFixture()
+        defer { fixture.remove() }
+        let sync = CleanupAssetSyncClient(mode: .failure)
+        let staging = LockingBox<URL?>(nil)
+        let session = await cleanupSession(client: sync) { directory in
+            staging.value = directory
+            return try fixture.generatedUploads(in: directory)
+        }
+
+        await session.synchronize()
+
+        #expect(await sync.publishCount == 1)
+        #expect(fixture.contents == fixture.baseline)
+        #expect(FileManager.default.fileExists(atPath: fixture.userOwnedFile.path))
+        #expect(staging.value.map { !FileManager.default.fileExists(atPath: $0.path) } == true)
+    }
+
+    @MainActor
+    @Test("task cancellation cleans current and later generated asset temps")
+    func assetUploadCancellationCleansAllScopedTemps() async throws {
+        let fixture = try AssetCleanupFixture()
+        defer { fixture.remove() }
+        let sync = CleanupAssetSyncClient(mode: .suspend)
+        let staging = LockingBox<URL?>(nil)
+        let session = await cleanupSession(client: sync) { directory in
+            staging.value = directory
+            return try fixture.generatedUploads(in: directory)
+        }
+        let task = Task { await session.synchronize() }
+        await sync.waitUntilPublishStarts()
+
+        task.cancel()
+        await task.value
+
+        #expect(fixture.contents == fixture.baseline)
+        #expect(FileManager.default.fileExists(atPath: fixture.userOwnedFile.path))
+        #expect(staging.value.map { !FileManager.default.fileExists(atPath: $0.path) } == true)
+    }
+
+    @MainActor
+    @Test("successful asset publication cleans generated temps but retains user files")
+    func assetUploadSuccessCleansAllScopedTemps() async throws {
+        let fixture = try AssetCleanupFixture()
+        defer { fixture.remove() }
+        let sync = CleanupAssetSyncClient(mode: .success)
+        let staging = LockingBox<URL?>(nil)
+        let session = await cleanupSession(client: sync) { directory in
+            staging.value = directory
+            return try fixture.generatedUploads(in: directory)
+        }
+
+        await session.synchronize()
+
+        #expect(await sync.publishCount == 3)
+        #expect(fixture.contents == fixture.baseline)
+        #expect(FileManager.default.fileExists(atPath: fixture.userOwnedFile.path))
+        #expect(staging.value.map { !FileManager.default.fileExists(atPath: $0.path) } == true)
+    }
+
+    @MainActor
+    @Test(
+        "generated paths cannot escape staging and external media survives",
+        arguments: AssetEscapeKind.allCases
+    )
+    func escapedGeneratedAssetIsRejected(_ escape: AssetEscapeKind) async throws {
+        let fixture = try AssetCleanupFixture()
+        defer { fixture.remove() }
+        let sync = CleanupAssetSyncClient(mode: .success)
+        let staging = LockingBox<URL?>(nil)
+        let session = await cleanupSession(client: sync) { directory in
+            staging.value = directory
+            return [try fixture.escapedUpload(in: directory, escape: escape)]
+        }
+
+        await session.synchronize()
+
+        #expect(await sync.publishCount == 0)
+        #expect(session.syncStatus.phase == .failed)
+        #expect(FileManager.default.fileExists(atPath: fixture.userOwnedFile.path))
+        #expect(try Data(contentsOf: fixture.userOwnedFile) == Data("user-owned".utf8))
+        #expect(staging.value.map { !FileManager.default.fileExists(atPath: $0.path) } == true)
+    }
+
+    @MainActor
+    @Test("cancelling a joining sync caller leaves the shared owner and staging intact until completion")
+    func cancelledJoiningSyncDoesNotCancelOwner() async throws {
+        let fixture = try AssetCleanupFixture()
+        defer { fixture.remove() }
+        let sync = SharedAssetSyncClient()
+        let cursor = InMemorySyncCursorStore()
+        let staging = LockingBox<URL?>(nil)
+        let session = AccountSession(
+            client: FakeAuthClient(),
+            store: InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+            oauth: ScriptedOAuthBrowserSession.passthrough(), environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync, outbox: InMemorySyncOutboxRepository(), cursor: cursor,
+                snapshot: { [] },
+                assetUploads: { directory in
+                    staging.value = directory
+                    return try fixture.generatedUploads(in: directory)
+                }
+            )
+        )
+        await session.requestEmailCode("shared-cleanup@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+        let owner = Task { await session.synchronize() }
+        await sync.waitUntilPublishStarts()
+        let joining = Task {
+            await session.synchronize()
+            return Task.isCancelled
+        }
+        await Task.yield()
+
+        joining.cancel()
+        await Task.yield()
+        let liveStaging = try #require(staging.value)
+        #expect(FileManager.default.fileExists(atPath: liveStaging.path))
+        #expect(Set(try FileManager.default.contentsOfDirectory(atPath: liveStaging.path)) == Set([
+            "transcript.json", "expanded-epub.reading-package.zip",
+        ]))
+        await sync.releasePublish()
+        await owner.value
+        let joiningWasCancelled = await joining.value
+
+        #expect(joiningWasCancelled)
+        #expect((await sync.ownerCancellationObserved) == false)
+        #expect(await sync.publishCount == 3)
+        #expect(await sync.pullCount == 1)
+        #expect(try cursor.loadCursor() == "1")
+        #expect(session.syncStatus.phase == .completed)
+        #expect(FileManager.default.fileExists(atPath: fixture.userOwnedFile.path))
+        #expect(staging.value.map { !FileManager.default.fileExists(atPath: $0.path) } == true)
+    }
+
+    @MainActor
+    @Test("an immediate second sync transfers no transcript object or change")
+    func immediateSecondSyncDoesNotRetransferTranscript() async throws {
+        let auth = FakeAuthClient()
+        let sync = FakeSyncClient()
+        sync.echoPublishedAssets = true
+        let bytes = Data(#"{"chapterID":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","segments":[]}"#.utf8)
+        let fileURL = try syncAssetFile(bytes)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let sha = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let upload = SyncAssetUpload(
+            revisionID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            chapterID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            sha256: sha,
+            originalBytes: bytes.count,
+            segmentCount: 0,
+            fileURL: fileURL,
+            compressedBytes: bytes.count
+        )
+        let versions = InMemorySyncEntityVersionStore()
+        let cursor = InMemorySyncCursorStore()
+        let session = AccountSession(
+            client: auth,
+            store: InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: InMemorySyncOutboxRepository(),
+                cursor: cursor,
+                versions: versions,
+                assetUploads: { _ in [upload] }
+            )
+        )
+        await session.requestEmailCode("asset-second-sync@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+        await session.synchronize()
+
+        #expect(sync.publishedAssets == [upload])
+        #expect(sync.pulledCursors == ["0", "1"])
+        #expect(try cursor.loadCursor() == "1")
     }
 
     @Test("sync status describes granular entity, batch, pending, and conflict progress")
@@ -413,13 +1081,13 @@ struct AccountSessionSyncTests {
     }
 
     @MainActor
-    @Test("push batches keep each real-world transcript below the Worker-safe request allowance")
+    @Test("push batches keep large structured rows below the Worker-safe request allowance")
     func pushBatchesRespectEncodedByteLimit() throws {
         let payload = Data("{\"text\":\"\(String(repeating: "a", count: 2_600_000))\"}".utf8)
         let pending = (0..<3).map { index in
             OutboxMutation(
                 id: MutationID(rawValue: "00000000-0000-4000-8000-\(String(format: "%012d", index + 1))"),
-                entityType: .transcript,
+                entityType: .vocabulary,
                 entityID: "10000000-0000-4000-8000-\(String(format: "%012d", index + 1))",
                 operation: .upsert,
                 baseRevision: .zero,
@@ -442,32 +1110,43 @@ struct AccountSessionSyncTests {
     }
 
     @MainActor
-    @Test("a transcript larger than the native batch budget fails before upload")
-    func oversizedTranscriptFailsBeforeUpload() {
+    @Test("a structured mutation larger than the native batch budget is skipped without blocking later rows")
+    func oversizedMutationDoesNotBlockLaterRows() throws {
         let payload = Data("{\"text\":\"\(String(repeating: "a", count: 3_200_000))\"}".utf8)
-        let mutation = OutboxMutation(
+        let oversized = OutboxMutation(
             id: MutationID(rawValue: "00000000-0000-4000-8000-000000000001"),
-            entityType: .transcript,
+            entityType: .vocabulary,
             entityID: "10000000-0000-4000-8000-000000000001",
             operation: .upsert,
             baseRevision: .zero,
             occurredAt: Date(timeIntervalSince1970: 1_777_000_000),
             payload: payload
         )
+        let valid = OutboxMutation(
+            id: MutationID(rawValue: "00000000-0000-4000-8000-000000000002"),
+            entityType: .vocabulary,
+            entityID: "10000000-0000-4000-8000-000000000002",
+            operation: .upsert,
+            baseRevision: .zero,
+            occurredAt: Date(timeIntervalSince1970: 1_777_000_001),
+            payload: Data(#"{"surface":"safe"}"#.utf8)
+        )
 
-        #expect(throws: (any Error).self) {
-            _ = try AccountSession.syncPushBatches([mutation])
-        }
+        let plan = try AccountSession.syncPushPlan([oversized, valid])
+
+        #expect(plan.batches.map { $0.map(\.id) } == [[valid.id]])
+        #expect(plan.skipped.map(\.mutationID) == [oversized.id])
+        #expect(plan.skipped.first?.encodedBytes ?? 0 > 2_752_512)
     }
 
     @MainActor
-    @Test("mixed transcripts split before the Worker resource threshold")
-    func mixedTranscriptsSplitBeforeWorkerThreshold() throws {
+    @Test("mixed large rows split before the Worker resource threshold")
+    func mixedLargeRowsSplitBeforeWorkerThreshold() throws {
         let sizes = [1_616_000, 1_350_000]
         let pending = sizes.enumerated().map { index, size in
             OutboxMutation(
                 id: MutationID(rawValue: "00000000-0000-4000-8000-\(String(format: "%012d", index + 1))"),
-                entityType: .transcript,
+                entityType: .vocabulary,
                 entityID: "10000000-0000-4000-8000-\(String(format: "%012d", index + 1))",
                 operation: .upsert,
                 baseRevision: .zero,
@@ -1245,6 +1924,207 @@ struct AccountSessionSyncTests {
     }
 }
 
+private final class AssetCleanupFixture: @unchecked Sendable {
+    let root: URL
+    let userOwnedFile: URL
+
+    init() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioReaderAssetCleanup-\(UUID().uuidString)", isDirectory: true)
+        userOwnedFile = root.appendingPathComponent("user-owned.epub")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("user-owned".utf8).write(to: userOwnedFile)
+    }
+
+    var baseline: Set<String> { [userOwnedFile.lastPathComponent] }
+
+    var contents: Set<String> {
+        Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
+    }
+
+    func writeGeneratedFiles(in generatedDirectory: URL) throws {
+        try Data(#"{"segments":[]}"#.utf8)
+            .write(to: generatedDirectory.appendingPathComponent("transcript.json"))
+        try Data("expanded-epub-package".utf8)
+            .write(to: generatedDirectory.appendingPathComponent("expanded-epub.reading-package.zip"))
+    }
+
+    func generatedUploads(in generatedDirectory: URL) throws -> [SyncAssetUpload] {
+        try writeGeneratedFiles(in: generatedDirectory)
+        return try [
+            upload(
+                at: generatedDirectory.appendingPathComponent("transcript.json"),
+                kind: .transcriptRevision,
+                deleteAfterUpload: true
+            ),
+            upload(at: userOwnedFile, kind: .epub, deleteAfterUpload: false),
+            upload(
+                at: generatedDirectory.appendingPathComponent("expanded-epub.reading-package.zip"),
+                kind: .epubReadingPackage,
+                deleteAfterUpload: true
+            ),
+        ]
+    }
+
+    func escapedUpload(in stagingDirectory: URL, escape: AssetEscapeKind) throws -> SyncAssetUpload {
+        let escaped: URL
+        switch escape {
+        case .symbolicLink:
+            escaped = stagingDirectory.appendingPathComponent("escaped-user-owned.epub")
+            try FileManager.default.createSymbolicLink(at: escaped, withDestinationURL: userOwnedFile)
+        case .parentTraversal:
+            escaped = stagingDirectory.appendingPathComponent(
+                "../\(root.lastPathComponent)/\(userOwnedFile.lastPathComponent)"
+            )
+        }
+        return try upload(at: escaped, kind: .epub, deleteAfterUpload: true)
+    }
+
+    func remove() {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    private func upload(
+        at url: URL,
+        kind: SyncAssetKind,
+        deleteAfterUpload: Bool
+    ) throws -> SyncAssetUpload {
+        let digest = try SyncAssetFileIO.digest(fileURL: url)
+        return SyncAssetUpload(
+            kind: kind,
+            revisionID: UUID().uuidString.lowercased(),
+            chapterID: kind == .transcriptRevision ? UUID().uuidString.lowercased() : nil,
+            contentType: kind == .transcriptRevision ? "application/json" : "application/octet-stream",
+            encoding: kind == .transcriptRevision ? "identity-json-v1" : "identity",
+            sha256: digest.sha256,
+            originalBytes: digest.byteCount,
+            segmentCount: kind == .transcriptRevision ? 0 : nil,
+            fileURL: url,
+            compressedBytes: digest.byteCount,
+            deleteFileAfterUpload: deleteAfterUpload
+        )
+    }
+}
+
+enum AssetEscapeKind: CaseIterable, Sendable {
+    case symbolicLink
+    case parentTraversal
+}
+
+private enum CleanupPublishMode: Sendable {
+    case success
+    case failure
+    case suspend
+}
+
+private actor CleanupAssetSyncClient: SyncClient {
+    let mode: CleanupPublishMode
+    private(set) var publishCount = 0
+    private var publishStarted = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(mode: CleanupPublishMode) {
+        self.mode = mode
+    }
+
+    func publishAsset(accessToken: String, deviceID: String, asset: SyncAssetUpload) async throws {
+        _ = accessToken; _ = deviceID; _ = asset
+        publishCount += 1
+        publishStarted = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        switch mode {
+        case .success:
+            return
+        case .failure:
+            throw TestSyncError.unavailable
+        case .suspend:
+            try await Task.sleep(for: .seconds(60))
+        }
+    }
+
+    func waitUntilPublishStarts() async {
+        guard !publishStarted else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func push(accessToken: String, deviceID: String, request: SyncPushRequest) async throws -> SyncPushResponse {
+        SyncPushResponse(batchId: request.batchId, results: [], cursor: request.baseCursor ?? "0")
+    }
+
+    func pull(accessToken: String, deviceID: String, cursor: String, limit: Int) async throws -> SyncPullResponse {
+        SyncPullResponse(changes: [], cursor: cursor, hasMore: false)
+    }
+}
+
+private actor SharedAssetSyncClient: SyncClient {
+    private(set) var publishCount = 0
+    private(set) var pullCount = 0
+    private(set) var ownerCancellationObserved = false
+    private var firstPublishStarted = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    func publishAsset(accessToken: String, deviceID: String, asset: SyncAssetUpload) async throws {
+        _ = accessToken; _ = deviceID; _ = asset
+        publishCount += 1
+        guard publishCount == 1 else { return }
+        firstPublishStarted = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { releaseWaiter = $0 }
+        if Task.isCancelled {
+            ownerCancellationObserved = true
+        }
+        try Task.checkCancellation()
+    }
+
+    func waitUntilPublishStarts() async {
+        guard !firstPublishStarted else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func releasePublish() {
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
+
+    func push(accessToken: String, deviceID: String, request: SyncPushRequest) async throws -> SyncPushResponse {
+        SyncPushResponse(batchId: request.batchId, results: [], cursor: request.baseCursor ?? "0")
+    }
+
+    func pull(accessToken: String, deviceID: String, cursor: String, limit: Int) async throws -> SyncPullResponse {
+        pullCount += 1
+        return SyncPullResponse(changes: [], cursor: "1", hasMore: false)
+    }
+}
+
+@MainActor
+private func cleanupSession(
+    client: any SyncClient,
+    assetUploads: @escaping @Sendable (URL) throws -> [SyncAssetUpload]
+) async -> AccountSession {
+    let session = AccountSession(
+        client: FakeAuthClient(),
+        store: InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+        oauth: ScriptedOAuthBrowserSession.passthrough(),
+        environment: .test,
+        syncRuntime: AccountSyncRuntime(
+            client: client,
+            outbox: InMemorySyncOutboxRepository(),
+            cursor: InMemorySyncCursorStore(),
+            snapshot: { [] },
+            assetUploads: assetUploads
+        )
+    )
+    await session.requestEmailCode("asset-cleanup-\(UUID().uuidString)@example.com")
+    await session.verifyEmailCode("123456")
+    session.setSyncEnabled(true)
+    return session
+}
+
 private struct FailingSyncClient: SyncClient {
     func push(accessToken: String, deviceID: String, request: SyncPushRequest) async throws -> SyncPushResponse {
         throw TestSyncError.unavailable
@@ -1440,4 +2320,11 @@ private final class LockingBox<Value>: @unchecked Sendable {
             storage = newValue
         }
     }
+}
+@Test("sync readiness enforces the v2 minimum before sync UI can become effective")
+func syncReadinessRejectsOldSemanticVersion() {
+    let readiness = AccountSyncReadiness(minAppVersion: "2.0.0", effective: true)
+        .enforcingAppVersion("1.9.9")
+    #expect(readiness.effective == false)
+    #expect(readiness.reason == "upgrade_required")
 }

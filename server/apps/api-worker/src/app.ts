@@ -70,6 +70,11 @@ import {
   isProductEventPath,
   productEventMethodError,
 } from "./product-events";
+import {
+  createAccountSyncReadinessService,
+  type AccountSyncReadinessService,
+  type AccountSyncStorageDescriptor,
+} from "./account-sync-readiness";
 
 const HEALTH_PATHS = new Set(["/v1/health", "/healthz", "/readyz"]);
 
@@ -83,6 +88,12 @@ export type AppOptions = {
   adminOrigin?: string;
   database: DatabaseClient;
   storage: ObjectStore;
+  storageDescriptor?: () => Promise<AccountSyncStorageDescriptor>;
+  resolveAccountSyncStorage?: () => Promise<{
+    store: ObjectStore;
+    descriptor: AccountSyncStorageDescriptor;
+  }>;
+  accountSyncReadiness?: AccountSyncReadinessService;
   qwen: QwenClient;
   runtime?: RuntimeConfigService;
   authenticate?: (request: Request) => Principal | Promise<Principal | null> | null;
@@ -113,6 +124,23 @@ export function createApiApp(options: AppOptions): ApiApp {
         : { verifyTurnstile: options.verifyTurnstile }),
       hmacSecret: options.hmacSecret ?? LOCAL_PASSWORDLESS_HMAC_SECRET,
     });
+  const accountSyncReadiness =
+    options.accountSyncReadiness ??
+    createAccountSyncReadinessService({
+      database: options.database,
+      resolveStorage:
+        options.resolveAccountSyncStorage ??
+        (async () => ({
+          store: options.storage,
+          descriptor: await (options.storageDescriptor ??
+            (() =>
+              Promise.resolve({
+                provider: "none" as const,
+                configured: false,
+                credentialsConfigured: false,
+              })))(),
+        })),
+    });
 
   async function authenticate(request: Request): Promise<Principal | null> {
     const principal = await options.authenticate?.(request);
@@ -130,6 +158,7 @@ export function createApiApp(options: AppOptions): ApiApp {
         authenticate,
         idempotencyStore,
         passwordlessLimiter,
+        accountSyncReadiness,
       );
       return applyCorsHeaders(request, withRequestId(response, requestId), allowlist);
     } catch (error: unknown) {
@@ -149,8 +178,18 @@ export function createApiApp(options: AppOptions): ApiApp {
 }
 
 export function createTestApp(overrides: Partial<AppOptions> = {}): ApiApp {
-  const { database: databaseOverride, runtime: runtimeOverride, ...rest } = overrides;
+  const {
+    database: databaseOverride,
+    runtime: runtimeOverride,
+    storage: storageOverride,
+    storageDescriptor: storageDescriptorOverride,
+    ...rest
+  } = overrides;
   const database = databaseOverride ?? createFakeDatabaseClient();
+  // Route tests opt into sync explicitly; the database factory itself retains the new-environment off default.
+  if (databaseOverride === undefined) {
+    void database.ops.patchFlag("account_sync", { enabled: true });
+  }
   const runtime =
     runtimeOverride ??
     createRuntimeConfigService({
@@ -161,11 +200,29 @@ export function createTestApp(overrides: Partial<AppOptions> = {}): ApiApp {
   const principal = createFakePrincipal();
   const testDeviceId = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
   database.identity.seedActiveDevice?.(principal.accountId, testDeviceId);
+  const storage = storageOverride ?? createFakeObjectStore();
+  const storageDescriptor =
+    storageDescriptorOverride ??
+    (storageOverride === undefined
+      ? () =>
+          Promise.resolve({
+            provider: "memory" as const,
+            bucket: "test-private-sync",
+            configured: true,
+            credentialsConfigured: true,
+          })
+      : () =>
+          Promise.resolve({
+            provider: "none" as const,
+            configured: false,
+            credentialsConfigured: false,
+          }));
   return createApiApp({
     environment: "test",
     version: "1.0.0-draft.1",
     corsOrigins: ["http://localhost:5173"],
-    storage: createFakeObjectStore(),
+    storage,
+    storageDescriptor,
     qwen: createFakeQwenClient(),
     auth: createMemoryAuthService({ jwt: LOCAL_JWT_CONFIG }),
     authenticate: () => principal,
@@ -284,7 +341,8 @@ export function createApiAppFromEnv(env: WorkerEnv): ApiApp {
     corsOrigins: parseOriginList(env.CORS_ALLOWED_ORIGINS),
     ...(adminOrigin !== undefined && adminOrigin !== "" ? { adminOrigin } : {}),
     database,
-    storage: createResolvingObjectStore(() => runtime.resolveStorage({ useFakes })),
+    storage: createResolvingObjectStore(async () => (await runtime.resolveStorage({ useFakes })).store),
+    resolveAccountSyncStorage: () => runtime.resolveStorage({ useFakes }),
     qwen: createResolvingQwenClient(() => runtime.resolveQwenClient({ useFakes })),
     runtime,
     ...(auth === undefined ? {} : { auth }),
@@ -408,6 +466,7 @@ async function handleRequest(
   authenticate: (request: Request) => Promise<Principal | null>,
   idempotencyStore: IdempotencyStore,
   passwordlessLimiter: PasswordlessLimiter,
+  accountSyncReadiness: AccountSyncReadinessService,
 ): Promise<Response> {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204 });
@@ -465,7 +524,9 @@ async function handleRequest(
     // Base transcripts can exceed the generic JSON limit; only sync push gets the larger,
     // still-bounded allowance used by the native byte-aware batcher.
     const bodyLimit =
-      path === "/v1/sync/push" ? Math.max(maxBodyBytes, SYNC_PUSH_MAX_BODY_BYTES) : maxBodyBytes;
+      path === "/v1/sync/push" || path === "/v2/sync/push"
+        ? Math.max(maxBodyBytes, SYNC_PUSH_MAX_BODY_BYTES)
+        : maxBodyBytes;
     const bodyError = await validateRequestBody(request, bodyLimit, requestId);
     if (bodyError !== undefined) {
       return bodyError;
@@ -482,6 +543,7 @@ async function handleRequest(
       passwordlessLimiter,
       localOAuthComplete: options.environment === "local" || options.environment === "test",
       ops: options.database.ops,
+      accountSyncReadiness,
       ...(options.turnstileSiteKey === undefined || options.turnstileSiteKey === ""
         ? {}
         : { turnstileSiteKey: options.turnstileSiteKey }),
@@ -497,8 +559,10 @@ async function handleRequest(
       requestId,
       authenticate,
       idempotencyStore,
-      sync: options.database.sync,
+      sync: path.startsWith("/v2/") ? options.database.syncV2 : options.database.sync,
       identity: options.database.identity,
+      ops: options.database.ops,
+      accountSyncReadiness,
     });
     if (routed !== undefined) {
       return routed;
@@ -562,7 +626,7 @@ async function handleRequest(
       identity: options.database.identity,
       catalog: options.database.catalog,
       objects: options.storage,
-      sync: options.database.sync,
+      sync: options.database.syncV2,
     });
     if (routed !== undefined) {
       return routed;
@@ -592,6 +656,7 @@ async function handleRequest(
       identity: options.database.identity,
       catalog: options.database.catalog,
       ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
+      accountSyncReadiness,
     });
     if (routed !== undefined) {
       return routed;

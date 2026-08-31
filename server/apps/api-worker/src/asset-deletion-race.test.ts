@@ -24,7 +24,7 @@ describe("asset upload deletion race", () => {
     };
     const app = createTestApp({ database, storage });
     const created = await app.fetch(
-      new Request("http://localhost/v1/uploads", {
+      new Request("http://localhost/v2/assets/uploads", {
         method: "POST",
         headers: {
           authorization: "Bearer test",
@@ -35,8 +35,10 @@ describe("asset upload deletion race", () => {
         body: JSON.stringify({
           kind: "audio",
           contentType: "audio/mp4",
-          sizeBytes: 3,
-          sha256: "abc",
+          encoding: "identity",
+          compressedBytes: 3,
+          originalBytes: 3,
+          sha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
           fileName: "private.m4b",
         }),
       }),
@@ -44,9 +46,13 @@ describe("asset upload deletion race", () => {
     expect(created.status).toBe(201);
     const ticket: { uploadId: string } = await created.json();
     const uploaded = await app.fetch(
-      new Request(`http://localhost/v1/uploads/${ticket.uploadId}/body`, {
+      new Request(`http://localhost/v2/assets/uploads/${ticket.uploadId}/body`, {
         method: "PUT",
-        headers: { authorization: "Bearer test", "content-type": "audio/mp4" },
+        headers: {
+          authorization: "Bearer test",
+          "content-type": "audio/mp4",
+          "content-length": "3",
+        },
         body: new Uint8Array([1, 2, 3]),
       }),
     );
@@ -100,7 +106,7 @@ describe("asset upload deletion race", () => {
     };
     const app = createTestApp({ database, storage });
     const created = await app.fetch(
-      new Request("http://localhost/v1/uploads", {
+      new Request("http://localhost/v2/assets/uploads", {
         method: "POST",
         headers: {
           authorization: "Bearer test",
@@ -111,23 +117,29 @@ describe("asset upload deletion race", () => {
         body: JSON.stringify({
           kind: "audio",
           contentType: "audio/mp4",
-          sizeBytes: 3,
-          sha256: "abc",
+          encoding: "identity",
+          compressedBytes: 3,
+          originalBytes: 3,
+          sha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
           fileName: "private.m4b",
         }),
       }),
     );
     const ticket: { uploadId: string } = await created.json();
     const uploaded = await app.fetch(
-      new Request(`http://localhost/v1/uploads/${ticket.uploadId}/body`, {
+      new Request(`http://localhost/v2/assets/uploads/${ticket.uploadId}/body`, {
         method: "PUT",
-        headers: { authorization: "Bearer test", "content-type": "audio/mp4" },
+        headers: {
+          authorization: "Bearer test",
+          "content-type": "audio/mp4",
+          "content-length": "3",
+        },
         body: new Uint8Array([1, 2, 3]),
       }),
     );
 
     expect(uploaded.status).toBe(500);
-    await expect(inner.list(`${USER_ID}/`)).resolves.toHaveLength(1);
+    await expect(inner.list(`private/v2/${USER_ID}/`)).resolves.toHaveLength(1);
     await expect(database.ops.accountObjectWriteLeases(USER_ID)).resolves.toHaveLength(1);
   });
 });

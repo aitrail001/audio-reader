@@ -324,6 +324,31 @@ export type FeatureFlag = {
   platforms?: string[];
 };
 
+export type AccountSyncReadiness = {
+  requiredSchemaVersion: string;
+  schemaReady: boolean;
+  provider: "gcs" | "supabase" | "r2" | "memory" | "none";
+  bucket: string | null;
+  credentialStatus: "ok" | "failed" | "not_checked";
+  privacyStatus: "ok" | "failed" | "not_checked";
+  uploadStatus: "ok" | "failed" | "not_checked";
+  downloadStatus: "ok" | "failed" | "not_checked";
+  checksumStatus: "ok" | "failed" | "not_checked";
+  deleteStatus: "ok" | "failed" | "not_checked";
+  notFoundStatus: "ok" | "failed" | "not_checked";
+  ready: boolean;
+  requested: boolean;
+  effective: boolean;
+  reason: string | null;
+  checkedAt: string;
+  cachedUntil: string;
+  retryAfterSeconds: number;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  lastFailureCode: string | null;
+  lastFailureDetail: string | null;
+};
+
 export type Quota = {
   key: string;
   used: number;

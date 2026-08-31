@@ -42,10 +42,10 @@ export const DEFAULT_FEATURE_FLAGS: readonly ProductFeatureFlag[] = [
   },
   {
     key: "account_sync",
-    enabled: true,
+    enabled: false,
     variant: null,
     rolloutPercent: 100,
-    minAppVersion: null,
+    minAppVersion: "2.0.0",
     platforms: [],
   },
   {

@@ -164,7 +164,7 @@ describe("library API", () => {
     }
   });
 
-  it("stores transcripts and review events", async () => {
+  it("retires inline transcript reads and writes while preserving review events", async () => {
     const { app } = await createBook();
     const transcript = await app.fetch(
       new Request("http://localhost/v1/transcripts", {
@@ -189,13 +189,20 @@ describe("library API", () => {
         }),
       }),
     );
-    expect(transcript.status).toBe(201);
+    expect(transcript.status).toBe(426);
+    expect(transcript.headers.get("X-Min-App-Version")).toBe("2.0.0");
     const active = await app.fetch(
       new Request(`http://localhost/v1/chapters/${CHAPTER_ID}/transcript`, {
         headers: readHeaders(),
       }),
     );
-    expect(active.status).toBe(200);
+    expect(active.status).toBe(426);
+    const bookScoped = await app.fetch(
+      new Request(`http://localhost/v1/books/${BOOK_ID}/transcripts`, {
+        headers: readHeaders(),
+      }),
+    );
+    expect(bookScoped.status).toBe(426);
     await app.fetch(
       new Request("http://localhost/v1/vocabulary", {
         method: "POST",

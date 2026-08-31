@@ -43,6 +43,178 @@ describe("GCS object store", () => {
     ).toMatchObject({ clientEmail: "sa@example.com" });
   });
 
+  it("ignores an untrusted token_uri and exchanges only with Google's fixed HTTPS endpoint", async () => {
+    const parsed = JSON.parse(await serviceAccountJson()) as Record<string, unknown>;
+    parsed.token_uri = "https://attacker.example/token";
+    const calls: string[] = [];
+    const store = createGcsObjectStore({
+      bucket: "audio-reader-assets",
+      serviceAccountJson: JSON.stringify(parsed),
+      fetch: (input) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        calls.push(url);
+        if (url === "https://oauth2.googleapis.com/token") {
+          return Promise.resolve(
+            new Response(JSON.stringify({ access_token: "token", expires_in: 3600 }), {
+              status: 200,
+            }),
+          );
+        }
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      },
+    });
+
+    await expect(store.ping()).resolves.toBe("ok");
+    expect(calls).toContain("https://oauth2.googleapis.com/token");
+    expect(calls.some((url) => url.includes("attacker.example"))).toBe(false);
+  });
+
+  it("detects public IAM access even when the bucket metadata itself is readable", async () => {
+    const store = createGcsObjectStore({
+      bucket: "public-assets",
+      serviceAccountJson: await serviceAccountJson(),
+      fetch: (input) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url === "https://oauth2.googleapis.com/token") {
+          return Promise.resolve(
+            new Response(JSON.stringify({ access_token: "token", expires_in: 3600 }), {
+              status: 200,
+            }),
+          );
+        }
+        if (url.endsWith("/iam")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                bindings: [{ role: "roles/storage.objectViewer", members: ["allUsers"] }],
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (url.endsWith("/defaultObjectAcl")) {
+          return Promise.resolve(new Response(JSON.stringify({ items: [] }), { status: 200 }));
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ iamConfiguration: { publicAccessPrevention: "inherited" } }),
+            { status: 200 },
+          ),
+        );
+      },
+    });
+
+    await expect(store.inspectPrivacy()).resolves.toEqual({
+      bucketExists: true,
+      publicAccess: true,
+    });
+  });
+
+  it("accepts a private UBLA bucket without requesting the disabled default object ACL API", async () => {
+    const calls: string[] = [];
+    const store = createGcsObjectStore({
+      bucket: "ubla-private-assets",
+      serviceAccountJson: await serviceAccountJson(),
+      fetch: (input) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        calls.push(url);
+        if (url === "https://oauth2.googleapis.com/token") {
+          return Promise.resolve(
+            new Response(JSON.stringify({ access_token: "token", expires_in: 3600 }), {
+              status: 200,
+            }),
+          );
+        }
+        if (url.endsWith("/iam")) {
+          return Promise.resolve(new Response(JSON.stringify({ bindings: [] }), { status: 200 }));
+        }
+        if (url.endsWith("/defaultObjectAcl")) {
+          return Promise.resolve(new Response("UBLA forbids ACL reads", { status: 400 }));
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              iamConfiguration: {
+                uniformBucketLevelAccess: { enabled: true },
+                publicAccessPrevention: "enforced",
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      },
+    });
+
+    await expect(store.inspectPrivacy()).resolves.toEqual({
+      bucketExists: true,
+      publicAccess: false,
+    });
+    expect(calls.some((url) => url.endsWith("/defaultObjectAcl"))).toBe(false);
+    expect(calls.some((url) => url.endsWith("/iam"))).toBe(true);
+  });
+
+  it("rejects a non-UBLA bucket with a public default object ACL", async () => {
+    const store = createGcsObjectStore({
+      bucket: "acl-public-assets",
+      serviceAccountJson: await serviceAccountJson(),
+      fetch: (input) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url === "https://oauth2.googleapis.com/token") {
+          return Promise.resolve(
+            new Response(JSON.stringify({ access_token: "token", expires_in: 3600 }), {
+              status: 200,
+            }),
+          );
+        }
+        if (url.endsWith("/iam"))
+          return Promise.resolve(new Response(JSON.stringify({ bindings: [] }), { status: 200 }));
+        if (url.endsWith("/defaultObjectAcl")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ items: [{ entity: "allUsers", role: "READER" }] }), {
+              status: 200,
+            }),
+          );
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              iamConfiguration: {
+                uniformBucketLevelAccess: { enabled: false },
+                publicAccessPrevention: "inherited",
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      },
+    });
+
+    await expect(store.inspectPrivacy()).resolves.toEqual({
+      bucketExists: true,
+      publicAccess: true,
+    });
+  });
+
+  it.each([
+    [401, "denied"],
+    [403, "denied"],
+    [404, "not_found"],
+    [429, "unknown"],
+    [500, "unknown"],
+  ] as const)("classifies anonymous HTTP %s as %s", async (status, expected) => {
+    const store = createGcsObjectStore({
+      bucket: "private-assets",
+      serviceAccountJson: await serviceAccountJson(),
+      fetch: () => Promise.resolve(new Response("probe", { status })),
+    });
+
+    await expect(store.anonymousRead("private/canary")).resolves.toBe(expected);
+  });
+
   it("uploads, downloads, deletes, and signs GET URLs through the JSON API", async () => {
     const json = await serviceAccountJson();
     const calls: { url: string; method: string }[] = [];
@@ -120,6 +292,21 @@ describe("GCS object store", () => {
     expect(signed).toContain("https://storage.googleapis.com/audio-reader-assets/chapter/1.mp3");
     expect(signed).toContain("X-Goog-Algorithm=GOOG4-RSA-SHA256");
     expect(signed).toContain("X-Goog-Signature=");
+    const bound = await store.createBoundUpload?.("chapter/large.m4b", {
+      expiresSeconds: 900,
+      contentType: "audio/mp4",
+      contentLength: 2_147_483_648,
+      sha256: "a".repeat(64),
+    });
+    expect(bound?.headers).toEqual({
+      "content-length": "2147483648",
+      "content-type": "audio/mp4",
+      "x-goog-content-sha256": "a".repeat(64),
+      "x-goog-meta-sha256": "a".repeat(64),
+    });
+    expect(bound?.url).toContain(
+      "X-Goog-SignedHeaders=content-length%3Bcontent-type%3Bhost%3Bx-goog-content-sha256%3Bx-goog-meta-sha256",
+    );
     await store.delete("chapter/1.mp3");
     await expect(store.get("chapter/1.mp3")).resolves.toBeUndefined();
     expect(calls.some((call) => call.url.includes("oauth2.googleapis.com/token"))).toBe(true);

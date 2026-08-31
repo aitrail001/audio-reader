@@ -439,7 +439,7 @@ struct ReadingAssistantPromptTests {
     func chapterSummaryPersistenceRoundTrip() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AudioReader-Chapter-Summary-\(UUID().uuidString)", isDirectory: true)
-        let url = directory.appendingPathComponent("summaries.json")
+        let url = directory.appendingPathComponent("library-vNext.sqlite")
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let record = ChapterSummaryRecord.pending(
@@ -460,10 +460,26 @@ struct ReadingAssistantPromptTests {
             createdAt: Date(timeIntervalSince1970: 30)
         ).accept(at: Date(timeIntervalSince1970: 40))
 
-        Persistence.saveChapterSummaries([record], to: url)
-        let loaded = Persistence.loadChapterSummaries(from: url)
+        let text = String(data: try JSONEncoder.iso.encode(record.summary), encoding: .utf8)!
+        let stored = StoredAssistantResult(
+            id: record.id,
+            kind: .chapterSummary,
+            status: .accepted,
+            language: record.language,
+            model: record.model,
+            bookID: record.bookID.map(BookID.init(rawValue:)),
+            bookTitle: record.bookTitle,
+            chapterID: ChapterID(rawValue: record.chapterID),
+            chapterTitle: record.chapterTitle,
+            source: record.chapterTitle,
+            text: text,
+            createdAt: record.createdAt,
+            decidedAt: record.decidedAt
+        )
+        try LocalSQLiteStore(fileURL: url).saveAssistantResult(stored)
+        let loaded = try LocalSQLiteStore(fileURL: url).loadAssistantResults()
 
-        #expect(loaded == [record])
+        #expect(loaded == [stored])
         #expect(loaded.first?.status == .accepted)
     }
 

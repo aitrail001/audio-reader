@@ -6,14 +6,15 @@ import Testing
 struct AppCompositionTests {
     private let occurredAt = Date(timeIntervalSince1970: 1_700_000_000)
 
-    @Test("Live composition uses local adapters and no network")
-    func liveCompositionUsesLocalAdaptersWithoutNetwork() throws {
+    @Test("Live composition uses the single vNext SQLite store and no network")
+    func liveCompositionUsesVNextStoreWithoutNetwork() throws {
         let compositionSource = try source("Sources/AudioReader/AppComposition.swift")
         let app = try source("Sources/AudioReader/AudioReaderApp.swift")
         let appState = try source("Sources/AudioReader/AppState.swift")
 
-        #expect(compositionSource.contains("LibraryStoreVocabularyRepository(store: .shared)"))
-        #expect(compositionSource.contains("PersistenceKnownLemmaRepository()"))
+        #expect(compositionSource.components(separatedBy: "Persistence.store").count - 1 == 4)
+        #expect(!compositionSource.contains("LibraryStore"))
+        #expect(!compositionSource.contains("RepositoryAdapter"))
         #expect(compositionSource.contains("usesLivePersistence: true"))
         #expect(!compositionSource.contains("#if os("))
         #expect(!compositionSource.contains("URLSession"))
@@ -32,8 +33,11 @@ struct AppCompositionTests {
             from: "    private static var defaultLibraryPath: String {",
             to: "\n    init("
         )
-        #expect(!defaultPath.contains("importedBooksURL"))
-        #expect(!defaultPath.contains("Persistence.root"))
+        #expect(defaultPath.contains("Persistence.importedBooksURL.path"))
+        #expect(!AppSettings.default.libraryPath.isEmpty)
+        #expect(AppSettings.default.libraryPath.contains("ImportedBooks-vNext"))
+        #expect(AppSettings.default.libraryPath.hasPrefix("/"))
+        #expect(AppSettings.default.libraryPath != FileManager.default.currentDirectoryPath)
     }
 
     private func section(in source: String, from start: String, to end: String) throws -> String {
@@ -54,6 +58,62 @@ struct AppCompositionTests {
         #expect(state.settings.playbackRate == AppSettings.default.playbackRate)
         #expect(state.settings.libraryPath == AppSettings.default.libraryPath)
         #expect(!state.settings.showStudyOverlay)
+    }
+
+    @MainActor
+    @Test("sync publication refreshes catalog decisions and checkpoints without relaunch")
+    func syncPublicationRefreshesStructuredStateImmediately() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library-vNext.sqlite"))
+        try store.saveBook(StoredBook(
+            id: BookID(rawValue: "cloud-book"),
+            title: "Cloud metadata",
+            source: BookSource.files.rawValue,
+            chapters: [StoredChapter(id: ChapterID(rawValue: "cloud-chapter"), index: 0, title: "One")]
+        ))
+        for (id, status) in [("accepted-result", AssistantResultStatus.accepted), ("rejected-result", .rejected)] {
+            try store.saveAssistantResult(StoredAssistantResult(
+                id: id,
+                kind: .sentenceGloss,
+                status: status,
+                language: "zh-Hans",
+                model: "managed",
+                chapterID: ChapterID(rawValue: "cloud-chapter"),
+                source: "Source \(id)",
+                text: "Result \(id)",
+                createdAt: occurredAt,
+                decidedAt: occurredAt
+            ))
+        }
+        try store.saveTranslationCheckpoint(StoredTranslationCheckpoint(
+            chapterID: ChapterID(rawValue: "cloud-chapter"),
+            language: "zh-Hans",
+            mode: ChapterTranslationMode.untranslatedOnly.rawValue,
+            completedSegmentCount: 3,
+            totalSegmentCount: 9,
+            status: ChapterTranslationStatus.awaitingReview.rawValue,
+            updatedAt: occurredAt
+        ))
+        let state = AppState(
+            composition: AppComposition(
+                vocabulary: store,
+                knownLemmas: store,
+                reviewEvents: store,
+                usesLivePersistence: true,
+                synchronizedStore: store
+            ),
+            account: AccountSession.isolated()
+        )
+
+        state.account.onLearningDataApplied?()
+
+        #expect(state.books.map { $0.id } == ["cloud-book"])
+        #expect(state.books.first?.mediaAvailability == .metadataOnly)
+        #expect(Set(state.glosses.map { $0.status }) == Set([GlossStatus.accepted, .rejected]))
+        #expect(state.chapterTranslationCheckpoints.first?.totalSentences == 9)
     }
 
     @MainActor

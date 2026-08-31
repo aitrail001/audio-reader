@@ -22,6 +22,7 @@ import {
   mutationSummary,
   policyDraftErrors,
   quotaReductionNeedsConfirmation,
+  canToggleAccountSync,
 } from "./operator-state";
 import {
   extractAccessToken,
@@ -46,6 +47,7 @@ import {
   PREVIEW_DIAGNOSTICS,
   PREVIEW_EVENTS,
   PREVIEW_FLAGS,
+  PREVIEW_ACCOUNT_SYNC_READINESS,
   PREVIEW_JOBS,
   PREVIEW_METRICS,
   PREVIEW_POLICIES,
@@ -78,6 +80,7 @@ import type {
   ProductEvent,
   Quota,
   RuntimeConfig,
+  AccountSyncReadiness,
   Section,
 } from "./types";
 
@@ -89,7 +92,7 @@ const RAIL: ({ type: "label"; label: string } | { type: "item"; id: Section; lab
   { type: "item", id: "privacy", label: "Privacy" },
   { type: "label", label: "AI" },
   { type: "item", id: "policies", label: "Policies" },
-  { type: "item", id: "cache", label: "Cache" },
+{ type: "item", id: "cache", label: "Shared AI cache" },
   { type: "label", label: "Delivery" },
   { type: "item", id: "jobs", label: "Jobs" },
   { type: "item", id: "flags", label: "Flags" },
@@ -137,17 +140,6 @@ function stringPayload(payload: Record<string, unknown> | undefined, key: string
   return typeof value === "string" ? value : "";
 }
 
-function cacheOriginal(entry: CacheEntry): string {
-  const payload = entry.payload;
-  return (
-    stringPayload(payload, "source") ||
-    stringPayload(payload, "overview") ||
-    stringPayload(payload, "chapterId") ||
-    entry.editionFingerprint ||
-    ""
-  );
-}
-
 function cacheResult(entry: CacheEntry): string {
   const payload = entry.payload;
   return stringPayload(payload, "translation") || stringPayload(payload, "overview") || "";
@@ -162,24 +154,6 @@ function cacheKind(entry: CacheEntry): string {
     return "sentence";
   }
   return kind.replaceAll("_", " ");
-}
-
-function cacheBook(entry: CacheEntry): string {
-  return (
-    stringPayload(entry.payload, "bookTitle") ||
-    entry.editionFingerprint ||
-    stringPayload(entry.payload, "editionFingerprint") ||
-    ""
-  );
-}
-
-function cacheChapter(entry: CacheEntry): string {
-  return (
-    stringPayload(entry.payload, "chapterTitle") ||
-    stringPayload(entry.payload, "chapterFingerprint") ||
-    stringPayload(entry.payload, "chapterId") ||
-    ""
-  );
 }
 
 function clipText(value: string, limit = 140): string {
@@ -283,6 +257,9 @@ export function App() {
   const [blocked, setBlocked] = useState<BlockedAttempt[]>([]);
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
   const [flags, setFlags] = useState<FeatureFlag[]>([]);
+  const [accountSyncReadiness, setAccountSyncReadiness] = useState<AccountSyncReadiness | null>(
+    null,
+  );
   const [quotas, setQuotas] = useState<Quota[]>([]);
   const [privacy, setPrivacy] = useState<PrivacyRequest[]>([]);
   const [privacyStatus, setPrivacyStatus] = useState(
@@ -458,6 +435,7 @@ export function App() {
     setAudit([]);
     setBlocked([]);
     setFlags([]);
+    setAccountSyncReadiness(null);
     setQuotas([]);
     setQuotaDrafts({});
     setPrivacy([]);
@@ -545,6 +523,7 @@ export function App() {
         setAudit(PREVIEW_AUDIT);
         setBlocked(PREVIEW_BLOCKED);
         setFlags(PREVIEW_FLAGS);
+        setAccountSyncReadiness(PREVIEW_ACCOUNT_SYNC_READINESS);
         setQuotas(PREVIEW_QUOTAS);
         setQuotaDrafts(
           Object.fromEntries(PREVIEW_QUOTAS.map((item) => [item.key, String(item.limit)])),
@@ -700,6 +679,7 @@ export function App() {
           auditPayload,
           blockedPayload,
           flagsPayload,
+          accountSyncReadinessPayload,
           quotasPayload,
           privacyPayload,
           diagnosticsPayload,
@@ -814,6 +794,16 @@ export function App() {
             [],
           ),
           authorized(
+            "flags.read",
+            () =>
+              independent(
+                "flags",
+                getJsonOrNull<AccountSyncReadiness>("/v1/admin/account-sync-readiness", access),
+                accountSyncReadiness,
+              ),
+            null,
+          ),
+          authorized(
             "quotas.read",
             () => independent("quotas", getJsonOrNull<Quota[]>("/v1/admin/quotas", access), quotas),
             [],
@@ -888,6 +878,7 @@ export function App() {
         const nextFlags = Array.isArray(flagsPayload) ? flagsPayload : [];
         const nextQuotas = Array.isArray(quotasPayload) ? quotasPayload : [];
         setFlags(nextFlags);
+        setAccountSyncReadiness(accountSyncReadinessPayload);
         setQuotas(nextQuotas);
         setQuotaDrafts(
           Object.fromEntries(nextQuotas.map((item) => [item.key, String(item.limit)])),
@@ -1805,6 +1796,7 @@ export function App() {
           {section === "flags" ? (
             <FlagsPanel
               flags={flags}
+              accountSyncReadiness={accountSyncReadiness}
               busy={busy}
               canMutate={canManageFlags}
               onToggle={(flag) => {
@@ -3557,11 +3549,10 @@ function CachePanel(props: {
 }) {
   return (
     <>
-      <h2>Cache</h2>
+      <h2>Shared AI cache</h2>
       <p className="lede">
-        Shared translation and summary rows. The table shows kind, original, result, book, and hits.
-        Open a row for cache id, cache key, chapter, context, and notes. Chat does not write this
-        table.
+        HMAC-addressed reusable translations and summaries. Source passages, private notes, chat,
+        and durable user decisions are not stored in this table.
       </p>
       <OperatorTable
         caption="Shared derived cache"
@@ -3631,20 +3622,6 @@ function CachePanel(props: {
             ),
           },
           {
-            id: "original",
-            header: "Original",
-            sortValue: (entry) => cacheOriginal(entry),
-            searchValue: (entry) => cacheOriginal(entry),
-            render: (entry) => {
-              const original = cacheOriginal(entry);
-              return (
-                <div className="cell-clip" title={original || undefined}>
-                  {original === "" ? "—" : clipText(original, 160)}
-                </div>
-              );
-            },
-          },
-          {
             id: "translation",
             header: "Translation",
             sortValue: (entry) => cacheResult(entry),
@@ -3659,18 +3636,11 @@ function CachePanel(props: {
             },
           },
           {
-            id: "book",
-            header: "Book",
-            sortValue: (entry) => cacheBook(entry),
-            searchValue: (entry) => `${cacheBook(entry)} ${entry.editionFingerprint ?? ""}`,
-            render: (entry) => {
-              const book = cacheBook(entry);
-              return (
-                <span className="cell-now" title={book || undefined}>
-                  {book === "" ? "—" : book}
-                </span>
-              );
-            },
+            id: "edition",
+            header: "Edition fingerprint",
+            sortValue: (entry) => entry.editionFingerprint ?? "",
+            searchValue: (entry) => entry.editionFingerprint ?? "",
+            render: (entry) => <span className="mono">{entry.editionFingerprint || "—"}</span>,
           },
           {
             id: "hits",
@@ -3751,10 +3721,7 @@ function CachePanel(props: {
 
 function CacheDetail(props: { entry: CacheEntry }) {
   const entry = props.entry;
-  const original = cacheOriginal(entry);
   const result = cacheResult(entry);
-  const book = cacheBook(entry);
-  const chapter = cacheChapter(entry);
   const notes = Array.isArray(entry.payload?.notes) ? entry.payload.notes : [];
   const kind = cacheKind(entry);
   return (
@@ -3764,14 +3731,8 @@ function CacheDetail(props: { entry: CacheEntry }) {
         <dd className="mono">{entry.id}</dd>
         <dt>Cache key</dt>
         <dd className="mono">{entry.cacheKey ?? "—"}</dd>
-        <dt>Book</dt>
-        <dd>{book || "—"}</dd>
         <dt>Edition id</dt>
-        <dd className="mono">
-          {entry.editionFingerprint || stringPayload(entry.payload, "editionFingerprint") || "—"}
-        </dd>
-        <dt>Chapter</dt>
-        <dd>{chapter || "—"}</dd>
+        <dd className="mono">{entry.editionFingerprint || "—"}</dd>
         <dt>Languages</dt>
         <dd>
           {entry.sourceLanguage} → {entry.targetLanguage}
@@ -3796,16 +3757,8 @@ function CacheDetail(props: { entry: CacheEntry }) {
       </dl>
       <div className="prose-pair">
         <figure>
-          <figcaption>Original</figcaption>
-          <pre className="prose-block">{original || "—"}</pre>
-        </figure>
-        <figure>
           <figcaption>Translation</figcaption>
           <pre className="prose-block">{result || "—"}</pre>
-        </figure>
-        <figure>
-          <figcaption>Context</figcaption>
-          <pre className="prose-block">{stringPayload(entry.payload, "context") || "—"}</pre>
         </figure>
         <figure>
           <figcaption>Notes</figcaption>
@@ -4770,6 +4723,7 @@ function FlagTargeting(props: {
 
 function FlagsPanel(props: {
   flags: FeatureFlag[];
+  accountSyncReadiness: AccountSyncReadiness | null;
   busy: boolean;
   canMutate: boolean;
   onToggle: (flag: FeatureFlag) => void;
@@ -4782,6 +4736,72 @@ function FlagsPanel(props: {
         Kill switches for managed Qwen, account sync, optional cloud media, and maintenance. Rollout
         is the percent of signed-in sessions that should see the flag.
       </p>
+      <h3>Cross-device Sync readiness</h3>
+      {props.accountSyncReadiness === null ? (
+        <p className="lede">Readiness has not been checked.</p>
+      ) : (
+        <dl className="detail-grid wide">
+          <div>
+            <dt>Required schema</dt>
+            <dd>
+              {props.accountSyncReadiness.requiredSchemaVersion} ·{" "}
+              {props.accountSyncReadiness.schemaReady ? "ready" : "unavailable"}
+            </dd>
+          </div>
+          <div>
+            <dt>Provider</dt>
+            <dd>{props.accountSyncReadiness.provider}</dd>
+          </div>
+          <div>
+            <dt>Bucket</dt>
+            <dd>{props.accountSyncReadiness.bucket ?? "not configured"}</dd>
+          </div>
+          <div>
+            <dt>Credential</dt>
+            <dd>{props.accountSyncReadiness.credentialStatus}</dd>
+          </div>
+          <div>
+            <dt>Private access</dt>
+            <dd>{props.accountSyncReadiness.privacyStatus}</dd>
+          </div>
+          <div>
+            <dt>Upload</dt>
+            <dd>{props.accountSyncReadiness.uploadStatus}</dd>
+          </div>
+          <div>
+            <dt>Download</dt>
+            <dd>{props.accountSyncReadiness.downloadStatus}</dd>
+          </div>
+          <div>
+            <dt>Checksum</dt>
+            <dd>{props.accountSyncReadiness.checksumStatus}</dd>
+          </div>
+          <div>
+            <dt>Delete</dt>
+            <dd>{props.accountSyncReadiness.deleteStatus}</dd>
+          </div>
+          <div>
+            <dt>Not found</dt>
+            <dd>{props.accountSyncReadiness.notFoundStatus}</dd>
+          </div>
+          <div>
+            <dt>Last success</dt>
+            <dd>{formatWhen(props.accountSyncReadiness.lastSuccessAt)}</dd>
+          </div>
+          <div>
+            <dt>Requested</dt>
+            <dd>{props.accountSyncReadiness.requested ? "enabled" : "disabled"}</dd>
+          </div>
+          <div>
+            <dt>Effective</dt>
+            <dd>
+              {props.accountSyncReadiness.effective
+                ? "enabled"
+                : `disabled · ${props.accountSyncReadiness.reason ?? "not ready"}`}
+            </dd>
+          </div>
+        </dl>
+      )}
       <OperatorTable
         caption="Product feature flags"
         noun="flag"
@@ -4833,7 +4853,12 @@ function FlagsPanel(props: {
                 <button
                   type="button"
                   className="ghost"
-                  disabled={!props.canMutate || props.busy}
+                  disabled={
+                    !props.canMutate ||
+                    props.busy ||
+                    (flag.key === "account_sync" &&
+                      !canToggleAccountSync(flag, props.accountSyncReadiness))
+                  }
                   onClick={() => {
                     props.onToggle(flag);
                   }}

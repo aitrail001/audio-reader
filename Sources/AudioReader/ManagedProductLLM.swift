@@ -34,6 +34,33 @@ enum ManagedProductLLM {
         )
     }
 
+    static func completeWithTrace(
+        system: String,
+        user: String,
+        sourceLanguage: String = "en",
+        targetLanguage: String = "zh",
+        learnerLevel: String = "intermediate",
+        chapterID: String = ManagedAccountCredentials.unscopedChapterID,
+        bookTitle: String = "",
+        author: String = "",
+        chapterTitle: String = ""
+    ) async throws -> ProductAICompletion {
+        let credentials = try credentials()
+        return try await client.completeWithTrace(
+            accessToken: credentials.accessToken,
+            deviceID: credentials.deviceID,
+            system: system,
+            user: user,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+            learnerLevel: learnerLevel,
+            chapterID: chapterID,
+            bookTitle: bookTitle,
+            author: author,
+            chapterTitle: chapterTitle
+        )
+    }
+
     static func translate(
         task: String,
         source: String,
@@ -50,7 +77,8 @@ enum ManagedProductLLM {
         author: String = "",
         chapterTitle: String = "",
         lookupOnly: Bool = false,
-        refresh: Bool = false
+        refresh: Bool = false,
+        assistantResultID: String? = nil
     ) async throws -> ProductTranslationResult {
         let credentials = try credentials()
         return try await client.translate(
@@ -72,7 +100,8 @@ enum ManagedProductLLM {
                 author: author,
                 chapterTitle: chapterTitle,
                 lookupOnly: lookupOnly,
-                refresh: refresh
+                refresh: refresh,
+                assistantResultId: assistantResultID
             )
         )
     }
@@ -170,7 +199,12 @@ enum ManagedProductLLM {
                         category: $0.category,
                         explanation: $0.explanation
                     )
-                }
+                },
+                assistantResultID: result.id,
+                model: result.model,
+                promptVersion: result.promptVersion,
+                modelPolicyHash: result.modelPolicyHash,
+                sharedCacheEntryID: result.sharedCacheEntryID
             )
         }
     }
@@ -259,10 +293,42 @@ enum ManagedProductLLM {
         author: String = "",
         chapterTitle: String = "",
         lookupOnly: Bool = false,
-        refresh: Bool = false
+        refresh: Bool = false,
+        assistantResultID: String? = nil
     ) async throws -> String {
+        let summary = try await summarizeResult(
+            chapterID: chapterID,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+            learnerLevel: learnerLevel,
+            segments: segments,
+            editionFingerprint: editionFingerprint,
+            bookTitle: bookTitle,
+            author: author,
+            chapterTitle: chapterTitle,
+            lookupOnly: lookupOnly,
+            refresh: refresh,
+            assistantResultID: assistantResultID
+        )
+        return summaryText(from: summary)
+    }
+
+    static func summarizeResult(
+        chapterID: String,
+        sourceLanguage: String,
+        targetLanguage: String,
+        learnerLevel: String,
+        segments: [String],
+        editionFingerprint: String = "",
+        bookTitle: String = "",
+        author: String = "",
+        chapterTitle: String = "",
+        lookupOnly: Bool = false,
+        refresh: Bool = false,
+        assistantResultID: String? = nil
+    ) async throws -> ProductChapterSummary {
         let credentials = try credentials()
-        let summary = try await client.summarize(
+        return try await client.summarize(
             accessToken: credentials.accessToken,
             deviceID: credentials.deviceID,
             request: ProductChapterSummaryRequest(
@@ -277,9 +343,13 @@ enum ManagedProductLLM {
                 chapterTitle: chapterTitle,
                 segments: segments,
                 lookupOnly: lookupOnly,
-                refresh: refresh
+                refresh: refresh,
+                assistantResultId: assistantResultID
             )
         )
+    }
+
+    static func summaryText(from summary: ProductChapterSummary) -> String {
         let payload: [String: Any] = [
             "overview": summary.overview,
             "keyPoints": summary.keyPoints,
@@ -289,7 +359,7 @@ enum ManagedProductLLM {
             },
             "themes": summary.themes
         ]
-        let data = try JSONSerialization.data(withJSONObject: payload)
+        let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
         return String(data: data, encoding: .utf8) ?? summary.overview
     }
 
@@ -332,9 +402,9 @@ enum ManagedProductLLM {
         bookTitle: String = "",
         author: String = "",
         chapterTitle: String = ""
-    ) async throws -> String? {
+    ) async throws -> ProductChapterSummary? {
         do {
-            return try await summarize(
+            return try await summarizeResult(
                 chapterID: chapterID,
                 sourceLanguage: sourceLanguage,
                 targetLanguage: targetLanguage,

@@ -14,6 +14,7 @@ import type {
   ProductEvent,
   Quota,
   RuntimeConfig,
+  AccountSyncReadiness,
 } from "./types";
 
 /** Labeled synthetic operator sample for layout review. Not live data. */
@@ -370,6 +371,31 @@ export const PREVIEW_FLAGS: FeatureFlag[] = [
   { key: "cloud_media", enabled: true, rolloutPercent: 100 },
   { key: "maintenance_mode", enabled: false, rolloutPercent: 100 },
 ];
+
+export const PREVIEW_ACCOUNT_SYNC_READINESS: AccountSyncReadiness = {
+  requiredSchemaVersion: "20260831120000",
+  schemaReady: true,
+  provider: "supabase",
+  bucket: "audio-reader-assets",
+  credentialStatus: "ok",
+  privacyStatus: "ok",
+  uploadStatus: "ok",
+  downloadStatus: "ok",
+  checksumStatus: "ok",
+  deleteStatus: "ok",
+  notFoundStatus: "ok",
+  ready: true,
+  requested: true,
+  effective: true,
+  reason: null,
+  checkedAt: "2026-08-28T12:00:00.000Z",
+  cachedUntil: "2026-08-28T12:00:30.000Z",
+  retryAfterSeconds: 30,
+  lastSuccessAt: "2026-08-28T12:00:00.000Z",
+  lastFailureAt: null,
+  lastFailureCode: null,
+  lastFailureDetail: null,
+};
 
 export const PREVIEW_QUOTAS: Quota[] = [
   { key: "qwen_tasks_day", used: 12, limit: 50, periodEndsAt: "2026-08-28T23:59:59.000Z" },

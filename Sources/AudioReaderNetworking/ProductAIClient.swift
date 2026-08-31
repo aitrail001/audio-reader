@@ -19,6 +19,7 @@ public struct ProductTranslationRequest: Codable, Equatable, Sendable {
     public var chapterTitle: String
     public var lookupOnly: Bool
     public var refresh: Bool
+    public var assistantResultId: String?
 
     public init(
         task: String,
@@ -37,7 +38,8 @@ public struct ProductTranslationRequest: Codable, Equatable, Sendable {
         author: String = "",
         chapterTitle: String = "",
         lookupOnly: Bool = false,
-        refresh: Bool = false
+        refresh: Bool = false,
+        assistantResultId: String? = nil
     ) {
         self.task = task
         self.sourceLanguage = sourceLanguage
@@ -56,16 +58,19 @@ public struct ProductTranslationRequest: Codable, Equatable, Sendable {
         self.chapterTitle = chapterTitle
         self.lookupOnly = lookupOnly
         self.refresh = refresh
+        self.assistantResultId = assistantResultId
     }
 }
 
 public struct ProductTranslationSentence: Codable, Equatable, Sendable {
     public var id: String
     public var text: String
+    public var assistantResultId: String?
 
-    public init(id: String, text: String) {
+    public init(id: String, text: String, assistantResultId: String? = nil) {
         self.id = id
         self.text = text
+        self.assistantResultId = assistantResultId
     }
 }
 
@@ -137,31 +142,43 @@ public struct ProductLearningNote: Codable, Equatable, Sendable {
 
 public struct ProductTranslationResult: Codable, Equatable, Sendable {
     public var id: String
+    public var sharedCacheEntryID: String?
     public var targetId: String?
     public var source: String?
     public var translation: String
     public var notes: [ProductLearningNote]
     public var provenance: String
     public var policyVersion: String
+    public var model: String?
+    public var promptVersion: String?
+    public var modelPolicyHash: String?
     public var createdAt: String
 
     public init(
         id: String,
+        sharedCacheEntryID: String? = nil,
         translation: String,
         notes: [ProductLearningNote],
         provenance: String,
         policyVersion: String,
+        model: String? = nil,
+        promptVersion: String? = nil,
+        modelPolicyHash: String? = nil,
         createdAt: String,
         targetId: String? = nil,
         source: String? = nil
     ) {
         self.id = id
+        self.sharedCacheEntryID = sharedCacheEntryID
         self.targetId = targetId
         self.source = source
         self.translation = translation
         self.notes = notes
         self.provenance = provenance
         self.policyVersion = policyVersion
+        self.model = model
+        self.promptVersion = promptVersion
+        self.modelPolicyHash = modelPolicyHash
         self.createdAt = createdAt
     }
 }
@@ -198,6 +215,7 @@ public struct ProductChapterSummaryRequest: Codable, Equatable, Sendable {
     public var segments: [String]
     public var lookupOnly: Bool
     public var refresh: Bool
+    public var assistantResultId: String?
 
     public init(
         chapterId: String,
@@ -211,7 +229,8 @@ public struct ProductChapterSummaryRequest: Codable, Equatable, Sendable {
         chapterTitle: String = "",
         segments: [String] = [],
         lookupOnly: Bool = false,
-        refresh: Bool = false
+        refresh: Bool = false,
+        assistantResultId: String? = nil
     ) {
         self.chapterId = chapterId
         self.sourceLanguage = sourceLanguage
@@ -225,6 +244,7 @@ public struct ProductChapterSummaryRequest: Codable, Equatable, Sendable {
         self.segments = segments
         self.lookupOnly = lookupOnly
         self.refresh = refresh
+        self.assistantResultId = assistantResultId
     }
 }
 
@@ -235,12 +255,17 @@ public struct ProductSummaryConcept: Codable, Equatable, Sendable {
 
 public struct ProductChapterSummary: Codable, Equatable, Sendable {
     public var id: String
+    public var sharedCacheEntryID: String?
     public var overview: String
     public var keyPoints: [String]
     public var charactersOrIdeas: [String]?
     public var keyConcepts: [ProductSummaryConcept]
     public var themes: [String]
     public var provenance: String
+    public var model: String?
+    public var promptVersion: String?
+    public var modelPolicyHash: String?
+    public var policyVersion: String?
     public var createdAt: String
 }
 
@@ -345,6 +370,16 @@ public struct ProductChatMessage: Codable, Equatable, Sendable {
     public var createdAt: String
 }
 
+public struct ProductAICompletion: Equatable, Sendable {
+    public let text: String
+    public let traceID: String
+
+    public init(text: String, traceID: String) {
+        self.text = text
+        self.traceID = traceID
+    }
+}
+
 public protocol ProductAIClient: Sendable {
     func translate(
         accessToken: String,
@@ -399,6 +434,36 @@ extension ProductAIClient {
         author: String = "",
         chapterTitle: String = ""
     ) async throws -> String {
+        try await completeWithTrace(
+            accessToken: accessToken,
+            deviceID: deviceID,
+            system: system,
+            user: user,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+            learnerLevel: learnerLevel,
+            chapterID: chapterID,
+            bookTitle: bookTitle,
+            author: author,
+            chapterTitle: chapterTitle
+        ).text
+    }
+
+    /// Returns the provider-owned message identifier alongside its text so
+    /// downstream provenance never depends on model-authored content.
+    public func completeWithTrace(
+        accessToken: String,
+        deviceID: String,
+        system: String,
+        user: String,
+        sourceLanguage: String = "en",
+        targetLanguage: String = "zh",
+        learnerLevel: String = "intermediate",
+        chapterID: String = ManagedAccountCredentials.unscopedChapterID,
+        bookTitle: String = "",
+        author: String = "",
+        chapterTitle: String = ""
+    ) async throws -> ProductAICompletion {
         let accepted = try await chat(
             accessToken: accessToken,
             deviceID: deviceID,
@@ -419,7 +484,8 @@ extension ProductAIClient {
             deviceID: deviceID,
             streamURL: accepted.streamUrl
         )
-        return message.text
+        guard message.id == accepted.messageId else { throw AuthClientError.invalidResponse }
+        return ProductAICompletion(text: message.text, traceID: message.id)
     }
 
 }

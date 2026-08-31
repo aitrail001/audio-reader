@@ -1,4 +1,5 @@
 import type { ReadinessStatus } from "@audio-reader/domain";
+import { ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION } from "./schema";
 import {
   createMemoryCatalogStore,
   createSupabaseCatalogStore,
@@ -29,6 +30,7 @@ export const packageId = "@audio-reader/database" as const;
 export type { ReadinessStatus };
 export {
   AUDIT_ACTOR_TYPES,
+  ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION,
   CORE_TABLES,
   GLOBAL_TABLES,
   JWT_DENIED_TABLES,
@@ -112,6 +114,7 @@ export type {
   ManagedPromptOutputValidation,
 } from "./assistant-prompts";
 export {
+  AssetReservationError,
   RestPersistenceError,
   createMemoryOpsStore,
   createSupabaseOpsStore,
@@ -126,6 +129,7 @@ export type {
   OperatorSettingsRecord,
   OperatorSettingsReadResult,
   OpsAsset,
+  OpsAssistantResult,
   OpsAuditEvent,
   OpsCacheEntry,
   OpsExport,
@@ -176,32 +180,44 @@ export type {
 
 export type DatabaseClient = {
   ping(): Promise<ReadinessStatus>;
+  accountSyncSchemaVersion(): Promise<string | undefined>;
   identity: IdentityStore;
   sync: SyncStore;
+  syncV2: SyncStore;
   catalog: CatalogStore;
   ops: OpsStore;
 };
 
 export function createFakeDatabaseClient(
-  options: { status?: ReadinessStatus } = {},
+  options: { status?: ReadinessStatus; accountSyncSchemaVersion?: string | null } = {},
 ): DatabaseClient {
   const status = options.status ?? "ok";
+  const schemaVersion =
+    options.accountSyncSchemaVersion === null
+      ? undefined
+      : (options.accountSyncSchemaVersion ?? ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION);
   const identity = createMemoryIdentityStore();
   const catalog = createMemoryCatalogStore();
+  const sync = createMemorySyncStore({ identity });
+  const syncV2 = createMemorySyncStore({ identity });
   return {
     ping: () => Promise.resolve(status),
+    accountSyncSchemaVersion: () => Promise.resolve(schemaVersion),
     identity,
-    sync: createMemorySyncStore({ identity }),
+    sync,
+    syncV2,
     catalog,
-    ops: createMemoryOpsStore({ identity, catalog }),
+    ops: createMemoryOpsStore({ identity, catalog, syncV2 }),
   };
 }
 
 export function createUnavailableDatabaseClient(): DatabaseClient {
   return {
     ping: () => Promise.resolve("unavailable"),
+    accountSyncSchemaVersion: () => Promise.resolve(undefined),
     identity: createUnavailableIdentityStore(),
     sync: createUnavailableSyncStore(),
+    syncV2: createUnavailableSyncStore(),
     catalog: createUnavailableCatalogStore(),
     ops: createUnavailableOpsStore(),
   };
@@ -220,8 +236,18 @@ export function createSupabaseDatabaseClient(options: SupabaseRestOptions): Data
       });
       return response.status >= 200 && response.status < 300 ? "ok" : "unavailable";
     },
+    async accountSyncSchemaVersion() {
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/account_sync_schema_version",
+        body: {},
+      });
+      if (response.status < 200 || response.status >= 300) return undefined;
+      return typeof response.body === "string" ? response.body : undefined;
+    },
     identity,
     sync: createSupabaseSyncStore(rest),
+    syncV2: createSupabaseSyncStore(rest, "v2"),
     catalog,
     ops: createSupabaseOpsStore(rest, { identity, catalog }),
   };

@@ -8,12 +8,21 @@ import AppKit
 import AudioReaderNetworking
 #endif
 
+struct PendingExternalEPUBDuplicate: Sendable {
+    var url: URL
+    var title: String
+}
+
 @MainActor
 @Observable
 final class AppState {
     private static let reviewLog = Logger(
         subsystem: "com.johnsonzhang.AudioReader",
         category: "vocabulary-review"
+    )
+    private static let vocabularyLog = Logger(
+        subsystem: "com.johnsonzhang.AudioReader",
+        category: "vocabulary-capture"
     )
 
     var settings: AppSettings
@@ -28,6 +37,10 @@ final class AppState {
         }
     }
     var transcriptionLanguageMismatch: TranscriptionLanguageMismatch?
+    private(set) var transcriptSegmentCount = 0
+    var canLoadMoreTranscriptSegments: Bool {
+        (transcript?.segments.count ?? 0) < transcriptSegmentCount
+    }
     private(set) var presentedTranscript: Transcript?
     private(set) var transcriptOverlayStatuses: [String: TranscriptOverlayApplicationStatus] = [:]
     private(set) var retainedTranscriptOverlays: [StoredTranscriptOverlay] = []
@@ -66,6 +79,7 @@ final class AppState {
     var transcriptionJobOrigin: BackgroundJobOrigin?
     var backgroundJobNavigationError: String?
     var errorMessage: String?
+    var pendingExternalEPUBDuplicate: PendingExternalEPUBDuplicate?
     var selectedWord: TranscriptWord?
     var definition: String?
     var dictionaryHits: [DictionaryHit] = []
@@ -134,7 +148,9 @@ final class AppState {
     @ObservationIgnored private let vocabularyRepository: any VocabularyRepository
     @ObservationIgnored private let knownLemmaRepository: any KnownLemmaRepository
     @ObservationIgnored private let reviewEventRepository: any ReviewEventRepository
+    @ObservationIgnored private let vocabularyCanonicalizationFallback: VocabularyCanonicalizationFallbackResolver?
     @ObservationIgnored private let usesLivePersistence: Bool
+    @ObservationIgnored private let synchronizedStore: LocalSQLiteStore?
     @ObservationIgnored private var lastPersistedReaderSeconds: TimeInterval?
     @ObservationIgnored private var inMemoryTranscriptOverlays: [StoredTranscriptOverlay] = []
 
@@ -518,7 +534,7 @@ final class AppState {
             heardQuizSegments: passage.segments.map {
                 ProductHeardSegment(id: $0.id, text: $0.displayText)
             },
-            completion: { response in
+            completion: { response, _ in
                 self.isHeardQuizWorking = false
                 let quiz = HeardQuizResolver.resolve(
                     response: response,
@@ -918,7 +934,9 @@ final class AppState {
         vocabularyRepository = composition.vocabulary
         knownLemmaRepository = composition.knownLemmas
         reviewEventRepository = composition.reviewEvents
+        vocabularyCanonicalizationFallback = composition.canonicalizationFallback
         usesLivePersistence = composition.usesLivePersistence
+        synchronizedStore = composition.synchronizedStore
         if let account {
             self.account = account
         } else if usesLivePersistence {
@@ -988,16 +1006,16 @@ final class AppState {
         }
     }
 
-    /// Library scan must not wait on account network I/O. Restore/sync publish
-    /// `account.activityMessage` so Settings and the rest of the shell stay usable.
+    /// Local discovery commits before account restore so a sync publication
+    /// cannot race a stale rescan into the observable catalog.
     func boot() async {
-        async let accountRestore: Void = account.restore()
         await rescan()
         if selectedBookID == nil, let first = books.first {
             selectedBookID = first.id
             selectedChapterID = first.chapters.first?.id
         }
-        await accountRestore
+        await account.restore()
+        reloadSyncedLearningData()
         if account.mode.isSignedIn {
             account.recordUsage(
                 name: "app.ready",
@@ -1047,9 +1065,16 @@ final class AppState {
 #else
         root = URL(fileURLWithPath: settings.libraryPath)
 #endif
-        let scanned = await Task.detached(priority: .userInitiated) {
+        let discovered = await Task.detached(priority: .userInitiated) {
             LibraryScanner.scan(root: root)
         }.value
+        let scanned: [Book]
+        do {
+            scanned = try Persistence.filterSuppressedBooks(discovered)
+        } catch {
+            scanned = discovered
+            errorMessage = "Deleted-library state could not be loaded: \(error.localizedDescription)"
+        }
         libraryScanProgress = .init(
             stage: "Preparing covers",
             detail: "Loading cover artwork for \(scanned.count) books…",
@@ -1062,10 +1087,7 @@ final class AppState {
         }.value
         books = scanned
         migrateVocabularySourceLanguages()
-        let transcripts = await Task.detached(priority: .utility) {
-            Persistence.loadAllTranscripts()
-        }.value
-        readyChapterIDs = Persistence.readyChapterIDs(in: scanned, transcripts: transcripts)
+        readyChapterIDs = Persistence.readyChapterIDs(in: scanned)
 
         libraryScanProgress = .init(
             stage: "Reading chapter information",
@@ -1093,20 +1115,84 @@ final class AppState {
                 )
             }
         }
-        readyChapterIDs = Persistence.readyChapterIDs(in: books, transcripts: transcripts)
+        do {
+            books = try Persistence.reconcileScannedBooks(books)
+        } catch {
+            errorMessage = "Library metadata could not be saved: \(error.localizedDescription)"
+        }
+        readyChapterIDs = Persistence.readyChapterIDs(in: books)
+    }
+
+    /// Both platform shells use the same catalog/assets/outbox deletion path;
+    /// the only platform distinction is the managed media root.
+    func deleteBookFromLibrary(_ book: Book) throws {
+#if os(iOS)
+        let mediaRoot = Persistence.importedBooksURL
+#else
+        let mediaRoot = URL(fileURLWithPath: settings.libraryPath, isDirectory: true)
+#endif
+        try Persistence.deleteBook(book, mediaRoot: mediaRoot)
+        books.removeAll { $0.id == book.id }
+        readyChapterIDs.subtract(book.chapters.map(\.id))
+        if selectedBookID == book.id {
+            cancelTranscription()
+            player.tearDown()
+            selectedBookID = books.first?.id
+            selectedChapterID = books.first?.chapters.first?.id
+            transcript = nil
+            transcriptSegmentCount = 0
+            tab = .library
+        }
     }
 
     /// Handles the system document-open route used by Files and Apple Books
     /// exports; copying and EPUB validation stay off the main actor.
     func importExternalEPUB(_ url: URL) async {
+        await performExternalEPUBImport(url, duplicatePolicy: .keepExisting)
+    }
+
+    func confirmExternalEPUBImport() async {
+        guard let pending = pendingExternalEPUBDuplicate else { return }
+        pendingExternalEPUBDuplicate = nil
+        await performExternalEPUBImport(pending.url, duplicatePolicy: .confirmedReimport)
+    }
+
+    func cancelExternalEPUBImport() {
+        guard pendingExternalEPUBDuplicate != nil else { return }
+        pendingExternalEPUBDuplicate = nil
+        account.recordUsage(
+            name: "book_import.finished",
+            properties: ["source": "open_url", "outcome": "duplicate_cancelled"]
+        )
+    }
+
+    /// The open-URL route pauses after read-only identity inspection; only the
+    /// confirmed path is allowed to create a second library folder.
+    private func performExternalEPUBImport(
+        _ url: URL,
+        duplicatePolicy: AudiobookDuplicateImportPolicy
+    ) async {
         guard LibraryScanner.ebookExt.contains(url.pathExtension.lowercased()) else {
             errorMessage = "AudioReader can open DRM-free EPUB documents."
             return
         }
         account.recordUsage(name: "book_import.started", properties: ["source": "open_url"])
         do {
+            if case .keepExisting = duplicatePolicy {
+                let preflight = try await Task.detached(priority: .userInitiated) {
+                    try AudiobookImportService.preflightFiles([url])
+                }.value
+                if let duplicate = preflight.duplicates.first {
+                    pendingExternalEPUBDuplicate = .init(url: url, title: duplicate.title)
+                    account.recordUsage(
+                        name: "book_import.finished",
+                        properties: ["source": "open_url", "outcome": "confirmation_required"]
+                    )
+                    return
+                }
+            }
             let result = try await Task.detached(priority: .userInitiated) {
-                try AudiobookImportService.importFiles([url])
+                try AudiobookImportService.importFiles([url], duplicatePolicy: duplicatePolicy)
             }.value
             await rescan()
             guard let book = books.first(where: {
@@ -1160,23 +1246,28 @@ final class AppState {
         deepReadingPausedSentenceID = nil
         player.rate = Float(settings.playbackRate)
         if chapter.hasAudio {
-            transcript = Persistence.loadTranscript(for: chapter)
+            transcriptSegmentCount = Persistence.transcriptSegmentCount(chapterID: chapter.id)
+            transcript = Persistence.loadTranscriptPage(
+                for: chapter,
+                range: 0..<Persistence.transcriptPageSize
+            )
         } else if let ebookPath = book.ebookPath, let sectionIndex = chapter.ebookSectionIndex {
             transcript = EPUBParser.readerTranscript(
                 from: ebookPath,
                 sectionIndex: sectionIndex,
                 chapterID: chapter.id
             )
+            transcriptSegmentCount = transcript?.segments.count ?? 0
             readyChapterIDs.insert(chapter.id)
         } else {
             transcript = nil
+            transcriptSegmentCount = 0
         }
         chapterTranslation = nil
         chapterSummary = chapterSummaries.first {
-            $0.id == ChapterSummaryRecord.makeID(
-                chapterID: chapter.id,
-                language: settings.targetLanguage
-            ) && $0.status != .rejected
+            $0.chapterID == chapter.id
+                && $0.language == settings.targetLanguage
+                && $0.status != .rejected
         }
         chapterChat = chapterChatsByChapterID[chapter.id] ?? []
         chapterAssistantError = chapterAssistantErrorsByChapterID[chapter.id]
@@ -1198,6 +1289,35 @@ final class AppState {
         }
         ensureCachedChapterSummary()
         ensureAutoTranslation()
+    }
+
+    /// Reader navigation grows the visible window one bounded SQLite page at a
+    /// time; opening a large chapter never materializes the remaining segments.
+    func loadMoreTranscriptSegments() {
+        guard usesLivePersistence,
+              let chapter = selectedChapter,
+              var current = transcript,
+              current.segments.count < transcriptSegmentCount
+        else { return }
+        let start = current.segments.count
+        let end = min(start + Persistence.transcriptPageSize, transcriptSegmentCount)
+        guard let page = Persistence.loadTranscriptPage(for: chapter, range: start..<end) else { return }
+        current.segments.append(contentsOf: page.segments)
+        transcript = current
+    }
+
+    /// Whole-chapter jobs may materialize the chapter, but only through the
+    /// store's bounded page loader; the reader's visible transcript stays paged.
+    func completeTranscriptForChapterAssistant() -> Transcript? {
+        guard usesLivePersistence,
+              let chapter = selectedChapter,
+              (presentedTranscript?.segments.count ?? 0) < transcriptSegmentCount,
+              let complete = Persistence.loadCompleteTranscript(for: chapter)
+        else { return presentedTranscript }
+        return Transcript(Persistence.resolvedTranscript(
+            complete,
+            chapterDuration: chapter.duration
+        ))
     }
 
     /// Contents and search navigation use the persisted chapter identity rather
@@ -1673,9 +1793,24 @@ final class AppState {
         let gloss = lookupGloss(kind: .word, source: head, context: segment.displayText)
         let accepted = gloss?.status == .accepted ? gloss : lookupGloss(kind: .word, source: head, context: nil)
         let dict = selectedDictionaryHit ?? dictionaryHits.first
+        let sourceLanguage = StudyTokenIndex.languageKey(for: audiobookLanguage(for: book))
+        let canonicalization = VocabularyCanonicalizer.canonicalize(
+            surfaceForm: head,
+            context: segment.displayText,
+            language: sourceLanguage
+        )
         let entry = VocabEntry(
             id: UUID().uuidString,
             word: head,
+            canonicalForm: canonicalization.canonicalForm,
+            partOfSpeech: canonicalization.partOfSpeech,
+            senseID: canonicalization.senseID,
+            canonicalizationSource: canonicalization.source,
+            canonicalizationConfidence: canonicalization.confidence,
+            canonicalizationStatus: canonicalization.status,
+            canonicalizationTraceID: canonicalization.traceID,
+            captureSource: .explicitWord,
+            reviewEligible: true,
             category: .word,
             definition: DictionaryLookup.plainPreview(from: dict?.preview ?? definition ?? dict?.html ?? ""),
             dictionaryName: dict?.name,
@@ -1683,7 +1818,7 @@ final class AppState {
             translation: (accepted?.status == .accepted ? accepted?.text : nil) ?? (gloss?.status == .accepted ? gloss?.text : nil),
             translationLanguage: accepted?.language ?? gloss?.language,
             translationModel: accepted?.model ?? gloss?.model,
-            sourceLanguage: StudyTokenIndex.languageKey(for: audiobookLanguage(for: book)),
+            sourceLanguage: sourceLanguage,
             context: segment.displayText,
             spokenText: segment.spokenText,
             ebookText: segment.trustedEbookText,
@@ -1696,9 +1831,57 @@ final class AppState {
             timestamp: word.start,
             addedAt: Date()
         )
+        Self.vocabularyLog.info(
+            "vocabulary_capture message=vocabulary_capture component=vocabulary-capture outcome=saved source=explicit_word canonicalizer=\(canonicalization.source.rawValue, privacy: .public) status=\(canonicalization.status.rawValue, privacy: .public)"
+        )
         vocab.insert(entry, at: 0)
         persistVocabulary()
         vocabularyNotice = "Added “\(head)” to your vocabulary."
+        resolveVocabularyCanonicalizationFallback(
+            entryID: entry.id,
+            offline: canonicalization,
+            surfaceForm: head,
+            context: segment.displayText,
+            language: sourceLanguage
+        )
+    }
+
+    /// Ambiguous offline proposals remain isolated unless the bounded managed
+    /// fallback returns a validated structured sense with trace provenance.
+    private func resolveVocabularyCanonicalizationFallback(
+        entryID: String,
+        offline: VocabularyCanonicalization,
+        surfaceForm: String,
+        context: String,
+        language: String
+    ) {
+        guard offline.status == .needsReview, let vocabularyCanonicalizationFallback else { return }
+        Task { @MainActor [weak self] in
+            let resolved = await vocabularyCanonicalizationFallback.resolve(
+                offline: offline,
+                surfaceForm: surfaceForm,
+                context: context,
+                language: language
+            )
+            guard resolved.status == .confirmed,
+                  let self,
+                  let index = self.vocab.firstIndex(where: { $0.id == entryID }),
+                  self.vocab[index].canonicalizationStatus == .needsReview
+            else { return }
+            var updated = self.vocab[index]
+            updated.canonicalForm = resolved.canonicalForm
+            updated.partOfSpeech = resolved.partOfSpeech
+            updated.senseID = resolved.senseID
+            updated.canonicalizationSource = resolved.source
+            updated.canonicalizationConfidence = resolved.confidence
+            updated.canonicalizationStatus = resolved.status
+            updated.canonicalizationTraceID = resolved.traceID
+            self.replaceVocabularyEntry(at: index, with: updated, refreshStudyIndex: false)
+            self.persistVocabularyUpdates([updated])
+            Self.vocabularyLog.info(
+                "vocabulary_canonicalization message=vocabulary_canonicalization component=vocabulary-capture outcome=fallback_confirmed resource=\(entryID, privacy: .private(mask: .hash)) traceId=\(resolved.traceID ?? "", privacy: .private(mask: .hash))"
+            )
+        }
     }
 
     func removeVocab(_ entry: VocabEntry) {
@@ -1717,52 +1900,94 @@ final class AppState {
         )
     }
 
+    /// Suggestions and sentence annotations become scheduler-owned only after
+    /// this explicit learner action; My list membership remains independent.
+    func acceptVocabularyForReview(_ entryID: String) {
+        guard let index = vocab.firstIndex(where: { $0.id == entryID }) else { return }
+        var updated = vocab[index]
+        updated.reviewEligible = true
+        updated.captureSource = updated.category == .sentence ? .explicitSentence : .explicitPhrase
+        replaceVocabularyEntry(at: index, with: updated, refreshStudyIndex: false)
+        persistVocabularyUpdates([updated])
+        Self.vocabularyLog.info(
+            "vocabulary_eligibility message=vocabulary_eligibility component=vocabulary-capture outcome=accepted resource=\(entryID, privacy: .private(mask: .hash)) category=\(updated.category.rawValue, privacy: .public)"
+        )
+    }
+
+    func updateVocabularyCanonicalForm(
+        _ entryID: String,
+        canonicalForm: String,
+        partOfSpeech: VocabularyPartOfSpeech,
+        senseID: String
+    ) {
+        guard let index = vocab.firstIndex(where: { $0.id == entryID }),
+              !VocabularyCanonicalizer.normalizedForm(canonicalForm).isEmpty
+        else { return }
+        var updated = vocab[index]
+        updated.confirmCanonicalForm(canonicalForm, partOfSpeech: partOfSpeech, senseID: senseID)
+        replaceVocabularyEntry(at: index, with: updated, refreshStudyIndex: false)
+        persistVocabularyUpdates([updated])
+        Self.vocabularyLog.info(
+            "vocabulary_canonicalization message=vocabulary_canonicalization component=vocabulary-capture outcome=user_confirmed resource=\(entryID, privacy: .private(mask: .hash)) partOfSpeech=\(partOfSpeech.rawValue, privacy: .public)"
+        )
+    }
+
     /// Keeps repository I/O off the main actor. The relational review event is
     /// the recovery source if the legacy vocabulary mirror cannot be updated.
     @discardableResult
     func reviewVocabulary(
         _ entryID: String,
+        occurrenceID: String? = nil,
         quality: VocabReviewQuality,
         face: VocabReviewPrompt? = nil,
         at date: Date = Date()
     ) async -> Bool {
-        guard let index = vocab.firstIndex(where: { $0.id == entryID }) else { return false }
-        let reviewed = VocabReviewScheduler.applying(quality, to: vocab[index], at: date)
+        guard let card = VocabularyStudyCards.card(containing: entryID, in: vocab),
+              let selectedOccurrence = occurrenceID.flatMap(card.occurrence(id:)) ?? card.occurrences.first
+        else { return false }
+        let reviewedSchedule = VocabReviewScheduler.applying(quality, to: card.studyEntry, at: date)
+        let reviewedOccurrences = card.occurrences.map { $0.applyingStudySchedule(from: reviewedSchedule) }
         let displayedFace = face ?? vocabReviewPrompt
         let event = StoredReviewEvent(
             id: ReviewEventID.generate(),
-            vocabularyID: VocabularyOccurrenceID(rawValue: reviewed.id),
+            vocabularyID: VocabularyOccurrenceID(rawValue: selectedOccurrence.id),
+            cardID: card.id,
             face: displayedFace.rawValue,
             rating: quality.rawValue,
             reviewedAt: date
         )
         let saveStartedAt = Date()
         Self.reviewLog.info(
-            "review_save_start message=review_save_start requestId=\(event.id.rawValue, privacy: .public) component=vocabulary-review outcome=started resource=\(reviewed.id, privacy: .private(mask: .hash))"
+            "review_save_start message=review_save_start requestId=\(event.id.rawValue, privacy: .public) component=vocabulary-review outcome=started resource=\(card.id, privacy: .private(mask: .hash))"
         )
         let reviewRepository = reviewEventRepository
         let vocabularyRepository = vocabularyRepository
-        let storedVocabulary = StoredVocabularyOccurrence(reviewed)
-        let reviewSchedule = StoredVocabularyReviewSchedule(storedVocabulary)
+        let storedVocabulary = reviewedOccurrences.map(StoredVocabularyOccurrence.init)
+        let reviewSchedules = storedVocabulary.map(StoredVocabularyReviewSchedule.init)
         do {
             let mirrorFailure = try await Task.detached(priority: .userInitiated) {
-                try reviewRepository.appendReviewEvent(event, vocabulary: storedVocabulary)
+                try reviewRepository.appendReviewEvent(event, vocabularies: storedVocabulary)
                 do {
-                    try vocabularyRepository.updateVocabularyReviewSchedule(reviewSchedule)
+                    try vocabularyRepository.updateVocabularyReviewSchedules(reviewSchedules)
                     return nil as String?
                 } catch {
                     return String(describing: error)
                 }
             }.value
-            guard let currentIndex = vocab.firstIndex(where: { $0.id == entryID }) else {
+            guard card.occurrenceIDs.contains(where: { id in vocab.contains { $0.id == id } }) else {
                 Self.reviewLog.warning(
                     "review_save_finish message=review_save_finish requestId=\(event.id.rawValue, privacy: .public) component=vocabulary-review outcome=saved_card_removed"
                 )
                 return false
             }
-            let current = StoredVocabularyOccurrence(vocab[currentIndex])
-            let merged = VocabEntry(reviewSchedule.merging(into: current))
-            replaceVocabularyEntry(at: currentIndex, with: merged, refreshStudyIndex: false)
+            for reviewSchedule in reviewSchedules {
+                guard let currentIndex = vocab.firstIndex(where: { $0.id == reviewSchedule.vocabularyID.rawValue }) else {
+                    continue
+                }
+                let current = StoredVocabularyOccurrence(vocab[currentIndex])
+                let merged = VocabEntry(reviewSchedule.merging(into: current))
+                replaceVocabularyEntry(at: currentIndex, with: merged, refreshStudyIndex: false)
+            }
             vocabReviewEvents.append(event)
             if let mirrorFailure {
                 Self.reviewLog.warning(
@@ -1776,9 +2001,9 @@ final class AppState {
                     "rating": quality.rawValue,
                     "face": displayedFace.rawValue,
                     "readerLevel": settings.readerLanguageLevel,
-                    "sourceLanguage": reviewed.sourceLanguage ?? settings.transcriptionLanguage,
+                    "sourceLanguage": selectedOccurrence.sourceLanguage ?? settings.transcriptionLanguage,
                     "targetLanguage": settings.targetLanguage,
-                    "contentId": AccountSyncApplicator.syncEntityID(reviewed.bookID, kind: "book")
+                    "contentId": AccountSyncApplicator.syncEntityID(selectedOccurrence.bookID, kind: "book")
                 ]
             )
             Self.reviewLog.info(
@@ -1950,7 +2175,8 @@ final class AppState {
 
     func reloadSyncedLearningData() {
         guard usesLivePersistence else { return }
-        var loaded = Persistence.loadSettings()
+        let database = synchronizedStore ?? Persistence.store
+        var loaded = Persistence.loadSettings(database: database)
 #if os(iOS)
         loaded.libraryPath = Persistence.importedBooksURL.path
         loaded.openAIAuthentication = OpenAIAuthentication.apiKey.rawValue
@@ -1971,6 +2197,21 @@ final class AppState {
             authoritativeSchedules: reviewedVocabulary ?? []
         )
         vocabReviewEvents = loadedReviewEvents
+        if let synchronizedBooks = try? Persistence.loadCatalogBooks(database: database) {
+            books = synchronizedBooks
+            if let selectedBookID, !synchronizedBooks.contains(where: { $0.id == selectedBookID }) {
+                self.selectedBookID = synchronizedBooks.first?.id
+                selectedChapterID = synchronizedBooks.first?.chapters.first?.id
+            } else if selectedBookID == nil {
+                selectedBookID = synchronizedBooks.first?.id
+                selectedChapterID = synchronizedBooks.first?.chapters.first?.id
+            }
+            readyChapterIDs = Persistence.readyChapterIDs(in: synchronizedBooks)
+        }
+        glosses = Persistence.loadGlosses(database: database)
+        chapterTranslationCheckpoints = Persistence.loadChapterTranslationCheckpoints(database: database)
+        chapterSummaries = Persistence.loadChapterSummaries(database: database)
+        studyActivityLog = Persistence.loadStudyActivityLog(database: database)
         selectedDictionaryName = settings.preferredDictionary
         player.rate = Float(settings.playbackRate)
         refreshStudyIndex()
@@ -2177,14 +2418,42 @@ final class AppState {
     }
 
     func acceptGloss(_ entry: GlossEntry) {
-        account.recordUsage(name: "ai.translation.accepted", properties: ["kind": entry.kind.rawValue])
         var copy = entry
         copy.status = .accepted
         copy.decidedAt = Date()
         copy.replacedText = nil
         copy.replacedModel = nil
-        saveGloss(copy)
+        if usesLivePersistence {
+            let prepared = ChapterAcceptanceBatch.prepare(
+                glosses: [copy],
+                vocab: vocab,
+                segments: transcript?.segments ?? [],
+                defaults: chapterAcceptanceDefaults
+            )
+            do {
+                try Persistence.acceptGlosses([copy], vocabulary: prepared.upserts)
+                glosses = GlossBatch.merging([copy], into: glosses)
+                mergeVocabUpserts(prepared.upserts, orderedAs: prepared.vocab)
+            } catch {
+                errorMessage = "The translation decision could not be saved. Nothing was changed."
+                return
+            }
+        } else {
+            saveGloss(copy)
+        }
+        account.recordUsage(name: "ai.translation.accepted", properties: ["kind": entry.kind.rawValue])
         refreshSelectedChapterTranslationStatus()
+    }
+
+    /// User edits remain a reviewable private lifecycle state until explicitly accepted or rejected.
+    func editGloss(_ entry: GlossEntry, text: String) {
+        let editedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !editedText.isEmpty else { return }
+        var edited = entry
+        edited.text = editedText
+        edited.status = .edited
+        edited.decidedAt = Date()
+        saveGloss(edited)
     }
 
     func rejectGloss(_ entry: GlossEntry) {
@@ -2197,20 +2466,46 @@ final class AppState {
             restored.decidedAt = Date()
             restored.replacedText = nil
             restored.replacedModel = nil
-            saveGloss(restored)
+            if usesLivePersistence {
+                do {
+                    try Persistence.acceptGlosses([restored], vocabulary: [])
+                    glosses = GlossBatch.merging([restored], into: glosses)
+                } catch {
+                    errorMessage = "The translation decision could not be saved. Nothing was changed."
+                    return
+                }
+            } else {
+                saveGloss(restored)
+            }
             refreshSelectedChapterTranslationStatus()
             return
         }
         var copy = entry
         copy.status = .rejected
         copy.decidedAt = Date()
-        saveGloss(copy)
         let source = GlossEntry.normalize(entry.source)
-        vocab.removeAll {
-            GlossEntry.normalize($0.context) == source
-            || (entry.kind == .word && $0.category == .word && $0.word.caseInsensitiveCompare(entry.source) == .orderedSame && $0.translation == entry.text)
+        let derived = vocab.filter {
+            ($0.captureSource == .acceptedSentenceTranslation || $0.captureSource == .automaticPhraseSuggestion)
+                && $0.reviewCount == 0
+                && GlossEntry.normalize($0.context) == source
         }
-        persistVocabulary()
+        if usesLivePersistence {
+            do {
+                try Persistence.rejectGloss(copy, derivedVocabulary: derived)
+                glosses = GlossBatch.merging([copy], into: glosses)
+                let removed = Set(derived.map(\.id))
+                vocab.removeAll { removed.contains($0.id) }
+            } catch {
+                errorMessage = "The translation decision could not be saved. Nothing was changed."
+                return
+            }
+        } else {
+            saveGloss(copy)
+            vocab.removeAll { candidate in
+                derived.contains(where: { $0.id == candidate.id })
+            }
+            persistVocabulary()
+        }
         refreshSelectedChapterTranslationStatus()
     }
 
@@ -2547,6 +2842,13 @@ final class AppState {
             ),
             targetIDs: missing.map(\.id)
         )
+        let replacementPairs: [(String, String)] = missing.compactMap { segment in
+            guard forceIDs.contains(segment.id),
+                  let existing = sentenceGloss(for: segment, language: language.rawValue)
+            else { return nil }
+            return (segment.id, existing.id)
+        }
+        let replacementResultIDs = Dictionary(uniqueKeysWithValues: replacementPairs)
         enqueueLLMJob(
             kind: .sentenceTranslation,
             origin: origin,
@@ -2557,7 +2859,13 @@ final class AppState {
                 let parsed: ChapterTranslationParseResult
                 if provider == .managedQwen {
                     let batch = try await ManagedProductLLM.translateBatch(
-                        sentences: missing.map { ProductTranslationSentence(id: $0.id, text: $0.displayText) },
+                        sentences: missing.map {
+                            ProductTranslationSentence(
+                                id: $0.id,
+                                text: $0.displayText,
+                                assistantResultId: replacementResultIDs[$0.id]
+                            )
+                        },
                         sourceLanguage: sourceLanguage.languageCode,
                         targetLanguage: language.rawValue,
                         learnerLevel: readerLevel.rawValue,
@@ -2639,14 +2947,17 @@ final class AppState {
             let existing = sentenceGloss(for: segment, language: language.rawValue)
             let replaced = forceIDs.contains(segment.id) ? existing : nil
             entries.append(GlossEntry(
-                id: GlossEntry.makeID(kind: .sentence, language: language.rawValue, source: segment.displayText, context: nil),
+                id: result.assistantResultID ?? replaced?.id ?? UUID().uuidString.lowercased(),
                 kind: .sentence,
                 language: language.rawValue,
                 source: segment.displayText,
                 context: nil,
                 text: result.glossText,
-                status: .pending,
-                model: model,
+                status: replaced == nil ? .pending : .replaced,
+                model: result.model ?? model,
+                promptVersion: result.promptVersion ?? "local",
+                modelPolicyHash: result.modelPolicyHash ?? "local",
+                sharedCacheEntryID: result.sharedCacheEntryID,
                 bookID: origin.bookID,
                 bookTitle: origin.bookTitle,
                 chapterID: origin.chapterID,
@@ -2681,13 +2992,13 @@ final class AppState {
         }
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let id = GlossEntry.makeID(kind: kind, language: settings.targetLanguage, source: trimmed, context: context)
         let replaced = prepareGlossReplacement(
             force: force,
             kind: kind,
             source: trimmed,
             context: context
         )
+        let id = replaced?.id ?? UUID().uuidString.lowercased()
         let provider = llmProvider
         if let configurationError = llmConfigurationError(for: provider) {
             translationError = configurationError.localizedDescription
@@ -2696,7 +3007,7 @@ final class AppState {
         }
         if !force,
            let existing = lookupGloss(kind: kind, source: trimmed, context: context),
-           existing.status == .accepted || existing.status == .pending {
+           existing.status == .accepted || existing.status == .pending || existing.status == .replaced {
             return
         }
         translationError = nil
@@ -2733,6 +3044,11 @@ final class AppState {
         ) { _ in
             do {
                 let text: String
+                var resultID = id
+                var resultModel = model
+                var resultPromptVersion = "local"
+                var resultModelPolicyHash = "local"
+                var resultSharedCacheEntryID: String?
                 if provider == .managedQwen {
                     // Dedicated product routes write assistant_cache_entries. Chat does not.
                     let result = try await ManagedProductLLM.translate(
@@ -2748,9 +3064,15 @@ final class AppState {
                         bookTitle: book?.title ?? "",
                         author: book?.author ?? "",
                         chapterTitle: chapter?.title ?? "",
-                        refresh: force
+                        refresh: force,
+                        assistantResultID: replaced?.id
                     )
                     text = ManagedProductLLM.wordMeaningText(from: result)
+                    resultID = result.id
+                    resultModel = result.model ?? model
+                    resultPromptVersion = result.promptVersion ?? result.policyVersion
+                    resultModelPolicyHash = result.modelPolicyHash ?? "local"
+                    resultSharedCacheEntryID = result.sharedCacheEntryID
                 } else {
                     text = try await GrokClient.shared.complete(
                         provider: provider,
@@ -2765,14 +3087,17 @@ final class AppState {
                     )
                 }
                 let entry = GlossEntry(
-                    id: id,
+                    id: resultID,
                     kind: kind,
                     language: language.rawValue,
                     source: trimmed,
                     context: context,
                     text: text,
-                    status: .pending,
-                    model: model,
+                    status: replaced == nil ? .pending : .replaced,
+                    model: resultModel,
+                    promptVersion: resultPromptVersion,
+                    modelPolicyHash: resultModelPolicyHash,
+                    sharedCacheEntryID: resultSharedCacheEntryID,
                     bookID: book?.id,
                     bookTitle: book?.title,
                     chapterID: chapter?.id,
@@ -2796,7 +3121,7 @@ final class AppState {
     }
 
     func translateChapter(mode: ChapterTranslationMode = .untranslatedOnly) {
-        guard let transcript = presentedTranscript, !transcript.segments.isEmpty else {
+        guard let transcript = completeTranscriptForChapterAssistant(), !transcript.segments.isEmpty else {
             chapterAssistantError = "Transcribe this chapter before translating it."
             return
         }
@@ -2926,7 +3251,13 @@ final class AppState {
                             )
                             let batch = try await ManagedProductLLM.translateBatch(
                                 sentences: remaining.map {
-                                    ProductTranslationSentence(id: $0.id, text: $0.displayText)
+                                    ProductTranslationSentence(
+                                        id: $0.id,
+                                        text: $0.displayText,
+                                        assistantResultId: resumedMode == .retranslateAll
+                                            ? self.sentenceGloss(for: $0, language: language.rawValue)?.id
+                                            : nil
+                                    )
                                 },
                                 sourceLanguage: sourceLanguage.languageCode,
                                 targetLanguage: language.rawValue,
@@ -3075,6 +3406,10 @@ final class AppState {
     }
 
     var pendingChapterSentenceGlosses: [GlossEntry] {
+        pendingChapterSentenceGlosses(in: transcript)
+    }
+
+    private func pendingChapterSentenceGlosses(in transcript: Transcript?) -> [GlossEntry] {
         guard let book = selectedBook, let chapter = selectedChapter else { return [] }
         return GlossBatch.pendingSentences(
             in: glosses,
@@ -3088,7 +3423,8 @@ final class AppState {
     }
 
     func acceptAllChapterTranslations() {
-        let entries = pendingChapterSentenceGlosses
+        let acceptedTranscript = completeTranscriptForChapterAssistant()
+        let entries = pendingChapterSentenceGlosses(in: acceptedTranscript)
         guard !entries.isEmpty, chapterAcceptanceProgress == nil else { return }
         let accepted = GlossBatch.accepting(entries)
         let operationID = UUID()
@@ -3099,11 +3435,8 @@ final class AppState {
             completed: 0,
             total: accepted.count
         )
-        glosses = GlossBatch.merging(accepted, into: glosses)
-
         let vocabSnapshot = vocab
         let acceptedChapterID = selectedChapterID
-        let acceptedTranscript = transcript
         let acceptedLanguage = settings.targetLanguage
         let segments = acceptedTranscript?.segments ?? []
         let defaults = chapterAcceptanceDefaults
@@ -3138,24 +3471,36 @@ final class AppState {
             }.value
             guard chapterAcceptanceID == operationID else { return }
 
-            mergeVocabUpserts(result.upserts, orderedAs: result.vocab)
             chapterAcceptanceProgress = .init(
                 stage: "Saving translations",
                 detail: "Writing vocabulary and translation updates…",
                 completed: accepted.count,
                 total: accepted.count
             )
-            let glossSnapshot = glosses
             let vocabulary = vocabularyRepository
             let storedVocabUpdates = result.upserts.map(StoredVocabularyOccurrence.init)
             let persistLiveGlosses = usesLivePersistence
-            await Task.detached(priority: .utility) {
-                if persistLiveGlosses {
-                    Persistence.saveGlossUpdates(accepted, allItems: glossSnapshot)
+            let saveSucceeded = await Task.detached(priority: .utility) { () -> Bool in
+                do {
+                    if persistLiveGlosses {
+                        try Persistence.acceptGlosses(accepted, vocabulary: result.upserts)
+                    } else {
+                        try vocabulary.upsertVocabulary(storedVocabUpdates)
+                    }
+                    return true
+                } catch {
+                    return false
                 }
-                try? vocabulary.upsertVocabulary(storedVocabUpdates)
             }.value
             guard chapterAcceptanceID == operationID else { return }
+            if !saveSucceeded {
+                errorMessage = "The chapter decisions could not be saved. Nothing was changed."
+                chapterAcceptanceProgress = nil
+                chapterAcceptanceID = nil
+                return
+            }
+            glosses = GlossBatch.merging(accepted, into: glosses)
+            mergeVocabUpserts(result.upserts, orderedAs: result.vocab)
 
             if let acceptedChapterID, let acceptedTranscript {
                 refreshChapterTranslationStatus(
@@ -3207,7 +3552,7 @@ final class AppState {
     }
 
     private func refreshSelectedChapterTranslationStatus() {
-        guard let transcript = presentedTranscript, !transcript.segments.isEmpty, let chapterID = selectedChapterID else { return }
+        guard let transcript = completeTranscriptForChapterAssistant(), !transcript.segments.isEmpty, let chapterID = selectedChapterID else { return }
         refreshChapterTranslationStatus(chapterID: chapterID, language: settings.targetLanguage, transcript: transcript)
     }
 
@@ -3251,7 +3596,7 @@ final class AppState {
     }
 
     func summarizeChapter(force: Bool = false) {
-        guard let transcript = presentedTranscript, !transcript.segments.isEmpty else {
+        guard let transcript = completeTranscriptForChapterAssistant(), !transcript.segments.isEmpty else {
             chapterAssistantError = "Transcribe this chapter before summarising it."
             return
         }
@@ -3269,28 +3614,32 @@ final class AppState {
         let language = settings.targetLanguage
         let model = selectedLLMModel
         let existing = chapterSummaries.first {
-            $0.id == ChapterSummaryRecord.makeID(chapterID: chapterID, language: language)
-                && $0.status != .rejected
+            $0.chapterID == chapterID && $0.language == language && $0.status != .rejected
         }
         let metadata = bookMetadata(book: selectedBook, chapter: selectedChapter)
         enqueueChapterAssistant(
             kind: .chapterSummary,
             origin: origin,
+            targetID: force ? existing?.id : nil,
             system: system,
             user: fullChapterInput(transcript, metadata: metadata),
             refresh: force
-        ) { summary in
+        ) { summary, identity in
             do {
                 let presentation = try ChapterSummaryPresentation.parse(summary)
                 let record = ChapterSummaryRecord.pending(
                     summary: presentation,
                     language: language,
-                    model: model,
+                    model: identity?.model ?? model,
                     bookID: origin.bookID,
                     bookTitle: origin.bookTitle,
                     chapterID: chapterID,
                     chapterTitle: origin.chapterTitle,
-                    replacing: existing
+                    replacing: existing,
+                    assistantResultID: identity?.id,
+                    promptVersion: identity?.promptVersion ?? identity?.policyVersion ?? "local",
+                    modelPolicyHash: identity?.modelPolicyHash ?? "local",
+                    sharedCacheEntryID: identity?.sharedCacheEntryID
                 )
                 self.saveChapterSummary(record, origin: origin)
             } catch {
@@ -3303,12 +3652,16 @@ final class AppState {
     }
 
     func acceptChapterSummary() {
-        guard let chapterSummary, chapterSummary.status == .pending else { return }
+        guard let chapterSummary,
+              chapterSummary.status == .pending || chapterSummary.status == .replaced
+        else { return }
         saveChapterSummary(chapterSummary.accept(at: Date()), origin: selectedOrigin())
     }
 
     func rejectChapterSummary() {
-        guard let chapterSummary, chapterSummary.status == .pending else { return }
+        guard let chapterSummary,
+              chapterSummary.status == .pending || chapterSummary.status == .replaced
+        else { return }
         let reviewed = chapterSummary.reject(at: Date())
         saveChapterSummary(reviewed, origin: selectedOrigin())
         if reviewed.status == .rejected {
@@ -3326,7 +3679,7 @@ final class AppState {
             chapterSummaries.append(summary)
         }
         if usesLivePersistence {
-            Persistence.saveChapterSummaries(chapterSummaries)
+            Persistence.saveChapterSummaryUpdate(summary)
         }
         if isSelected(origin) {
             chapterSummary = summary.status == .rejected ? nil : summary
@@ -3374,7 +3727,7 @@ final class AppState {
             targetID: message.id.uuidString,
             system: system,
             user: user
-        ) { answer in
+        ) { answer, _ in
             var messages = self.chapterChatsByChapterID[chapterID] ?? []
             messages.append(.init(role: .assistant, text: answer))
             self.chapterChatsByChapterID[chapterID] = messages
@@ -3401,12 +3754,11 @@ final class AppState {
         let model = selectedLLMModel
         let segments = transcript.segments.map(\.displayText)
         let existing = chapterSummaries.first {
-            $0.id == ChapterSummaryRecord.makeID(chapterID: chapterID, language: language)
-                && $0.status != .rejected
+            $0.chapterID == chapterID && $0.language == language && $0.status != .rejected
         }
         Task { @MainActor in
             do {
-                guard let raw = try await ManagedProductLLM.lookupSummary(
+                guard let identity = try await ManagedProductLLM.lookupSummary(
                     chapterID: chapterID,
                     sourceLanguage: self.currentAudiobookLanguage.languageCode,
                     targetLanguage: language,
@@ -3417,16 +3769,22 @@ final class AppState {
                     author: origin.author,
                     chapterTitle: origin.chapterTitle
                 ) else { return }
-                let presentation = try ChapterSummaryPresentation.parse(raw)
+                let presentation = try ChapterSummaryPresentation.parse(
+                    ManagedProductLLM.summaryText(from: identity)
+                )
                 let record = ChapterSummaryRecord.pending(
                     summary: presentation,
                     language: language,
-                    model: model,
+                    model: identity.model ?? model,
                     bookID: origin.bookID,
                     bookTitle: origin.bookTitle,
                     chapterID: chapterID,
                     chapterTitle: origin.chapterTitle,
-                    replacing: existing
+                    replacing: existing,
+                    assistantResultID: identity.id,
+                    promptVersion: identity.promptVersion ?? identity.policyVersion ?? "local",
+                    modelPolicyHash: identity.modelPolicyHash ?? "local",
+                    sharedCacheEntryID: identity.sharedCacheEntryID
                 )
                 self.saveChapterSummary(record, origin: origin)
             } catch {
@@ -3444,7 +3802,7 @@ final class AppState {
         refresh: Bool = false,
         structuredJSON: Bool = false,
         heardQuizSegments: [ProductHeardSegment]? = nil,
-        completion: @escaping @MainActor (String) -> Void,
+        completion: @escaping @MainActor (String, ProductChapterSummary?) -> Void,
         failure: (@MainActor () -> Void)? = nil
     ) {
         let provider = llmProvider
@@ -3477,6 +3835,7 @@ final class AppState {
         ) { _ in
             do {
                 let result: String
+                var summaryIdentity: ProductChapterSummary?
                 if provider == .managedQwen, let heardQuizSegments {
                     result = try await ManagedProductLLM.heardQuiz(
                         chapterID: origin.chapterID ?? "",
@@ -3492,7 +3851,7 @@ final class AppState {
                     let transcript = origin.chapterID.flatMap { Persistence.loadTranscript(chapterID: $0) }
                         ?? self.transcript
                     let segments = transcript?.segments.map(\.displayText) ?? []
-                    result = try await ManagedProductLLM.summarize(
+                    let summary = try await ManagedProductLLM.summarizeResult(
                         chapterID: origin.chapterID ?? "",
                         sourceLanguage: self.currentAudiobookLanguage.languageCode,
                         targetLanguage: self.settings.targetLanguage,
@@ -3502,8 +3861,11 @@ final class AppState {
                         bookTitle: origin.bookTitle,
                         author: origin.author,
                         chapterTitle: origin.chapterTitle,
-                        refresh: refresh
+                        refresh: refresh,
+                        assistantResultID: refresh ? targetID : nil
                     )
+                    summaryIdentity = summary
+                    result = ManagedProductLLM.summaryText(from: summary)
                 } else if structuredJSON {
                     result = try await GrokClient.shared.completeStructuredJSON(
                         provider: provider,
@@ -3543,7 +3905,7 @@ final class AppState {
                         chapterTitle: origin.chapterTitle
                     )
                 }
-                completion(result)
+                completion(result, summaryIdentity)
             } catch {
                 if let chapterID = origin.chapterID {
                     self.chapterAssistantErrorsByChapterID[chapterID] = error.localizedDescription
@@ -3588,7 +3950,7 @@ final class AppState {
         guard !entries.isEmpty else { return }
         glosses = GlossBatch.merging(entries, into: glosses)
         if usesLivePersistence {
-            Persistence.saveGlosses(glosses)
+            Persistence.saveGlossUpdates(entries, allItems: glosses)
         }
         var vocabularyChanged = false
         for entry in entries where entry.status == .accepted {
@@ -3685,10 +4047,24 @@ final class AppState {
                     changed = true
                 }
             } else {
+                let canonicalization = VocabularyCanonicalizer.canonicalize(
+                    surfaceForm: gloss.source,
+                    context: original,
+                    language: sourceLanguage ?? "und"
+                )
                 vocab.insert(
                     VocabEntry(
                         id: UUID().uuidString,
                         word: gloss.source,
+                        canonicalForm: canonicalization.canonicalForm,
+                        partOfSpeech: canonicalization.partOfSpeech,
+                        senseID: canonicalization.senseID,
+                        canonicalizationSource: canonicalization.source,
+                        canonicalizationConfidence: canonicalization.confidence,
+                        canonicalizationStatus: canonicalization.status,
+                        canonicalizationTraceID: canonicalization.traceID,
+                        captureSource: .explicitWord,
+                        reviewEligible: true,
                         category: .word,
                         definition: dict.map { DictionaryLookup.plainPreview(from: $0.preview) },
                         dictionaryName: dict?.name,
@@ -3728,6 +4104,12 @@ final class AppState {
                     VocabEntry(
                         id: UUID().uuidString,
                         word: String(gloss.source.prefix(80)),
+                        canonicalForm: gloss.source,
+                        partOfSpeech: .sentence,
+                        canonicalizationConfidence: 1,
+                        canonicalizationStatus: .confirmed,
+                        captureSource: .acceptedSentenceTranslation,
+                        reviewEligible: false,
                         category: .sentence,
                         definition: nil,
                         translation: gloss.text,
@@ -3761,10 +4143,24 @@ final class AppState {
                     language: StudyLanguage(rawValue: gloss.language) ?? .en
                 )
                 let hit = hits.first
+                let canonicalization = VocabularyCanonicalizer.canonicalize(
+                    surfaceForm: phrase.phrase,
+                    context: gloss.source,
+                    language: sourceLanguage ?? "und"
+                )
                 vocab.insert(
                     VocabEntry(
                         id: UUID().uuidString,
                         word: phrase.phrase,
+                        canonicalForm: canonicalization.canonicalForm,
+                        partOfSpeech: canonicalization.partOfSpeech,
+                        senseID: canonicalization.senseID,
+                        canonicalizationSource: canonicalization.source,
+                        canonicalizationConfidence: canonicalization.confidence,
+                        canonicalizationStatus: canonicalization.status,
+                        canonicalizationTraceID: canonicalization.traceID,
+                        captureSource: .automaticPhraseSuggestion,
+                        reviewEligible: false,
                         category: .phrase,
                         definition: hit.map { DictionaryLookup.plainPreview(from: $0.preview) },
                         dictionaryName: hit?.name,

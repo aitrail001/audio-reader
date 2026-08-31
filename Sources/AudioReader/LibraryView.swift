@@ -167,7 +167,7 @@ struct LibraryView: View {
         ContentUnavailableView {
             Label("Build your reading library", systemImage: "books.vertical")
         } description: {
-            Text("Import audiobook audio, EPUB books, or both. You can attach the missing format to the same book later.")
+            Text(Persistence.localMediaReimportNotice + " You can attach audio and EPUB files to the same book later.")
         } actions: {
 #if os(macOS)
             Button(action: importPairedBook) {
@@ -224,23 +224,7 @@ struct LibraryView: View {
     private func deleteBook(_ book: Book) {
 #if os(macOS)
         do {
-            if state.selectedBookID == book.id {
-                state.cancelTranscription()
-                state.player.tearDown()
-                state.selectedBookID = nil
-                state.selectedChapterID = nil
-                state.transcript = nil
-                state.tab = .library
-            }
-            try AudiobookImportService.trashBookFolder(
-                URL(fileURLWithPath: book.folderPath, isDirectory: true),
-                in: URL(fileURLWithPath: state.settings.libraryPath, isDirectory: true)
-            )
-            Task {
-                await state.rescan()
-                state.selectedBookID = state.books.first?.id
-                state.selectedChapterID = state.books.first?.chapters.first?.id
-            }
+            try state.deleteBookFromLibrary(book)
         } catch {
             deleteError = error.localizedDescription
         }
@@ -321,9 +305,11 @@ private struct BookCard: View {
                 Text(book.author ?? "Unknown author")
                     .foregroundStyle(Palette.dim)
                 Spacer()
-                Text(book.mediaAvailability == .ebookOnly
-                    ? "\(book.chapters.count) readable sections"
-                    : "\(transcribedCount)/\(book.chapters.count) transcribed")
+                Text(book.mediaAvailability == .metadataOnly
+                    ? "Local media unavailable — re-import required"
+                    : book.mediaAvailability == .ebookOnly
+                        ? "\(book.chapters.count) readable sections"
+                        : "\(transcribedCount)/\(book.chapters.count) transcribed")
                     .foregroundStyle(Palette.dim)
             }
             .font(.caption)
@@ -353,10 +339,13 @@ private struct BookCard: View {
         }
         .buttonStyle(.borderedProminent)
         .tint(Palette.terracotta)
+        .disabled(book.mediaAvailability == .metadataOnly)
         .accessibilityIdentifier("library.continue.\(book.id)")
         Button(action: onRepair) {
             Label(
-                book.mediaAvailability == .ebookOnly
+                book.mediaAvailability == .metadataOnly
+                    ? "Re-import Media"
+                    : book.mediaAvailability == .ebookOnly
                     ? "Add Audio"
                     : (book.ebookPath == nil ? "Add EPUB" : "Add Files"),
                 systemImage: "wrench.and.screwdriver"
@@ -380,9 +369,11 @@ private struct ChapterStrip: View {
                     Text(book.title)
                         .font(.system(size: 15, weight: .semibold, design: .serif))
                         .foregroundStyle(Palette.ink)
-                    Text(book.mediaAvailability == .ebookOnly
-                        ? "\(book.chapters.count) readable EPUB sections"
-                        : "\(book.chapters.count) chapters · \(state.transcribedChapterCount(in: book)) transcribed" + (book.ebookPath == nil ? " · audio only" : " · EPUB found"))
+                    Text(book.mediaAvailability == .metadataOnly
+                        ? "Local media unavailable — re-import required"
+                        : book.mediaAvailability == .ebookOnly
+                            ? "\(book.chapters.count) readable EPUB sections"
+                            : "\(book.chapters.count) chapters · \(state.transcribedChapterCount(in: book)) transcribed" + (book.ebookPath == nil ? " · audio only" : " · EPUB found"))
                         .font(.system(size: 11))
                         .foregroundStyle(Palette.dim)
                     AudiobookLanguagePicker(state: state, book: book)
@@ -393,10 +384,13 @@ private struct ChapterStrip: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Palette.terracotta)
+                .disabled(book.mediaAvailability == .metadataOnly)
                 .accessibilityIdentifier("library.continue")
                 Button(action: onAddEbook) {
                     Label(
-                        book.mediaAvailability == .ebookOnly
+                        book.mediaAvailability == .metadataOnly
+                            ? "Re-import Media"
+                            : book.mediaAvailability == .ebookOnly
                             ? "Add Audio"
                             : (book.ebookPath == nil ? "Add EPUB" : "Add Files"),
                         systemImage: "book.pages"
