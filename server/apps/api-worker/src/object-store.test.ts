@@ -168,6 +168,261 @@ describe("supabase object store", () => {
     });
   });
 
+  it.each([
+    [
+      "/object/upload/sign/audio-reader-assets/private%2Fpending%2Flarge.m4b?token=relative",
+      "https://example.supabase.co/storage/v1/object/upload/sign/audio-reader-assets/private%2Fpending%2Flarge.m4b?token=relative",
+    ],
+    [
+      "/storage/v1/object/upload/sign/audio-reader-assets/private%2Fpending%2Flarge.m4b?token=storage-relative",
+      "https://example.supabase.co/storage/v1/object/upload/sign/audio-reader-assets/private%2Fpending%2Flarge.m4b?token=storage-relative",
+    ],
+    [
+      "https://example.supabase.co/storage/v1/object/upload/sign/audio-reader-assets/private%2Fpending%2Flarge.m4b?token=absolute",
+      "https://example.supabase.co/storage/v1/object/upload/sign/audio-reader-assets/private%2Fpending%2Flarge.m4b?token=absolute",
+    ],
+  ])("creates a non-overwriting bound PUT for signed URL %s", async (signed, expectedUrl) => {
+    const issuedAt = Date.UTC(2026, 8, 1, 0, 0, 0);
+    const calls: Array<{ url: string; method: string; headers: Headers; body: unknown }> = [];
+    const store = createSupabaseObjectStore({
+      url: "https://example.supabase.co/",
+      serviceRoleKey: "service-role",
+      bucket: "audio-reader-assets",
+      now: () => issuedAt,
+      fetch: (input, init) => {
+        calls.push({
+          url: typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+          method: init?.method ?? "GET",
+          headers: new Headers(init?.headers),
+          body: init?.body,
+        });
+        return Promise.resolve(new Response(JSON.stringify({ url: signed }), { status: 200 }));
+      },
+    });
+
+    await expect(store.supportsBoundUpload()).resolves.toBe(true);
+    await expect(
+      store.createBoundUpload?.("private/pending/large.m4b", {
+        expiresSeconds: 900,
+        contentType: "audio/mp4",
+        contentLength: 8 * 1024 * 1024 + 1,
+        sha256: "a".repeat(64),
+      }),
+    ).resolves.toEqual({
+      url: expectedUrl,
+      expiresAt: "2026-09-01T02:00:00.000Z",
+      headers: {
+        "content-length": "8388609",
+        "content-type": "audio/mp4",
+        "x-upsert": "false",
+      },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(
+      "https://example.supabase.co/storage/v1/object/upload/sign/audio-reader-assets/private/pending/large.m4b",
+    );
+    expect(calls[0]?.method).toBe("POST");
+    expect(calls[0]?.headers.get("x-upsert")).toBeNull();
+    expect(JSON.parse(String(calls[0]?.body))).toEqual({});
+  });
+
+  it("captures the hosted Supabase upload deadline before signing latency", async () => {
+    const issuedAt = Date.UTC(2026, 8, 1, 0, 0, 0);
+    let now = issuedAt;
+    const store = createSupabaseObjectStore({
+      url: "https://example.supabase.co",
+      serviceRoleKey: "service-role",
+      now: () => now,
+      fetch: () => {
+        now += 30_000;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              signedURL:
+                "https://example.supabase.co/storage/v1/object/upload/sign/audio-reader-assets/private/large.m4b?token=latency",
+            }),
+            { status: 200 },
+          ),
+        );
+      },
+    });
+
+    await expect(
+      store.createBoundUpload?.("private/pending/large.m4b", {
+        expiresSeconds: 900,
+        contentType: "audio/mp4",
+        contentLength: 8 * 1024 * 1024 + 1,
+        sha256: "e".repeat(64),
+      }),
+    ).resolves.toMatchObject({ expiresAt: "2026-09-01T02:00:00.000Z" });
+  });
+
+  it.each([
+    [300, 900, "2026-09-01T00:05:00.000Z"],
+    [1800, 900, "2026-09-01T00:15:00.000Z"],
+    [10_000, 10_000, "2026-09-01T02:00:00.000Z"],
+  ])(
+    "clamps a custom HTTPS deadline to provider TTL %s, caller window %s, and two hours",
+    async (signedUploadTtlSeconds, expiresSeconds, expectedExpiresAt) => {
+      const issuedAt = Date.UTC(2026, 8, 1, 0, 0, 0);
+      const store = createSupabaseObjectStore({
+        url: "https://storage.example.com",
+        serviceRoleKey: "service-role",
+        signedUploadTtlSeconds,
+        now: () => issuedAt,
+        fetch: () =>
+          Promise.resolve(
+            new Response(
+              JSON.stringify({
+                signedURL:
+                  "https://storage.example.com/storage/v1/object/upload/sign/audio-reader-assets/private/large.m4b?token=self-hosted",
+              }),
+              { status: 200 },
+            ),
+          ),
+      });
+
+      await expect(store.supportsBoundUpload()).resolves.toBe(true);
+      await expect(
+        store.createBoundUpload?.("private/pending/large.m4b", {
+          expiresSeconds,
+          contentType: "audio/mp4",
+          contentLength: 8 * 1024 * 1024 + 1,
+          sha256: "f".repeat(64),
+        }),
+      ).resolves.toMatchObject({ expiresAt: expectedExpiresAt });
+    },
+  );
+
+  it.each([undefined, 0, -1, 1.5, Number.NaN])(
+    "fails custom HTTPS direct uploads closed without a valid provider TTL: %s",
+    async (signedUploadTtlSeconds) => {
+      let fetches = 0;
+      const store = createSupabaseObjectStore({
+        url: "https://storage.example.com",
+        serviceRoleKey: "service-role",
+        ...(signedUploadTtlSeconds === undefined ? {} : { signedUploadTtlSeconds }),
+        fetch: () => {
+          fetches += 1;
+          return Promise.resolve(new Response("{}", { status: 200 }));
+        },
+      });
+
+      await expect(store.supportsBoundUpload()).resolves.toBe(false);
+      await expect(
+        store.createBoundUpload?.("private/pending/large.m4b", {
+          expiresSeconds: 900,
+          contentType: "audio/mp4",
+          contentLength: 8 * 1024 * 1024 + 1,
+          sha256: "0".repeat(64),
+        }),
+      ).resolves.toBeUndefined();
+      expect(fetches).toBe(0);
+    },
+  );
+
+  it("keeps hosted Supabase direct uploads available without an explicit provider TTL", async () => {
+    const issuedAt = Date.UTC(2026, 8, 1, 0, 0, 0);
+    const store = createSupabaseObjectStore({
+      url: "https://example.supabase.co",
+      serviceRoleKey: "service-role",
+      now: () => issuedAt,
+      fetch: () =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              signedURL:
+                "https://example.supabase.co/storage/v1/object/upload/sign/audio-reader-assets/private/large.m4b?token=hosted",
+            }),
+            { status: 200 },
+          ),
+        ),
+    });
+
+    await expect(
+      store.createBoundUpload?.("private/pending/large.m4b", {
+        expiresSeconds: 900,
+        contentType: "audio/mp4",
+        contentLength: 8 * 1024 * 1024 + 1,
+        sha256: "f".repeat(64),
+      }),
+    ).resolves.toMatchObject({ expiresAt: "2026-09-01T02:00:00.000Z" });
+  });
+
+  it.each([
+    "https://uploads.example.com/private/large.m4b?token=cross-origin",
+    "http://example.supabase.co/storage/v1/object/upload/sign/audio-reader-assets/private/large.m4b?token=downgrade",
+    "https://example.supabase.co:444/storage/v1/object/upload/sign/audio-reader-assets/private/large.m4b?token=wrong-port",
+  ])("rejects a signed upload URL outside the configured Supabase origin: %s", async (signed) => {
+    const store = createSupabaseObjectStore({
+      url: "https://example.supabase.co",
+      serviceRoleKey: "service-role",
+      fetch: () =>
+        Promise.resolve(new Response(JSON.stringify({ signedURL: signed }), { status: 200 })),
+    });
+
+    await expect(
+      store.createBoundUpload?.("private/pending/large.m4b", {
+        expiresSeconds: 900,
+        contentType: "audio/mp4",
+        contentLength: 8 * 1024 * 1024 + 1,
+        sha256: "c".repeat(64),
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not advertise or create direct uploads for an HTTP Supabase origin", async () => {
+    let fetches = 0;
+    const store = createSupabaseObjectStore({
+      url: "http://127.0.0.1:54321",
+      serviceRoleKey: "service-role",
+      fetch: () => {
+        fetches += 1;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              url: "http://127.0.0.1:54321/storage/v1/object/upload/sign/audio-reader-assets/private/large.m4b?token=local",
+            }),
+            { status: 200 },
+          ),
+        );
+      },
+    });
+
+    await expect(store.supportsBoundUpload()).resolves.toBe(false);
+    await expect(
+      store.createBoundUpload?.("private/pending/large.m4b", {
+        expiresSeconds: 900,
+        contentType: "audio/mp4",
+        contentLength: 8 * 1024 * 1024 + 1,
+        sha256: "d".repeat(64),
+      }),
+    ).resolves.toBeUndefined();
+    expect(fetches).toBe(0);
+  });
+
+  it.each([
+    new Response("not-json", { status: 200 }),
+    new Response(JSON.stringify({}), { status: 200 }),
+    new Response(JSON.stringify({ url: "" }), { status: 200 }),
+    new Response("unavailable", { status: 503 }),
+  ])("fails closed when signed upload response is malformed or unavailable", async (response) => {
+    const store = createSupabaseObjectStore({
+      url: "https://example.supabase.co",
+      serviceRoleKey: "service-role",
+      fetch: () => Promise.resolve(response.clone()),
+    });
+
+    await expect(
+      store.createBoundUpload?.("private/pending/large.m4b", {
+        expiresSeconds: 900,
+        contentType: "audio/mp4",
+        contentLength: 8 * 1024 * 1024 + 1,
+        sha256: "b".repeat(64),
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it("uploads, downloads, deletes, and signs URLs", async () => {
     const objects = new Map<string, Uint8Array>();
     const store = createSupabaseObjectStore({

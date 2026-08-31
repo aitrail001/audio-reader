@@ -19,6 +19,7 @@ export type WorkerEnv = {
   SUPABASE_SERVICE_ROLE_KEY?: string;
   SUPABASE_SECRET_KEY?: string;
   SUPABASE_STORAGE_BUCKET?: string;
+  SUPABASE_STORAGE_SIGNED_UPLOAD_TTL_SECONDS?: string;
   QWEN_API_KEY?: string;
   QWEN_BASE_URL?: string;
   QWEN_MODEL?: string;

@@ -347,6 +347,15 @@ export function createRuntimeConfigService(input: {
     const supabaseKey =
       input.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || input.env.SUPABASE_SECRET_KEY?.trim() || "";
     const supabaseBucket = input.env.SUPABASE_STORAGE_BUCKET?.trim() ?? "";
+    const supabaseSignedUploadTtlRaw =
+      input.env.SUPABASE_STORAGE_SIGNED_UPLOAD_TTL_SECONDS?.trim() ?? "";
+    const supabaseSignedUploadTtlCandidate = Number(supabaseSignedUploadTtlRaw);
+    const supabaseSignedUploadTtlSeconds =
+      supabaseSignedUploadTtlRaw !== "" &&
+      Number.isSafeInteger(supabaseSignedUploadTtlCandidate) &&
+      supabaseSignedUploadTtlCandidate > 0
+        ? supabaseSignedUploadTtlCandidate
+        : undefined;
     const hasR2 = input.env.ASSETS !== undefined;
     const r2 = input.env.ASSETS;
     const r2AccountId = input.env.R2_ACCOUNT_ID?.trim() ?? "";
@@ -360,6 +369,7 @@ export function createRuntimeConfigService(input: {
       supabaseUrl,
       supabaseKey,
       supabaseBucket,
+      supabaseSignedUploadTtlRaw,
       hasR2,
       r2AccountId,
       r2BucketName,
@@ -379,6 +389,9 @@ export function createRuntimeConfigService(input: {
         ...(supabaseUrl === "" ? {} : { url: supabaseUrl }),
         ...(supabaseKey === "" ? {} : { serviceRoleKey: supabaseKey }),
         bucket: supabaseBucket,
+        ...(supabaseSignedUploadTtlSeconds === undefined
+          ? {}
+          : { signedUploadTtlSeconds: supabaseSignedUploadTtlSeconds }),
         ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
       });
       resolution = {

@@ -113,6 +113,24 @@ describe("runtime config wrapping", () => {
     expect(settingsReads).toBe(0);
   });
 
+  it("plumbs an explicit custom Supabase signed-upload TTL into storage capability", async () => {
+    const database = createFakeDatabaseClient();
+    const runtime = createRuntimeConfigService({
+      env: {
+        ENVIRONMENT: "production",
+        SUPABASE_URL: "https://storage.example.com",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+        SUPABASE_STORAGE_BUCKET: "supabase-assets",
+        SUPABASE_STORAGE_SIGNED_UPLOAD_TTL_SECONDS: "600",
+      },
+      ops: database.ops,
+      wrappingSecret: "test-operator-secret-key",
+    });
+
+    const resolved = await runtime.resolveStorage({ useFakes: false });
+    await expect(resolved.store.supportsBoundUpload()).resolves.toBe(true);
+  });
+
   it("preserves GCS selection when no Supabase bucket is explicit", async () => {
     const database = createFakeDatabaseClient();
     const runtime = createRuntimeConfigService({

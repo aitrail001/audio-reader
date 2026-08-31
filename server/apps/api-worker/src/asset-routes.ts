@@ -257,7 +257,7 @@ async function createUpload(
           assetId: existing.id,
           method: "PUT",
           url: upload.url,
-          expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+          expiresAt: upload.expiresAt,
           headers: upload.headers,
           multipart: false,
           ready: existing.status === "ready",
@@ -302,13 +302,12 @@ async function createUpload(
         }
         throw error;
       }
-      const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
       const ticket: UploadTicket = {
         uploadId: asset.uploadId,
         assetId: asset.id,
         method: "PUT",
         url: upload.url,
-        expiresAt,
+        expiresAt: upload.expiresAt,
         headers: upload.headers,
         multipart: false,
         ready: false,
@@ -328,10 +327,11 @@ async function uploadTarget(
   contentType: string,
   sha256: string,
   origin: string,
-): Promise<{ url: string; headers: Record<string, string> } | undefined> {
+): Promise<{ url: string; headers: Record<string, string>; expiresAt: string } | undefined> {
   if (compressedBytes <= MAX_WORKER_UPLOAD_BYTES) {
     return {
       url: `${origin}/v2/assets/uploads/${uploadId}/body`,
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
       headers: {
         "content-type": contentType,
         "content-length": String(compressedBytes),

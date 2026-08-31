@@ -13,10 +13,7 @@ export type ObjectStore = {
   delete(key: string): Promise<void>;
   supportsBoundUpload(): Promise<boolean>;
   signedUploadUrl?(key: string, expiresSeconds?: number): Promise<string | undefined>;
-  createBoundUpload?(
-    key: string,
-    input: BoundUploadInput,
-  ): Promise<{ url: string; headers: Record<string, string> } | undefined>;
+  createBoundUpload?(key: string, input: BoundUploadInput): Promise<BoundUploadTarget | undefined>;
   signedDownloadUrl?(key: string, expiresSeconds?: number): Promise<string | undefined>;
 };
 
@@ -31,6 +28,13 @@ export type BoundUploadInput = {
   contentType: string;
   contentLength: number;
   sha256: string;
+};
+
+export type BoundUploadTarget = {
+  url: string;
+  headers: Record<string, string>;
+  /** Conservative do-not-use-after deadline; not proof of a configurable provider's token TTL. */
+  expiresAt: string;
 };
 
 export function createFakeObjectStore(
@@ -274,15 +278,36 @@ export type SupabaseStorageOptions = {
   serviceRoleKey: string;
   bucket?: string;
   fetch?: typeof fetch;
+  now?: () => number;
+  signedUploadTtlSeconds?: number;
 };
 
 const SUPABASE_LIST_MAX_DEPTH = 8;
 const SUPABASE_LIST_MAX_TRAVERSAL_ENTRIES = 4_096;
+const SUPABASE_SIGNED_UPLOAD_SECONDS = 2 * 60 * 60;
 
 export function createSupabaseObjectStore(options: SupabaseStorageOptions): ObjectStore {
-  const origin = options.url.replace(/\/$/, "");
+  const origin = options.url.replace(/\/+$/, "");
   const bucket = options.bucket?.trim() || "audio-reader-assets";
   const fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const now = options.now ?? (() => Date.now());
+  let configuredUrl: URL | undefined;
+  try {
+    configuredUrl = new URL(origin);
+  } catch {
+    configuredUrl = undefined;
+  }
+  const usesHostedSupabaseLifetime =
+    configuredUrl?.hostname === "supabase.co" ||
+    configuredUrl?.hostname.endsWith(".supabase.co") === true;
+  const customSignedUploadSeconds =
+    Number.isSafeInteger(options.signedUploadTtlSeconds) &&
+    (options.signedUploadTtlSeconds ?? 0) > 0
+      ? Math.min(options.signedUploadTtlSeconds ?? 0, SUPABASE_SIGNED_UPLOAD_SECONDS)
+      : undefined;
+  const supportsNativeDirectUpload =
+    configuredUrl?.protocol === "https:" &&
+    (usesHostedSupabaseLifetime || customSignedUploadSeconds !== undefined);
   const headers = {
     apikey: options.serviceRoleKey,
     authorization: `Bearer ${options.serviceRoleKey}`,
@@ -294,6 +319,26 @@ export function createSupabaseObjectStore(options: SupabaseStorageOptions): Obje
       .map((segment) => encodeURIComponent(segment))
       .join("/");
     return `${origin}/storage/v1/${prefix}/${encodeURIComponent(bucket)}/${path}`;
+  }
+
+  async function createSignedUploadUrl(key: string): Promise<string | undefined> {
+    if (!supportsNativeDirectUpload) return undefined;
+    try {
+      const response = await fetchImpl(objectUrl(key, "object/upload/sign"), {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: "{}",
+      });
+      if (!response.ok) return undefined;
+      const payload: unknown = await response.json();
+      if (!isRecord(payload)) return undefined;
+      const signed = [payload.signedURL, payload.signedUrl, payload.url].find(
+        (value): value is string => typeof value === "string" && value.trim() !== "",
+      );
+      return signed === undefined ? undefined : normalizeSupabaseSignedUrl(origin, signed);
+    } catch {
+      return undefined;
+    }
   }
 
   return {
@@ -473,23 +518,31 @@ export function createSupabaseObjectStore(options: SupabaseStorageOptions): Obje
         throw new Error("supabase storage delete failed");
       }
     },
-    supportsBoundUpload: () => Promise.resolve(false),
-    async signedUploadUrl(key) {
-      const response = await fetchImpl(objectUrl(key, "object/upload/sign"), {
-        method: "POST",
-        headers: { ...headers, "content-type": "application/json" },
-        body: JSON.stringify({ upsert: false }),
-      });
-      if (!response.ok) return undefined;
-      const payload: unknown = await response.json();
-      if (!isRecord(payload)) return undefined;
-      const signed = [payload.signedURL, payload.signedUrl, payload.url].find(
-        (value): value is string => typeof value === "string" && value !== "",
-      );
-      if (signed === undefined) return undefined;
-      return signed.startsWith("http")
-        ? signed
-        : `${origin}${signed.startsWith("/") ? signed : `/${signed}`}`;
+    supportsBoundUpload: () => Promise.resolve(supportsNativeDirectUpload),
+    signedUploadUrl: createSignedUploadUrl,
+    async createBoundUpload(key, input) {
+      const issuedBeforeRequest = now();
+      const url = await createSignedUploadUrl(key);
+      if (url === undefined) return undefined;
+      // Hosted Supabase fixes upload tokens at two hours. Custom HTTPS deployments use the
+      // shorter of the caller window and their explicit provider TTL.
+      const adapterSeconds = usesHostedSupabaseLifetime
+        ? SUPABASE_SIGNED_UPLOAD_SECONDS
+        : Math.min(
+            Math.max(Math.trunc(input.expiresSeconds), 1),
+            customSignedUploadSeconds ?? SUPABASE_SIGNED_UPLOAD_SECONDS,
+          );
+      // Supabase's token selects the temporary key but does not bind size or checksum. Refuse
+      // overwrite here; completion streams and verifies both values before promoting the object.
+      return {
+        url,
+        expiresAt: new Date(issuedBeforeRequest + adapterSeconds * 1000).toISOString(),
+        headers: {
+          "content-length": String(input.contentLength),
+          "content-type": input.contentType,
+          "x-upsert": "false",
+        },
+      };
     },
     async signedDownloadUrl(key, expiresSeconds = 900) {
       const response = await fetchImpl(objectUrl(key, "object/sign"), {
@@ -520,6 +573,22 @@ export function createSupabaseObjectStore(options: SupabaseStorageOptions): Obje
         : `${origin}/storage/v1${signed.startsWith("/") ? signed : `/${signed}`}`;
     },
   };
+}
+
+function normalizeSupabaseSignedUrl(origin: string, signed: string): string | undefined {
+  const value = signed.trim();
+  try {
+    const configuredOrigin = new URL(origin).origin;
+    if (/^https?:\/\//i.test(value)) {
+      const url = new URL(value);
+      return url.origin === configuredOrigin ? url.toString() : undefined;
+    }
+    const path = value.replace(/^\/+/, "");
+    const storagePath = path.startsWith("storage/v1/") ? path : `storage/v1/${path}`;
+    return new URL(`/${storagePath}`, `${origin}/`).toString();
+  } catch {
+    return undefined;
+  }
 }
 
 function streamBytes(value: Uint8Array): ReadableStream<Uint8Array> {
@@ -589,6 +658,7 @@ export function tryCreateSupabaseObjectStore(input: {
   serviceRoleKey?: string;
   bucket?: string;
   fetch?: typeof fetch;
+  signedUploadTtlSeconds?: number;
 }): ObjectStore | undefined {
   const url = input.url?.trim() ?? "";
   const serviceRoleKey = input.serviceRoleKey?.trim() ?? "";
@@ -600,6 +670,9 @@ export function tryCreateSupabaseObjectStore(input: {
     serviceRoleKey,
     ...(input.bucket === undefined ? {} : { bucket: input.bucket }),
     ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
+    ...(input.signedUploadTtlSeconds === undefined
+      ? {}
+      : { signedUploadTtlSeconds: input.signedUploadTtlSeconds }),
   });
 }
 

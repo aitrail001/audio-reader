@@ -304,6 +304,7 @@ describe("GCS object store", () => {
       "x-goog-content-sha256": "a".repeat(64),
       "x-goog-meta-sha256": "a".repeat(64),
     });
+    expect(bound?.expiresAt).toBe("2026-08-28T12:15:00.000Z");
     expect(bound?.url).toContain(
       "X-Goog-SignedHeaders=content-length%3Bcontent-type%3Bhost%3Bx-goog-content-sha256%3Bx-goog-meta-sha256",
     );

@@ -428,10 +428,6 @@ describe("account sync object-storage readiness", () => {
         return Promise.resolve(new Response("unexpected", { status: 500 }));
       },
     });
-    // Exercise the recursive canary sweep independently of the production Supabase
-    // large-upload capability gate covered above.
-    store.supportsBoundUpload = () => Promise.resolve(true);
-
     await expect(service("supabase", store, { now: () => time }).read(true)).resolves.toMatchObject(
       {
         ready: true,
@@ -442,6 +438,42 @@ describe("account sync object-storage readiness", () => {
     expect(deleted).toContain(staleKey);
     expect(deleted.some((key) => !key.endsWith(".canary"))).toBe(false);
     expect(objects.size).toBe(0);
+  });
+
+  it("rejects account-sync readiness when Supabase direct uploads use HTTP", async () => {
+    const time = 1_777_000_000_000;
+    const store = createSupabaseObjectStore({
+      url: "http://127.0.0.1:54321",
+      serviceRoleKey: "service-role",
+      bucket: "private-assets",
+      fetch: () =>
+        Promise.resolve(new Response(JSON.stringify({ public: false }), { status: 200 })),
+    });
+
+    await expect(service("supabase", store, { now: () => time }).read(true)).resolves.toMatchObject(
+      {
+        ready: false,
+        reason: "storage_direct_upload_unavailable",
+      },
+    );
+  });
+
+  it("rejects custom HTTPS Supabase readiness without an explicit provider TTL", async () => {
+    const time = 1_777_000_000_000;
+    const store = createSupabaseObjectStore({
+      url: "https://storage.example.com",
+      serviceRoleKey: "service-role",
+      bucket: "private-assets",
+      fetch: () =>
+        Promise.resolve(new Response(JSON.stringify({ public: false }), { status: 200 })),
+    });
+
+    await expect(service("supabase", store, { now: () => time }).read(true)).resolves.toMatchObject(
+      {
+        ready: false,
+        reason: "storage_direct_upload_unavailable",
+      },
+    );
   });
 
   it("does not sweep a canary exactly fifteen minutes old", async () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createFakeDatabaseClient } from "@audio-reader/database";
 import { createTestApp } from "./app";
+import { createFakeObjectStore } from "./object-store";
 
 const DEVICE_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
 
@@ -331,5 +332,45 @@ describe("asset upload API", () => {
     );
     expect(response.status).toBe(503);
     expect(await readJson(response)).toMatchObject({ code: "direct_upload_unavailable" });
+  });
+
+  it("uses the provider's conservative absolute direct-upload deadline", async () => {
+    const storage = createFakeObjectStore();
+    storage.supportsBoundUpload = () => Promise.resolve(true);
+    storage.createBoundUpload = () =>
+      Promise.resolve({
+        url: "https://example.supabase.co/storage/v1/object/upload/sign/private/large.m4b",
+        headers: { "x-upsert": "false" },
+        expiresAt: "2026-09-01T02:00:00.000Z",
+      });
+    const app = createTestApp({ storage });
+    const response = await app.fetch(
+      new Request("http://localhost/v2/assets/uploads", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "large-expiry-create-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          kind: "audio",
+          contentType: "audio/mp4",
+          encoding: "identity",
+          compressedBytes: 8 * 1024 * 1024 + 1,
+          originalBytes: 8 * 1024 * 1024 + 1,
+          sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          fileName: "large.m4b",
+        }),
+      }),
+    );
+    const ticket = await readJson(response);
+
+    expect(response.status).toBe(201);
+    expect(ticket).toMatchObject({
+      method: "PUT",
+      ready: false,
+      expiresAt: "2026-09-01T02:00:00.000Z",
+    });
   });
 });

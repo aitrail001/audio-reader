@@ -323,18 +323,25 @@ export function createGcsObjectStore(options: GcsStoreOptions): ObjectStore {
         "x-goog-content-sha256": input.sha256,
         "x-goog-meta-sha256": input.sha256,
       };
+      const keyMaterial = await signingKey();
+      const issuedAt = now();
+      const expiresSeconds = Math.min(Math.max(Math.trunc(input.expiresSeconds), 1), 604_800);
       const url = await signGcsUrl({
         bucket,
         objectName: key,
         account,
-        expiresSeconds: input.expiresSeconds,
-        now,
-        key: await signingKey(),
+        expiresSeconds,
+        now: () => issuedAt,
+        key: keyMaterial,
         method: "PUT",
         headers,
         payloadHash: input.sha256,
       });
-      return { url, headers };
+      return {
+        url,
+        headers,
+        expiresAt: new Date(issuedAt + expiresSeconds * 1000).toISOString(),
+      };
     },
     supportsBoundUpload: () => Promise.resolve(true),
   };
