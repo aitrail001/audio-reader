@@ -103,6 +103,50 @@ describe("job worker", () => {
     });
   });
 
+  it("uses explicit Supabase storage without reading stale Operator GCS settings", async () => {
+    const requestedUrls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL | Request) => {
+        const url = String(input instanceof Request ? input.url : input);
+        requestedUrls.push(url);
+        if (url.includes("/operator_settings")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify([
+                {
+                  id: "default",
+                  payload: { gcsBucket: "stale-gcs" },
+                  ciphertext: "stale-ciphertext",
+                  nonce: "stale-nonce",
+                  updated_at: "2026-09-01T00:00:00.000Z",
+                  updated_by: null,
+                },
+              ]),
+              { status: 200, headers: { "content-type": "application/json" } },
+            ),
+          );
+        }
+        return Promise.resolve(new Response("[]", { status: 200 }));
+      }),
+    );
+
+    const response = await Promise.resolve(
+      worker.fetch(new Request("https://job-worker.example/health"), {
+        SUPABASE_URL: "https://example.supabase.co",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+        SUPABASE_STORAGE_BUCKET: "audio-reader-assets",
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      status: "ok",
+      dependencies: { database: "ok", storage: "ok" },
+    });
+    expect(requestedUrls.some((url) => url.includes("/operator_settings"))).toBe(false);
+  });
+
   it("completes queued assistant jobs with Qwen", async () => {
     const database = createFakeDatabaseClient();
     await database.ops.createJob({

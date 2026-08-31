@@ -60,6 +60,23 @@ function databaseConfigured(env: WorkerEnv): boolean {
 }
 
 async function resolveStorage(env: WorkerEnv, ops: OpsStore): Promise<ObjectStore> {
+  const supabaseBucket = env.SUPABASE_STORAGE_BUCKET?.trim() ?? "";
+  if (supabaseBucket !== "") {
+    const supabaseUrl = env.SUPABASE_URL?.trim() ?? "";
+    const supabaseKey =
+      env.SUPABASE_SERVICE_ROLE_KEY?.trim() || env.SUPABASE_SECRET_KEY?.trim() || "";
+    // The explicit bucket selects Supabase authoritatively; stale Operator GCS data is not read.
+    const supabase = tryCreateSupabaseObjectStore({
+      ...(supabaseUrl === "" ? {} : { url: supabaseUrl }),
+      ...(supabaseKey === "" ? {} : { serviceRoleKey: supabaseKey }),
+      bucket: supabaseBucket,
+    });
+    if (supabase === undefined || (await supabase.ping()) !== "ok") {
+      throw new Error("job_worker_storage_unavailable");
+    }
+    return supabase;
+  }
+
   let bucket = env.GCS_BUCKET?.trim() ?? "";
   let serviceAccountJson = env.GCS_SERVICE_ACCOUNT_JSON?.trim() ?? "";
   const wrapping = resolveJobOperatorWrappingSecret(env);
@@ -83,23 +100,8 @@ async function resolveStorage(env: WorkerEnv, ops: OpsStore): Promise<ObjectStor
     throw new Error("job_worker_storage_secrets_unavailable");
   }
   const gcs = tryCreateGcsObjectStore({ bucket, serviceAccountJson });
-  const supabaseUrl = env.SUPABASE_URL?.trim() ?? "";
-  const supabaseKey =
-    env.SUPABASE_SERVICE_ROLE_KEY?.trim() || env.SUPABASE_SECRET_KEY?.trim() || "";
-  const supabaseBucket = env.SUPABASE_STORAGE_BUCKET?.trim() ?? "";
-  // Database credentials do not identify the API Worker's storage provider. Supabase Storage is
-  // eligible only with an explicit bucket, avoiding a healthy-but-wrong default-provider fallback.
-  const supabase =
-    supabaseBucket === ""
-      ? undefined
-      : tryCreateSupabaseObjectStore({
-          ...(supabaseUrl === "" ? {} : { url: supabaseUrl }),
-          ...(supabaseKey === "" ? {} : { serviceRoleKey: supabaseKey }),
-          bucket: supabaseBucket,
-        });
   const store =
     gcs ??
-    supabase ??
     (env.ASSETS === undefined
       ? undefined
       : createR2ObjectStore(env.ASSETS, {

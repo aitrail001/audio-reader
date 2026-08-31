@@ -42,7 +42,7 @@ describe("runtime config wrapping", () => {
     await expect(runtime.view()).resolves.toMatchObject({ storage: { provider: "none" } });
   });
 
-  it("returns one atomic provider selection and never falls back from malformed selected GCS to Supabase", async () => {
+  it("selects an explicit Supabase bucket ahead of malformed GCS configuration", async () => {
     const database = createFakeDatabaseClient();
     const runtime = createRuntimeConfigService({
       env: {
@@ -51,7 +51,77 @@ describe("runtime config wrapping", () => {
         GCS_SERVICE_ACCOUNT_JSON: "{malformed",
         SUPABASE_URL: "https://example.supabase.co",
         SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
-        SUPABASE_STORAGE_BUCKET: "fallback-that-must-not-be-used",
+        SUPABASE_STORAGE_BUCKET: "selected-supabase",
+      },
+      ops: database.ops,
+      wrappingSecret: "test-operator-secret-key",
+    });
+
+    const resolved = await runtime.resolveStorage({ useFakes: false });
+    expect(resolved.descriptor).toMatchObject({
+      provider: "supabase",
+      bucket: "selected-supabase",
+      credentialsConfigured: true,
+    });
+    await expect(runtime.view()).resolves.toMatchObject({
+      storage: {
+        provider: "supabase",
+        bucket: "selected-supabase",
+        credentialsConfigured: true,
+        source: "env",
+      },
+    });
+  });
+
+  it("does not read or decrypt stale saved GCS settings for explicit Supabase storage", async () => {
+    const database = createFakeDatabaseClient();
+    const cipher = await encryptOperatorSecrets("old-wrapping-secret", {
+      gcsServiceAccountJson: '{"stale":"gcs"}',
+    });
+    await database.ops.putOperatorSettings({
+      id: "default",
+      payload: { gcsBucket: "stale-gcs" },
+      ciphertext: cipher.ciphertext,
+      nonce: cipher.nonce,
+      updatedBy: "00000000-0000-4000-8000-000000000002",
+    });
+    const readOperatorSettings = database.ops.readOperatorSettings.bind(database.ops);
+    let settingsReads = 0;
+    Object.assign(database.ops, {
+      readOperatorSettings: () => {
+        settingsReads += 1;
+        return readOperatorSettings();
+      },
+    });
+    const runtime = createRuntimeConfigService({
+      env: {
+        ENVIRONMENT: "production",
+        SUPABASE_URL: "https://example.supabase.co",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+        SUPABASE_STORAGE_BUCKET: "supabase-assets",
+      },
+      ops: database.ops,
+      wrappingSecret: "new-wrapping-secret",
+    });
+
+    const resolved = await runtime.resolveStorage({ useFakes: false });
+    expect(resolved.descriptor).toMatchObject({
+      provider: "supabase",
+      bucket: "supabase-assets",
+      credentialsConfigured: true,
+    });
+    expect(settingsReads).toBe(0);
+  });
+
+  it("preserves GCS selection when no Supabase bucket is explicit", async () => {
+    const database = createFakeDatabaseClient();
+    const runtime = createRuntimeConfigService({
+      env: {
+        ENVIRONMENT: "production",
+        GCS_BUCKET: "selected-gcs",
+        GCS_SERVICE_ACCOUNT_JSON: "{malformed",
+        SUPABASE_URL: "https://example.supabase.co",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
       },
       ops: database.ops,
       wrappingSecret: "test-operator-secret-key",
@@ -63,29 +133,6 @@ describe("runtime config wrapping", () => {
       bucket: "selected-gcs",
       credentialsConfigured: false,
     });
-    await expect(resolved.store.ping()).resolves.toBe("unavailable");
-    await expect(runtime.view()).resolves.toMatchObject({
-      storage: { provider: "gcs", bucket: "selected-gcs", credentialsConfigured: false },
-    });
-  });
-
-  it("does not relabel a stale partial GCS environment as the valid Supabase provider", async () => {
-    const database = createFakeDatabaseClient();
-    const runtime = createRuntimeConfigService({
-      env: {
-        ENVIRONMENT: "production",
-        GCS_SERVICE_ACCOUNT_JSON: "{}",
-        SUPABASE_URL: "https://example.supabase.co",
-        SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
-        SUPABASE_STORAGE_BUCKET: "supabase-assets",
-      },
-      ops: database.ops,
-      wrappingSecret: "test-operator-secret-key",
-    });
-
-    const resolved = await runtime.resolveStorage({ useFakes: false });
-    expect(resolved.descriptor.provider).toBe("gcs");
-    expect(resolved.descriptor.bucket).toBeUndefined();
     await expect(resolved.store.ping()).resolves.toBe("unavailable");
   });
 
