@@ -423,7 +423,7 @@ export function createSupabaseObjectStore(options: SupabaseStorageOptions): Obje
         method: "GET",
         headers,
       });
-      if (response.status === 404 || (await isSupabaseObjectNotFound(response))) {
+      if (response.status === 404 || (await isSupabaseNotFound(response, "authenticated"))) {
         return undefined;
       }
       if (!response.ok) {
@@ -436,7 +436,8 @@ export function createSupabaseObjectStore(options: SupabaseStorageOptions): Obje
         method: "GET",
         headers,
       });
-      if (response.status === 404 || (await isSupabaseObjectNotFound(response))) return undefined;
+      if (response.status === 404 || (await isSupabaseNotFound(response, "authenticated")))
+        return undefined;
       if (!response.ok || response.body === null)
         throw new Error("supabase storage download failed");
       const size = Number(response.headers.get("content-length"));
@@ -614,20 +615,31 @@ async function classifySupabaseAnonymousResponse(
 ): Promise<"denied" | "readable" | "not_found" | "unknown"> {
   const classified = classifyAnonymousResponse(response);
   if (classified !== "unknown") return classified;
-  return (await isSupabaseObjectNotFound(response)) ? "not_found" : "unknown";
+  return (await isSupabaseNotFound(response, "anonymous")) ? "not_found" : "unknown";
 }
 
-/** Supabase may carry a legacy 404 object code inside HTTP 400; other 400s stay failures. */
-async function isSupabaseObjectNotFound(response: Response): Promise<boolean> {
+/** Recognizes legacy HTTP-400 not-found shapes without hiding authenticated bucket failures. */
+async function isSupabaseNotFound(
+  response: Response,
+  context: "anonymous" | "authenticated",
+): Promise<boolean> {
   if (response.status !== 400) return false;
   try {
     const payload: unknown = await response.json();
     if (!isRecord(payload)) return false;
     const statusCode = payload.statusCode;
-    return (
+    const objectNotFound =
       (statusCode === 404 || statusCode === "404") &&
       typeof payload.error === "string" &&
-      payload.error.toLowerCase() === "not_found"
+      payload.error.toLowerCase() === "not_found";
+    if (objectNotFound) return true;
+    // Supabase's anonymous route conceals a private bucket with this exact legacy shape.
+    return (
+      context === "anonymous" &&
+      (statusCode === 404 || statusCode === "404") &&
+      payload.error === "Bucket not found" &&
+      payload.message === "Bucket not found" &&
+      payload.code === "NoSuchBucket"
     );
   } catch {
     return false;

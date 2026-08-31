@@ -153,6 +153,43 @@ describe("supabase object store", () => {
     await expect(store.open("private/canary")).resolves.toBeUndefined();
   });
 
+  it("accepts Supabase's exact legacy private-bucket concealment only for anonymous reads", async () => {
+    const concealed = JSON.stringify({
+      statusCode: "404",
+      error: "Bucket not found",
+      message: "Bucket not found",
+      code: "NoSuchBucket",
+    });
+    const store = createSupabaseObjectStore({
+      url: "https://example.supabase.co",
+      serviceRoleKey: "service-role",
+      bucket: "private-assets",
+      fetch: () => Promise.resolve(new Response(concealed, { status: 400 })),
+    });
+
+    await expect(store.anonymousRead("private/canary")).resolves.toBe("not_found");
+    await expect(store.get("private/canary")).rejects.toThrow(/download failed/i);
+    await expect(store.open("private/canary")).rejects.toThrow(/download failed/i);
+  });
+
+  it("keeps an arbitrary Supabase HTTP 400 unknown or failed", async () => {
+    const store = createSupabaseObjectStore({
+      url: "https://example.supabase.co",
+      serviceRoleKey: "service-role",
+      bucket: "private-assets",
+      fetch: () =>
+        Promise.resolve(
+          new Response(JSON.stringify({ statusCode: "400", error: "Bad Request" }), {
+            status: 400,
+          }),
+        ),
+    });
+
+    await expect(store.anonymousRead("private/canary")).resolves.toBe("unknown");
+    await expect(store.get("private/canary")).rejects.toThrow(/download failed/i);
+    await expect(store.open("private/canary")).rejects.toThrow(/download failed/i);
+  });
+
   it("does not create a missing bucket during a readiness ping", async () => {
     const calls: Array<{ url: string; method: string }> = [];
     const store = createSupabaseObjectStore({

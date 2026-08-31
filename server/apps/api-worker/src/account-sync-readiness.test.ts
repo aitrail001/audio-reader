@@ -364,6 +364,12 @@ describe("account sync object-storage readiness", () => {
       error: "not_found",
       message: "Object not found",
     });
+    const concealedBucket = JSON.stringify({
+      statusCode: "404",
+      error: "Bucket not found",
+      message: "Bucket not found",
+      code: "NoSuchBucket",
+    });
     const store = createSupabaseObjectStore({
       url: "https://example.supabase.co",
       serviceRoleKey: "service-role",
@@ -408,7 +414,7 @@ describe("account sync object-storage readiness", () => {
           return Promise.resolve(new Response("{}", { status: 200 }));
         }
         if (url.includes("/storage/v1/object/public/private-assets/") && method === "GET") {
-          return Promise.resolve(new Response(notFound, { status: 400 }));
+          return Promise.resolve(new Response(concealedBucket, { status: 400 }));
         }
         const authenticatedPrefix = "/storage/v1/object/authenticated/private-assets/";
         if (url.includes(authenticatedPrefix) && method === "GET") {
