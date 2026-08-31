@@ -211,7 +211,8 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
         `${policy.model}|${policy.systemPrompt}|${policy.userPrompt}|${wordTask ? WORD_IN_SENTENCE_INSTRUCTIONS : SENTENCE_TRANSLATION_INSTRUCTIONS}`,
       );
       const requestedResultId =
-        typeof body.value.assistantResultId === "string" && UUID_PATTERN.test(body.value.assistantResultId)
+        typeof body.value.assistantResultId === "string" &&
+        UUID_PATTERN.test(body.value.assistantResultId)
           ? body.value.assistantResultId
           : undefined;
       const cacheKey = await cacheKeyFor(context, {
@@ -236,19 +237,28 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
           const exactModel = hit.model || policy.model;
           const exactPromptVersion = hit.promptVersion || policy.promptVersion;
           const exactModelPolicyHash = hit.modelPolicyHash || modelPolicyHash;
-          const payload = withTranslationIdentity({
-            ...hit,
-            id: resultId,
-            sharedCacheEntryID: hit.id,
-            model: exactModel,
-            promptVersion: exactPromptVersion,
-            modelPolicyHash: exactModelPolicyHash,
-          }, { targetId, source });
+          const payload = withTranslationIdentity(
+            {
+              ...hit,
+              id: resultId,
+              sharedCacheEntryID: hit.id,
+              model: exactModel,
+              promptVersion: exactPromptVersion,
+              modelPolicyHash: exactModelPolicyHash,
+            },
+            { targetId, source },
+          );
           const recorded = await recordUse(
-            context, principal.accountId, resultId, "translation",
-            requestedResultId === undefined ? "pending" : "replaced", hit.id,
+            context,
+            principal.accountId,
+            resultId,
+            "translation",
+            requestedResultId === undefined ? "pending" : "replaced",
+            hit.id,
             translationPrivateText(payload),
-            exactModel, exactPromptVersion, exactModelPolicyHash,
+            exactModel,
+            exactPromptVersion,
+            exactModelPolicyHash,
             {
               resultKind: wordTask ? "wordGloss" : "sentenceGloss",
               language: targetLanguage,
@@ -507,7 +517,9 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
       );
       const requestedResultIDs = new Map(
         sentences.flatMap((sentence) =>
-          sentence.assistantResultId === undefined ? [] : [[sentence.id, sentence.assistantResultId] as const],
+          sentence.assistantResultId === undefined
+            ? []
+            : [[sentence.id, sentence.assistantResultId] as const],
         ),
       );
       const sentenceContextCount =
@@ -558,7 +570,12 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
       );
       if (pending.length === 0) {
         const privateResults = await materializePrivateTranslationResults(
-          context, principal.accountId, results, policy.model, policy.promptVersion, modelPolicyHash,
+          context,
+          principal.accountId,
+          results,
+          policy.model,
+          policy.promptVersion,
+          modelPolicyHash,
           requestedResultIDs,
           { language: targetLanguage, contextText: contextBefore, bookTitle, chapterTitle },
         );
@@ -733,7 +750,12 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
       }
       const combined = [...results, ...generated.generated];
       const privateResults = await materializePrivateTranslationResults(
-        context, principal.accountId, combined, policy.model, policy.promptVersion, modelPolicyHash,
+        context,
+        principal.accountId,
+        combined,
+        policy.model,
+        policy.promptVersion,
+        modelPolicyHash,
         requestedResultIDs,
         { language: targetLanguage, contextText: contextBefore, bookTitle, chapterTitle },
       );
@@ -796,7 +818,8 @@ async function createSummary(context: AssistantRouteContext): Promise<Response> 
         `${policy.model}|${policy.systemPrompt}|${policy.userPrompt}|${CHAPTER_SUMMARY_INSTRUCTIONS}`,
       );
       const requestedResultId =
-        typeof body.value.assistantResultId === "string" && UUID_PATTERN.test(body.value.assistantResultId)
+        typeof body.value.assistantResultId === "string" &&
+        UUID_PATTERN.test(body.value.assistantResultId)
           ? body.value.assistantResultId
           : undefined;
       const cacheKey = await cacheKeyFor(context, {
@@ -818,10 +841,16 @@ async function createSummary(context: AssistantRouteContext): Promise<Response> 
           const exactPromptVersion = hit.promptVersion || policy.promptVersion;
           const exactModelPolicyHash = hit.modelPolicyHash || modelPolicyHash;
           const recorded = await recordUse(
-            context, principal.accountId, resultId, "chapter_summary",
-            requestedResultId === undefined ? "pending" : "replaced", hit.id,
+            context,
+            principal.accountId,
+            resultId,
+            "chapter_summary",
+            requestedResultId === undefined ? "pending" : "replaced",
+            hit.id,
             JSON.stringify(summaryPrivateContent(hit)),
-            exactModel, exactPromptVersion, exactModelPolicyHash,
+            exactModel,
+            exactPromptVersion,
+            exactModelPolicyHash,
             {
               resultKind: "chapterSummary",
               language: targetLanguage,
@@ -1107,8 +1136,15 @@ async function createChat(context: AssistantRouteContext): Promise<Response> {
         createdAt,
       });
       await recordUse(
-        context, principal.accountId, messageId, "chat", "pending", null, answer,
-        completed.model, policy.promptVersion,
+        context,
+        principal.accountId,
+        messageId,
+        "chat",
+        "pending",
+        null,
+        answer,
+        completed.model,
+        policy.promptVersion,
         await sha256Hex(`${completed.model}|${policy.systemPrompt}|${policy.userPrompt}`),
       );
       const payload: ChatAccepted = {
@@ -1969,10 +2005,15 @@ function translationPrivateContent(result: TranslationResult): Record<string, un
 }
 
 function translationPrivateText(result: TranslationResult): string {
-  const notes = result.notes.length === 0
-    ? "LEARNING NOTES:\nNone"
-    : `LEARNING NOTES:\n${result.notes.map((note) =>
-      `• ${note.source} — [${note.category.replaceAll("_", " ")}] ${note.explanation}`).join("\n")}`;
+  const notes =
+    result.notes.length === 0
+      ? "LEARNING NOTES:\nNone"
+      : `LEARNING NOTES:\n${result.notes
+          .map(
+            (note) =>
+              `• ${note.source} — [${note.category.replaceAll("_", " ")}] ${note.explanation}`,
+          )
+          .join("\n")}`;
   return `TRANSLATION:\n${result.translation}\n\n${notes}`;
 }
 
@@ -2002,38 +2043,44 @@ async function materializePrivateTranslationResults(
     chapterTitle?: string;
   } = {},
 ): Promise<TranslationResult[]> {
-  return Promise.all(results.map(async (cached) => {
-    const resultId = requestedResultIDs.get(cached.targetId ?? "") ?? crypto.randomUUID();
-    const exactModel = cached.model || model;
-    const exactPromptVersion = cached.promptVersion || promptVersion;
-    const exactModelPolicyHash = cached.modelPolicyHash || modelPolicyHash;
-    const cacheEntryId = cached.sharedCacheEntryID ?? null;
-    const recorded = await recordUse(
-      context, userId, resultId, "translation",
-      requestedResultIDs.has(cached.targetId ?? "") ? "replaced" : "pending",
-      cacheEntryId, translationPrivateText(cached),
-      exactModel, exactPromptVersion, exactModelPolicyHash,
-      {
-        resultKind: "sentenceGloss",
-        ...details,
-        ...(cached.source === undefined
-          ? {}
-          : { sourceText: cached.source }),
-        ...(cached.targetId === undefined || cached.targetId === null
-          ? {}
-          : { targetId: cached.targetId }),
-        privateContent: translationPrivateContent(cached),
-      },
-    );
-    return {
-      ...cached,
-      id: resultId,
-      sharedCacheEntryID: recorded?.cacheEntryId ?? null,
-      model: exactModel,
-      promptVersion: exactPromptVersion,
-      modelPolicyHash: exactModelPolicyHash,
-    };
-  }));
+  return Promise.all(
+    results.map(async (cached) => {
+      const resultId = requestedResultIDs.get(cached.targetId ?? "") ?? crypto.randomUUID();
+      const exactModel = cached.model || model;
+      const exactPromptVersion = cached.promptVersion || promptVersion;
+      const exactModelPolicyHash = cached.modelPolicyHash || modelPolicyHash;
+      const cacheEntryId = cached.sharedCacheEntryID ?? null;
+      const recorded = await recordUse(
+        context,
+        userId,
+        resultId,
+        "translation",
+        requestedResultIDs.has(cached.targetId ?? "") ? "replaced" : "pending",
+        cacheEntryId,
+        translationPrivateText(cached),
+        exactModel,
+        exactPromptVersion,
+        exactModelPolicyHash,
+        {
+          resultKind: "sentenceGloss",
+          ...details,
+          ...(cached.source === undefined ? {} : { sourceText: cached.source }),
+          ...(cached.targetId === undefined || cached.targetId === null
+            ? {}
+            : { targetId: cached.targetId }),
+          privateContent: translationPrivateContent(cached),
+        },
+      );
+      return {
+        ...cached,
+        id: resultId,
+        sharedCacheEntryID: recorded?.cacheEntryId ?? null,
+        model: exactModel,
+        promptVersion: exactPromptVersion,
+        modelPolicyHash: exactModelPolicyHash,
+      };
+    }),
+  );
 }
 
 /** Persist a shared cache row without failing the caller. The generated payload is already in hand. */

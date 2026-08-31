@@ -126,8 +126,12 @@ describe("job worker", () => {
       cleanupObsoleteV1Data(_userId: string, execute: boolean) {
         calls.push(execute);
         return Promise.resolve({
-          changes: 1, outcomes: 1, batches: 1, transcriptRevisions: 1,
-          transcriptSegments: 2, assets: 1,
+          changes: 1,
+          outcomes: 1,
+          batches: 1,
+          transcriptRevisions: 1,
+          transcriptSegments: 2,
+          assets: 1,
           objectKeys: [`${accountId}/manifest-audio.m4b`, "another-user/not-owned"],
           executed: execute,
         });
@@ -143,11 +147,13 @@ describe("job worker", () => {
     await expect(processQueuedJobs(database.ops, createFakeQwenClient(), objects)).resolves.toBe(1);
 
     expect(calls).toEqual([false, true]);
-    expect(objects.deleted.sort()).toEqual([
-      `${accountId}/enumerated-cover.jpg`,
-      `${accountId}/manifest-audio.m4b`,
-      `private/v1/${accountId}/enumerated-transcript.json`,
-    ].sort());
+    expect(objects.deleted.sort()).toEqual(
+      [
+        `${accountId}/enumerated-cover.jpg`,
+        `${accountId}/manifest-audio.m4b`,
+        `private/v1/${accountId}/enumerated-transcript.json`,
+      ].sort(),
+    );
     expect(await database.ops.listJobs({ status: "succeeded" })).toHaveLength(1);
   });
 
@@ -161,8 +167,14 @@ describe("job worker", () => {
       cleanupObsoleteV1Data(_userId: string, execute: boolean) {
         calls.push(execute);
         return Promise.resolve({
-          changes: 1, outcomes: 0, batches: 0, transcriptRevisions: 0,
-          transcriptSegments: 0, assets: 1, objectKeys: [objectKey], executed: execute,
+          changes: 1,
+          outcomes: 0,
+          batches: 0,
+          transcriptRevisions: 0,
+          transcriptSegments: 0,
+          assets: 1,
+          objectKeys: [objectKey],
+          executed: execute,
         });
       },
     });
@@ -313,9 +325,8 @@ describe("job worker", () => {
     let finished = false;
     let failDelete = true;
     Object.assign(database.ops, {
-      claimReadyAssetUploadCleanup: () => Promise.resolve(
-        finished ? [] : [{ id: "ready-retry", uploadObjectKey: uploadKey }],
-      ),
+      claimReadyAssetUploadCleanup: () =>
+        Promise.resolve(finished ? [] : [{ id: "ready-retry", uploadObjectKey: uploadKey }]),
       finishReadyAssetUploadCleanup: () => {
         finished = true;
         return Promise.resolve();

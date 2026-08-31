@@ -157,17 +157,34 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
   });
 
   it.each([
-    ["nested media bytes", {
-      localId: "book-a", title: "Book", source: "files",
-      chapters: [{ localId: "chapter-a", index: 0, title: "One", audioData: "AAAA" }],
-    }],
-    ["unknown nested field", {
-      localId: "book-a", title: "Book", source: "files",
-      chapters: [{ localId: "chapter-a", index: 0, title: "One", surprise: true }],
-    }],
-    ["unknown top-level field", {
-      localId: "book-a", title: "Book", source: "files", chapters: [], transcriptData: "{}",
-    }],
+    [
+      "nested media bytes",
+      {
+        localId: "book-a",
+        title: "Book",
+        source: "files",
+        chapters: [{ localId: "chapter-a", index: 0, title: "One", audioData: "AAAA" }],
+      },
+    ],
+    [
+      "unknown nested field",
+      {
+        localId: "book-a",
+        title: "Book",
+        source: "files",
+        chapters: [{ localId: "chapter-a", index: 0, title: "One", surprise: true }],
+      },
+    ],
+    [
+      "unknown top-level field",
+      {
+        localId: "book-a",
+        title: "Book",
+        source: "files",
+        chapters: [],
+        transcriptData: "{}",
+      },
+    ],
   ])("rejects v2 RPC bypass payload with %s without advancing its cursor", (_label, payload) => {
     const session = requireDb(db);
     const before = scalar(
@@ -178,22 +195,28 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
       ${sqlString(USER_A)}::uuid,
       ${sqlString(DEVICE_A)}::uuid,
       gen_random_uuid(),
-      ${sqlJson([{
-        mutationId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-        entityType: "book",
-        entityId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
-        operation: "upsert",
-        baseRevision: 0,
-        occurredAt: "2026-08-31T00:00:00Z",
-        payload,
-      }])}::jsonb
+      ${sqlJson([
+        {
+          mutationId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          entityType: "book",
+          entityId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          operation: "upsert",
+          baseRevision: 0,
+          occurredAt: "2026-08-31T00:00:00Z",
+          payload,
+        },
+      ])}::jsonb
     )`);
     expect(result.ok).toBe(false);
-    expect(result.stderr).toMatch(/recursive compact entity schema|outside its entity schema|large immutable content/i);
-    expect(scalar(
-      session,
-      `select count(*)::text from public.sync_v2_changes where user_id = ${sqlString(USER_A)}::uuid`,
-    )).toBe(before);
+    expect(result.stderr).toMatch(
+      /recursive compact entity schema|outside its entity schema|large immutable content/i,
+    );
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.sync_v2_changes where user_id = ${sqlString(USER_A)}::uuid`,
+      ),
+    ).toBe(before);
   });
 
   it("rejects an unknown v2 entity type with an empty payload without advancing its cursor", () => {
@@ -206,22 +229,26 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
       ${sqlString(USER_A)}::uuid,
       ${sqlString(DEVICE_A)}::uuid,
       gen_random_uuid(),
-      ${sqlJson([{
-        mutationId: "88888888-8888-4888-8888-888888888888",
-        entityType: "unknown_empty_entity",
-        entityId: "89898989-8989-4989-8989-898989898989",
-        operation: "upsert",
-        baseRevision: 0,
-        occurredAt: "2026-08-31T00:00:00Z",
-        payload: {},
-      }])}::jsonb
+      ${sqlJson([
+        {
+          mutationId: "88888888-8888-4888-8888-888888888888",
+          entityType: "unknown_empty_entity",
+          entityId: "89898989-8989-4989-8989-898989898989",
+          operation: "upsert",
+          baseRevision: 0,
+          occurredAt: "2026-08-31T00:00:00Z",
+          payload: {},
+        },
+      ])}::jsonb
     )`);
     expect(result.ok).toBe(false);
     expect(result.stderr).toMatch(/unsupported v2 entity type/i);
-    expect(scalar(
-      session,
-      `select count(*)::text from public.sync_v2_changes where user_id = ${sqlString(USER_A)}::uuid`,
-    )).toBe(before);
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.sync_v2_changes where user_id = ${sqlString(USER_A)}::uuid`,
+      ),
+    ).toBe(before);
   });
 
   it("dry-runs and idempotently executes complete per-user v1 cleanup", () => {
@@ -230,7 +257,9 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
     const bookId = "11111111-1111-4111-8111-111111111111";
     const chapterId = "22222222-2222-4222-8222-222222222222";
     const revisionId = "33333333-3333-4333-8333-333333333333";
-    execOk(session, `
+    execOk(
+      session,
+      `
       insert into public.profiles (user_id, display_name, account_status)
       values (${sqlString(userId)}::uuid, 'legacy cleanup', 'active');
       insert into public.books (
@@ -282,36 +311,54 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
         ${sqlString(userId)}::uuid,
         '77777777-7777-4777-8777-777777777777'::uuid, 'rejected', '{}'
       );
-    `);
+    `,
+    );
 
     const inspected = callJson(
       session,
       `select public.cleanup_obsolete_v1_data(${sqlString(userId)}::uuid, false)`,
     );
     expect(inspected).toMatchObject({
-      changes: 1, outcomes: 1, batches: 1, transcriptRevisions: 1,
-      transcriptSegments: 1, assets: 1, executed: false,
+      changes: 1,
+      outcomes: 1,
+      batches: 1,
+      transcriptRevisions: 1,
+      transcriptSegments: 1,
+      assets: 1,
+      executed: false,
     });
     expect(inspected.objectKeys).toEqual([
       `${userId}/legacy-audio.m4b`,
       `${userId}/legacy-transcript.json`,
     ]);
-    expect(scalar(
-      session,
-      `select count(*)::text from public.book_assets where user_id = ${sqlString(userId)}::uuid`,
-    )).toBe("1");
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.book_assets where user_id = ${sqlString(userId)}::uuid`,
+      ),
+    ).toBe("1");
 
     const executed = callJson(
       session,
       `select public.cleanup_obsolete_v1_data(${sqlString(userId)}::uuid, true)`,
     );
-    expect(executed).toMatchObject({ changes: 1, transcriptSegments: 1, assets: 1, executed: true });
-    expect(callJson(
-      session,
-      `select public.cleanup_obsolete_v1_data(${sqlString(userId)}::uuid, true)`,
-    )).toMatchObject({
-      changes: 0, outcomes: 0, batches: 0, transcriptRevisions: 0,
-      transcriptSegments: 0, assets: 0, objectKeys: [], executed: true,
+    expect(executed).toMatchObject({
+      changes: 1,
+      transcriptSegments: 1,
+      assets: 1,
+      executed: true,
+    });
+    expect(
+      callJson(session, `select public.cleanup_obsolete_v1_data(${sqlString(userId)}::uuid, true)`),
+    ).toMatchObject({
+      changes: 0,
+      outcomes: 0,
+      batches: 0,
+      transcriptRevisions: 0,
+      transcriptSegments: 0,
+      assets: 0,
+      objectKeys: [],
+      executed: true,
     });
   });
 
@@ -1431,9 +1478,27 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
        )`,
     );
     const lifecycle = [
-      { status: "accepted", text: "accepted", model: "qwen3.5-plus-2026-08-01", prompt: "qwen-managed-v3", hash: "a".repeat(64) },
-      { status: "edited", text: "edited", model: "qwen3.5-plus-2026-08-01", prompt: "qwen-managed-v3", hash: "a".repeat(64) },
-      { status: "replaced", text: "replacement", model: "qwen3.5-plus-2026-08-31", prompt: "qwen-managed-v4", hash: "b".repeat(64) },
+      {
+        status: "accepted",
+        text: "accepted",
+        model: "qwen3.5-plus-2026-08-01",
+        prompt: "qwen-managed-v3",
+        hash: "a".repeat(64),
+      },
+      {
+        status: "edited",
+        text: "edited",
+        model: "qwen3.5-plus-2026-08-01",
+        prompt: "qwen-managed-v3",
+        hash: "a".repeat(64),
+      },
+      {
+        status: "replaced",
+        text: "replacement",
+        model: "qwen3.5-plus-2026-08-31",
+        prompt: "qwen-managed-v4",
+        hash: "b".repeat(64),
+      },
     ];
     for (const [index, state] of lifecycle.entries()) {
       const mutation = {
@@ -1472,13 +1537,24 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
     }
 
     expect(
-      scalar(session, `select count(*)::text from user_assistant_results where id = ${sqlString(resultId)}::uuid`),
+      scalar(
+        session,
+        `select count(*)::text from user_assistant_results where id = ${sqlString(resultId)}::uuid`,
+      ),
     ).toBe("1");
     expect(
-      scalar(session, `select status || '|' || output_text || '|' || model || '|' || prompt_version || '|' || model_policy_hash from user_assistant_results where id = ${sqlString(resultId)}::uuid`),
+      scalar(
+        session,
+        `select status || '|' || output_text || '|' || model || '|' || prompt_version || '|' || model_policy_hash from user_assistant_results where id = ${sqlString(resultId)}::uuid`,
+      ),
     ).toBe(`replaced|replacement|qwen3.5-plus-2026-08-31|qwen-managed-v4|${"b".repeat(64)}`);
     expect(
-      Number(scalar(session, `select jsonb_array_length(history)::text from user_assistant_results where id = ${sqlString(resultId)}::uuid`)),
+      Number(
+        scalar(
+          session,
+          `select jsonb_array_length(history)::text from user_assistant_results where id = ${sqlString(resultId)}::uuid`,
+        ),
+      ),
     ).toBeGreaterThanOrEqual(4);
     const bootstrap = callJson(
       session,
@@ -1490,7 +1566,9 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
       (item) => item.entity_type === "assistant_result" && item.entity_id === resultId,
     );
     expect(entity).toBeDefined();
-    expect(entity?.payload).toMatchObject({ result: { id: resultId, status: "replaced", text: "replacement" } });
+    expect(entity?.payload).toMatchObject({
+      result: { id: resultId, status: "replaced", text: "replacement" },
+    });
   });
 
   it("records a complete generated private summary without requiring its shared cache row", () => {
@@ -1511,22 +1589,22 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
        from public.record_user_assistant_result(
          ${sqlString(USER_A)}::uuid,
          ${sqlJson({
-          id: resultId,
-          task: "chapter_summary",
-          resultKind: "chapterSummary",
-          status: "pending",
-          cacheEntryId: missingCacheId,
-          outputText,
-          privateContent: structured,
-          language: "zh-Hans",
-          sourceText: "private chapter text",
-          bookTitle: "Private Book",
-          chapterTitle: "Private Chapter",
-          targetId: "chapter-local-1",
-          model: "qwen3.7-plus-2026-09-01",
-          promptVersion: "qwen-managed-v4",
-          modelPolicyHash: "c".repeat(64),
-          createdAt: "2026-09-01T00:00:00Z",
+           id: resultId,
+           task: "chapter_summary",
+           resultKind: "chapterSummary",
+           status: "pending",
+           cacheEntryId: missingCacheId,
+           outputText,
+           privateContent: structured,
+           language: "zh-Hans",
+           sourceText: "private chapter text",
+           bookTitle: "Private Book",
+           chapterTitle: "Private Chapter",
+           targetId: "chapter-local-1",
+           model: "qwen3.7-plus-2026-09-01",
+           promptVersion: "qwen-managed-v4",
+           modelPolicyHash: "c".repeat(64),
+           createdAt: "2026-09-01T00:00:00Z",
          })}::jsonb
        ) recorded`,
     );
@@ -1552,8 +1630,8 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
         ${sqlString(USER_A)}::uuid, null, 0, 500, 1048576
       )`,
     );
-    const bootstrapped = requireJsonObjectArray(bootstrap.entities).find((entity) =>
-      entity.entity_type === "assistant_result" && entity.entity_id === resultId
+    const bootstrapped = requireJsonObjectArray(bootstrap.entities).find(
+      (entity) => entity.entity_type === "assistant_result" && entity.entity_id === resultId,
     );
     expect(bootstrapped).toBeDefined();
     const bootstrappedResult = requireJsonObject(requireJsonObject(bootstrapped?.payload).result);

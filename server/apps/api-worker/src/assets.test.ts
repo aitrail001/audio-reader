@@ -16,17 +16,26 @@ describe("asset upload API", () => {
   it("retrieves an announced ready asset directly even after 500 earlier manifests", async () => {
     const database = createFakeDatabaseClient();
     const app = createTestApp({ database });
-    const principal = await app.authenticate(new Request("http://localhost", {
-      headers: { authorization: "Bearer test" },
-    }));
+    const principal = await app.authenticate(
+      new Request("http://localhost", {
+        headers: { authorization: "Bearer test" },
+      }),
+    );
     if (principal === null) throw new Error("test principal missing");
     let target = "";
     for (let index = 0; index <= 500; index += 1) {
       const uploadId = crypto.randomUUID();
       const created = await database.ops.createAsset(principal.accountId, {
-        kind: "cover", contentType: "image/png", compressedBytes: 1, originalBytes: 1,
-        sha256: index.toString(16).padStart(64, "0"), encoding: "identity",
-        revisionId: null, bookId: null, chapterId: null, segmentCount: null,
+        kind: "cover",
+        contentType: "image/png",
+        compressedBytes: 1,
+        originalBytes: 1,
+        sha256: index.toString(16).padStart(64, "0"),
+        encoding: "identity",
+        revisionId: null,
+        bookId: null,
+        chapterId: null,
+        segmentCount: null,
         fileName: `cover-${String(index)}.png`,
         objectKey: `${principal.accountId}/cover/${String(index)}`,
         uploadObjectKey: `${principal.accountId}/pending/${uploadId}`,
@@ -36,9 +45,11 @@ describe("asset upload API", () => {
       target = created.id;
     }
 
-    const response = await app.fetch(new Request(`http://localhost/v2/assets/${target}`, {
-      headers: { authorization: "Bearer test" },
-    }));
+    const response = await app.fetch(
+      new Request(`http://localhost/v2/assets/${target}`, {
+        headers: { authorization: "Bearer test" },
+      }),
+    );
 
     expect(response.status).toBe(200);
     expect(await readJson(response)).toMatchObject({ id: target, kind: "cover", status: "ready" });
@@ -47,68 +58,106 @@ describe("asset upload API", () => {
   it("publishes and discovers a compact ready manifest for every supported kind", async () => {
     const app = createTestApp();
     const kinds = [
-      "audio", "epub", "cover", "transcriptRevision", "epubReadingPackage",
-      "alignmentPackage", "mediaAnalysis", "transcriptExport", "accountExport",
-      "assistantArtifact", "otherLargeImmutable",
+      "audio",
+      "epub",
+      "cover",
+      "transcriptRevision",
+      "epubReadingPackage",
+      "alignmentPackage",
+      "mediaAnalysis",
+      "transcriptExport",
+      "accountExport",
+      "assistantArtifact",
+      "otherLargeImmutable",
     ] as const;
     for (const [index, kind] of kinds.entries()) {
-      const bytes = kind === "transcriptRevision"
-        ? new TextEncoder().encode('{"segments":[]}')
-        : new Uint8Array([index + 1]);
+      const bytes =
+        kind === "transcriptRevision"
+          ? new TextEncoder().encode('{"segments":[]}')
+          : new Uint8Array([index + 1]);
       const digest = await crypto.subtle.digest("SHA-256", bytes);
       const sha256 = [...new Uint8Array(digest)]
         .map((byte) => byte.toString(16).padStart(2, "0"))
         .join("");
-      const created = await app.fetch(new Request("http://localhost/v2/assets/uploads", {
-        method: "POST",
-        headers: {
-          authorization: "Bearer test", "X-Device-Id": DEVICE_ID,
-          "Idempotency-Key": `all-kind-create-${String(index)}`, "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          kind,
-          contentType: kind === "transcriptRevision" ? "application/json" : "application/octet-stream",
-          encoding: kind === "transcriptRevision" ? "identity-json-v1" : "identity",
-          compressedBytes: bytes.byteLength,
-          originalBytes: bytes.byteLength,
-          sha256,
-          fileName: `${kind}.object`,
-          ...(kind === "transcriptRevision" ? {
-            revisionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            chapterId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-            segmentCount: 0,
-          } : {}),
-        }),
-      }));
-      expect(created.status, kind).toBe(201);
-      const ticket = await readJson(created);
-      if (!isRecord(ticket) || typeof ticket.url !== "string" || typeof ticket.uploadId !== "string") continue;
-      expect((await app.fetch(new Request(ticket.url, {
-        method: "PUT",
-        headers: {
-          authorization: "Bearer test", "content-type": "application/octet-stream",
-          "content-length": String(bytes.byteLength),
-        },
-        body: bytes,
-      }))).status, kind).toBe(200);
-      expect((await app.fetch(new Request(
-        `http://localhost/v2/assets/uploads/${ticket.uploadId}/complete`,
-        {
+      const created = await app.fetch(
+        new Request("http://localhost/v2/assets/uploads", {
           method: "POST",
           headers: {
-            authorization: "Bearer test", "X-Device-Id": DEVICE_ID,
-            "Idempotency-Key": `all-kind-complete-${String(index)}`, "content-type": "application/json",
+            authorization: "Bearer test",
+            "X-Device-Id": DEVICE_ID,
+            "Idempotency-Key": `all-kind-create-${String(index)}`,
+            "content-type": "application/json",
           },
-          body: "{}",
-        },
-      ))).status, kind).toBe(200);
-      const discovered = await app.fetch(new Request(`http://localhost/v2/assets?kind=${kind}`, {
-        headers: { authorization: "Bearer test" },
-      }));
+          body: JSON.stringify({
+            kind,
+            contentType:
+              kind === "transcriptRevision" ? "application/json" : "application/octet-stream",
+            encoding: kind === "transcriptRevision" ? "identity-json-v1" : "identity",
+            compressedBytes: bytes.byteLength,
+            originalBytes: bytes.byteLength,
+            sha256,
+            fileName: `${kind}.object`,
+            ...(kind === "transcriptRevision"
+              ? {
+                  revisionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                  chapterId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                  segmentCount: 0,
+                }
+              : {}),
+          }),
+        }),
+      );
+      expect(created.status, kind).toBe(201);
+      const ticket = await readJson(created);
+      if (
+        !isRecord(ticket) ||
+        typeof ticket.url !== "string" ||
+        typeof ticket.uploadId !== "string"
+      )
+        continue;
+      expect(
+        (
+          await app.fetch(
+            new Request(ticket.url, {
+              method: "PUT",
+              headers: {
+                authorization: "Bearer test",
+                "content-type": "application/octet-stream",
+                "content-length": String(bytes.byteLength),
+              },
+              body: bytes,
+            }),
+          )
+        ).status,
+        kind,
+      ).toBe(200);
+      expect(
+        (
+          await app.fetch(
+            new Request(`http://localhost/v2/assets/uploads/${ticket.uploadId}/complete`, {
+              method: "POST",
+              headers: {
+                authorization: "Bearer test",
+                "X-Device-Id": DEVICE_ID,
+                "Idempotency-Key": `all-kind-complete-${String(index)}`,
+                "content-type": "application/json",
+              },
+              body: "{}",
+            }),
+          )
+        ).status,
+        kind,
+      ).toBe(200);
+      const discovered = await app.fetch(
+        new Request(`http://localhost/v2/assets?kind=${kind}`, {
+          headers: { authorization: "Bearer test" },
+        }),
+      );
       expect(discovered.status, kind).toBe(200);
       const list = await readJson(discovered);
       expect(
-        isRecord(list) && Array.isArray(list.assets) &&
+        isRecord(list) &&
+          Array.isArray(list.assets) &&
           list.assets.some((asset) => isRecord(asset) && asset.kind === kind),
       ).toBe(true);
     }
@@ -226,44 +275,60 @@ describe("asset upload API", () => {
 
   it("requires an exact Content-Length on the bounded Worker upload fallback", async () => {
     const app = createTestApp();
-    const created = await app.fetch(new Request("http://localhost/v2/assets/uploads", {
-      method: "POST",
-      headers: {
-        authorization: "Bearer test", "X-Device-Id": DEVICE_ID,
-        "Idempotency-Key": "bounded-create-0001", "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        kind: "cover", contentType: "image/png", encoding: "identity",
-        compressedBytes: 3, originalBytes: 3,
-        sha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
-        fileName: "cover.png",
+    const created = await app.fetch(
+      new Request("http://localhost/v2/assets/uploads", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "bounded-create-0001",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          kind: "cover",
+          contentType: "image/png",
+          encoding: "identity",
+          compressedBytes: 3,
+          originalBytes: 3,
+          sha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+          fileName: "cover.png",
+        }),
       }),
-    }));
+    );
     const ticket = await readJson(created);
     if (!isRecord(ticket) || typeof ticket.url !== "string") return;
-    const response = await app.fetch(new Request(ticket.url, {
-      method: "PUT",
-      headers: { authorization: "Bearer test", "content-type": "image/png" },
-      body: new Uint8Array([1, 2, 3]),
-    }));
+    const response = await app.fetch(
+      new Request(ticket.url, {
+        method: "PUT",
+        headers: { authorization: "Bearer test", "content-type": "image/png" },
+        body: new Uint8Array([1, 2, 3]),
+      }),
+    );
     expect(response.status).toBe(411);
   });
 
   it("refuses to reserve a large manifest when direct signed upload is unavailable", async () => {
     const app = createTestApp();
-    const response = await app.fetch(new Request("http://localhost/v2/assets/uploads", {
-      method: "POST",
-      headers: {
-        authorization: "Bearer test", "X-Device-Id": DEVICE_ID,
-        "Idempotency-Key": "large-create-000001", "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        kind: "audio", contentType: "audio/mp4", encoding: "identity",
-        compressedBytes: 8 * 1024 * 1024 + 1, originalBytes: 8 * 1024 * 1024 + 1,
-        sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        fileName: "large.m4b",
+    const response = await app.fetch(
+      new Request("http://localhost/v2/assets/uploads", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "large-create-000001",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          kind: "audio",
+          contentType: "audio/mp4",
+          encoding: "identity",
+          compressedBytes: 8 * 1024 * 1024 + 1,
+          originalBytes: 8 * 1024 * 1024 + 1,
+          sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          fileName: "large.m4b",
+        }),
       }),
-    }));
+    );
     expect(response.status).toBe(503);
     expect(await readJson(response)).toMatchObject({ code: "direct_upload_unavailable" });
   });

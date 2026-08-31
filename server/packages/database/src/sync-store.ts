@@ -224,10 +224,14 @@ export function createMemorySyncStore(options: { identity?: IdentityStore } = {}
   };
 }
 
-export function createSupabaseSyncStore(rest: RestClient, namespace: "v1" | "v2" = "v1"): SyncStore {
+export function createSupabaseSyncStore(
+  rest: RestClient,
+  namespace: "v1" | "v2" = "v1",
+): SyncStore {
   const pushRpc = namespace === "v2" ? "/rpc/push_sync_v2_batch" : "/rpc/push_sync_batch";
   const pullRpc = namespace === "v2" ? "/rpc/pull_sync_v2_page" : "/rpc/pull_sync_page";
-  const bootstrapRpc = namespace === "v2" ? "/rpc/bootstrap_sync_v2_page" : "/rpc/bootstrap_sync_page";
+  const bootstrapRpc =
+    namespace === "v2" ? "/rpc/bootstrap_sync_v2_page" : "/rpc/bootstrap_sync_page";
   const changesTable = namespace === "v2" ? "/sync_v2_changes" : "/sync_changes";
   const batchesTable = namespace === "v2" ? "/sync_v2_batches" : "/sync_batches";
   return {

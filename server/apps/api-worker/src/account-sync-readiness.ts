@@ -175,16 +175,8 @@ export function createAccountSyncReadinessService(input: {
       );
     }
 
-    if (
-      descriptor.provider !== "memory" &&
-      !(await store.supportsBoundUpload())
-    ) {
-      return failure(
-        statuses,
-        "storage_direct_upload_unavailable",
-        checkedAtMs,
-        failureTtlMs,
-      );
+    if (descriptor.provider !== "memory" && !(await store.supportsBoundUpload())) {
+      return failure(statuses, "storage_direct_upload_unavailable", checkedAtMs, failureTtlMs);
     }
 
     const sweep = await sweepStaleCanaries(store, checkedAtMs);

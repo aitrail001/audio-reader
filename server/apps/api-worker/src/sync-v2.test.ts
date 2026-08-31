@@ -20,46 +20,75 @@ describe("object-backed sync v2", () => {
     const app = createTestApp();
     const bytes = new Uint8Array([1]);
     const draft = {
-      kind: "epubReadingPackage", contentType: "application/zip", encoding: "identity",
-      compressedBytes: 1, originalBytes: 1,
+      kind: "epubReadingPackage",
+      contentType: "application/zip",
+      encoding: "identity",
+      compressedBytes: 1,
+      originalBytes: 1,
       sha256: "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a",
       fileName: "reading-package.zip",
     };
-    const created = await app.fetch(new Request("http://localhost/v2/assets/uploads", {
-      method: "POST", headers: headers("reading-package-create"), body: JSON.stringify(draft),
-    }));
+    const created = await app.fetch(
+      new Request("http://localhost/v2/assets/uploads", {
+        method: "POST",
+        headers: headers("reading-package-create"),
+        body: JSON.stringify(draft),
+      }),
+    );
     const ticket: { uploadId: string; url: string } = await created.json();
     expect(created.status).toBe(201);
-    expect((await app.fetch(new Request(ticket.url, {
-      method: "PUT",
-      headers: {
-        authorization: "Bearer test", "content-type": "application/zip", "content-length": "1",
-      },
-      body: bytes,
-    }))).status).toBe(200);
-    expect((await app.fetch(new Request(
-      `http://localhost/v2/assets/uploads/${ticket.uploadId}/complete`,
-      { method: "POST", headers: headers("reading-package-complete"), body: "{}" },
-    ))).status).toBe(200);
-    const first = await app.fetch(new Request(
-      "http://localhost/v2/sync/pull?cursor=0&limit=100", { headers: headers() },
-    ));
-    const firstBody: { cursor: string; changes: Array<{ payload: { kind?: string } }> } = await first.json();
+    expect(
+      (
+        await app.fetch(
+          new Request(ticket.url, {
+            method: "PUT",
+            headers: {
+              authorization: "Bearer test",
+              "content-type": "application/zip",
+              "content-length": "1",
+            },
+            body: bytes,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await app.fetch(
+          new Request(`http://localhost/v2/assets/uploads/${ticket.uploadId}/complete`, {
+            method: "POST",
+            headers: headers("reading-package-complete"),
+            body: "{}",
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    const first = await app.fetch(
+      new Request("http://localhost/v2/sync/pull?cursor=0&limit=100", { headers: headers() }),
+    );
+    const firstBody: { cursor: string; changes: Array<{ payload: { kind?: string } }> } =
+      await first.json();
     expect(firstBody.changes).toHaveLength(1);
     expect(firstBody.changes[0]?.payload.kind).toBe("epubReadingPackage");
 
-    const retried = await app.fetch(new Request("http://localhost/v2/assets/uploads", {
-      method: "POST", headers: headers("reading-package-retry"), body: JSON.stringify(draft),
-    }));
+    const retried = await app.fetch(
+      new Request("http://localhost/v2/assets/uploads", {
+        method: "POST",
+        headers: headers("reading-package-retry"),
+        body: JSON.stringify(draft),
+      }),
+    );
     expect(retried.status).toBe(200);
     expect(await retried.json()).toMatchObject({ uploadId: ticket.uploadId, ready: true });
-    const immediate = await app.fetch(new Request(
-      `http://localhost/v2/sync/pull?cursor=${firstBody.cursor}&limit=100`, { headers: headers() },
-    ));
+    const immediate = await app.fetch(
+      new Request(`http://localhost/v2/sync/pull?cursor=${firstBody.cursor}&limit=100`, {
+        headers: headers(),
+      }),
+    );
     expect(await immediate.json()).toMatchObject({ changes: [], cursor: firstBody.cursor });
-    const listed = await app.fetch(new Request(
-      "http://localhost/v2/assets?kind=epubReadingPackage", { headers: headers() },
-    ));
+    const listed = await app.fetch(
+      new Request("http://localhost/v2/assets?kind=epubReadingPackage", { headers: headers() }),
+    );
     const listedBody: { assets: unknown[] } = await listed.json();
     expect(listedBody.assets).toHaveLength(1);
   });
@@ -201,7 +230,7 @@ describe("object-backed sync v2", () => {
               operation: "upsert",
               baseRevision: 0,
               occurredAt: "2026-08-31T00:00:00Z",
-              payload: { transcriptJSON: "{\"segments\":[]}" },
+              payload: { transcriptJSON: '{"segments":[]}' },
             },
           ],
         }),
@@ -215,26 +244,46 @@ describe("object-backed sync v2", () => {
   });
 
   it.each([
-    ["unknown top-level", { localId: "book", title: "Book", source: "files", chapters: [], surprise: true }],
-    ["unknown nested", {
-      localId: "book", title: "Book", source: "files",
-      chapters: [{ localId: "chapter", index: 0, title: "One", embeddedBytes: "AAAA" }],
-    }],
-    ["oversized scalar", { localId: "book", title: "x".repeat(65 * 1024), source: "files", chapters: [] }],
+    [
+      "unknown top-level",
+      { localId: "book", title: "Book", source: "files", chapters: [], surprise: true },
+    ],
+    [
+      "unknown nested",
+      {
+        localId: "book",
+        title: "Book",
+        source: "files",
+        chapters: [{ localId: "chapter", index: 0, title: "One", embeddedBytes: "AAAA" }],
+      },
+    ],
+    [
+      "oversized scalar",
+      { localId: "book", title: "x".repeat(65 * 1024), source: "files", chapters: [] },
+    ],
   ])("rejects %s payload outside the strict book schema", async (_label, payload) => {
     const app = createTestApp();
-    const response = await app.fetch(new Request("http://localhost/v2/sync/push", {
-      method: "POST",
-      headers: headers(`strict-schema-${crypto.randomUUID()}`),
-      body: JSON.stringify({
-        deviceId: DEVICE_ID,
-        batchId: crypto.randomUUID(),
-        mutations: [{
-          mutationId: crypto.randomUUID(), entityType: "book", entityId: crypto.randomUUID(),
-          operation: "upsert", baseRevision: 0, occurredAt: "2026-08-31T00:00:00Z", payload,
-        }],
+    const response = await app.fetch(
+      new Request("http://localhost/v2/sync/push", {
+        method: "POST",
+        headers: headers(`strict-schema-${crypto.randomUUID()}`),
+        body: JSON.stringify({
+          deviceId: DEVICE_ID,
+          batchId: crypto.randomUUID(),
+          mutations: [
+            {
+              mutationId: crypto.randomUUID(),
+              entityType: "book",
+              entityId: crypto.randomUUID(),
+              operation: "upsert",
+              baseRevision: 0,
+              occurredAt: "2026-08-31T00:00:00Z",
+              payload,
+            },
+          ],
+        }),
       }),
-    }));
+    );
     expect(response.status).toBe(400);
   });
 
@@ -249,15 +298,17 @@ describe("object-backed sync v2", () => {
       occurredAt: "2026-08-31T00:00:00Z",
       payload: { day: "2026-08-31" },
     });
-    const response = await app.fetch(new Request("http://localhost/v2/sync/push", {
-      method: "POST",
-      headers: headers("batch-over-contract-limit"),
-      body: JSON.stringify({
-        deviceId: DEVICE_ID,
-        batchId: crypto.randomUUID(),
-        mutations: Array.from({ length: 101 }, (_, index) => mutation(index + 1)),
+    const response = await app.fetch(
+      new Request("http://localhost/v2/sync/push", {
+        method: "POST",
+        headers: headers("batch-over-contract-limit"),
+        body: JSON.stringify({
+          deviceId: DEVICE_ID,
+          batchId: crypto.randomUUID(),
+          mutations: Array.from({ length: 101 }, (_, index) => mutation(index + 1)),
+        }),
       }),
-    }));
+    );
 
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ code: "bad_request" });

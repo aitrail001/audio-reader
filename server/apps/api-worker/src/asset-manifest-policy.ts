@@ -60,7 +60,11 @@ export function contentAddressedObjectKey(
   kind: AssetManifestKind,
   sha256: string,
 ): string {
-  if (!UUID_PATTERN.test(ownerId) || !ASSET_MANIFEST_KINDS.includes(kind) || !SHA256_PATTERN.test(sha256)) {
+  if (
+    !UUID_PATTERN.test(ownerId) ||
+    !ASSET_MANIFEST_KINDS.includes(kind) ||
+    !SHA256_PATTERN.test(sha256)
+  ) {
     throw new Error("invalid object identity");
   }
   return `private/v2/${ownerId}/${kind}/${sha256}`;
@@ -94,7 +98,8 @@ export function validateAssetManifestDraft(input: AssetManifestDraft): AssetMani
     return {
       ok: false,
       field: "encoding",
-      message: "Compressed encodings are not accepted until bounded server-side decoding is available.",
+      message:
+        "Compressed encodings are not accepted until bounded server-side decoding is available.",
     };
   }
   if (input.kind !== "transcriptRevision" && input.encoding !== "identity") {
@@ -193,7 +198,8 @@ export async function verifyAssetObject(
     if (bytes.byteLength !== manifest.originalBytes) return false;
   }
   if (manifest.kind === "transcriptRevision") {
-    if (manifest.encoding !== "identity-json-v1" || bytes.byteLength > MAX_TRANSCRIPT_BYTES) return false;
+    if (manifest.encoding !== "identity-json-v1" || bytes.byteLength > MAX_TRANSCRIPT_BYTES)
+      return false;
     try {
       const decoded: unknown = JSON.parse(
         new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes),
@@ -229,9 +235,8 @@ export async function verifyAssetStream(
     return false;
   }
   const hash = new IncrementalSha256();
-  const transcript = manifest.kind === "transcriptRevision"
-    ? new StreamingTranscriptJSONParser()
-    : undefined;
+  const transcript =
+    manifest.kind === "transcriptRevision" ? new StreamingTranscriptJSONParser() : undefined;
   const reader = object.body.getReader();
   let total = 0;
   try {
@@ -247,15 +252,22 @@ export async function verifyAssetStream(
       transcript?.update(next.value);
     }
   } catch {
-    try { await reader.cancel(); } catch { /* storage already failed */ }
+    try {
+      await reader.cancel();
+    } catch {
+      /* storage already failed */
+    }
     return false;
   }
   if (total !== manifest.compressedBytes || hash.digestHex() !== manifest.sha256) return false;
-  if (manifest.encoding?.startsWith("identity") === true && manifest.originalBytes !== total) return false;
+  if (manifest.encoding?.startsWith("identity") === true && manifest.originalBytes !== total)
+    return false;
   if (transcript !== undefined) {
-    return manifest.encoding === "identity-json-v1"
-      && total <= MAX_TRANSCRIPT_BYTES
-      && transcript.finish() === manifest.segmentCount;
+    return (
+      manifest.encoding === "identity-json-v1" &&
+      total <= MAX_TRANSCRIPT_BYTES &&
+      transcript.finish() === manifest.segmentCount
+    );
   }
   return true;
 }
@@ -287,7 +299,8 @@ class StreamingTranscriptJSONParser {
 
   private readonly decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
   private readonly frames: JSONFrame[] = [];
-  private lexicalState: "default" | "string" | "escape" | "unicode" | "number" | "literal" = "default";
+  private lexicalState: "default" | "string" | "escape" | "unicode" | "number" | "literal" =
+    "default";
   private tokenBuffer = "";
   private unicodeBuffer = "";
   private rootState: "value" | "done" = "value";
@@ -312,8 +325,11 @@ class StreamingTranscriptJSONParser {
     } catch {
       this.valid = false;
     }
-    return this.valid && this.lexicalState === "default" && this.rootState === "done"
-      && this.frames.length === 0 && this.segmentsSeen
+    return this.valid &&
+      this.lexicalState === "default" &&
+      this.rootState === "done" &&
+      this.frames.length === 0 &&
+      this.segmentsSeen
       ? this.segmentCount
       : undefined;
   }
@@ -325,7 +341,7 @@ class StreamingTranscriptJSONParser {
   private scanCharacter(character: string): void {
     if (!this.valid) return;
     if (this.lexicalState === "string") {
-      if (character === "\"") {
+      if (character === '"') {
         this.lexicalState = "default";
         this.emit({ kind: "string", value: this.tokenBuffer });
       } else if (character === "\\") {
@@ -339,7 +355,14 @@ class StreamingTranscriptJSONParser {
     }
     if (this.lexicalState === "escape") {
       const escapes: Record<string, string> = {
-        "\"": "\"", "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t",
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+        b: "\b",
+        f: "\f",
+        n: "\n",
+        r: "\r",
+        t: "\t",
       };
       if (character === "u") {
         this.unicodeBuffer = "";
@@ -383,13 +406,19 @@ class StreamingTranscriptJSONParser {
       return;
     }
     if (/\s/.test(character)) return;
-    if (character === "\"") {
+    if (character === '"') {
       this.tokenBuffer = "";
       this.lexicalState = "string";
       return;
     }
-    if (character === "{" || character === "}" || character === "[" || character === "]"
-        || character === ":" || character === ",") {
+    if (
+      character === "{" ||
+      character === "}" ||
+      character === "[" ||
+      character === "]" ||
+      character === ":" ||
+      character === ","
+    ) {
       this.emit({ kind: "punctuation", value: character });
       return;
     }
@@ -408,12 +437,14 @@ class StreamingTranscriptJSONParser {
 
   private appendString(character: string): void {
     this.tokenBuffer += character;
-    if (this.tokenBuffer.length > StreamingTranscriptJSONParser.maximumStringLength) this.valid = false;
+    if (this.tokenBuffer.length > StreamingTranscriptJSONParser.maximumStringLength)
+      this.valid = false;
   }
 
   private appendPrimitive(character: string): void {
     this.tokenBuffer += character;
-    if (this.tokenBuffer.length > StreamingTranscriptJSONParser.maximumPrimitiveLength) this.valid = false;
+    if (this.tokenBuffer.length > StreamingTranscriptJSONParser.maximumPrimitiveLength)
+      this.valid = false;
   }
 
   private finishPrimitive(): void {
@@ -424,7 +455,11 @@ class StreamingTranscriptJSONParser {
         this.emit({ kind: "primitive" });
       }
     } else if (this.lexicalState === "literal") {
-      if (this.tokenBuffer !== "true" && this.tokenBuffer !== "false" && this.tokenBuffer !== "null") {
+      if (
+        this.tokenBuffer !== "true" &&
+        this.tokenBuffer !== "false" &&
+        this.tokenBuffer !== "null"
+      ) {
         this.valid = false;
       } else {
         this.emit({ kind: "primitive" });

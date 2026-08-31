@@ -838,13 +838,15 @@ describe("asset reservation", () => {
       uploadId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     };
     await expect(ops.createAsset("user", base)).resolves.toMatchObject({ status: "pending" });
-    await expect(ops.createAsset("user", {
-      ...base,
-      sha256: "b".repeat(64),
-      objectKey: "private/v2/user/cover/b",
-      uploadObjectKey: "private/v2/user/pending/b",
-      uploadId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-    })).rejects.toEqual(new AssetReservationError("cloud_media_quota_exceeded"));
+    await expect(
+      ops.createAsset("user", {
+        ...base,
+        sha256: "b".repeat(64),
+        objectKey: "private/v2/user/cover/b",
+        uploadObjectKey: "private/v2/user/pending/b",
+        uploadId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      }),
+    ).rejects.toEqual(new AssetReservationError("cloud_media_quota_exceeded"));
   });
 });
 

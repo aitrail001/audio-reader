@@ -89,8 +89,7 @@ export async function buildAccountExportPayload(input: {
       id: result.id,
       task: result.task,
       status: result.status,
-      sharedCacheReference:
-        result.cacheEntryId === null ? null : { entryId: result.cacheEntryId },
+      sharedCacheReference: result.cacheEntryId === null ? null : { entryId: result.cacheEntryId },
       privateContent: {
         resultKind: result.resultKind,
         language: result.language,

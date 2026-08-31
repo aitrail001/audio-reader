@@ -59,10 +59,14 @@ export function createFakeObjectStore(
     get: (key) => Promise.resolve(objects.get(key)),
     open: (key) => {
       const value = objects.get(key);
-      return Promise.resolve(value === undefined ? undefined : {
-        size: value.byteLength,
-        body: streamBytes(value),
-      });
+      return Promise.resolve(
+        value === undefined
+          ? undefined
+          : {
+              size: value.byteLength,
+              body: streamBytes(value),
+            },
+      );
     },
     list: (prefix, limit) =>
       Promise.resolve(
@@ -388,7 +392,8 @@ export function createSupabaseObjectStore(options: SupabaseStorageOptions): Obje
         headers,
       });
       if (response.status === 404) return undefined;
-      if (!response.ok || response.body === null) throw new Error("supabase storage download failed");
+      if (!response.ok || response.body === null)
+        throw new Error("supabase storage download failed");
       const size = Number(response.headers.get("content-length"));
       if (!Number.isSafeInteger(size) || size < 0) {
         await response.body.cancel();

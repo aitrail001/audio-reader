@@ -47,7 +47,9 @@ export async function processQueuedJobs(
         const listed = (await Promise.all(prefixes.map((prefix) => objects.list(prefix)))).flat();
         const keys = new Set([
           ...listed,
-          ...inspected.objectKeys.filter((key) => prefixes.some((prefix) => key.startsWith(prefix))),
+          ...inspected.objectKeys.filter((key) =>
+            prefixes.some((prefix) => key.startsWith(prefix)),
+          ),
         ]);
         for (const key of [...keys].sort()) await objects.delete(key);
         const result = await ops.cleanupObsoleteV1Data(job.accountId, true);

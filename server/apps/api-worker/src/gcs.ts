@@ -369,7 +369,9 @@ async function signGcsUrl(input: {
   const credential = `${input.account.clientEmail}/${dateStamp}/auto/storage/goog4_request`;
   const signedHeaderValues = new Map<string, string>([
     ["host", "storage.googleapis.com"],
-    ...Object.entries(input.headers ?? {}).map(([name, value]) => [name.toLowerCase(), value.trim()] as const),
+    ...Object.entries(input.headers ?? {}).map(
+      ([name, value]) => [name.toLowerCase(), value.trim()] as const,
+    ),
   ]);
   const signedHeaders = [...signedHeaderValues.keys()].sort();
   const params = new Map<string, string>([

@@ -180,7 +180,14 @@ export async function handleAssetRoute(context: AssetRouteContext): Promise<Resp
   }
   const download = DOWNLOAD.exec(path) ?? V2_DOWNLOAD.exec(path);
   if (download?.[1] !== undefined) {
-    return createDownload(context, principal, ops, download[1], url.origin, path.startsWith("/v2/"));
+    return createDownload(
+      context,
+      principal,
+      ops,
+      download[1],
+      url.origin,
+      path.startsWith("/v2/"),
+    );
   }
   const content = CONTENT.exec(path) ?? V2_CONTENT.exec(path);
   if (content?.[1] !== undefined) {
@@ -228,7 +235,10 @@ async function createUpload(
           existing.chapterId !== manifest.chapterId ||
           existing.compressedBytes !== manifest.compressedBytes
         ) {
-          return conflict(context.requestId, "Content digest is already bound to different metadata.");
+          return conflict(
+            context.requestId,
+            "Content digest is already bound to different metadata.",
+          );
         }
         const upload = await uploadTarget(
           objects,
@@ -374,7 +384,11 @@ async function putUploadBody(
     });
   }
   if (Number(declaredLength) !== asset.compressedBytes) {
-    return fieldError(context.requestId, "content-length", "Upload size does not match its manifest.");
+    return fieldError(
+      context.requestId,
+      "content-length",
+      "Upload size does not match its manifest.",
+    );
   }
   const bytes = await readBoundedUpload(context.request, asset.compressedBytes);
   if (bytes === undefined) {
@@ -400,7 +414,10 @@ async function putUploadBody(
 }
 
 /** Reads the Worker fallback stream without ever buffering beyond the reserved manifest size. */
-async function readBoundedUpload(request: Request, expectedBytes: number): Promise<Uint8Array | undefined> {
+async function readBoundedUpload(
+  request: Request,
+  expectedBytes: number,
+): Promise<Uint8Array | undefined> {
   const reader = request.body?.getReader();
   if (reader === undefined) return expectedBytes === 0 ? new Uint8Array() : undefined;
   const chunks: Uint8Array[] = [];
@@ -502,7 +519,11 @@ async function completeUpload(
             assetId: stored.id,
           }),
         );
-        return fieldError(context.requestId, "uploadId", "Upload size or checksum does not match the manifest.");
+        return fieldError(
+          context.requestId,
+          "uploadId",
+          "Upload size or checksum does not match the manifest.",
+        );
       }
       if (!(await objectWriteIsAllowed(context.identity, principal.accountId))) {
         return conflict(context.requestId, "Account deletion is already in progress.");
@@ -524,13 +545,20 @@ async function completeUpload(
         ))
       ) {
         await ops.finishObjectWrite(lease.id);
-        return fieldError(context.requestId, "uploadId", "Immutable object key already contains different bytes.");
+        return fieldError(
+          context.requestId,
+          "uploadId",
+          "Immutable object key already contains different bytes.",
+        );
       }
       if (existing === undefined) await objects.copy(stored.uploadObjectKey, stored.objectKey);
       if (!(await objectWriteIsAllowed(context.identity, principal.accountId))) {
         await objects.delete(stored.objectKey);
         await ops.finishObjectWrite(lease.id);
-        return conflict(context.requestId, "Account deletion began while the upload was completing.");
+        return conflict(
+          context.requestId,
+          "Account deletion began while the upload was completing.",
+        );
       }
       const completed = await ops.completeAsset(principal.accountId, uploadId);
       if (completed === undefined) {

@@ -132,13 +132,15 @@ export function createApiApp(options: AppOptions): ApiApp {
         options.resolveAccountSyncStorage ??
         (async () => ({
           store: options.storage,
-          descriptor: await (options.storageDescriptor ??
+          descriptor: await (
+            options.storageDescriptor ??
             (() =>
               Promise.resolve({
                 provider: "none" as const,
                 configured: false,
                 credentialsConfigured: false,
-              })))(),
+              }))
+          )(),
         })),
     });
 
@@ -341,7 +343,9 @@ export function createApiAppFromEnv(env: WorkerEnv): ApiApp {
     corsOrigins: parseOriginList(env.CORS_ALLOWED_ORIGINS),
     ...(adminOrigin !== undefined && adminOrigin !== "" ? { adminOrigin } : {}),
     database,
-    storage: createResolvingObjectStore(async () => (await runtime.resolveStorage({ useFakes })).store),
+    storage: createResolvingObjectStore(
+      async () => (await runtime.resolveStorage({ useFakes })).store,
+    ),
     resolveAccountSyncStorage: () => runtime.resolveStorage({ useFakes }),
     qwen: createResolvingQwenClient(() => runtime.resolveQwenClient({ useFakes })),
     runtime,

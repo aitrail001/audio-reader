@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -108,7 +109,9 @@ describe("multi-user postgres schema migrations", () => {
     const sql = loadMigrationSql();
     expect(sql).toContain("create function public.account_sync_schema_version()");
     expect(sql).toContain(`'${ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION}'`);
-    expect(sql).toContain("grant execute on function public.account_sync_schema_version() to service_role");
+    expect(sql).toContain(
+      "grant execute on function public.account_sync_schema_version() to service_role",
+    );
   });
 
   it("tracks versioned SQL under server/supabase/migrations", () => {
@@ -119,6 +122,23 @@ describe("multi-user postgres schema migrations", () => {
     expect(files.length).toBeGreaterThan(0);
     for (const file of files) {
       expect(file).toMatch(MIGRATION_NAME);
+    }
+  });
+
+  it("keeps already-applied migrations immutable", () => {
+    const expected = new Map([
+      [
+        "20260826140030_assistant_cache_jobs_usage.sql",
+        "86dbaba57b4b52524b72d30c06c7229ad56f51407c75681443662cfbb6966307",
+      ],
+      [
+        "20260828130000_quota_limits.sql",
+        "4520c1c822655417cc5b416eb51a07276806b094a6755898585eabc99099a5ae",
+      ],
+    ]);
+    for (const [file, digest] of expected) {
+      const sql = readFileSync(join(migrationsDir, file));
+      expect(createHash("sha256").update(sql).digest("hex"), file).toBe(digest);
     }
   });
 
@@ -505,12 +525,18 @@ describe("multi-user postgres schema migrations", () => {
 
   it("separates durable assistant result history from disposable shared cache content", () => {
     const sql = loadMigrationSql();
-    const schema = parsePostgresSchema(sql);
-    const result = schema.tables.get("user_assistant_results");
-    expect(result?.columns.has("history")).toBe(true);
-    expect(result?.columns.has("model")).toBe(true);
-    expect(sql).toMatch(/status in \('pending', 'accepted', 'rejected', 'stale', 'edited', 'replaced'\)/i);
-    expect(sql).toMatch(/cache_entry_id uuid references public\.assistant_cache_entries \(id\) on delete set null/i);
+    expect(sql).toMatch(
+      /alter table public\.user_assistant_results[\s\S]*add column if not exists history jsonb/i,
+    );
+    expect(sql).toMatch(
+      /alter table public\.user_assistant_results[\s\S]*add column if not exists model text/i,
+    );
+    expect(sql).toMatch(
+      /status in \('pending', 'accepted', 'rejected', 'stale', 'edited', 'replaced'\)/i,
+    );
+    expect(sql).toMatch(
+      /cache_entry_id uuid references public\.assistant_cache_entries \(id\) on delete set null/i,
+    );
     expect(sql).toMatch(/append_user_assistant_result_history/i);
   });
 

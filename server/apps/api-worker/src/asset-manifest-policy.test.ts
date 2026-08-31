@@ -44,10 +44,17 @@ async function verifyTranscriptJSON(
       controller.close();
     },
   });
-  return verifyAssetStream({
-    compressedBytes: bytes.byteLength, originalBytes: bytes.byteLength, sha256,
-    kind: "transcriptRevision", encoding: "identity-json-v1", segmentCount,
-  }, { size: bytes.byteLength, body });
+  return verifyAssetStream(
+    {
+      compressedBytes: bytes.byteLength,
+      originalBytes: bytes.byteLength,
+      sha256,
+      kind: "transcriptRevision",
+      encoding: "identity-json-v1",
+      segmentCount,
+    },
+    { size: bytes.byteLength, body },
+  );
 }
 
 describe("v2 asset manifest policy", () => {
@@ -150,32 +157,48 @@ describe("v2 asset manifest policy", () => {
         offset = end;
       },
     });
-    await expect(verifyAssetStream({
-      compressedBytes: bytes.byteLength,
-      originalBytes: bytes.byteLength,
-      sha256,
-      encoding: "identity",
-    }, { size: bytes.byteLength, body })).resolves.toBe(true);
+    await expect(
+      verifyAssetStream(
+        {
+          compressedBytes: bytes.byteLength,
+          originalBytes: bytes.byteLength,
+          sha256,
+          encoding: "identity",
+        },
+        { size: bytes.byteLength, body },
+      ),
+    ).resolves.toBe(true);
     expect(offset).toBe(bytes.byteLength);
   });
 
   it("rejects simulated 2 GiB metadata and provider checksum mismatch before reading", async () => {
     let pulls = 0;
-    const unread = () => new ReadableStream<Uint8Array>({
-      pull(controller) {
-        pulls += 1;
-        controller.enqueue(new Uint8Array([1]));
-      },
-    });
-    await expect(verifyAssetStream({ compressedBytes: 3, sha256: SHA256_123 }, {
-      size: 2 * 1024 * 1024 * 1024,
-      body: unread(),
-    })).resolves.toBe(false);
-    await expect(verifyAssetStream({ compressedBytes: 3, sha256: SHA256_123 }, {
-      size: 3,
-      sha256: "a".repeat(64),
-      body: unread(),
-    })).resolves.toBe(false);
+    const unread = () =>
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls += 1;
+          controller.enqueue(new Uint8Array([1]));
+        },
+      });
+    await expect(
+      verifyAssetStream(
+        { compressedBytes: 3, sha256: SHA256_123 },
+        {
+          size: 2 * 1024 * 1024 * 1024,
+          body: unread(),
+        },
+      ),
+    ).resolves.toBe(false);
+    await expect(
+      verifyAssetStream(
+        { compressedBytes: 3, sha256: SHA256_123 },
+        {
+          size: 3,
+          sha256: "a".repeat(64),
+          body: unread(),
+        },
+      ),
+    ).resolves.toBe(false);
     expect(pulls).toBe(0);
   });
 
@@ -185,12 +208,13 @@ describe("v2 asset manifest policy", () => {
     const sha256 = [...new Uint8Array(digest)]
       .map((byte) => byte.toString(16).padStart(2, "0"))
       .join("");
-    const stream = (): ReadableStream<Uint8Array> => new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(bytes);
-        controller.close();
-      },
-    });
+    const stream = (): ReadableStream<Uint8Array> =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      });
     const manifest = {
       compressedBytes: bytes.byteLength,
       originalBytes: bytes.byteLength,
@@ -198,12 +222,24 @@ describe("v2 asset manifest policy", () => {
       kind: "transcriptRevision" as const,
       encoding: "identity-json-v1",
     };
-    await expect(verifyAssetStream({ ...manifest, segmentCount: 2 }, {
-      size: bytes.byteLength, body: stream(),
-    })).resolves.toBe(true);
-    await expect(verifyAssetStream({ ...manifest, segmentCount: 1 }, {
-      size: bytes.byteLength, body: stream(),
-    })).resolves.toBe(false);
+    await expect(
+      verifyAssetStream(
+        { ...manifest, segmentCount: 2 },
+        {
+          size: bytes.byteLength,
+          body: stream(),
+        },
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      verifyAssetStream(
+        { ...manifest, segmentCount: 1 },
+        {
+          size: bytes.byteLength,
+          body: stream(),
+        },
+      ),
+    ).resolves.toBe(false);
   });
 
   it.each([
@@ -252,7 +288,11 @@ describe("v2 asset manifest policy", () => {
     expect(created.status).toBe(201);
     const ticket: unknown = await created.json();
     expect(isRecord(ticket) && typeof ticket.uploadId === "string").toBe(true);
-    if (!isRecord(ticket) || typeof ticket.uploadId !== "string" || typeof ticket.url !== "string") {
+    if (
+      !isRecord(ticket) ||
+      typeof ticket.uploadId !== "string" ||
+      typeof ticket.url !== "string"
+    ) {
       return;
     }
 
@@ -279,8 +319,10 @@ describe("v2 asset manifest policy", () => {
       }),
     );
     expect(completed.status).toBe(400);
-    expect(await database.ops.getAssetByUpload(principal.accountId, ticket.uploadId)).toMatchObject({
-      status: "pending",
-    });
+    expect(await database.ops.getAssetByUpload(principal.accountId, ticket.uploadId)).toMatchObject(
+      {
+        status: "pending",
+      },
+    );
   });
 });

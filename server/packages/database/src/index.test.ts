@@ -84,24 +84,27 @@ describe("@audio-reader/database", () => {
     [JSON.stringify(ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION), ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION],
     [JSON.stringify("wrong-version"), "wrong-version"],
     ["null", undefined],
-  ] as const)("reads the exact account sync migration identity from its dedicated RPC", async (body, expected) => {
-    const requests: string[] = [];
-    const client = createSupabaseDatabaseClient({
-      url: "https://example.supabase.co",
-      serviceRoleKey: "service-role",
-      fetch: (input) => {
-        requests.push(
-          typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
-        );
-        return Promise.resolve(new Response(body, { status: 200 }));
-      },
-    });
+  ] as const)(
+    "reads the exact account sync migration identity from its dedicated RPC",
+    async (body, expected) => {
+      const requests: string[] = [];
+      const client = createSupabaseDatabaseClient({
+        url: "https://example.supabase.co",
+        serviceRoleKey: "service-role",
+        fetch: (input) => {
+          requests.push(
+            typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+          );
+          return Promise.resolve(new Response(body, { status: 200 }));
+        },
+      });
 
-    await expect(client.accountSyncSchemaVersion()).resolves.toBe(expected);
-    expect(requests).toEqual([
-      "https://example.supabase.co/rest/v1/rpc/account_sync_schema_version",
-    ]);
-  });
+      await expect(client.accountSyncSchemaVersion()).resolves.toBe(expected);
+      expect(requests).toEqual([
+        "https://example.supabase.co/rest/v1/rpc/account_sync_schema_version",
+      ]);
+    },
+  );
 
   it("treats the product-event window end as exclusive", async () => {
     const client = createFakeDatabaseClient();

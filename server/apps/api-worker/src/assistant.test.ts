@@ -283,8 +283,8 @@ describe("managed Qwen assistant API", () => {
       offset: 0,
       limit: 100,
     });
-    const bootstrapped = bootstrap.entities.find((entity) =>
-      entity.entityType === "assistant_result" && entity.entityId === resultID
+    const bootstrapped = bootstrap.entities.find(
+      (entity) => entity.entityType === "assistant_result" && entity.entityId === resultID,
     );
     expect(bootstrapped).toBeDefined();
     const bootstrappedResult: unknown = bootstrapped?.payload.result;

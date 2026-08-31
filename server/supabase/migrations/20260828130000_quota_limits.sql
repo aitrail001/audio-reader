@@ -11,7 +11,7 @@ alter table public.quota_limits force row level security;
 insert into public.feature_flags (key, enabled, rollout_percent)
 values
   ('managed_qwen', true, 100),
-  ('account_sync', false, 100),
+  ('account_sync', true, 100),
   ('cloud_media', true, 100),
   ('maintenance_mode', false, 100)
 on conflict (key) do nothing;

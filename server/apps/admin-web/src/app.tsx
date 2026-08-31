@@ -92,7 +92,7 @@ const RAIL: ({ type: "label"; label: string } | { type: "item"; id: Section; lab
   { type: "item", id: "privacy", label: "Privacy" },
   { type: "label", label: "AI" },
   { type: "item", id: "policies", label: "Policies" },
-{ type: "item", id: "cache", label: "Shared AI cache" },
+  { type: "item", id: "cache", label: "Shared AI cache" },
   { type: "label", label: "Delivery" },
   { type: "item", id: "jobs", label: "Jobs" },
   { type: "item", id: "flags", label: "Flags" },

@@ -616,10 +616,12 @@ function compareSemanticVersions(left: string, right: string): number {
   const leftParts = parse(left);
   const rightParts = parse(right);
   if (
-    leftParts.length !== 3 || rightParts.length !== 3 ||
+    leftParts.length !== 3 ||
+    rightParts.length !== 3 ||
     leftParts.some((part) => !Number.isInteger(part) || part < 0) ||
     rightParts.some((part) => !Number.isInteger(part) || part < 0)
-  ) return -1;
+  )
+    return -1;
   for (let index = 0; index < 3; index += 1) {
     const difference = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
     if (difference !== 0) return difference;

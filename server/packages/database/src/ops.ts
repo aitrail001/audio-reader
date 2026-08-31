@@ -609,9 +609,7 @@ export function createMemoryOpsStore(
     getAssetByContent(userId, kind, sha256) {
       const asset = [...assets.values()].find(
         (candidate) =>
-          candidate.accountId === userId &&
-          candidate.kind === kind &&
-          candidate.sha256 === sha256,
+          candidate.accountId === userId && candidate.kind === kind && candidate.sha256 === sha256,
       );
       return Promise.resolve(asset === undefined ? undefined : { ...asset });
     },
@@ -1120,19 +1118,20 @@ export function createMemoryOpsStore(
 
     gcAbandonedAssetUploads(before, limit) {
       const cutoff = Date.parse(before);
-      const pending = [...new Map(
-        [...assets.values()].map((asset) => [asset.id, asset]),
-      ).values()]
-        .filter((asset) =>
-          (asset.status === "pending" && Date.parse(asset.createdAt) < cutoff) ||
-          asset.status === "deleting"
+      const pending = [...new Map([...assets.values()].map((asset) => [asset.id, asset])).values()]
+        .filter(
+          (asset) =>
+            (asset.status === "pending" && Date.parse(asset.createdAt) < cutoff) ||
+            asset.status === "deleting",
         )
         .slice(0, Math.max(0, Math.min(Math.floor(limit), 1_000)));
       for (const asset of pending) asset.status = "deleting";
-      return Promise.resolve(pending.map((asset) => ({
-        id: asset.id,
-        objectKeys: [...new Set([asset.uploadObjectKey, asset.objectKey])],
-      })));
+      return Promise.resolve(
+        pending.map((asset) => ({
+          id: asset.id,
+          objectKeys: [...new Set([asset.uploadObjectKey, asset.objectKey])],
+        })),
+      );
     },
 
     finishAbandonedAssetUploadGc(ids) {
@@ -1149,10 +1148,12 @@ export function createMemoryOpsStore(
       const ready = [...new Map([...assets.values()].map((asset) => [asset.id, asset])).values()]
         .filter((asset) => asset.status === "ready" && !cleanedReadyAssetUploads.has(asset.id))
         .slice(0, Math.max(0, Math.min(Math.floor(limit), 1_000)));
-      return Promise.resolve(ready.map((asset) => ({
-        id: asset.id,
-        uploadObjectKey: asset.uploadObjectKey,
-      })));
+      return Promise.resolve(
+        ready.map((asset) => ({
+          id: asset.id,
+          uploadObjectKey: asset.uploadObjectKey,
+        })),
+      );
     },
 
     finishReadyAssetUploadCleanup(ids) {
@@ -1162,8 +1163,14 @@ export function createMemoryOpsStore(
 
     cleanupObsoleteV1Data(_userId, execute) {
       return Promise.resolve({
-        changes: 0, outcomes: 0, batches: 0, transcriptRevisions: 0,
-        transcriptSegments: 0, assets: 0, objectKeys: [], executed: execute,
+        changes: 0,
+        outcomes: 0,
+        batches: 0,
+        transcriptRevisions: 0,
+        transcriptSegments: 0,
+        assets: 0,
+        objectKeys: [],
+        executed: execute,
       });
     },
 
@@ -1290,25 +1297,28 @@ export function createMemoryOpsStore(
         model: input.model ?? null,
         promptVersion: input.promptVersion ?? null,
         modelPolicyHash: input.modelPolicyHash ?? null,
-        history: [...(prior?.history ?? []), {
-          status: input.status ?? (prior === undefined ? "pending" : "replaced"),
-          outputText: input.outputText,
-          privateContent: input.privateContent ?? null,
-          resultKind: input.resultKind ?? null,
-          language: input.language ?? null,
-          sourceText: input.sourceText ?? null,
-          contextText: input.contextText ?? null,
-          bookTitle: input.bookTitle ?? null,
-          chapterTitle: input.chapterTitle ?? null,
-          targetId: input.targetId ?? null,
-          timestampSeconds: input.timestampSeconds ?? null,
-          model: input.model ?? null,
-          promptVersion: input.promptVersion ?? null,
-          modelPolicyHash: input.modelPolicyHash ?? null,
-          sharedCacheReference:
-            input.cacheEntryId === null ? null : { entryId: input.cacheEntryId },
-          recordedAt: timestamp,
-        }],
+        history: [
+          ...(prior?.history ?? []),
+          {
+            status: input.status ?? (prior === undefined ? "pending" : "replaced"),
+            outputText: input.outputText,
+            privateContent: input.privateContent ?? null,
+            resultKind: input.resultKind ?? null,
+            language: input.language ?? null,
+            sourceText: input.sourceText ?? null,
+            contextText: input.contextText ?? null,
+            bookTitle: input.bookTitle ?? null,
+            chapterTitle: input.chapterTitle ?? null,
+            targetId: input.targetId ?? null,
+            timestampSeconds: input.timestampSeconds ?? null,
+            model: input.model ?? null,
+            promptVersion: input.promptVersion ?? null,
+            modelPolicyHash: input.modelPolicyHash ?? null,
+            sharedCacheReference:
+              input.cacheEntryId === null ? null : { entryId: input.cacheEntryId },
+            recordedAt: timestamp,
+          },
+        ],
         createdAt: prior?.createdAt ?? timestamp,
         updatedAt: timestamp,
         decidedAt: null,
@@ -1320,18 +1330,20 @@ export function createMemoryOpsStore(
           userId,
           deviceId: "00000000-0000-4000-8000-000000000000",
           batchId: crypto.randomUUID(),
-          mutations: [{
-            mutationId: crypto.randomUUID(),
-            entityType: "assistant_result",
-            entityId: input.resultId,
-            operation: "upsert",
-            baseRevision: prior?.history.length ?? 0,
-            occurredAt: timestamp,
-            payload: {
-              result: assistantResultSyncPayload(created),
-              vocabulary: [],
+          mutations: [
+            {
+              mutationId: crypto.randomUUID(),
+              entityType: "assistant_result",
+              entityId: input.resultId,
+              operation: "upsert",
+              baseRevision: prior?.history.length ?? 0,
+              occurredAt: timestamp,
+              payload: {
+                result: assistantResultSyncPayload(created),
+                vocabulary: [],
+              },
             },
-          }],
+          ],
         });
       }
       return { ...created, history: created.history.map((item) => ({ ...item })) };
@@ -1446,34 +1458,35 @@ export function createUnavailableOpsStore(): OpsStore {
     beginObjectWrite: fail,
     finishObjectWrite: fail,
     accountObjectWriteLeases: fail,
-    recordAssistantUse: (_userId, input) => Promise.resolve({
-      id: input.resultId,
-      accountId: "",
-      task: input.task,
-      resultKind: null,
-      status: "pending",
-      cacheEntryId: input.cacheEntryId,
-      outputText: input.outputText,
-      privateContent: input.privateContent ?? null,
-      language: null,
-      sourceText: null,
-      contextText: null,
-      bookTitle: null,
-      chapterTitle: null,
-      targetId: null,
-      timestampSeconds: null,
-      replacedText: null,
-      replacedModel: null,
-      privateEditedOutput: null,
-      privateNotes: null,
-      model: input.model ?? null,
-      promptVersion: input.promptVersion ?? null,
-      modelPolicyHash: input.modelPolicyHash ?? null,
-      history: [],
-      createdAt: new Date(0).toISOString(),
-      updatedAt: new Date(0).toISOString(),
-      decidedAt: null,
-    }),
+    recordAssistantUse: (_userId, input) =>
+      Promise.resolve({
+        id: input.resultId,
+        accountId: "",
+        task: input.task,
+        resultKind: null,
+        status: "pending",
+        cacheEntryId: input.cacheEntryId,
+        outputText: input.outputText,
+        privateContent: input.privateContent ?? null,
+        language: null,
+        sourceText: null,
+        contextText: null,
+        bookTitle: null,
+        chapterTitle: null,
+        targetId: null,
+        timestampSeconds: null,
+        replacedText: null,
+        replacedModel: null,
+        privateEditedOutput: null,
+        privateNotes: null,
+        model: input.model ?? null,
+        promptVersion: input.promptVersion ?? null,
+        modelPolicyHash: input.modelPolicyHash ?? null,
+        history: [],
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+        decidedAt: null,
+      }),
     listAssistantResults: () => Promise.resolve([]),
     putChatMessage: () => Promise.resolve(),
     getChatMessage: () => Promise.resolve(undefined),
@@ -1772,8 +1785,12 @@ export function createSupabaseOpsStore(
             ...(input.privateContent === undefined ? {} : { privateContent: input.privateContent }),
             ...(input.resultKind === undefined ? {} : { resultKind: input.resultKind }),
             ...(input.language === undefined ? {} : { language: input.language }),
-            ...(input.sourceText === undefined ? {} : { sourceText: input.sourceText.slice(0, 20000) }),
-            ...(input.contextText === undefined ? {} : { contextText: input.contextText.slice(0, 20000) }),
+            ...(input.sourceText === undefined
+              ? {}
+              : { sourceText: input.sourceText.slice(0, 20000) }),
+            ...(input.contextText === undefined
+              ? {}
+              : { contextText: input.contextText.slice(0, 20000) }),
             ...(input.bookTitle === undefined ? {} : { bookTitle: input.bookTitle }),
             ...(input.chapterTitle === undefined ? {} : { chapterTitle: input.chapterTitle }),
             ...(input.targetId === undefined ? {} : { targetId: input.targetId }),
@@ -1791,7 +1808,10 @@ export function createSupabaseOpsStore(
       });
       const mapped = mapAssistantResultRow(restRow(response.body));
       if (!restOk(response) || mapped === undefined) {
-        throw new RestPersistenceError(502, "Postgres did not persist the private assistant result.");
+        throw new RestPersistenceError(
+          502,
+          "Postgres did not persist the private assistant result.",
+        );
       }
       return mapped;
     },
@@ -1939,12 +1959,18 @@ export function createSupabaseOpsStore(
       }
       return restRows(response.body).flatMap((row) =>
         typeof row.id === "string"
-          ? [{
-              id: row.id,
-              objectKeys: [...new Set([row.upload_object_key, row.object_key].filter(
-                (key): key is string => typeof key === "string" && key !== "",
-              ))],
-            }]
+          ? [
+              {
+                id: row.id,
+                objectKeys: [
+                  ...new Set(
+                    [row.upload_object_key, row.object_key].filter(
+                      (key): key is string => typeof key === "string" && key !== "",
+                    ),
+                  ),
+                ],
+              },
+            ]
           : [],
       );
     },
@@ -1997,9 +2023,12 @@ export function createSupabaseOpsStore(
       const body = response.body;
       const count = (key: string) => Math.max(0, finiteNumber(body[key]) ?? 0);
       return {
-        changes: count("changes"), outcomes: count("outcomes"), batches: count("batches"),
+        changes: count("changes"),
+        outcomes: count("outcomes"),
+        batches: count("batches"),
         transcriptRevisions: count("transcriptRevisions"),
-        transcriptSegments: count("transcriptSegments"), assets: count("assets"),
+        transcriptSegments: count("transcriptSegments"),
+        assets: count("assets"),
         objectKeys: Array.isArray(body.objectKeys)
           ? body.objectKeys.filter((key): key is string => typeof key === "string")
           : [],
@@ -2668,8 +2697,12 @@ function mapAssistantResultRow(
   }
   const status = row.status;
   if (
-    status !== "pending" && status !== "accepted" && status !== "rejected" &&
-    status !== "stale" && status !== "edited" && status !== "replaced"
+    status !== "pending" &&
+    status !== "accepted" &&
+    status !== "rejected" &&
+    status !== "stale" &&
+    status !== "edited" &&
+    status !== "replaced"
   ) {
     return undefined;
   }
@@ -2713,7 +2746,8 @@ function mapAssistantResultRow(
 function assistantResultSyncPayload(result: OpsAssistantResult): Record<string, unknown> {
   return {
     id: result.id,
-    kind: result.resultKind ?? (result.task === "chapter_summary" ? "chapterSummary" : "sentenceGloss"),
+    kind:
+      result.resultKind ?? (result.task === "chapter_summary" ? "chapterSummary" : "sentenceGloss"),
     status: result.status,
     language: result.language ?? "",
     model: result.model ?? "",
@@ -2804,11 +2838,7 @@ async function buildQuotas(
   let storageBytes = 0;
   if (userId !== "") {
     for (const [key, asset] of assets) {
-      if (
-        key.startsWith(`${userId}:`) &&
-        !key.startsWith("upload:") &&
-        asset.status === "ready"
-      ) {
+      if (key.startsWith(`${userId}:`) && !key.startsWith("upload:") && asset.status === "ready") {
         storageBytes += asset.compressedBytes;
       }
     }

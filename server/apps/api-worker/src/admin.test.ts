@@ -29,24 +29,35 @@ describe("admin and privacy API", () => {
   it("audits legacy cleanup dry-runs without enqueueing destructive work", async () => {
     const database = createFakeDatabaseClient();
     const cleanup = {
-      changes: 3, outcomes: 2, batches: 1, transcriptRevisions: 4,
-      transcriptSegments: 20, assets: 5, objectKeys: [`${USER_ID}/legacy.epub`], executed: false,
+      changes: 3,
+      outcomes: 2,
+      batches: 1,
+      transcriptRevisions: 4,
+      transcriptSegments: 20,
+      assets: 5,
+      objectKeys: [`${USER_ID}/legacy.epub`],
+      executed: false,
     };
     Object.assign(database.ops, {
       cleanupObsoleteV1Data: () => Promise.resolve(cleanup),
     });
     const app = createTestApp({
       database,
-      authenticate: () => createFakePrincipal({
-        role: "admin", accountId: OPERATOR_ID, adminRoles: ["operator"],
-      }),
+      authenticate: () =>
+        createFakePrincipal({
+          role: "admin",
+          accountId: OPERATOR_ID,
+          adminRoles: ["operator"],
+        }),
     });
 
-    const response = await app.fetch(new Request("http://localhost/v1/admin/legacy-cleanup", {
-      method: "POST",
-      headers: { authorization: "Bearer admin", "content-type": "application/json" },
-      body: JSON.stringify({ userId: USER_ID, dryRun: true }),
-    }));
+    const response = await app.fetch(
+      new Request("http://localhost/v1/admin/legacy-cleanup", {
+        method: "POST",
+        headers: { authorization: "Bearer admin", "content-type": "application/json" },
+        body: JSON.stringify({ userId: USER_ID, dryRun: true }),
+      }),
+    );
 
     expect(response.status).toBe(200);
     expect(await readJson(response)).toEqual(cleanup);
@@ -60,19 +71,23 @@ describe("admin and privacy API", () => {
     const database = createFakeDatabaseClient();
     const app = createTestApp({
       database,
-      authenticate: () => createFakePrincipal({
-        role: "admin", accountId: OPERATOR_ID, adminRoles: ["operator"],
-      }),
+      authenticate: () =>
+        createFakePrincipal({
+          role: "admin",
+          accountId: OPERATOR_ID,
+          adminRoles: ["operator"],
+        }),
     });
-    const request = () => new Request("http://localhost/v1/admin/legacy-cleanup", {
-      method: "POST",
-      headers: {
-        authorization: "Bearer admin",
-        "content-type": "application/json",
-        "idempotency-key": "legacy-cleanup-execute-0001",
-      },
-      body: JSON.stringify({ userId: USER_ID, dryRun: false }),
-    });
+    const request = () =>
+      new Request("http://localhost/v1/admin/legacy-cleanup", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer admin",
+          "content-type": "application/json",
+          "idempotency-key": "legacy-cleanup-execute-0001",
+        },
+        body: JSON.stringify({ userId: USER_ID, dryRun: false }),
+      });
 
     const first = await app.fetch(request());
     const replay = await app.fetch(request());
@@ -81,7 +96,9 @@ describe("admin and privacy API", () => {
     expect(replay.status).toBe(202);
     expect(await readJson(replay)).toEqual(await readJson(first));
     expect(await database.ops.listJobs()).toHaveLength(1);
-    expect(await database.ops.listAudit({ action: "legacy_cleanup_execute_requested" })).toHaveLength(1);
+    expect(
+      await database.ops.listAudit({ action: "legacy_cleanup_execute_requested" }),
+    ).toHaveLength(1);
   });
 
   it("rejects requested account sync enablement while object storage is unavailable", async () => {
@@ -110,9 +127,9 @@ describe("admin and privacy API", () => {
     expect(await readJson(response)).toMatchObject({
       code: "account_sync_unavailable",
     });
-    expect((await database.ops.listFlags()).find((flag) => flag.key === "account_sync")?.enabled).toBe(
-      false,
-    );
+    expect(
+      (await database.ops.listFlags()).find((flag) => flag.key === "account_sync")?.enabled,
+    ).toBe(false);
   });
 
   it("forces a fresh readiness probe before enabling instead of trusting cached success", async () => {
@@ -157,9 +174,9 @@ describe("admin and privacy API", () => {
     );
 
     expect(response.status).toBe(503);
-    expect((await database.ops.listFlags()).find((flag) => flag.key === "account_sync")?.enabled).toBe(
-      false,
-    );
+    expect(
+      (await database.ops.listFlags()).find((flag) => flag.key === "account_sync")?.enabled,
+    ).toBe(false);
   });
 
   it.each([
