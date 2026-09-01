@@ -69,8 +69,51 @@ enum Persistence {
 
     static func loadCatalogBooks(database: LocalSQLiteStore = Persistence.store) throws -> [Book] {
         try database.loadBooks().map { stored in
-            Book(stored, assets: try database.loadAssets(bookID: stored.id))
+            let assets = try database.loadAssets(bookID: stored.id)
+            let repaired = try repairMissingEbookSectionIndices(
+                in: stored,
+                assets: assets,
+                database: database
+            )
+            return Book(repaired, assets: assets)
         }
+    }
+
+    /// Repairs only legacy EPUB-only rows: paired/audio catalogs use a different
+    /// chapter contract and must never inherit EPUB spine positions by proximity.
+    private static func repairMissingEbookSectionIndices(
+        in stored: StoredBook,
+        assets: [StoredLocalAsset],
+        database: LocalSQLiteStore
+    ) throws -> StoredBook {
+        guard !stored.chapters.isEmpty,
+              stored.chapters.allSatisfy({ $0.ebookSectionIndex == nil }),
+              !assets.contains(where: { $0.kind == "audio" }),
+              let ebookPath = assets.first(where: { $0.kind == "epub" })?.localMediaKey,
+              let document = EPUBParser.document(from: ebookPath),
+              document.sections.count == stored.chapters.count,
+              Set(stored.chapters.map(\.index)) == Set(document.sections.indices),
+              Set(stored.chapters.map(\.index)).count == stored.chapters.count
+        else { return stored }
+
+        var repaired = stored
+        for chapterOffset in repaired.chapters.indices {
+            repaired.chapters[chapterOffset].ebookSectionIndex = repaired.chapters[chapterOffset].index
+        }
+
+        let entityID = AccountSyncApplicator.syncEntityID(repaired.id.rawValue, kind: "book")
+        let revision = try database.loadVersion(
+            entityType: OutboxEntityType.book.rawValue,
+            entityID: entityID
+        ).map { ServerVersion($0.serverVersion) } ?? .zero
+        try database.saveBook(
+            repaired,
+            mutation: AccountSyncApplicator.bookMutation(for: repaired, baseRevision: revision)
+        )
+        durabilityLog.info(
+            "message=catalog.epub_section_repair component=persistence outcome=success bookId=\(repaired.id.rawValue, privacy: .public) chapters=\(repaired.chapters.count, privacy: .public)"
+        )
+        return repaired
     }
 
     /// Durable catalog tombstones win over filesystem discovery. This leaves
@@ -703,26 +746,26 @@ enum Persistence {
 
     static func saveChapterSummaries(_ summaries: [ChapterSummaryRecord]) {
         let durable = ((try? store.loadAssistantResults()) ?? []).filter { $0.kind != .chapterSummary }
-        try? store.replaceAssistantResults(durable + summaries.compactMap(storedSummary(from:)))
+        try? store.replaceAssistantResults(durable + summaries.compactMap { try? storedSummary(from: $0) })
     }
 
+    /// Summary lifecycle completion must not be published until this durable write succeeds.
     static func saveChapterSummaryUpdate(
         _ summary: ChapterSummaryRecord,
         database: LocalSQLiteStore = Persistence.store
-    ) {
-        guard let result = storedSummary(from: summary) else { return }
+    ) throws {
+        let result = try storedSummary(from: summary)
         if summary.status != .pending, UUID(uuidString: result.id) != nil {
-            try? saveAssistantResultLifecycle(result, database: database)
+            try saveAssistantResultLifecycle(result, database: database)
         } else {
-            try? database.saveAssistantResult(result)
+            try database.saveAssistantResult(result)
         }
     }
 
-    private static func storedSummary(from record: ChapterSummaryRecord) -> StoredAssistantResult? {
-        guard let summary = String(data: (try? JSONEncoder.iso.encode(record.summary)) ?? Data(), encoding: .utf8)
-        else { return nil }
-        let replaced = record.replacedSummary.flatMap {
-            String(data: (try? JSONEncoder.iso.encode($0)) ?? Data(), encoding: .utf8)
+    private static func storedSummary(from record: ChapterSummaryRecord) throws -> StoredAssistantResult {
+        let summary = String(decoding: try JSONEncoder.iso.encode(record.summary), as: UTF8.self)
+        let replaced = try record.replacedSummary.map {
+            String(decoding: try JSONEncoder.iso.encode($0), as: UTF8.self)
         }
         return StoredAssistantResult(
             id: record.id,

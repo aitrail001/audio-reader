@@ -15,13 +15,10 @@ struct VocabularyCanonicalization: Equatable, Sendable {
     func studyKey(language: String, occurrenceID: String? = nil) -> VocabularyStudyIdentity {
         VocabularyStudyIdentity(
             language: VocabularyCanonicalizer.normalizedLanguage(language),
-            canonicalForm: canonicalForm,
+            canonicalForm: VocabularyCanonicalizer.normalizedForm(canonicalForm),
             partOfSpeech: partOfSpeech,
             senseID: senseID,
-            canonicalizationStatus: status,
-            canonicalizationSource: source,
-            canonicalizationConfidence: confidence,
-            occurrenceID: senseID == nil ? occurrenceID : nil
+            occurrenceID: status == .confirmed && senseID?.isEmpty == false ? nil : occurrenceID
         )
     }
 }
@@ -31,10 +28,40 @@ struct VocabularyStudyIdentity: Hashable, Sendable {
     var canonicalForm: String
     var partOfSpeech: VocabularyPartOfSpeech
     var senseID: String?
-    var canonicalizationStatus: VocabularyCanonicalizationStatus
-    var canonicalizationSource: VocabularyCanonicalizationSource
-    var canonicalizationConfidence: Double
     var occurrenceID: String?
+}
+
+private enum VocabularyStableIdentityHash {
+    private static let format = "audio-reader:vocabulary-identity:v2"
+
+    /// A versioned, domain-separated stream of UTF-8 byte-length-prefixed fields keeps tuple
+    /// boundaries deterministic across devices even when a field contains control characters.
+    static func identifier(prefix: String, domain: String, components: [String]) -> String {
+        var encoded = Data()
+        append(format, to: &encoded)
+        append(domain, to: &encoded)
+        append(String(components.count), to: &encoded)
+        for component in components {
+            append(component, to: &encoded)
+        }
+        let digest = SHA256.hash(data: encoded)
+        return prefix + digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func append(_ component: String, to data: inout Data) {
+        let bytes = Data(component.utf8)
+        data.append(contentsOf: String(bytes.count).utf8)
+        data.append(0x3a)
+        data.append(bytes)
+    }
+}
+
+/// A readable choice shown to the learner while its stable sense identifier stays internal.
+struct VocabularyMeaningChoice: Identifiable, Equatable, Sendable {
+    let id: String
+    let title: String
+    let occurrenceIDs: Set<String>
+    let representsExistingCard: Bool
 }
 
 struct VocabularyOccurrenceLocation: Equatable, Sendable {
@@ -378,9 +405,6 @@ extension VocabEntry {
             canonicalForm: VocabularyCanonicalizer.normalizedForm(canonicalForm),
             partOfSpeech: partOfSpeech,
             senseID: hasValidatedSense ? normalizedSense : nil,
-            canonicalizationStatus: hasValidatedSense ? .confirmed : .needsReview,
-            canonicalizationSource: canonicalizationSource,
-            canonicalizationConfidence: canonicalizationConfidence,
             occurrenceID: hasValidatedSense ? nil : id
         )
     }
@@ -425,6 +449,233 @@ extension VocabEntry {
     }
 }
 
+enum VocabularySenseConfirmation {
+    private struct BaseIdentity: Hashable {
+        let language: String
+        let canonicalForm: String
+        let partOfSpeech: VocabularyPartOfSpeech
+    }
+
+    private enum ContextualEvidence: Hashable {
+        case translation(String)
+        case context(String)
+
+        var kind: String {
+            switch self {
+            case .translation: "translation"
+            case .context: "context"
+            }
+        }
+
+        var value: String {
+            switch self {
+            case let .translation(value), let .context(value): value
+            }
+        }
+    }
+
+    private struct ReconciliationIdentity: Hashable {
+        let base: BaseIdentity
+        let evidence: ContextualEvidence?
+    }
+
+    /// The hash is stable across devices and never requires a learner to author model identity.
+    static func stableSenseID(
+        language: String,
+        canonicalForm: String,
+        partOfSpeech: VocabularyPartOfSpeech,
+        meaning: String,
+        disambiguator: String? = nil
+    ) -> String {
+        VocabularyStableIdentityHash.identifier(
+            prefix: "sense:",
+            domain: "sense",
+            components: [
+                VocabularyCanonicalizer.normalizedLanguage(language),
+                VocabularyCanonicalizer.normalizedForm(canonicalForm),
+                partOfSpeech.rawValue,
+                normalizedMeaning(meaning),
+                disambiguator ?? ""
+            ]
+        )
+    }
+
+    /// Existing confirmed senses are displayed using learner-facing evidence, never their IDs.
+    static func choices(for entry: VocabEntry, among entries: [VocabEntry]) -> [VocabularyMeaningChoice] {
+        let compatible = entries.filter {
+            $0.id != entry.id
+                && $0.canonicalizationStatus == .confirmed
+                && $0.senseID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                && baseIdentity($0) == baseIdentity(entry)
+        }
+        let groups = Dictionary(grouping: compatible, by: { $0.senseID!.trimmingCharacters(in: .whitespacesAndNewlines) })
+        var result = groups.compactMap { senseID, occurrences -> VocabularyMeaningChoice? in
+            guard let title = occurrences.lazy.compactMap(readableMeaning).first else { return nil }
+            return VocabularyMeaningChoice(
+                id: senseID,
+                title: title,
+                occurrenceIDs: Set(occurrences.map(\.id)),
+                representsExistingCard: true
+            )
+        }
+        if let title = readableMeaning(entry) {
+            let currentSense = entry.canonicalizationStatus == .confirmed
+                ? entry.senseID?.trimmingCharacters(in: .whitespacesAndNewlines)
+                : nil
+            let choiceID = currentSense ?? stableSenseID(
+                language: entry.sourceLanguage ?? "und",
+                canonicalForm: entry.studyForm,
+                partOfSpeech: entry.partOfSpeech,
+                meaning: title
+            )
+            if let index = result.firstIndex(where: { $0.id == choiceID }) {
+                result[index] = VocabularyMeaningChoice(
+                    id: result[index].id,
+                    title: result[index].title,
+                    occurrenceIDs: result[index].occurrenceIDs.union([entry.id]),
+                    representsExistingCard: true
+                )
+            } else {
+                result.append(VocabularyMeaningChoice(
+                    id: choiceID,
+                    title: title,
+                    occurrenceIDs: [entry.id],
+                    representsExistingCard: currentSense != nil
+                ))
+            }
+        }
+        return result.sorted {
+            let titleOrder = $0.title.localizedCaseInsensitiveCompare($1.title)
+            return titleOrder == .orderedSame ? $0.id < $1.id : titleOrder == .orderedAscending
+        }
+    }
+
+    /// Automatic reuse requires exact contextual evidence and exactly one compatible sense.
+    static func recurringSenseID(for entry: VocabEntry, among entries: [VocabEntry]) -> String? {
+        guard let evidence = contextualEvidence(entry) else { return nil }
+        let matches = Set(entries.compactMap { candidate -> String? in
+            guard candidate.canonicalizationStatus == .confirmed,
+                  baseIdentity(candidate) == baseIdentity(entry),
+                  contextualEvidence(candidate) == evidence,
+                  let senseID = candidate.senseID?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !senseID.isEmpty
+            else { return nil }
+            return senseID
+        })
+        return matches.count == 1 ? matches.first : nil
+    }
+
+    /// Repairs legacy occurrence IDs only when exact contextual evidence proves equivalence.
+    /// Every occurrence is retained and receives the strongest schedule before a later split.
+    static func reconcile(_ entries: [VocabEntry]) -> [VocabEntry] {
+        var result = entries
+        let candidates = Dictionary(grouping: result.indices.filter {
+            result[$0].canonicalizationStatus == .confirmed && result[$0].senseID != nil
+        }) { index in
+            let entry = result[index]
+            return ReconciliationIdentity(
+                base: baseIdentity(entry),
+                evidence: contextualEvidence(entry)
+            )
+        }
+        for indices in candidates.values {
+            guard !indices.isEmpty else { continue }
+            let hasLegacyID = indices.contains { isOccurrenceBasedSense(result[$0]) }
+            let distinctSenses = Set(indices.compactMap { result[$0].senseID })
+            guard hasLegacyID || distinctSenses.count > 1,
+                  let evidence = indices.lazy.compactMap({ contextualEvidence(result[$0]) }).first,
+                  let first = indices.first
+            else { continue }
+            let exemplar = result[first]
+            let repairedID = stableSenseID(
+                language: exemplar.sourceLanguage ?? "und",
+                canonicalForm: exemplar.studyForm,
+                partOfSpeech: exemplar.partOfSpeech,
+                meaning: evidence.value,
+                disambiguator: "evidence:\(evidence.kind)"
+            )
+            for index in indices { result[index].senseID = repairedID }
+        }
+
+        let cards = VocabularyStudyCards.cards(result)
+        let scheduleByOccurrence = Dictionary(uniqueKeysWithValues: cards.flatMap { card in
+            card.occurrences.map { ($0.id, (card.schedule, card.isInLearnList)) }
+        })
+        for index in result.indices {
+            guard let (schedule, isInLearnList) = scheduleByOccurrence[result[index].id] else { continue }
+            result[index] = result[index].applyingStudySchedule(schedule)
+            result[index].isInLearnList = isInLearnList
+        }
+        return result
+    }
+
+    static func separatedSenseID(for entry: VocabEntry) -> String {
+        stableSenseID(
+            language: entry.sourceLanguage ?? "und",
+            canonicalForm: entry.studyForm,
+            partOfSpeech: entry.partOfSpeech,
+            meaning: readableMeaning(entry) ?? entry.context,
+            disambiguator: "occurrence:\(entry.id)"
+        )
+    }
+
+    static func resolvedSenseID(
+        for choice: VocabularyMeaningChoice,
+        entry: VocabEntry,
+        canonicalForm: String,
+        partOfSpeech: VocabularyPartOfSpeech
+    ) -> String {
+        guard !choice.representsExistingCard else { return choice.id }
+        return stableSenseID(
+            language: entry.sourceLanguage ?? "und",
+            canonicalForm: canonicalForm,
+            partOfSpeech: partOfSpeech,
+            meaning: choice.title
+        )
+    }
+
+    private static func baseIdentity(_ entry: VocabEntry) -> BaseIdentity {
+        BaseIdentity(
+            language: VocabularyCanonicalizer.normalizedLanguage(entry.sourceLanguage ?? "und"),
+            canonicalForm: VocabularyCanonicalizer.normalizedForm(entry.studyForm),
+            partOfSpeech: entry.partOfSpeech
+        )
+    }
+
+    private static func readableMeaning(_ entry: VocabEntry) -> String? {
+        let candidate = [entry.translation, entry.definition, entry.context]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+        guard let candidate else { return nil }
+        let collapsed = candidate.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return collapsed.count <= 180 ? collapsed : String(collapsed.prefix(177)) + "…"
+    }
+
+    private static func contextualEvidence(_ entry: VocabEntry) -> ContextualEvidence? {
+        if let translation = entry.translation?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !translation.isEmpty {
+            return .translation(normalizedMeaning(translation))
+        }
+        let context = entry.context.trimmingCharacters(in: .whitespacesAndNewlines)
+        return context.isEmpty ? nil : .context(normalizedMeaning(context))
+    }
+
+    private static func normalizedMeaning(_ meaning: String) -> String {
+        meaning.precomposedStringWithCanonicalMapping
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .lowercased()
+    }
+
+    private static func isOccurrenceBasedSense(_ entry: VocabEntry) -> Bool {
+        guard let senseID = entry.senseID?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
+        return senseID == entry.id
+            || senseID == "occurrence:\(entry.id)"
+            || senseID == "occurrence-\(entry.id)"
+    }
+}
+
 enum VocabularyStudyCards {
     static func cards(_ entries: [VocabEntry]) -> [VocabularyStudyCard] {
         var order: [VocabularyStudyIdentity] = []
@@ -453,17 +704,16 @@ enum VocabularyStudyCards {
 
     private static func cardID(for identity: VocabularyStudyIdentity) -> String {
         if let occurrenceID = identity.occurrenceID { return occurrenceID }
-        let components = [
-            identity.language,
-            identity.canonicalForm,
-            identity.partOfSpeech.rawValue,
-            identity.senseID ?? "",
-            identity.canonicalizationStatus.rawValue,
-            identity.canonicalizationSource.rawValue,
-            String(identity.canonicalizationConfidence)
-        ].joined(separator: "\u{1f}")
-        let digest = SHA256.hash(data: Data(components.utf8))
-        return "study:" + digest.map { String(format: "%02x", $0) }.joined()
+        return VocabularyStableIdentityHash.identifier(
+            prefix: "study:",
+            domain: "study-card",
+            components: [
+                identity.language,
+                identity.canonicalForm,
+                identity.partOfSpeech.rawValue,
+                identity.senseID ?? ""
+            ]
+        )
     }
 
     private static func scheduleBefore(_ lhs: VocabEntry, _ rhs: VocabEntry) -> Bool {

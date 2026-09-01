@@ -6,6 +6,8 @@ struct MacAppleBooksView: View {
     @Bindable var library: MacAppleBooksLibrary
     @Binding var pendingDuplicateImport: MacAppleBookItem?
     let importingID: String?
+    let companionBookTitle: String?
+    let companionRequirement: MacAppleBooksCompanionRequirement?
     let onImport: (MacAppleBookItem) -> Void
     let onConfirmDuplicate: (MacAppleBookItem) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -16,7 +18,9 @@ struct MacAppleBooksView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Apple Books")
                         .font(.system(size: 22, weight: .semibold))
-                    Text("Accessible downloaded audiobooks and non-DRM EPUB books stored by Apple Books")
+                    Text(companionBookTitle.map {
+                        "\(companionRequirement?.prompt ?? "Choose companion media.") Add it to \($0)"
+                    } ?? "Accessible downloaded audiobooks and non-DRM EPUB books stored by Apple Books")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -38,6 +42,7 @@ struct MacAppleBooksView: View {
                 }
                 Section("Downloaded Books") {
                     ForEach(library.items) { item in
+                        let isCompatibleCompanion = companionRequirement?.accepts(item.kind) ?? true
                         HStack(spacing: 14) {
                             cover(item)
                             VStack(alignment: .leading, spacing: 4) {
@@ -54,6 +59,11 @@ struct MacAppleBooksView: View {
                                     Text(item.kind == .ebook ? "EPUB book" : formatClock(item.duration))
                                         .font(.caption.monospacedDigit())
                                         .foregroundStyle(.secondary)
+                                    if companionRequirement != nil, !isCompatibleCompanion {
+                                        Text("This book needs a different media type")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                             }
                             Spacer()
@@ -62,11 +72,16 @@ struct MacAppleBooksView: View {
                             if importingID == item.id {
                                 ProgressView().controlSize(.small)
                             } else {
-                                Button("Import") { onImport(item) }
+                                Button(companionBookTitle == nil ? "Import" : "Add") { onImport(item) }
                                     .buttonStyle(.borderedProminent)
                                     .tint(Palette.terracotta)
-                                    .disabled(!item.canImport || importingID != nil)
-                                    .accessibilityLabel("Import \(item.title)")
+                                    .disabled(!item.canImport || !isCompatibleCompanion || importingID != nil)
+                                    .accessibilityLabel(companionBookTitle == nil
+                                        ? "Import \(item.title)"
+                                        : "Add \(item.title) to \(companionBookTitle ?? "selected book")")
+                                    .accessibilityIdentifier(companionBookTitle == nil
+                                        ? "library.importAppleBooks.\(item.id)"
+                                        : "library.addAppleBooksCompanion.\(item.id)")
                             }
                         }
                         .padding(.vertical, 5)

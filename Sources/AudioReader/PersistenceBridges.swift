@@ -20,7 +20,8 @@ extension StoredBook {
                     index: $0.index,
                     title: $0.title,
                     duration: $0.duration,
-                    startTime: $0.startTime
+                    startTime: $0.startTime,
+                    ebookSectionIndex: $0.ebookSectionIndex
                 )
             }
         )
@@ -144,7 +145,8 @@ extension Book {
                     title: $0.title,
                     audioPath: audioByChapter[$0.id.rawValue] ?? "",
                     duration: $0.duration,
-                    startTime: $0.startTime
+                    startTime: $0.startTime,
+                    ebookSectionIndex: $0.ebookSectionIndex
                 )
             },
             source: BookSource(rawValue: stored.source) ?? .files

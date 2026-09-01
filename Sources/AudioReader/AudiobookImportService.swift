@@ -93,6 +93,7 @@ enum AudiobookImportError: LocalizedError {
     case exportUnavailable
     case unsafeDeletionTarget
     case invalidEbook
+    case incompatibleCompanion
     case duplicateConfirmationMissing
     case replacementRollbackFailed(String)
 
@@ -104,6 +105,7 @@ enum AudiobookImportError: LocalizedError {
         case .exportUnavailable: "This audiobook cannot be copied into AudioReader for transcription."
         case .unsafeDeletionTarget: "AudioReader can only delete a book stored directly in its imported library."
         case .invalidEbook: "Choose a readable EPUB file."
+        case .incompatibleCompanion: "Choose the missing media type for this book."
         case .duplicateConfirmationMissing: "The matching imported book could not be confirmed."
         case .replacementRollbackFailed(let detail):
             "The EPUB replacement could not be rolled back completely: \(detail)"

@@ -366,7 +366,8 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
                     index: chapter.int("position"),
                     title: try chapter.required("title"),
                     duration: chapter.optionalDouble("duration"),
-                    startTime: chapter.optionalDouble("start_time")
+                    startTime: chapter.optionalDouble("start_time"),
+                    ebookSectionIndex: chapter["ebook_section_index"].flatMap(Int.init)
                 )
             }
             return StoredBook(
@@ -425,10 +426,12 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
                 try connection.run(
                     """
                     INSERT INTO local_chapters(
-                      id, book_id, position, title, duration, start_time, created_at, updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?)
+                      id, book_id, position, title, duration, start_time, ebook_section_index,
+                      created_at, updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(id) DO UPDATE SET book_id=excluded.book_id, position=excluded.position,
                       title=excluded.title, duration=excluded.duration, start_time=excluded.start_time,
+                      ebook_section_index=excluded.ebook_section_index,
                       updated_at=excluded.updated_at, deleted_at=NULL
                     """
                 ) { [connection] statement in
@@ -438,8 +441,9 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
                     connection.bind(statement, 4, chapter.title)
                     connection.bind(statement, 5, chapter.duration)
                     connection.bind(statement, 6, chapter.startTime)
-                    connection.bindDate(statement, 7, now)
+                    connection.bind(statement, 7, chapter.ebookSectionIndex)
                     connection.bindDate(statement, 8, now)
+                    connection.bindDate(statement, 9, now)
                 }
             }
             let retainedChapterIDs = Set(book.chapters.map(\.id.rawValue))
@@ -1941,6 +1945,13 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
             }
             if storedVersion < 2 {
                 for addition in LocalSchemaVNext.version2ColumnAdditions {
+                    let columns = try connection.query("PRAGMA table_info(\(addition.table))")
+                    guard !columns.contains(where: { $0["name"] == addition.column }) else { continue }
+                    try connection.exec(addition.sql)
+                }
+            }
+            if storedVersion < 3 {
+                for addition in LocalSchemaVNext.version3ColumnAdditions {
                     let columns = try connection.query("PRAGMA table_info(\(addition.table))")
                     guard !columns.contains(where: { $0["name"] == addition.column }) else { continue }
                     try connection.exec(addition.sql)

@@ -446,7 +446,8 @@ enum AccountSyncApplicator {
                             index: $0.index,
                             title: $0.title,
                             duration: $0.duration,
-                            startTime: $0.startTime
+                            startTime: $0.startTime,
+                            ebookSectionIndex: $0.ebookSectionIndex
                         )
                     }
                 )
@@ -1086,7 +1087,8 @@ enum AccountSyncApplicator {
                         index: $0.index,
                         title: $0.title,
                         duration: $0.duration,
-                        startTime: $0.startTime
+                        startTime: $0.startTime,
+                        ebookSectionIndex: $0.ebookSectionIndex
                     )
                 }
             )
@@ -1107,7 +1109,8 @@ enum AccountSyncApplicator {
                 index: Int(change.payload["index"]?.numberValue ?? 0),
                 title: try requiredString("title", in: change),
                 duration: change.payload["duration"]?.numberValue,
-                startTime: change.payload["startTime"]?.numberValue
+                startTime: change.payload["startTime"]?.numberValue,
+                ebookSectionIndex: change.payload["ebookSectionIndex"]?.numberValue.map(Int.init)
             )
             book.chapters.removeAll { $0.id == chapter.id }
             book.chapters.append(chapter)
@@ -1503,6 +1506,7 @@ private struct PortableChapter: Codable {
     var title: String
     var duration: Double?
     var startTime: Double?
+    var ebookSectionIndex: Int?
 }
 
 private struct PortableTranscriptOverlay: Encodable {

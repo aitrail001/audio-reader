@@ -313,6 +313,329 @@ struct VocabularyCanonicalizationTests {
         #expect(VocabularyStudyCards.cards([confirmedRiver, confirmedFinancial]).count == 2)
     }
 
+    @Test("Confirmed identity ignores provenance and confidence metadata")
+    func confirmedIdentityIgnoresAuditMetadata() throws {
+        var manual = entry(id: "manual", surface: "bank", context: "We rested on the river bank.")
+        manual.definition = "the land beside a river"
+        manual.confirmCanonicalForm("bank", partOfSpeech: .noun, senseID: "bank:river-edge")
+        var managed = manual
+        managed.id = "managed"
+        managed.canonicalizationSource = .llmFallback
+        managed.canonicalizationConfidence = 0.91
+        managed.canonicalizationTraceID = "trace-managed"
+
+        let card = try #require(VocabularyStudyCards.cards([manual, managed]).first)
+
+        #expect(VocabularyStudyCards.cards([manual, managed]).count == 1)
+        #expect(card.occurrenceIDs == ["manual", "managed"])
+        #expect(manual.studyIdentity == managed.studyIdentity)
+    }
+
+    @Test("Hidden sense identifiers are deterministic and collision safe")
+    func hiddenSenseIdentifiersAreDeterministicAndCollisionSafe() {
+        let river = VocabularySenseConfirmation.stableSenseID(
+            language: "en-AU",
+            canonicalForm: "Bank",
+            partOfSpeech: .noun,
+            meaning: "The land beside a river"
+        )
+        let sameRiver = VocabularySenseConfirmation.stableSenseID(
+            language: "en",
+            canonicalForm: " bank ",
+            partOfSpeech: .noun,
+            meaning: "the land beside a river"
+        )
+        let finance = VocabularySenseConfirmation.stableSenseID(
+            language: "en",
+            canonicalForm: "bank",
+            partOfSpeech: .noun,
+            meaning: "a financial institution"
+        )
+
+        #expect(river == sameRiver)
+        #expect(river != finance)
+        #expect(!river.contains("land beside a river"))
+    }
+
+    @Test("Hidden sense identity keeps delimiter and empty tuple fields distinct")
+    func hiddenSenseIdentitySeparatesAdversarialTupleComponents() {
+        let delimiter = "\u{1f}"
+        let delimiterInMeaning = VocabularySenseConfirmation.stableSenseID(
+            language: "en",
+            canonicalForm: "bank",
+            partOfSpeech: .noun,
+            meaning: "river\(delimiter)edge",
+            disambiguator: ""
+        )
+        let shiftedDelimiter = VocabularySenseConfirmation.stableSenseID(
+            language: "en",
+            canonicalForm: "bank",
+            partOfSpeech: .noun,
+            meaning: "river",
+            disambiguator: "edge\(delimiter)"
+        )
+        let emptyMeaning = VocabularySenseConfirmation.stableSenseID(
+            language: "en",
+            canonicalForm: "bank",
+            partOfSpeech: .noun,
+            meaning: "",
+            disambiguator: "river"
+        )
+        let emptyDisambiguator = VocabularySenseConfirmation.stableSenseID(
+            language: "en",
+            canonicalForm: "bank",
+            partOfSpeech: .noun,
+            meaning: "river",
+            disambiguator: ""
+        )
+
+        #expect(delimiterInMeaning != shiftedDelimiter)
+        #expect(emptyMeaning != emptyDisambiguator)
+    }
+
+    @Test("Study card identity safely encodes confirmed tuples and keeps drafts occurrence scoped")
+    func studyCardIdentityIsCollisionSafeAndDeterministic() throws {
+        let delimiter = "\u{1f}"
+        var embeddedDelimiter = entry(id: "embedded", surface: "bank", context: "First context.")
+        embeddedDelimiter.confirmCanonicalForm(
+            "bank\(delimiter)noun",
+            partOfSpeech: .verb,
+            senseID: "sense"
+        )
+        var shiftedDelimiter = entry(id: "shifted", surface: "bank", context: "Second context.")
+        shiftedDelimiter.confirmCanonicalForm(
+            "bank",
+            partOfSpeech: .noun,
+            senseID: "verb\(delimiter)sense"
+        )
+
+        let forward = VocabularyStudyCards.cards([embeddedDelimiter, shiftedDelimiter])
+        let reversed = VocabularyStudyCards.cards([shiftedDelimiter, embeddedDelimiter])
+
+        #expect(forward.count == 2)
+        #expect(Set(forward.map(\.id)).count == 2)
+        #expect(Set(forward.map(\.id)) == Set(reversed.map(\.id)))
+        #expect(forward.allSatisfy { $0.id.hasPrefix("study:") })
+
+        let firstDraft = entry(id: "draft-a", surface: "bank", context: "Draft A.")
+        let secondDraft = entry(id: "draft-b", surface: "bank", context: "Draft B.")
+        let draftCards = VocabularyStudyCards.cards([firstDraft, secondDraft])
+
+        #expect(Set(draftCards.map(\.id)) == ["draft-a", "draft-b"])
+    }
+
+    @Test("Meaning choices are readable while internal identifiers stay hidden")
+    func meaningChoicesUseReadableVocabularyEvidence() throws {
+        var river = entry(id: "river", surface: "bank", context: "We rested on the river bank.")
+        river.definition = "the land beside a river"
+        river.confirmCanonicalForm("bank", partOfSpeech: .noun, senseID: "bank:river-edge")
+        var financial = entry(id: "finance", surface: "bank", context: "The bank approved the loan.")
+        financial.translation = "financial institution"
+        financial.confirmCanonicalForm("bank", partOfSpeech: .noun, senseID: "bank:financial-institution")
+        var unresolved = entry(id: "new", surface: "bank", context: "The boat reached the bank.")
+        unresolved.definition = "the land beside a river"
+
+        let choices = VocabularySenseConfirmation.choices(for: unresolved, among: [river, financial])
+
+        #expect(choices.map(\.title).contains("the land beside a river"))
+        #expect(choices.map(\.title).contains("financial institution"))
+        #expect(choices.allSatisfy { !$0.title.contains($0.id) })
+        #expect(choices.allSatisfy { !$0.title.contains(":river-edge") })
+    }
+
+    @Test("Only exact contextual evidence automatically reuses a confirmed sense")
+    func contextualRecurrenceReusesOnlyAnUnambiguousConfirmedSense() {
+        var river = entry(id: "river", surface: "bank", context: "We rested on the river bank.")
+        river.translation = "river edge"
+        river.confirmCanonicalForm("bank", partOfSpeech: .noun, senseID: "bank:river-edge")
+        var financial = entry(id: "finance", surface: "bank", context: "The bank approved the loan.")
+        financial.translation = "financial institution"
+        financial.confirmCanonicalForm("bank", partOfSpeech: .noun, senseID: "bank:financial-institution")
+        var recurring = entry(id: "recurring", surface: "bank", context: "They sat on the bank.")
+        recurring.translation = "river edge"
+        let ambiguous = entry(id: "ambiguous", surface: "bank", context: "They approached the bank.")
+
+        #expect(VocabularySenseConfirmation.recurringSenseID(for: recurring, among: [river, financial]) == "bank:river-edge")
+        #expect(VocabularySenseConfirmation.recurringSenseID(for: ambiguous, among: [river, financial]) == nil)
+    }
+
+    @Test("Legacy occurrence senses reconcile without losing schedule or locations")
+    func legacySenseReconciliationPreservesState() throws {
+        var first = entry(id: "legacy-a", surface: "bank", context: "We rested on the river bank.")
+        first.translation = "river edge"
+        first.confirmCanonicalForm("bank", partOfSpeech: .noun, senseID: first.id)
+        first.reviewCount = 7
+        first.reviewIntervalDays = 18
+        first.nextReview = Date(timeIntervalSince1970: 90_000)
+        first.lastReviewedAt = Date(timeIntervalSince1970: 80_000)
+        first.lastReviewQuality = .remember
+        var second = entry(id: "legacy-b", surface: "bank", context: "The path followed the bank.")
+        second.translation = "river edge"
+        second.confirmCanonicalForm("bank", partOfSpeech: .noun, senseID: "occurrence:\(second.id)")
+        second.bookID = "other-book"
+
+        let reconciled = VocabularySenseConfirmation.reconcile([first, second])
+        let card = try #require(VocabularyStudyCards.cards(reconciled).first)
+
+        #expect(VocabularyStudyCards.cards(reconciled).count == 1)
+        #expect(Set(reconciled.compactMap(\.senseID)).count == 1)
+        #expect(card.occurrenceIDs == ["legacy-a", "legacy-b"])
+        #expect(card.locations.map(\.bookID).sorted() == ["book", "other-book"])
+        #expect(reconciled.allSatisfy { $0.reviewCount == 7 })
+        #expect(reconciled.allSatisfy { $0.nextReview == Date(timeIntervalSince1970: 90_000) })
+    }
+
+    @Test("Reconciliation does not merge delimiter-shifted base and evidence tuples")
+    func reconciliationKeyKeepsAdversarialTuplesDistinct() {
+        let delimiter = "\u{1f}"
+        var embeddedBase = entry(id: "embedded-base", surface: "bank", context: "First context.")
+        embeddedBase.translation = "edge"
+        embeddedBase.confirmCanonicalForm(
+            "bank\(delimiter)noun\(delimiter)translation:river",
+            partOfSpeech: .verb,
+            senseID: "sense:embedded-base"
+        )
+        var shiftedEvidence = entry(id: "shifted-evidence", surface: "bank", context: "Second context.")
+        shiftedEvidence.translation = "river\(delimiter)verb\(delimiter)translation:edge"
+        shiftedEvidence.confirmCanonicalForm(
+            "bank",
+            partOfSpeech: .noun,
+            senseID: "sense:shifted-evidence"
+        )
+
+        let reconciled = VocabularySenseConfirmation.reconcile([embeddedBase, shiftedEvidence])
+
+        #expect(Set(reconciled.compactMap(\.senseID)) == ["sense:embedded-base", "sense:shifted-evidence"])
+    }
+
+    @Test("Contextual recurrence does not reuse a delimiter-colliding base identity")
+    func contextualRecurrenceKeepsAdversarialBaseIdentitiesDistinct() {
+        let delimiter = "\u{1f}"
+        var confirmed = entry(id: "confirmed", surface: "noun", context: "First context.")
+        confirmed.sourceLanguage = "en\(delimiter)bank"
+        confirmed.translation = "shared meaning"
+        confirmed.confirmCanonicalForm("noun", partOfSpeech: .verb, senseID: "sense:confirmed")
+        var candidate = entry(id: "candidate", surface: "bank", context: "Second context.")
+        candidate.sourceLanguage = "en"
+        candidate.translation = "shared meaning"
+        candidate.confirmCanonicalForm(
+            "bank\(delimiter)noun",
+            partOfSpeech: .verb,
+            senseID: nil
+        )
+
+        #expect(VocabularySenseConfirmation.recurringSenseID(for: candidate, among: [confirmed]) == nil)
+    }
+
+    @Test("Ordinary matching reconciliation still merges schedules and senses")
+    func structuredReconciliationKeyStillMergesOrdinaryEvidence() {
+        var first = entry(id: "ordinary-a", surface: "bank", context: "First context.")
+        first.translation = "river edge"
+        first.confirmCanonicalForm("bank", partOfSpeech: .noun, senseID: "sense:provider-a")
+        first.reviewCount = 6
+        var second = entry(id: "ordinary-b", surface: "bank", context: "Second context.")
+        second.translation = "river edge"
+        second.confirmCanonicalForm("bank", partOfSpeech: .noun, senseID: "sense:provider-b")
+
+        let reconciled = VocabularySenseConfirmation.reconcile([first, second])
+
+        #expect(Set(reconciled.compactMap(\.senseID)).count == 1)
+        #expect(reconciled.allSatisfy { $0.reviewCount == 6 })
+    }
+
+    @Test("App launch persists deterministic reconciliation and retains legacy review history")
+    @MainActor
+    func appLaunchPersistsReconciliationWithoutRewritingHistory() throws {
+        let vocabulary = InMemoryVocabularyRepository()
+        let reviews = InMemoryReviewEventRepository()
+        var first = entry(id: "persist-a", surface: "bank", context: "We rested on the river bank.")
+        first.translation = "river edge"
+        first.confirmCanonicalForm("bank", partOfSpeech: .noun, senseID: first.id)
+        first.reviewCount = 4
+        first.lastReviewedAt = Date(timeIntervalSince1970: 5_000)
+        var second = entry(id: "persist-b", surface: "bank", context: "The path followed the bank.")
+        second.translation = "river edge"
+        second.confirmCanonicalForm("bank", partOfSpeech: .noun, senseID: "occurrence:\(second.id)")
+        let event = StoredReviewEvent(
+            id: ReviewEventID(rawValue: "legacy-review"),
+            vocabularyID: VocabularyOccurrenceID(rawValue: first.id),
+            cardID: "legacy-occurrence-card",
+            face: VocabReviewPrompt.recognition.rawValue,
+            rating: VocabReviewQuality.remember.rawValue,
+            reviewedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        try vocabulary.saveVocabulary([first, second].map(StoredVocabularyOccurrence.init))
+        try reviews.appendReviewEvent(event)
+
+        let state = AppState(composition: AppComposition(
+            vocabulary: vocabulary,
+            knownLemmas: InMemoryKnownLemmaRepository(),
+            reviewEvents: reviews
+        ))
+        let persisted = try vocabulary.loadVocabulary()
+
+        #expect(VocabularyStudyCards.cards(state.vocab).count == 1)
+        #expect(Set(persisted.compactMap(\.senseID)).count == 1)
+        #expect(persisted.allSatisfy { $0.reviewCount == 4 })
+        #expect(try reviews.loadReviewEvents() == [event])
+        #expect(state.vocabReviewEvents == [event])
+    }
+
+    @Test("Merge and separate recovery preserve schedules and immutable review history")
+    @MainActor
+    func mergeAndSeparateRecoveryPreservesReviewStateAndHistory() throws {
+        let vocabulary = InMemoryVocabularyRepository()
+        let reviews = InMemoryReviewEventRepository()
+        var river = entry(id: "river", surface: "bank", context: "We rested on the river bank.")
+        river.translation = "river edge"
+        river.confirmCanonicalForm("bank", partOfSpeech: .noun, senseID: "bank:river-edge")
+        river.reviewCount = 5
+        river.reviewIntervalDays = 14
+        river.lastReviewedAt = Date(timeIntervalSince1970: 5_000)
+        var duplicate = entry(id: "duplicate", surface: "bank", context: "The path followed the bank.")
+        duplicate.translation = "land beside the water"
+        duplicate.confirmCanonicalForm("bank", partOfSpeech: .noun, senseID: "legacy-fallback-river")
+        let event = StoredReviewEvent(
+            id: ReviewEventID(rawValue: "review-history"),
+            vocabularyID: VocabularyOccurrenceID(rawValue: river.id),
+            cardID: "legacy-card-id",
+            face: VocabReviewPrompt.recognition.rawValue,
+            rating: VocabReviewQuality.remember.rawValue,
+            reviewedAt: Date(timeIntervalSince1970: 5_000)
+        )
+        try vocabulary.saveVocabulary([river, duplicate].map(StoredVocabularyOccurrence.init))
+        try reviews.appendReviewEvent(event)
+        let state = AppState(composition: AppComposition(
+            vocabulary: vocabulary,
+            knownLemmas: InMemoryKnownLemmaRepository(),
+            reviewEvents: reviews
+        ))
+        let target = try #require(VocabularySenseConfirmation.choices(
+            for: state.vocab.first { $0.id == duplicate.id }!,
+            among: state.vocab
+        ).first { $0.occurrenceIDs.contains(river.id) })
+
+        state.confirmVocabularyMeaning(
+            duplicate.id,
+            canonicalForm: "banking",
+            partOfSpeech: .verb,
+            choice: target
+        )
+        let merged = try #require(state.vocab.first { $0.id == duplicate.id })
+        #expect(merged.senseID == river.senseID)
+        #expect(merged.canonicalForm == "bank")
+        #expect(merged.partOfSpeech == .noun)
+        #expect(merged.reviewCount == 5)
+        #expect(try reviews.loadReviewEvents() == [event])
+
+        state.separateVocabularyMeaning(duplicate.id)
+        let separated = try #require(state.vocab.first { $0.id == duplicate.id })
+        #expect(separated.senseID != river.senseID)
+        #expect(separated.reviewCount == 5)
+        #expect(try reviews.loadReviewEvents() == [event])
+        #expect(try vocabulary.loadVocabulary().first { $0.id.rawValue == duplicate.id }?.senseID == separated.senseID)
+    }
+
     @Test("Compatible occurrences keep the strongest reviewed schedule")
     func canonicalMergePreservesReviewedSchedule() {
         var earlier = entry(id: "did", surface: "did", context: "I did it.")

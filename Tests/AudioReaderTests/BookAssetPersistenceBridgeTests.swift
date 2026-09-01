@@ -27,6 +27,12 @@ struct BookAssetPersistenceBridgeTests {
                 index: 0,
                 title: "One",
                 audioPath: audio.path
+            ), Chapter(
+                id: "ebook-chapter",
+                index: 1,
+                title: "Published One",
+                audioPath: "",
+                ebookSectionIndex: 3
             )]
         )
 
@@ -37,6 +43,7 @@ struct BookAssetPersistenceBridgeTests {
         #expect(assets.allSatisfy { $0.contentHash?.isEmpty == false })
         #expect(assets.allSatisfy { ($0.byteCount ?? 0) > 0 })
         #expect(restored.chapters.first?.audioPath == audio.path)
+        #expect(restored.chapters.last?.ebookSectionIndex == 3)
         #expect(restored.ebookPath == epub.path)
         #expect(restored.coverPath == cover.path)
         #expect(restored.mediaAvailability == .audioAndEbook)

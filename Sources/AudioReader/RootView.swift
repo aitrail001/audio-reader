@@ -7,6 +7,8 @@ struct RootView: View {
     @State private var showMacAppleBooks = false
     @State private var macAppleBooks = MacAppleBooksLibrary()
     @State private var importingAppleBookID: String?
+    @State private var appleBooksCompanionTargetID: String?
+    @State private var appleBooksCompanionRequirement: MacAppleBooksCompanionRequirement?
     @State private var pendingAppleBooksDuplicate: MacAppleBookItem?
     @State private var pendingMacBookDelete: Book?
     @State private var macBookDeleteError: String?
@@ -25,7 +27,19 @@ struct RootView: View {
             } detail: {
                 switch state.tab {
                 case .library:
+#if os(macOS)
+                    LibraryView(state: state) { book in
+                        guard let requirement = MacAppleBooksCompanionRequirement(
+                            mediaAvailability: book.mediaAvailability
+                        ) else { return }
+                        pendingAppleBooksDuplicate = nil
+                        appleBooksCompanionTargetID = book.id
+                        appleBooksCompanionRequirement = requirement
+                        showMacAppleBooks = true
+                    }
+#else
                     LibraryView(state: state)
+#endif
                 case .player:
                     PlayerView(state: state)
                 case .vocab:
@@ -60,11 +74,18 @@ struct RootView: View {
             Text(state.backgroundJobNavigationError ?? "The original chapter is no longer available.")
         }
 #if os(macOS)
-        .sheet(isPresented: $showMacAppleBooks) {
+        .sheet(isPresented: $showMacAppleBooks, onDismiss: {
+            appleBooksCompanionTargetID = nil
+            appleBooksCompanionRequirement = nil
+        }) {
             MacAppleBooksView(
                 library: macAppleBooks,
                 pendingDuplicateImport: $pendingAppleBooksDuplicate,
                 importingID: importingAppleBookID,
+                companionBookTitle: appleBooksCompanionTargetID.flatMap { targetID in
+                    state.books.first(where: { $0.id == targetID })?.title
+                },
+                companionRequirement: appleBooksCompanionRequirement,
                 onImport: importAppleBook,
                 onConfirmDuplicate: confirmAppleBooksDuplicateImport
             )
@@ -243,6 +264,25 @@ struct RootView: View {
                 guard let location = item.location else {
                     throw AudiobookImportError.protectedOrUnavailable
                 }
+                if let targetID = appleBooksCompanionTargetID,
+                   let requirement = appleBooksCompanionRequirement {
+                    guard let book = state.books.first(where: { $0.id == targetID }) else {
+                        throw AudiobookImportError.protectedOrUnavailable
+                    }
+                    let added = try macAppleBooks.addCompanion(
+                        item,
+                        to: URL(fileURLWithPath: book.folderPath, isDirectory: true),
+                        required: requirement
+                    )
+                    macAppleBooks.message = added.isEmpty
+                        ? "That Apple Books file is already attached to \(book.title)."
+                        : "Added \(item.title) to \(book.title)."
+                    importResult = macAppleBooks.message
+                    await state.rescan()
+                    state.selectedBookID = targetID
+                    if !added.isEmpty { showMacAppleBooks = false }
+                    return
+                }
                 let destinationRoot = libraryRoot
                 let preflight = try await Task.detached(priority: .userInitiated) {
                     try AudiobookImportService.preflightFiles([location], into: destinationRoot)
@@ -304,7 +344,7 @@ struct BackgroundJobsButton: View {
             }
             .padding(.trailing, 5)
         }
-        .accessibilityLabel("Background jobs, \(state.backgroundJobs.count) queued or running")
+        .accessibilityLabel("Background jobs, \(state.backgroundJobs.count) active or recent")
         .help("Show background jobs")
         .popover(isPresented: $isPresented) {
             BackgroundJobsView(state: state) { job in
@@ -331,9 +371,9 @@ private struct BackgroundJobsView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Label(job.stage, systemImage: job.symbol)
                             .font(.subheadline.weight(.semibold))
-                        Text(job.state == .queued ? "Queued" : "Running")
+                        Text(statusLabel(for: job.state))
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(job.state == .queued ? Palette.mute : Palette.gold)
+                            .foregroundStyle(job.state == .running ? Palette.gold : Palette.mute)
                         Text(job.bookTitle)
                             .font(.subheadline)
                             .lineLimit(2)
@@ -343,9 +383,9 @@ private struct BackgroundJobsView: View {
                             .lineLimit(2)
                         if job.state == .queued {
                             ProgressView(value: 0)
-                        } else if let fraction = job.fraction {
+                        } else if job.state == .running, let fraction = job.fraction {
                             ProgressView(value: fraction)
-                        } else {
+                        } else if job.state == .running {
                             ProgressView()
                         }
                         Text(job.detail)
@@ -357,7 +397,8 @@ private struct BackgroundJobsView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel("\(job.state == .queued ? "Queued" : "Running") \(job.stage), \(job.bookTitle), \(job.chapterTitle)")
+                .accessibilityLabel("\(statusLabel(for: job.state)) \(job.stage), \(job.bookTitle), \(job.chapterTitle)")
+                .accessibilityValue(job.detail)
                 .accessibilityHint("Open this chapter in the player")
                 if job.id != state.backgroundJobs.last?.id {
                     Divider()
@@ -366,5 +407,15 @@ private struct BackgroundJobsView: View {
         }
         .padding(18)
         .frame(width: 320, alignment: .leading)
+    }
+
+    private func statusLabel(for state: BackgroundJob.State) -> String {
+        switch state {
+        case .queued: "Queued"
+        case .running: "Running"
+        case .completed: "Completed"
+        case .failed: "Failed"
+        case .cancelled: "Cancelled"
+        }
     }
 }

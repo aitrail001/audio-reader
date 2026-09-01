@@ -112,12 +112,14 @@ private enum IPadImportRequest: Identifiable {
     case files
     case folder
     case companion(bookID: String)
+    case appleBooksExport(bookID: String)
 
     var id: String {
         switch self {
         case .files: "files"
         case .folder: "folder"
         case .companion(let bookID): "companion-\(bookID)"
+        case .appleBooksExport(let bookID): "apple-books-export-\(bookID)"
         }
     }
 
@@ -126,19 +128,20 @@ private enum IPadImportRequest: Identifiable {
         case .files: [.mp3, .mpeg4Audio, .epub, .image, .audio]
         case .folder: [.folder]
         case .companion: [.mp3, .mpeg4Audio, .epub, .image, .audio]
+        case .appleBooksExport: [.epub]
         }
     }
 
     var allowsMultipleSelection: Bool {
         switch self {
         case .files: true
-        case .folder: false
+        case .folder, .appleBooksExport: false
         case .companion: true
         }
     }
     var importsAsCopy: Bool {
         switch self {
-        case .files, .companion: true
+        case .files, .companion, .appleBooksExport: true
         case .folder: false
         }
     }
@@ -169,6 +172,7 @@ struct IPadRootView: View {
     @State private var importError: String?
     @State private var pendingDuplicateImport: IPadPendingDuplicateImport?
     @State private var pendingBookDelete: Book?
+    @State private var companionTargetBookID: String?
 
     var body: some View {
         Group {
@@ -204,6 +208,7 @@ struct IPadRootView: View {
                 case .files: importFiles(result)
                 case .folder: importFolder(result)
                 case .companion(let bookID): importCompanion(result, bookID: bookID)
+                case .appleBooksExport(let bookID): importCompanion(result, bookID: bookID)
                 }
                 importRequest = nil
             }
@@ -269,6 +274,9 @@ struct IPadRootView: View {
             }
         }
         .onChange(of: source) { _, selected in
+            if selected != .deviceAudiobooks {
+                companionTargetBookID = nil
+            }
             if selected == .deviceAudiobooks {
                 Task { await deviceLibrary.requestAccessAndReload() }
             }
@@ -434,9 +442,13 @@ struct IPadRootView: View {
                 importedBooks: filteredBooks,
                 selectedBookID: $state.selectedBookID,
                 importingID: importingDeviceID,
+                companionBookTitle: companionTargetBookID.flatMap { targetID in
+                    state.books.first(where: { $0.id == targetID })?.title
+                },
                 importMessage: importMessage,
                 onRefresh: { Task { await deviceLibrary.requestAccessAndReload() } },
                 onImport: importDeviceAudiobook,
+                onCancelCompanion: { companionTargetBookID = nil },
                 onDelete: { pendingBookDelete = $0 }
             )
             .navigationTitle("Apple Books & Device")
@@ -533,7 +545,9 @@ struct IPadRootView: View {
             IPadBookDetail(
                 state: state,
                 book: book,
-                onAddEbook: { importRequest = .companion(bookID: book.id) },
+                onAddFiles: { importRequest = .companion(bookID: book.id) },
+                onBrowseAppleBooks: { browseAppleBooksCompanion(for: book) },
+                onAddAppleBooksExport: { importRequest = .appleBooksExport(bookID: book.id) },
                 onDelete: { pendingBookDelete = book }
             )
         } else {
@@ -639,6 +653,22 @@ struct IPadRootView: View {
         Task {
             defer { importingDeviceID = nil }
             do {
+                if let targetID = companionTargetBookID {
+                    guard let book = state.books.first(where: { $0.id == targetID }) else {
+                        throw AudiobookImportError.protectedOrUnavailable
+                    }
+                    let added = try await deviceLibrary.addCompanion(
+                        item,
+                        to: URL(fileURLWithPath: book.folderPath, isDirectory: true)
+                    )
+                    importMessage = added.isEmpty
+                        ? "That device audiobook is already attached to \(book.title)."
+                        : "Added \(item.title) to \(book.title)."
+                    companionTargetBookID = nil
+                    await state.rescan()
+                    state.selectedBookID = targetID
+                    return
+                }
                 let preflight = try await deviceLibrary.preflightAudiobook(item)
                 if preflight.identity.requiresConfirmation {
                     pendingDuplicateImport = .deviceAudiobook(item, preflight)
@@ -656,6 +686,19 @@ struct IPadRootView: View {
                 importError = error.localizedDescription
             }
         }
+    }
+
+    /// iPadOS can enumerate accessible device audiobooks, while Apple Books
+    /// EPUBs must arrive as an explicit exported document chosen by the reader.
+    private func browseAppleBooksCompanion(for book: Book) {
+        if book.chapters.contains(where: \.hasAudio) {
+            importRequest = .appleBooksExport(bookID: book.id)
+            return
+        }
+        companionTargetBookID = book.id
+        source = .deviceAudiobooks
+        applyColumnMode(isReaderActive: false, showsLibraryAlongsideReader: false)
+        Task { await deviceLibrary.requestAccessAndReload() }
     }
 
     private var duplicateImportTitle: String {
@@ -842,8 +885,13 @@ private struct IPadBookList: View {
 private struct IPadBookDetail: View {
     @Bindable var state: AppState
     let book: Book
-    let onAddEbook: () -> Void
+    let onAddFiles: () -> Void
+    let onBrowseAppleBooks: () -> Void
+    let onAddAppleBooksExport: () -> Void
     let onDelete: () -> Void
+
+    private var needsAudio: Bool { !book.chapters.contains(where: \.hasAudio) }
+    private var needsEbook: Bool { book.ebookPath == nil }
 
     var body: some View {
         ScrollView {
@@ -922,17 +970,28 @@ private struct IPadBookDetail: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Button(action: onAddEbook) {
+                    Menu {
+                        Button("Choose Files…") { onAddFiles() }
+                            .accessibilityIdentifier("library.repair.files")
+                        if needsAudio {
+                            Button("Apple Books & Device…") { onBrowseAppleBooks() }
+                                .accessibilityIdentifier("library.repair.appleBooksAudio")
+                        }
+                        if needsEbook {
+                            Button("Apple Books Export…") { onAddAppleBooksExport() }
+                                .accessibilityIdentifier("library.repair.appleBooksEPUB")
+                            Text(IPadEPUBImportPolicy.supportedEquivalent)
+                        }
+                    } label: {
                         Label(
                             book.mediaAvailability == .metadataOnly
                                 ? "Re-import Media"
                                 : book.mediaAvailability == .ebookOnly
-                                ? "Add Audio"
-                                : (book.ebookPath == nil ? "Add EPUB" : "Add Files"),
+                                    ? "Add Audio"
+                                    : (book.ebookPath == nil ? "Add EPUB" : "Add Files"),
                             systemImage: "book.closed"
                         )
                     }
-                    .accessibilityIdentifier("library.repair")
                     Button(role: .destructive, action: onDelete) {
                         Label("Delete Book", systemImage: "trash")
                     }
@@ -940,6 +999,7 @@ private struct IPadBookDetail: View {
                     Label("Book Actions", systemImage: "ellipsis.circle")
                 }
                 .accessibilityLabel("Book actions")
+                .accessibilityIdentifier("library.repair")
             }
         }
     }
@@ -950,13 +1010,21 @@ private struct DeviceAudiobooksView: View {
     let importedBooks: [Book]
     @Binding var selectedBookID: String?
     let importingID: UInt64?
+    let companionBookTitle: String?
     let importMessage: String?
     let onRefresh: () -> Void
     let onImport: (DeviceAudiobookItem) -> Void
+    let onCancelCompanion: () -> Void
     let onDelete: (Book) -> Void
 
     var body: some View {
         List {
+            if let companionBookTitle {
+                Section {
+                    LabeledContent("Adding audio to", value: companionBookTitle)
+                    Button("Cancel companion selection", action: onCancelCompanion)
+                }
+            }
             if !importedBooks.isEmpty {
                 Section("Imported into AudioReader") {
                     ForEach(importedBooks) { book in
@@ -1027,11 +1095,13 @@ private struct DeviceAudiobooksView: View {
                         if importingID == item.id {
                             ProgressView()
                         } else {
-                            Button("Import") { onImport(item) }
+                            Button(companionBookTitle == nil ? "Import" : "Add") { onImport(item) }
                                 .buttonStyle(.bordered)
                                 .frame(minHeight: 44)
                                 .disabled(!item.canImport || importingID != nil)
-                                .accessibilityIdentifier("library.importDevice.\(item.id)")
+                                .accessibilityIdentifier(companionBookTitle == nil
+                                    ? "library.importDevice.\(item.id)"
+                                    : "library.addDeviceCompanion.\(item.id)")
                         }
                     }
                     .padding(.vertical, 4)

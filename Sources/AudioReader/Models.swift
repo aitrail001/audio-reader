@@ -396,6 +396,16 @@ struct BackgroundJob: Identifiable, Equatable, Sendable {
     enum State: String, Sendable {
         case queued
         case running
+        case completed
+        case failed
+        case cancelled
+
+        var isTerminal: Bool {
+            switch self {
+            case .completed, .failed, .cancelled: true
+            case .queued, .running: false
+            }
+        }
     }
 
     var id: UUID
@@ -406,9 +416,11 @@ struct BackgroundJob: Identifiable, Equatable, Sendable {
     var chapterID: String?
     var chapterTitle: String
     var targetID: String?
+    var language: String?
     var stage: String
     var detail: String
     var fraction: Double?
+    var chapterSummaryPhase: ChapterSummaryProgress.Phase?
 
     init(
         id: UUID = UUID(),
@@ -419,9 +431,11 @@ struct BackgroundJob: Identifiable, Equatable, Sendable {
         chapterID: String? = nil,
         chapterTitle: String,
         targetID: String? = nil,
+        language: String? = nil,
         stage: String,
         detail: String,
-        fraction: Double?
+        fraction: Double?,
+        chapterSummaryPhase: ChapterSummaryProgress.Phase? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -431,9 +445,11 @@ struct BackgroundJob: Identifiable, Equatable, Sendable {
         self.chapterID = chapterID
         self.chapterTitle = chapterTitle
         self.targetID = targetID
+        self.language = language
         self.stage = stage
         self.detail = detail
         self.fraction = fraction
+        self.chapterSummaryPhase = chapterSummaryPhase
     }
 
     var origin: BackgroundJobOrigin {
@@ -455,6 +471,48 @@ struct BackgroundJob: Identifiable, Equatable, Sendable {
         case .chapterSummary: "list.bullet.rectangle"
         }
     }
+}
+
+/// Chapter-summary progress describes observable work phases only; providers do not
+/// expose trustworthy token completion, so every phase remains indeterminate.
+struct ChapterSummaryProgress: Equatable, Sendable {
+    enum Phase: String, CaseIterable, Sendable {
+        case queued
+        case preparing
+        case cacheOrRequest
+        case waitingForModel
+        case processing
+        case completed
+        case failed
+        case cancelled
+    }
+
+    var phase: Phase
+    var detail: String
+
+    var stage: String {
+        switch phase {
+        case .queued: "Chapter summary queued"
+        case .preparing: "Preparing chapter summary"
+        case .cacheOrRequest: "Checking cache or requesting summary"
+        case .waitingForModel: "Waiting for model"
+        case .processing: "Processing chapter summary"
+        case .completed: "Chapter summary ready"
+        case .failed: "Chapter summary failed"
+        case .cancelled: "Chapter summary cancelled"
+        }
+    }
+
+    var fraction: Double? { nil }
+
+    var isTerminal: Bool {
+        switch phase {
+        case .completed, .failed, .cancelled: true
+        case .queued, .preparing, .cacheOrRequest, .waitingForModel, .processing: false
+        }
+    }
+
+    var accessibilityValue: String { "\(stage). \(detail)" }
 }
 
 struct LLMChatMessage: Identifiable, Hashable, Sendable {

@@ -2584,6 +2584,66 @@ struct AccountSessionFlowTests {
         }
     }
 
+    @Test("book sync preserves EPUB section identity and accepts legacy chapters without it")
+    func bookSyncPreservesOptionalEbookSectionIndex() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-book-epub-index-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        let book = StoredBook(
+            id: BookID(rawValue: "epub-book"),
+            title: "EPUB Book",
+            source: "files",
+            chapters: [StoredChapter(
+                id: ChapterID(rawValue: "title-page"),
+                index: 0,
+                title: "Title Page",
+                ebookSectionIndex: 0
+            )]
+        )
+        let mutation = try AccountSyncApplicator.bookMutation(for: book)
+        let payload = try JSONDecoder().decode([String: SyncJSONValue].self, from: mutation.payload)
+        let change = SyncPulledChange(
+            sequence: 1,
+            entityType: mutation.entityType.rawValue,
+            entityId: mutation.entityID,
+            operation: mutation.operation.rawValue,
+            revision: 1,
+            changedAt: "2026-09-01T00:00:00Z",
+            payload: payload
+        )
+
+        try AccountSyncApplicator.applyPage([change], cursor: "1", to: store)
+
+        #expect(try store.loadBooks().first?.chapters.first?.ebookSectionIndex == 0)
+
+        let legacyPayload: [String: SyncJSONValue] = [
+            "localId": .string("legacy-book"),
+            "title": .string("Legacy Book"),
+            "source": .string("files"),
+            "chapters": .array([.object([
+                "localId": .string("legacy-chapter"),
+                "index": .number(0),
+                "title": .string("Legacy Chapter"),
+            ])]),
+        ]
+        let legacyChange = SyncPulledChange(
+            sequence: 2,
+            entityType: OutboxEntityType.book.rawValue,
+            entityId: AccountSyncApplicator.syncEntityID("legacy-book", kind: "book"),
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-09-01T00:00:01Z",
+            payload: legacyPayload
+        )
+
+        try AccountSyncApplicator.applyPage([legacyChange], cursor: "2", to: store)
+
+        let legacy = try #require(try store.loadBooks().first { $0.id.rawValue == "legacy-book" })
+        #expect(legacy.chapters.first?.ebookSectionIndex == nil)
+    }
+
     @Test("a concurrent catalog delete cannot make a transcript page permanently fail")
     func transcriptEligibilityRevalidatesAfterConcurrentDelete() throws {
         let root = FileManager.default.temporaryDirectory

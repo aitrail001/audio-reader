@@ -13,6 +13,31 @@ struct PendingExternalEPUBDuplicate: Sendable {
     var title: String
 }
 
+struct ChapterSummaryExecutionRequest: Sendable {
+    var provider: LLMProvider
+    var model: String
+    var origin: BackgroundJobOrigin
+    var system: String
+    var user: String
+    var refresh: Bool
+    var targetID: String?
+}
+
+struct ChapterSummaryExecutionResult: Sendable {
+    var text: String
+    var identity: ProductChapterSummary?
+}
+
+@MainActor
+protocol ChapterSummaryExecuting {
+    func execute(_ request: ChapterSummaryExecutionRequest) async throws -> ChapterSummaryExecutionResult
+}
+
+@MainActor
+protocol ChapterSummarySaving {
+    func save(_ summary: ChapterSummaryRecord) throws
+}
+
 @MainActor
 @Observable
 final class AppState {
@@ -23,6 +48,10 @@ final class AppState {
     private static let vocabularyLog = Logger(
         subsystem: "com.johnsonzhang.AudioReader",
         category: "vocabulary-capture"
+    )
+    private static let assistantLog = Logger(
+        subsystem: "com.johnsonzhang.AudioReader",
+        category: "chapter-assistant"
     )
 
     var settings: AppSettings
@@ -138,6 +167,8 @@ final class AppState {
 #endif
     var llmJobQueue = BackgroundJobQueue(maxConcurrentPerKind: 2)
     @ObservationIgnored private var llmJobOperations: [UUID: @MainActor (UUID) async -> Void] = [:]
+    @ObservationIgnored private let chapterSummaryExecutor: (any ChapterSummaryExecuting)?
+    @ObservationIgnored private let chapterSummarySaver: (any ChapterSummarySaving)?
     @ObservationIgnored private var chapterTranslationStopRequests: Set<UUID> = []
     @ObservationIgnored private var managedHydrationKeys: Set<String> = []
     @ObservationIgnored private var chapterSummaries: [ChapterSummaryRecord] = []
@@ -162,6 +193,15 @@ final class AppState {
 
     var selectedChapter: Chapter? {
         selectedBook?.chapters.first { $0.id == selectedChapterID }
+    }
+
+    /// EPUB-only sections render as published text without overwriting the
+    /// user's persisted preference for audio and aligned audio-plus-EPUB chapters.
+    var readerTextSource: TextSource {
+        guard selectedChapter?.ebookSectionIndex != nil,
+              selectedChapter?.hasAudio == false
+        else { return textSource }
+        return .original
     }
 
     /// Keeps immutable transcript source separate from the one resolved view
@@ -315,7 +355,7 @@ final class AppState {
                 fraction: transcriptionProgress?.fraction
             ))
         }
-        jobs.append(contentsOf: llmJobQueue.jobs)
+        jobs.append(contentsOf: llmJobQueue.visibleJobs)
         if !llmJobQueue.jobs.contains(where: { $0.kind == .chapterTranslation }),
            isChapterAssistantWorking,
            let origin = chapterTranslationJobOrigin,
@@ -337,6 +377,7 @@ final class AppState {
     func isLLMJobActive(kind: BackgroundJob.Kind, targetID: String? = nil) -> Bool {
         llmJobQueue.jobs.contains {
             $0.kind == kind
+                && !$0.state.isTerminal
                 && $0.chapterID == selectedChapterID
                 && (targetID == nil || $0.targetID == targetID)
         }
@@ -344,6 +385,12 @@ final class AppState {
 
     var selectedChapterTranslationJobState: BackgroundJob.State? {
         llmJobQueue.presentation(forChapterID: selectedChapterID).chapterTranslationState
+    }
+
+    var selectedChapterSummaryJob: BackgroundJob? {
+        selectedChapterID.flatMap {
+            llmJobQueue.latestChapterSummary(chapterID: $0, language: settings.targetLanguage)
+        }
     }
 
     var currentReaderPosition: (segment: TranscriptSegment?, word: TranscriptWord?) {
@@ -941,7 +988,13 @@ final class AppState {
         }
     }
 
-    init(composition: AppComposition = .inMemory(), account: AccountSession? = nil) {
+    init(composition: AppComposition = .inMemory(),
+        account: AccountSession? = nil,
+        chapterSummaryExecutor: (any ChapterSummaryExecuting)? = nil,
+        chapterSummarySaver: (any ChapterSummarySaving)? = nil
+    ) {
+        self.chapterSummaryExecutor = chapterSummaryExecutor
+        self.chapterSummarySaver = chapterSummarySaver
         vocabularyRepository = composition.vocabulary
         knownLemmaRepository = composition.knownLemmas
         reviewEventRepository = composition.reviewEvents
@@ -984,11 +1037,20 @@ final class AppState {
         knownLemmas = ((try? knownLemmaRepository.loadKnownLemmas()) ?? []).map(KnownLemmaRecord.init)
         let loadedReviewEvents = (try? reviewEventRepository.loadReviewEvents()) ?? []
         let reviewedVocabulary = (try? reviewEventRepository.loadReviewVocabularySnapshot()) ?? nil
-        vocab = VocabularyReviewHistoryReconciler.reconcile(
+        let reviewReconciledVocabulary = VocabularyReviewHistoryReconciler.reconcile(
             entries: loadedVocabulary,
             events: loadedReviewEvents,
             authoritativeSchedules: reviewedVocabulary ?? []
         )
+        vocab = VocabularySenseConfirmation.reconcile(reviewReconciledVocabulary)
+        let senseRepairs = zip(reviewReconciledVocabulary, vocab)
+            .compactMap { original, repaired in original == repaired ? nil : repaired }
+        if !senseRepairs.isEmpty {
+            try? vocabularyRepository.upsertVocabulary(senseRepairs.map(StoredVocabularyOccurrence.init))
+            Self.vocabularyLog.info(
+                "vocabulary_reconciliation message=vocabulary_reconciliation component=vocabulary-canonicalization outcome=repaired occurrences=\(senseRepairs.count, privacy: .public)"
+            )
+        }
         vocabReviewEvents = loadedReviewEvents
         appleIntelligenceAvailability = AppleIntelligenceAvailability.current()
         if usesLivePersistence, let database = liveDatabase {
@@ -1833,7 +1895,7 @@ final class AppState {
             context: segment.displayText,
             language: sourceLanguage
         )
-        let entry = VocabEntry(
+        var entry = VocabEntry(
             id: UUID().uuidString,
             word: head,
             canonicalForm: canonicalization.canonicalForm,
@@ -1865,8 +1927,15 @@ final class AppState {
             timestamp: word.start,
             addedAt: Date()
         )
+        if let recurringSenseID = VocabularySenseConfirmation.recurringSenseID(for: entry, among: vocab) {
+            entry.senseID = recurringSenseID
+            entry.canonicalizationStatus = .confirmed
+            Self.vocabularyLog.info(
+                "vocabulary_canonicalization message=vocabulary_canonicalization component=vocabulary-capture outcome=confirmed_sense_reused"
+            )
+        }
         Self.vocabularyLog.info(
-            "vocabulary_capture message=vocabulary_capture component=vocabulary-capture outcome=saved source=explicit_word canonicalizer=\(canonicalization.source.rawValue, privacy: .public) status=\(canonicalization.status.rawValue, privacy: .public)"
+            "vocabulary_capture message=vocabulary_capture component=vocabulary-capture outcome=saved source=explicit_word canonicalizer=\(entry.canonicalizationSource.rawValue, privacy: .public) status=\(entry.canonicalizationStatus.rawValue, privacy: .public)"
         )
         vocab.insert(entry, at: 0)
         persistVocabulary()
@@ -1905,7 +1974,8 @@ final class AppState {
             var updated = self.vocab[index]
             updated.canonicalForm = resolved.canonicalForm
             updated.partOfSpeech = resolved.partOfSpeech
-            updated.senseID = resolved.senseID
+            updated.senseID = VocabularySenseConfirmation.recurringSenseID(for: updated, among: self.vocab)
+                ?? resolved.senseID
             updated.canonicalizationSource = resolved.source
             updated.canonicalizationConfidence = resolved.confidence
             updated.canonicalizationStatus = resolved.status
@@ -1948,21 +2018,65 @@ final class AppState {
         )
     }
 
-    func updateVocabularyCanonicalForm(
+    func confirmVocabularyMeaning(
         _ entryID: String,
         canonicalForm: String,
         partOfSpeech: VocabularyPartOfSpeech,
-        senseID: String
+        choice: VocabularyMeaningChoice
     ) {
         guard let index = vocab.firstIndex(where: { $0.id == entryID }),
               !VocabularyCanonicalizer.normalizedForm(canonicalForm).isEmpty
         else { return }
         var updated = vocab[index]
-        updated.confirmCanonicalForm(canonicalForm, partOfSpeech: partOfSpeech, senseID: senseID)
+        let mergeTarget = choice.occurrenceIDs
+            .lazy
+            .filter { $0 != entryID }
+            .compactMap { targetID in self.vocab.first(where: { $0.id == targetID }) }
+            .first
+        let confirmedForm = mergeTarget?.studyForm ?? canonicalForm
+        let confirmedPartOfSpeech = mergeTarget?.partOfSpeech ?? partOfSpeech
+        let senseID = VocabularySenseConfirmation.resolvedSenseID(
+            for: choice,
+            entry: updated,
+            canonicalForm: confirmedForm,
+            partOfSpeech: confirmedPartOfSpeech
+        )
+        updated.confirmCanonicalForm(
+            confirmedForm,
+            partOfSpeech: confirmedPartOfSpeech,
+            senseID: senseID
+        )
+        var candidateVocabulary = vocab
+        candidateVocabulary[index] = updated
+        let reconciled = VocabularySenseConfirmation.reconcile(candidateVocabulary)
+        let changed = zip(vocab, reconciled).compactMap { original, repaired in
+            original == repaired ? nil : repaired
+        }
+        vocab = reconciled
+        persistVocabularyUpdates(changed)
+        Self.vocabularyLog.info(
+            "vocabulary_canonicalization message=vocabulary_canonicalization component=vocabulary-capture outcome=user_confirmed resource=\(entryID, privacy: .private(mask: .hash)) partOfSpeech=\(confirmedPartOfSpeech.rawValue, privacy: .public) merged=\(mergeTarget != nil, privacy: .public)"
+        )
+    }
+
+    /// A split retains the shared schedule on this occurrence while assigning a new hidden identity.
+    func separateVocabularyMeaning(_ entryID: String) {
+        guard let index = vocab.firstIndex(where: { $0.id == entryID }) else { return }
+        let card = VocabularyStudyCards.card(containing: entryID, in: vocab)
+        var updated = vocab[index]
+        if let card {
+            updated = updated.applyingStudySchedule(card.schedule)
+            updated.isInLearnList = card.isInLearnList
+        }
+        updated.confirmCanonicalForm(
+            updated.studyForm,
+            partOfSpeech: updated.partOfSpeech,
+            senseID: VocabularySenseConfirmation.separatedSenseID(for: updated)
+        )
         replaceVocabularyEntry(at: index, with: updated, refreshStudyIndex: false)
         persistVocabularyUpdates([updated])
         Self.vocabularyLog.info(
-            "vocabulary_canonicalization message=vocabulary_canonicalization component=vocabulary-capture outcome=user_confirmed resource=\(entryID, privacy: .private(mask: .hash)) partOfSpeech=\(partOfSpeech.rawValue, privacy: .public)"
+            "vocabulary_canonicalization message=vocabulary_canonicalization component=vocabulary-capture outcome=meaning_separated resource=\(entryID, privacy: .private(mask: .hash))"
         )
     }
 
@@ -2230,11 +2344,20 @@ final class AppState {
         knownLemmas = ((try? knownLemmaRepository.loadKnownLemmas()) ?? []).map(KnownLemmaRecord.init)
         let loadedReviewEvents = (try? reviewEventRepository.loadReviewEvents()) ?? []
         let reviewedVocabulary = (try? reviewEventRepository.loadReviewVocabularySnapshot()) ?? nil
-        vocab = VocabularyReviewHistoryReconciler.reconcile(
+        let reviewReconciledVocabulary = VocabularyReviewHistoryReconciler.reconcile(
             entries: loadedVocabulary,
             events: loadedReviewEvents,
             authoritativeSchedules: reviewedVocabulary ?? []
         )
+        vocab = VocabularySenseConfirmation.reconcile(reviewReconciledVocabulary)
+        let senseRepairs = zip(reviewReconciledVocabulary, vocab)
+            .compactMap { original, repaired in original == repaired ? nil : repaired }
+        if !senseRepairs.isEmpty {
+            try? vocabularyRepository.upsertVocabulary(senseRepairs.map(StoredVocabularyOccurrence.init))
+            Self.vocabularyLog.info(
+                "vocabulary_reconciliation message=vocabulary_reconciliation component=vocabulary-canonicalization outcome=repaired occurrences=\(senseRepairs.count, privacy: .public)"
+            )
+        }
         vocabReviewEvents = loadedReviewEvents
         if let synchronizedBooks = try? Persistence.loadCatalogBooks(database: database) {
             books = synchronizedBooks
@@ -2583,28 +2706,34 @@ final class AppState {
         return selectedChapterID == chapterID
     }
 
+    @discardableResult
     private func enqueueLLMJob(
         id: UUID = UUID(),
         kind: BackgroundJob.Kind,
         origin: BackgroundJobOrigin,
         targetID: String? = nil,
+        language: String? = nil,
         stage: String? = nil,
         detail: String? = nil,
+        chapterSummaryPhase: ChapterSummaryProgress.Phase? = nil,
         operation: @escaping @MainActor (UUID) async -> Void
-    ) {
+    ) -> BackgroundJob {
         llmJobOperations[id] = operation
         let job = llmJobQueue.enqueue(
             id: id,
             kind: kind,
             origin: origin,
             targetID: targetID,
+            language: language,
             stage: stage,
-            detail: detail
+            detail: detail,
+            chapterSummaryPhase: chapterSummaryPhase
         )
         refreshLLMBusyState()
         if job.state == .running {
             launchLLMJob(id)
         }
+        return job
     }
 
     private func launchLLMJob(_ id: UUID) {
@@ -2642,6 +2771,62 @@ final class AppState {
             )
             chapterTranslationJobOrigin = job.origin
         }
+    }
+
+    /// The queue owns both active and recent terminal summary metadata, so the
+    /// Chapter AI panel and Background Jobs always render the same request UUID.
+    func recordChapterSummaryProgress(
+        _ progress: ChapterSummaryProgress,
+        jobID: UUID,
+        origin: BackgroundJobOrigin,
+        language: String? = nil
+    ) {
+        guard let chapterID = origin.chapterID else { return }
+        if progress.isTerminal {
+            let state: BackgroundJob.State = switch progress.phase {
+            case .completed: .completed
+            case .failed: .failed
+            case .cancelled: .cancelled
+            case .queued, .preparing, .cacheOrRequest, .waitingForModel, .processing:
+                preconditionFailure("A nonterminal phase cannot produce terminal job state")
+            }
+            if llmJobQueue.jobs.contains(where: { $0.id == jobID }) {
+                llmJobQueue.markTerminal(
+                    id: jobID,
+                    state: state,
+                    stage: progress.stage,
+                    detail: progress.detail,
+                    chapterSummaryPhase: progress.phase
+                )
+            } else {
+                llmJobQueue.recordTerminal(BackgroundJob(
+                    id: jobID,
+                    kind: .chapterSummary,
+                    state: state,
+                    bookID: origin.bookID,
+                    bookTitle: origin.bookTitle,
+                    chapterID: chapterID,
+                    chapterTitle: origin.chapterTitle,
+                    language: language ?? settings.targetLanguage,
+                    stage: progress.stage,
+                    detail: progress.detail,
+                    fraction: nil,
+                    chapterSummaryPhase: progress.phase
+                ))
+            }
+        } else {
+            llmJobQueue.update(
+                id: jobID,
+                stage: progress.stage,
+                detail: progress.detail,
+                fraction: progress.fraction,
+                chapterSummaryPhase: progress.phase
+            )
+        }
+        refreshLLMBusyState()
+        Self.assistantLog.info(
+            "message=chapter_summary_progress requestId=\(jobID.uuidString, privacy: .public) component=chapter-summary outcome=\(progress.phase.rawValue, privacy: .public) resource=\(chapterID, privacy: .private(mask: .hash))"
+        )
     }
 
     func refreshLLMBusyState() {
@@ -3731,29 +3916,22 @@ final class AppState {
             user: fullChapterInput(transcript, metadata: metadata),
             refresh: force
         ) { summary, identity in
-            do {
-                let presentation = try ChapterSummaryPresentation.parse(summary)
-                let record = ChapterSummaryRecord.pending(
-                    summary: presentation,
-                    language: language,
-                    model: identity?.model ?? model,
-                    bookID: origin.bookID,
-                    bookTitle: origin.bookTitle,
-                    chapterID: chapterID,
-                    chapterTitle: origin.chapterTitle,
-                    replacing: existing,
-                    assistantResultID: identity?.id,
-                    promptVersion: identity?.promptVersion ?? identity?.policyVersion ?? "local",
-                    modelPolicyHash: identity?.modelPolicyHash ?? "local",
-                    sharedCacheEntryID: identity?.sharedCacheEntryID
-                )
-                self.saveChapterSummary(record, origin: origin)
-            } catch {
-                self.chapterAssistantErrorsByChapterID[chapterID] = error.localizedDescription
-                if self.isSelected(origin) {
-                    self.chapterAssistantError = error.localizedDescription
-                }
-            }
+            let presentation = try ChapterSummaryPresentation.parse(summary)
+            let record = ChapterSummaryRecord.pending(
+                summary: presentation,
+                language: language,
+                model: identity?.model ?? model,
+                bookID: origin.bookID,
+                bookTitle: origin.bookTitle,
+                chapterID: chapterID,
+                chapterTitle: origin.chapterTitle,
+                replacing: existing,
+                assistantResultID: identity?.id,
+                promptVersion: identity?.promptVersion ?? identity?.policyVersion ?? "local",
+                modelPolicyHash: identity?.modelPolicyHash ?? "local",
+                sharedCacheEntryID: identity?.sharedCacheEntryID
+            )
+            try self.persistAndPublishChapterSummary(record, origin: origin)
         }
     }
 
@@ -3769,23 +3947,40 @@ final class AppState {
               chapterSummary.status == .pending || chapterSummary.status == .replaced
         else { return }
         let reviewed = chapterSummary.reject(at: Date())
-        saveChapterSummary(reviewed, origin: selectedOrigin())
-        if reviewed.status == .rejected {
+        if saveChapterSummary(reviewed, origin: selectedOrigin()), reviewed.status == .rejected {
             self.chapterSummary = nil
         }
     }
 
+    @discardableResult
     private func saveChapterSummary(
         _ summary: ChapterSummaryRecord,
         origin: BackgroundJobOrigin
-    ) {
+    ) -> Bool {
+        do {
+            try persistAndPublishChapterSummary(summary, origin: origin)
+            return true
+        } catch {
+            chapterAssistantError = error.localizedDescription
+            errorMessage = "The chapter summary could not be saved. Nothing was changed."
+            return false
+        }
+    }
+
+    /// Publish only after the injected or live persistence boundary confirms a durable save.
+    private func persistAndPublishChapterSummary(
+        _ summary: ChapterSummaryRecord,
+        origin: BackgroundJobOrigin
+    ) throws {
+        if let chapterSummarySaver {
+            try chapterSummarySaver.save(summary)
+        } else if let database = liveDatabase {
+            try Persistence.saveChapterSummaryUpdate(summary, database: database)
+        }
         if let index = chapterSummaries.firstIndex(where: { $0.id == summary.id }) {
             chapterSummaries[index] = summary
         } else {
             chapterSummaries.append(summary)
-        }
-        if let database = liveDatabase {
-            Persistence.saveChapterSummaryUpdate(summary, database: database)
         }
         if isSelected(origin) {
             chapterSummary = summary.status == .rejected ? nil : summary
@@ -3908,11 +4103,26 @@ final class AppState {
         refresh: Bool = false,
         structuredJSON: Bool = false,
         heardQuizSegments: [ProductHeardSegment]? = nil,
-        completion: @escaping @MainActor (String, ProductChapterSummary?) -> Void,
+        completion: @escaping @MainActor (String, ProductChapterSummary?) throws -> Void,
         failure: (@MainActor () -> Void)? = nil
     ) {
+        let jobID = UUID()
+        let progressLanguage = settings.targetLanguage
         let provider = llmProvider
-        if let configurationError = llmConfigurationError(for: provider) {
+        let usesInjectedSummaryExecutor = kind == .chapterSummary && chapterSummaryExecutor != nil
+        if !usesInjectedSummaryExecutor,
+           let configurationError = llmConfigurationError(for: provider) {
+            if kind == .chapterSummary {
+                recordChapterSummaryProgress(
+                    ChapterSummaryProgress(
+                        phase: .failed,
+                        detail: configurationError.localizedDescription
+                    ),
+                    jobID: jobID,
+                    origin: origin,
+                    language: progressLanguage
+                )
+            }
             if let failure {
                 failure()
                 return
@@ -3933,16 +4143,64 @@ final class AppState {
         if isSelected(origin) {
             chapterAssistantError = nil
         }
-        enqueueLLMJob(
+        let initialSummaryProgress = ChapterSummaryProgress(
+            phase: .preparing,
+            detail: "Preparing chapter and reading context…"
+        )
+        let enqueuedJob = enqueueLLMJob(
+            id: jobID,
             kind: kind,
             origin: origin,
             targetID: targetID,
-            detail: "Requesting \(model)…"
-        ) { _ in
+            language: kind == .chapterSummary ? progressLanguage : nil,
+            stage: kind == .chapterSummary ? initialSummaryProgress.stage : nil,
+            detail: kind == .chapterSummary ? initialSummaryProgress.detail : "Requesting \(model)…",
+            chapterSummaryPhase: kind == .chapterSummary ? initialSummaryProgress.phase : nil
+        ) { jobID in
+            if kind == .chapterSummary {
+                self.recordChapterSummaryProgress(
+                    initialSummaryProgress,
+                    jobID: jobID,
+                    origin: origin,
+                    language: progressLanguage
+                )
+                let requestProgress: ChapterSummaryProgress
+                if provider == .managedQwen {
+                    requestProgress = ChapterSummaryProgress(
+                        phase: .cacheOrRequest,
+                        detail: refresh
+                            ? "Requesting a fresh summary from \(model). Model progress is indeterminate."
+                            : "Checking the shared cache first; \(model) will generate a summary if needed. Model progress is indeterminate."
+                    )
+                } else {
+                    requestProgress = ChapterSummaryProgress(
+                        phase: .waitingForModel,
+                        detail: "Waiting for \(model). Model progress is indeterminate."
+                    )
+                }
+                self.recordChapterSummaryProgress(
+                    requestProgress,
+                    jobID: jobID,
+                    origin: origin,
+                    language: progressLanguage
+                )
+            }
             do {
                 let result: String
                 var summaryIdentity: ProductChapterSummary?
-                if provider == .managedQwen, let heardQuizSegments {
+                if kind == .chapterSummary, let chapterSummaryExecutor = self.chapterSummaryExecutor {
+                    let execution = try await chapterSummaryExecutor.execute(ChapterSummaryExecutionRequest(
+                        provider: provider,
+                        model: model,
+                        origin: origin,
+                        system: system,
+                        user: user,
+                        refresh: refresh,
+                        targetID: targetID
+                    ))
+                    result = execution.text
+                    summaryIdentity = execution.identity
+                } else if provider == .managedQwen, let heardQuizSegments {
                     result = try await ManagedProductLLM.heardQuiz(
                         chapterID: origin.chapterID ?? "",
                         sourceLanguage: self.currentAudiobookLanguage.languageCode,
@@ -4013,16 +4271,76 @@ final class AppState {
                         chapterTitle: origin.chapterTitle
                     )
                 }
-                completion(result, summaryIdentity)
-            } catch {
-                if let chapterID = origin.chapterID {
-                    self.chapterAssistantErrorsByChapterID[chapterID] = error.localizedDescription
+                if kind == .chapterSummary {
+                    let usedCache = summaryIdentity?.provenance.hasPrefix("cache") == true
+                    self.recordChapterSummaryProgress(
+                        ChapterSummaryProgress(
+                            phase: .processing,
+                            detail: usedCache
+                                ? "Cached summary found. Parsing and saving it for review…"
+                                : "Model response received. Parsing and saving it for review…"
+                        ),
+                        jobID: jobID,
+                        origin: origin,
+                        language: progressLanguage
+                    )
                 }
-                if self.isSelected(origin) {
-                    self.chapterAssistantError = error.localizedDescription
+                try completion(result, summaryIdentity)
+                if kind == .chapterSummary {
+                    let usedCache = summaryIdentity?.provenance.hasPrefix("cache") == true
+                    self.recordChapterSummaryProgress(
+                        ChapterSummaryProgress(
+                            phase: .completed,
+                            detail: usedCache
+                                ? "Cached summary saved and ready for review."
+                                : "Summary saved and ready for review."
+                        ),
+                        jobID: jobID,
+                        origin: origin,
+                        language: progressLanguage
+                    )
+                }
+            } catch {
+                let cancelled = error is CancellationError
+                    || (error as? URLError)?.code == .cancelled
+                    || Task.isCancelled
+                if kind == .chapterSummary {
+                    self.recordChapterSummaryProgress(
+                        ChapterSummaryProgress(
+                            phase: cancelled ? .cancelled : .failed,
+                            detail: cancelled
+                                ? "The summary request was cancelled."
+                                : error.localizedDescription
+                        ),
+                        jobID: jobID,
+                        origin: origin,
+                        language: progressLanguage
+                    )
+                }
+                if !cancelled {
+                    if let chapterID = origin.chapterID {
+                        self.chapterAssistantErrorsByChapterID[chapterID] = error.localizedDescription
+                    }
+                    if self.isSelected(origin) {
+                        self.chapterAssistantError = error.localizedDescription
+                    }
                 }
                 failure?()
             }
+        }
+        if kind == .chapterSummary {
+            let enqueuedProgress = enqueuedJob.state == .queued
+                ? ChapterSummaryProgress(
+                    phase: .queued,
+                    detail: "Waiting for a chapter summary slot…"
+                )
+                : initialSummaryProgress
+            recordChapterSummaryProgress(
+                enqueuedProgress,
+                jobID: jobID,
+                origin: origin,
+                language: progressLanguage
+            )
         }
     }
 

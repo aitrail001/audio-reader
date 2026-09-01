@@ -154,19 +154,23 @@ public struct StoredChapter: Codable, Equatable, Sendable {
     public var title: String
     public var duration: TimeInterval?
     public var startTime: TimeInterval?
+    /// Identifies the published EPUB section independently of audio chapter order.
+    public var ebookSectionIndex: Int?
 
     public init(
         id: ChapterID,
         index: Int,
         title: String,
         duration: TimeInterval? = nil,
-        startTime: TimeInterval? = nil
+        startTime: TimeInterval? = nil,
+        ebookSectionIndex: Int? = nil
     ) {
         self.id = id
         self.index = index
         self.title = title
         self.duration = duration
         self.startTime = startTime
+        self.ebookSectionIndex = ebookSectionIndex
     }
 }
 

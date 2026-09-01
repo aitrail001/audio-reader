@@ -13,7 +13,7 @@ struct LocalVNextPersistenceTests {
 
         let store = LocalSQLiteStore(fileURL: url)
 
-        #expect(try store.currentSchemaVersion() == 2)
+        #expect(try store.currentSchemaVersion() == 3)
         #expect(Set(try store.columnNames(in: "local_assets")).isSuperset(of: [
             "content_hash", "byte_count", "metadata_json",
         ]))
@@ -61,7 +61,7 @@ struct LocalVNextPersistenceTests {
         try store.saveAssistantResult(currentResult)
 
         let reopened = LocalSQLiteStore(fileURL: url)
-        #expect(try reopened.currentSchemaVersion() == 2)
+        #expect(try reopened.currentSchemaVersion() == 3)
         #expect(try reopened.loadAssets(bookID: BookID(rawValue: "legacy-book")) == [currentAsset])
         #expect(try reopened.loadAssistantResults().contains(currentResult))
         #expect(try reopened.rowCount("local_assets") == 1)
@@ -69,11 +69,48 @@ struct LocalVNextPersistenceTests {
     }
 
     @Test
+    func priorV2SchemaMigratesChapterEbookSectionIndexWithoutLosingRows() throws {
+        let url = temporaryDirectory().appendingPathComponent("library-vNext.sqlite")
+        try installPriorV1Schema(at: url)
+        try installVersion2Columns(at: url)
+        try execute("PRAGMA user_version = 2", at: url)
+
+        let store = LocalSQLiteStore(fileURL: url)
+
+        #expect(try store.currentSchemaVersion() == 3)
+        #expect(try store.columnNames(in: "local_chapters").contains("ebook_section_index"))
+        let legacyChapter = try #require(try store.loadBooks().first?.chapters.first)
+        #expect(legacyChapter.ebookSectionIndex == nil)
+
+        var updated = legacyChapter
+        updated.ebookSectionIndex = 4
+        try store.saveBook(StoredBook(
+            id: BookID(rawValue: "legacy-book"),
+            title: "Legacy Book",
+            source: "files",
+            chapters: [updated]
+        ))
+
+        #expect(try LocalSQLiteStore(fileURL: url).loadBooks().first?.chapters.first?.ebookSectionIndex == 4)
+    }
+
+    @Test
+    func storedChapterDecodesPayloadsWrittenBeforeEbookSectionIndex() throws {
+        let data = Data(#"{"id":"legacy-chapter","index":2,"title":"Legacy"}"#.utf8)
+
+        let chapter = try JSONDecoder().decode(StoredChapter.self, from: data)
+
+        #expect(chapter.id == ChapterID(rawValue: "legacy-chapter"))
+        #expect(chapter.index == 2)
+        #expect(chapter.ebookSectionIndex == nil)
+    }
+
+    @Test
     func futureSchemaVersionIsRejectedWithoutModification() throws {
         let url = temporaryDirectory().appendingPathComponent("library-vNext.sqlite")
         try installPriorV1Schema(at: url)
         try installVersion2Columns(at: url)
-        try execute("PRAGMA user_version = 3", at: url)
+        try execute("PRAGMA user_version = 4", at: url)
         let schemaBeforeOpen = try schemaFingerprint(at: url)
         let assetsBeforeOpen = try rawRows("SELECT * FROM local_assets ORDER BY id", at: url)
 
@@ -85,7 +122,7 @@ struct LocalVNextPersistenceTests {
         #expect(throws: (any Error).self) {
             try store.deleteAssets(bookID: BookID(rawValue: "legacy-book"))
         }
-        #expect(try rawUserVersion(at: url) == 3)
+        #expect(try rawUserVersion(at: url) == 4)
         #expect(try schemaFingerprint(at: url) == schemaBeforeOpen)
         #expect(try rawRows("SELECT * FROM local_assets ORDER BY id", at: url) == assetsBeforeOpen)
     }
@@ -979,6 +1016,7 @@ struct LocalVNextPersistenceTests {
             "local_assets.content_hash", "local_assets.byte_count", "local_assets.metadata_json",
             "local_assistant_results.prompt_version", "local_assistant_results.model_policy_hash",
             "local_assistant_results.shared_cache_entry_id",
+            "local_chapters.ebook_section_index",
         ]))
         #expect(priorColumns.allSatisfy { table, columns in
             columns.subtracting(currentColumns[table] ?? []).isEmpty

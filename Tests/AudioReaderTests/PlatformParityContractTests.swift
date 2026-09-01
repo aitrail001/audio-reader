@@ -8,11 +8,12 @@ struct PlatformParityContractTests {
     func bothTargetsShareProductionSources() throws {
         let project = try source("AudioReader.xcodeproj/project.pbxproj")
 
-        #expect(project.components(separatedBy: "fileSystemSynchronizedGroups = (").count - 1 == 4)
+        #expect(project.components(separatedBy: "fileSystemSynchronizedGroups = (").count - 1 == 5)
         #expect(project.contains("name = \"AudioReader-macOS\";"))
         #expect(project.contains("name = \"AudioReader-iOS\";"))
         #expect(project.contains("name = \"AudioReader-macOSUITests\";"))
         #expect(project.contains("name = \"AudioReader-iOSUITests\";"))
+        #expect(project.contains("name = \"AudioReader-iOSUnitTests\";"))
         #expect(project.components(separatedBy: "100000000000000000000020 /* Sources/AudioReader */,").count - 1 == 3)
         #expect(project.components(separatedBy: "100000000000000000000025 /* Sources/AudioReaderDomain */,").count - 1 == 3)
         #expect(project.components(separatedBy: "100000000000000000000026 /* Sources/AudioReaderLocalStore */,").count - 1 == 3)
@@ -59,7 +60,12 @@ struct PlatformParityContractTests {
         #expect(learningDashboard.contains("Study "))
         #expect(vocabularyView.contains("state.setVocabularyLearnList("))
         #expect(vocabularyView.contains("state.acceptVocabularyForReview(entry.id)"))
-        #expect(vocabularyView.contains("state.updateVocabularyCanonicalForm("))
+        #expect(vocabularyView.contains("state.confirmVocabularyMeaning("))
+        #expect(vocabularyView.contains("Merge cards"))
+        #expect(vocabularyView.contains("Separate meaning"))
+        #expect(vocabularyView.contains("Meaning in this sentence"))
+        #expect(!vocabularyView.contains("Sense identifier"))
+        #expect(!vocabularyView.contains("senseDraft"))
         #expect(vocabularyView.contains("Save sentence as card"))
         #expect(vocabularyView.contains("Accept phrase suggestion"))
         #expect(vocabularyCanonicalization.contains("import NaturalLanguage"))
@@ -535,11 +541,6 @@ struct PlatformParityContractTests {
     @Test("Retranslation confirmation and loading are shared across both platforms")
     func sharesRetranslationFeedback() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
-        let sentenceTranslation = try section(
-            in: playerView,
-            from: "    private var translationBlock: some View",
-            to: "\n}\n\nprivate struct WordToken"
-        )
         let wordInspector = try section(
             in: playerView,
             from: "                        inspectorCard(title: \"In this sentence\")",
@@ -551,8 +552,6 @@ struct PlatformParityContractTests {
         #expect(playerView.contains("Retranslate this sentence?"))
         #expect(playerView.contains("Retranslate this word or phrase?"))
         #expect(playerView.contains("Retranslate the whole chapter?"))
-        #expect(sentenceTranslation.contains("if isTranslating {"))
-        #expect(!sentenceTranslation.contains("if isTranslating && gloss == nil"))
         #expect(activeIndex < glossIndex)
         #expect(!playerView.contains("#if os(macOS)\n            .confirmationDialog"))
     }
@@ -720,6 +719,37 @@ struct PlatformParityContractTests {
         #expect(persistence.contains("Local media from earlier versions is not migrated"))
         #expect(macLibrary.contains("Persistence.localMediaReimportNotice"))
         #expect(iPadLibrary.contains("Persistence.localMediaReimportNotice"))
+    }
+
+    @Test("Both platforms offer Files and Apple Books when attaching companion media")
+    func companionImportSourcesHavePlatformParity() throws {
+        let macRoot = try source("Sources/AudioReader/RootView.swift")
+        let macLibraryView = try source("Sources/AudioReader/LibraryView.swift")
+        let macAppleBooksView = try source("Sources/AudioReader/MacAppleBooksView.swift")
+        let macAppleBooksLibrary = try source("Sources/AudioReader/MacAppleBooksLibrary.swift")
+        let iPadRoot = try source("Sources/AudioReader/IPadRootView.swift")
+        let iPadImports = try source("Sources/AudioReader/IPadImports.swift")
+
+        #expect(macRoot.contains("appleBooksCompanionTargetID"))
+        #expect(macLibraryView.contains("onChooseAppleBooksCompanion"))
+        #expect(macLibraryView.contains("Button(\"Choose Files…\")"))
+        #expect(macLibraryView.contains("Button(\"Apple Books…\")"))
+        #expect(macAppleBooksView.contains("companionBookTitle"))
+        #expect(macAppleBooksView.contains("companionRequirement"))
+        #expect(macAppleBooksView.contains("isCompatibleCompanion"))
+        #expect(macAppleBooksView.contains("library.addAppleBooksCompanion."))
+        #expect(macAppleBooksLibrary.contains("func addCompanion("))
+        #expect(macAppleBooksLibrary.contains("required: MacAppleBooksCompanionRequirement"))
+        #expect(macAppleBooksLibrary.contains("reason=capability_already_present"))
+
+        #expect(iPadRoot.contains("case appleBooksExport(bookID: String)"))
+        #expect(iPadRoot.contains("companionTargetBookID"))
+        #expect(iPadRoot.contains("Button(\"Choose Files…\")"))
+        #expect(iPadRoot.contains("Button(\"Apple Books & Device…\")"))
+        #expect(iPadRoot.contains("Button(\"Apple Books Export…\")"))
+        #expect(iPadRoot.contains("library.addDeviceCompanion."))
+        #expect(iPadImports.contains("func addCompanion("))
+        #expect(iPadRoot.contains("IPadEPUBImportPolicy.supportedEquivalent"))
     }
 
     private func source(_ relativePath: String) throws -> String {

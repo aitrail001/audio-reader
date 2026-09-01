@@ -977,7 +977,8 @@ private struct VocabCard: View {
     @State private var showDictHTML = false
     @State private var showCanonicalEditor = false
     @State private var canonicalDraft = ""
-    @State private var senseDraft = ""
+    @State private var meaningChoices: [VocabularyMeaningChoice] = []
+    @State private var selectedMeaningID = ""
     @State private var partOfSpeechDraft = VocabularyPartOfSpeech.unknown
     @Environment(\.colorScheme) private var colorScheme
 
@@ -1104,15 +1105,20 @@ private struct VocabCard: View {
         }
         if entry.canonicalizationStatus == .needsReview {
             Button {
-                canonicalDraft = entry.studyForm
-                senseDraft = entry.senseID ?? ""
-                partOfSpeechDraft = entry.partOfSpeech
-                showCanonicalEditor = true
+                presentMeaningEditor()
             } label: {
-                Label("Confirm study form", systemImage: "pencil")
+                Label("Confirm meaning", systemImage: "pencil")
             }
             .buttonStyle(.bordered)
-            .accessibilityHint("Edits the low-confidence canonical form before it can merge with another card.")
+            .accessibilityHint("Choose the plain-language meaning used here before this item can merge with another card.")
+        } else {
+            Button {
+                presentMeaningEditor()
+            } label: {
+                Label("Edit meaning", systemImage: "square.and.pencil")
+            }
+            .buttonStyle(.bordered)
+            .accessibilityHint("Merge this occurrence with an equivalent card or separate an incorrect merge.")
         }
     }
 
@@ -1120,35 +1126,75 @@ private struct VocabCard: View {
         NavigationStack {
             Form {
                 TextField("Canonical study form", text: $canonicalDraft)
-                TextField("Sense identifier", text: $senseDraft)
                 Picker("Part of speech", selection: $partOfSpeechDraft) {
                     ForEach(VocabularyPartOfSpeech.allCases, id: \.self) { value in
                         Text(value.rawValue.capitalized).tag(value)
                     }
                 }
+                Section("Meaning in this sentence") {
+                    Picker("Meaning", selection: $selectedMeaningID) {
+                        ForEach(meaningChoices) { choice in
+                            Text(choice.title).tag(choice.id)
+                        }
+                    }
+                    Text(entry.context)
+                        .font(.caption)
+                        .foregroundStyle(Palette.dim)
+                }
+                if canSeparateMeaning {
+                    Button("Separate meaning", role: .destructive) {
+                        state.separateVocabularyMeaning(entry.id)
+                        showCanonicalEditor = false
+                    }
+                    .accessibilityHint("Keeps this occurrence and its review schedule but gives it a separate card.")
+                }
             }
-            .navigationTitle("Study identity")
+            .navigationTitle("Confirm meaning")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { showCanonicalEditor = false }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        state.updateVocabularyCanonicalForm(
+                    Button(isMergingMeaning ? "Merge cards" : "Save") {
+                        guard let choice = selectedMeaningChoice else { return }
+                        state.confirmVocabularyMeaning(
                             entry.id,
                             canonicalForm: canonicalDraft,
                             partOfSpeech: partOfSpeechDraft,
-                            senseID: senseDraft
+                            choice: choice
                         )
                         showCanonicalEditor = false
                     }
                     .disabled(
                         VocabularyCanonicalizer.normalizedForm(canonicalDraft).isEmpty
-                            || senseDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || selectedMeaningChoice == nil
                     )
                 }
             }
         }
+    }
+
+    private var selectedMeaningChoice: VocabularyMeaningChoice? {
+        meaningChoices.first { $0.id == selectedMeaningID }
+    }
+
+    private var isMergingMeaning: Bool {
+        selectedMeaningChoice?.occurrenceIDs.contains(where: { $0 != entry.id }) == true
+    }
+
+    private var canSeparateMeaning: Bool {
+        entry.canonicalizationStatus == .confirmed
+            && (VocabularyStudyCards.card(containing: entry.id, in: state.vocab)?.occurrences.count ?? 0) > 1
+    }
+
+    private func presentMeaningEditor() {
+        canonicalDraft = entry.studyForm
+        partOfSpeechDraft = entry.partOfSpeech
+        meaningChoices = VocabularySenseConfirmation.choices(for: entry, among: state.vocab)
+        selectedMeaningID = meaningChoices.first(where: { $0.occurrenceIDs.contains(entry.id) })?.id
+            ?? meaningChoices.first?.id
+            ?? ""
+        showCanonicalEditor = true
     }
 
     @ViewBuilder

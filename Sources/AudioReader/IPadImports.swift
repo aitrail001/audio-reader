@@ -23,12 +23,41 @@ struct DeviceAudiobookItem: Identifiable, Sendable {
     var canImport: Bool { !isProtected && assetURL != nil }
 }
 
+struct DeviceAudiobookCompanionStage {
+    var audio: URL
+    var cleanupFolder: URL?
+}
+
+/// Tests replace only device export and chapter extraction; attachment and
+/// cleanup still run through the production `addCompanion` mutation boundary.
+@MainActor
+struct DeviceAudiobookCompanionLoader {
+    var stage: (URL) async throws -> DeviceAudiobookCompanionStage
+    var chapters: (URL) async -> [EmbeddedM4BChapter]
+
+    static let live = Self(
+        stage: { assetURL in
+            if assetURL.isFileURL {
+                return .init(audio: assetURL, cleanupFolder: nil)
+            }
+            let exported = try await DeviceAudiobookLibrary.exportAudio(from: assetURL)
+            return .init(audio: exported.audio, cleanupFolder: exported.folder)
+        },
+        chapters: { await M4BChapterExtractor.extract(from: $0) }
+    )
+}
+
 @MainActor
 @Observable
 final class DeviceAudiobookLibrary {
     var items: [DeviceAudiobookItem] = []
     var isLoading = false
     var message: String?
+    private let companionLoader: DeviceAudiobookCompanionLoader
+
+    init(companionLoader: DeviceAudiobookCompanionLoader = .live) {
+        self.companionLoader = companionLoader
+    }
 
     var authorizationStatus: MPMediaLibraryAuthorizationStatus {
         MPMediaLibrary.authorizationStatus()
@@ -103,7 +132,7 @@ final class DeviceAudiobookLibrary {
             deviceImportLog.info("book_import_preflight_finished message=book_import_preflight_finished component=device-book-import source=device-audiobooks outcome=success duplicate_count=\(prepared.identity.duplicates.count, privacy: .public) identity=exact-content")
             return prepared
         }
-        let staged = try await exportAudio(from: assetURL)
+        let staged = try await Self.exportAudio(from: assetURL)
         do {
             let identity = try AudiobookImportService.preflightDeviceAudiobook(
                 deviceID: item.id,
@@ -162,7 +191,41 @@ final class DeviceAudiobookLibrary {
         return .init(folder: folder, createdBook: true, addedFileNames: [destination.lastPathComponent])
     }
 
-    private func exportAudio(from assetURL: URL) async throws -> (folder: URL, audio: URL) {
+    /// The selected book folder remains the identity owner when device audio is
+    /// attached, so an existing EPUB and its reading state are never replaced.
+    func addCompanion(_ item: DeviceAudiobookItem, to bookFolder: URL) async throws -> [String] {
+        guard item.canImport, let assetURL = item.assetURL else {
+            throw AudiobookImportError.protectedOrUnavailable
+        }
+        let requestID = UUID().uuidString
+        deviceImportLog.info(
+            "device_companion_started message=device_companion_started requestId=\(requestID, privacy: .public) component=device-book-import source=device-audiobooks"
+        )
+        do {
+            let staged = try await companionLoader.stage(assetURL)
+            defer {
+                if let cleanupFolder = staged.cleanupFolder {
+                    try? FileManager.default.removeItem(at: cleanupFolder)
+                }
+            }
+            let chapters = await companionLoader.chapters(assetURL)
+            let added = try AudiobookImportService.addCompanionFiles([staged.audio], to: bookFolder)
+            if !added.isEmpty, !chapters.isEmpty {
+                try M4BChapterExtractor.save(chapters, in: bookFolder)
+            }
+            deviceImportLog.info(
+                "device_companion_finished message=device_companion_finished requestId=\(requestID, privacy: .public) component=device-book-import source=device-audiobooks outcome=success added_count=\(added.count, privacy: .public)"
+            )
+            return added
+        } catch {
+            deviceImportLog.error(
+                "device_companion_finished message=device_companion_finished requestId=\(requestID, privacy: .public) component=device-book-import source=device-audiobooks outcome=failure error_type=\(String(reflecting: type(of: error)), privacy: .public)"
+            )
+            throw error
+        }
+    }
+
+    fileprivate static func exportAudio(from assetURL: URL) async throws -> (folder: URL, audio: URL) {
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("AudioReader-device-import-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

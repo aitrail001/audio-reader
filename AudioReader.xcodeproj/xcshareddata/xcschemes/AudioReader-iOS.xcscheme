@@ -10,10 +10,16 @@
          <BuildActionEntry buildForTesting = "YES" buildForRunning = "NO" buildForProfiling = "NO" buildForArchiving = "NO" buildForAnalyzing = "NO">
             <BuildableReference BuildableIdentifier = "primary" BlueprintIdentifier = "100000000000000000000043" BuildableName = "AudioReader-iOSUITests.xctest" BlueprintName = "AudioReader-iOSUITests" ReferencedContainer = "container:AudioReader.xcodeproj"/>
          </BuildActionEntry>
+         <BuildActionEntry buildForTesting = "YES" buildForRunning = "NO" buildForProfiling = "NO" buildForArchiving = "NO" buildForAnalyzing = "NO">
+            <BuildableReference BuildableIdentifier = "primary" BlueprintIdentifier = "100000000000000000000044" BuildableName = "AudioReader-iOSUnitTests.xctest" BlueprintName = "AudioReader-iOSUnitTests" ReferencedContainer = "container:AudioReader.xcodeproj"/>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction buildConfiguration = "Debug" selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv = "YES">
       <Testables>
+         <TestableReference skipped = "NO">
+            <BuildableReference BuildableIdentifier = "primary" BlueprintIdentifier = "100000000000000000000044" BuildableName = "AudioReader-iOSUnitTests.xctest" BlueprintName = "AudioReader-iOSUnitTests" ReferencedContainer = "container:AudioReader.xcodeproj"/>
+         </TestableReference>
          <TestableReference skipped = "NO">
             <BuildableReference BuildableIdentifier = "primary" BlueprintIdentifier = "100000000000000000000043" BuildableName = "AudioReader-iOSUITests.xctest" BlueprintName = "AudioReader-iOSUITests" ReferencedContainer = "container:AudioReader.xcodeproj"/>
          </TestableReference>

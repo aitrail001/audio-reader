@@ -93,6 +93,78 @@ struct BackgroundJobSchedulerTests {
         #expect(visible[2].detail == "Waiting for a chapter translation slot…")
     }
 
+    @Test("Chapter summary phases stay indeterminate while their detail remains meaningful")
+    func chapterSummaryPhasesAreTruthfullyIndeterminate() {
+        let phases = ChapterSummaryProgress.Phase.allCases.map {
+            ChapterSummaryProgress(phase: $0, detail: "Phase detail")
+        }
+
+        #expect(phases.allSatisfy { $0.fraction == nil })
+        #expect(ChapterSummaryProgress(phase: .queued, detail: "Queued").stage == "Chapter summary queued")
+        #expect(ChapterSummaryProgress(phase: .preparing, detail: "Context").stage == "Preparing chapter summary")
+        #expect(ChapterSummaryProgress(phase: .cacheOrRequest, detail: "Cache").stage == "Checking cache or requesting summary")
+        #expect(ChapterSummaryProgress(phase: .waitingForModel, detail: "Model").stage == "Waiting for model")
+        #expect(ChapterSummaryProgress(phase: .processing, detail: "Saving").stage == "Processing chapter summary")
+        #expect(ChapterSummaryProgress(phase: .completed, detail: "Ready").isTerminal)
+        #expect(ChapterSummaryProgress(phase: .failed, detail: "Failed").isTerminal)
+        #expect(ChapterSummaryProgress(phase: .cancelled, detail: "Cancelled").isTerminal)
+    }
+
+    @MainActor
+    @Test("Selected chapter summary progress updates the shared job and retains a terminal outcome")
+    func selectedChapterSummaryProgressSharesJobLifecycle() {
+        let state = AppState()
+        state.selectedChapterID = "chapter-1"
+        let job = state.llmJobQueue.enqueue(
+            kind: .chapterSummary,
+            origin: origin,
+            language: state.settings.targetLanguage,
+            stage: "Preparing chapter summary",
+            detail: "Preparing chapter and reading context…",
+            chapterSummaryPhase: .preparing
+        )
+        let waiting = ChapterSummaryProgress(
+            phase: .waitingForModel,
+            detail: "Waiting for Test Model. Model progress is indeterminate."
+        )
+
+        state.recordChapterSummaryProgress(waiting, jobID: job.id, origin: origin)
+
+        #expect(state.selectedChapterSummaryJob?.chapterSummaryPhase == waiting.phase)
+        #expect(state.llmJobQueue.jobs.first?.stage == waiting.stage)
+        #expect(state.llmJobQueue.jobs.first?.detail == waiting.detail)
+        #expect(state.llmJobQueue.jobs.first?.fraction == nil)
+
+        let requestedLanguage = state.settings.targetLanguage
+        state.settings.targetLanguage = requestedLanguage == "ko" ? "zh-Hans" : "ko"
+        #expect(state.selectedChapterSummaryJob == nil)
+        state.settings.targetLanguage = requestedLanguage
+
+        _ = state.llmJobQueue.finish(id: job.id)
+        let completed = ChapterSummaryProgress(
+            phase: .completed,
+            detail: "Summary saved and ready for review."
+        )
+        state.recordChapterSummaryProgress(completed, jobID: job.id, origin: origin)
+
+        #expect(state.selectedChapterSummaryJob?.chapterSummaryPhase == completed.phase)
+        #expect(state.selectedChapterSummaryJob?.id == job.id)
+        #expect(!state.isLLMJobActive(kind: .chapterSummary))
+
+        let retryJob = state.llmJobQueue.enqueue(
+            kind: .chapterSummary,
+            origin: origin,
+            language: state.settings.targetLanguage
+        )
+        let retry = ChapterSummaryProgress(
+            phase: .preparing,
+            detail: "Preparing chapter and reading context…"
+        )
+        state.recordChapterSummaryProgress(retry, jobID: retryJob.id, origin: origin)
+        #expect(state.selectedChapterSummaryJob?.chapterSummaryPhase == retry.phase)
+        #expect(state.selectedChapterSummaryJob?.id == retryJob.id)
+    }
+
     @Test("Selected-chapter busy state changes deterministically with selection")
     func projectsBusyStateForSelectedChapter() {
         var queue = BackgroundJobQueue(maxConcurrentPerKind: 2)

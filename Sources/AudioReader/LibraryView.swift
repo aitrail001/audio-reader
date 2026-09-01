@@ -2,7 +2,9 @@ import SwiftUI
 
 struct LibraryView: View {
     @Bindable var state: AppState
+    var onChooseAppleBooksCompanion: (Book) -> Void = { _ in }
     @State private var pendingBookDelete: Book?
+    @State private var companionSourceBook: Book?
     @State private var deleteError: String?
     @State private var bookUpdateResult: String?
     @State private var query = ""
@@ -24,7 +26,7 @@ struct LibraryView: View {
                         transcribedCount: state.transcribedChapterCount(in: book),
                         onSelect: { select(book) },
                         onContinue: { continueReading(book) },
-                        onRepair: { addCompanionFiles(to: book) }
+                        onRepair: { chooseCompanionSource(for: book) }
                     )
                         .contextMenu {
                             Button(role: .destructive) {
@@ -47,7 +49,7 @@ struct LibraryView: View {
                 ChapterStrip(
                     state: state,
                     book: book,
-                    onAddEbook: { addCompanionFiles(to: book) },
+                    onAddEbook: { chooseCompanionSource(for: book) },
                     onDelete: { pendingBookDelete = book }
                 )
             }
@@ -96,6 +98,30 @@ struct LibraryView: View {
         } message: {
             Text(bookUpdateResult ?? "")
         }
+#if os(macOS)
+        .confirmationDialog("Add Companion Media", isPresented: Binding(
+            get: { companionSourceBook != nil },
+            set: { if !$0 { companionSourceBook = nil } }
+        )) {
+            Button("Choose Files…") {
+                guard let book = companionSourceBook else { return }
+                companionSourceBook = nil
+                addCompanionFiles(to: book)
+            }
+            if let book = companionSourceBook,
+               MacAppleBooksCompanionRequirement(mediaAvailability: book.mediaAvailability) != nil {
+                Button("Apple Books…") {
+                    companionSourceBook = nil
+                    onChooseAppleBooksCompanion(book)
+                }
+            }
+            Button("Cancel", role: .cancel) { companionSourceBook = nil }
+        } message: {
+            Text(MacAppleBooksCompanionRequirement(
+                mediaAvailability: companionSourceBook?.mediaAvailability ?? .audioAndEbook
+            )?.prompt ?? "Choose ordinary files to update this book.")
+        }
+#endif
     }
 
     private var filteredBooks: [Book] {
@@ -245,6 +271,14 @@ struct LibraryView: View {
         } catch {
             bookUpdateResult = error.localizedDescription
         }
+#endif
+    }
+
+    private func chooseCompanionSource(for book: Book) {
+#if os(macOS)
+        companionSourceBook = book
+#else
+        addCompanionFiles(to: book)
 #endif
     }
 }

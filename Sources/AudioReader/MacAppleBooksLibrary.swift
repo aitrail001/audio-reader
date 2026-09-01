@@ -30,6 +30,36 @@ struct MacAppleBookItem: Identifiable, Hashable, Sendable {
     }
 }
 
+enum MacAppleBooksCompanionRequirement: Equatable, Sendable {
+    case audiobook
+    case ebook
+    case either
+
+    init?(mediaAvailability: BookMediaAvailability) {
+        switch mediaAvailability {
+        case .ebookOnly: self = .audiobook
+        case .audioOnly: self = .ebook
+        case .metadataOnly: self = .either
+        case .audioAndEbook: return nil
+        }
+    }
+
+    func accepts(_ kind: MacAppleBookItem.Kind) -> Bool {
+        switch (self, kind) {
+        case (.audiobook, .audiobook), (.ebook, .ebook), (.either, _): true
+        default: false
+        }
+    }
+
+    var prompt: String {
+        switch self {
+        case .audiobook: "Choose an accessible downloaded audiobook."
+        case .ebook: "Choose a non-DRM EPUB book."
+        case .either: "Choose an accessible audiobook or a non-DRM EPUB book."
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class MacAppleBooksLibrary {
@@ -173,6 +203,84 @@ final class MacAppleBooksLibrary {
         )
         if item.kind == .audiobook, let artworkData = item.artworkData {
             try artworkData.write(to: folder.appendingPathComponent("cover.jpg"), options: .atomic)
+        }
+    }
+
+    /// The caller's missing-capability requirement is rechecked against the
+    /// folder so stale UI state cannot replace or add a second effective medium.
+    func addCompanion(
+        _ item: MacAppleBookItem,
+        to bookFolder: URL,
+        required: MacAppleBooksCompanionRequirement
+    ) throws -> [String] {
+        guard item.canImport, let location = item.location else {
+            throw AudiobookImportError.protectedOrUnavailable
+        }
+        let requestID = UUID().uuidString
+        appleBooksLog.info(
+            "apple_books_companion_started message=apple_books_companion_started requestId=\(requestID, privacy: .public) component=apple-books-library kind=\(item.kind.rawValue, privacy: .public)"
+        )
+        guard required.accepts(item.kind) else {
+            appleBooksLog.error(
+                "apple_books_companion_finished message=apple_books_companion_finished requestId=\(requestID, privacy: .public) component=apple-books-library outcome=rejected reason=incompatible_kind"
+            )
+            throw AudiobookImportError.incompatibleCompanion
+        }
+        if containsMedia(of: item.kind, in: bookFolder) {
+            if try isExactRepeat(location, kind: item.kind, in: bookFolder) {
+                appleBooksLog.info(
+                    "apple_books_companion_finished message=apple_books_companion_finished requestId=\(requestID, privacy: .public) component=apple-books-library outcome=success added_count=0 reason=exact_repeat"
+                )
+                return []
+            }
+            appleBooksLog.error(
+                "apple_books_companion_finished message=apple_books_companion_finished requestId=\(requestID, privacy: .public) component=apple-books-library outcome=rejected reason=capability_already_present"
+            )
+            throw AudiobookImportError.incompatibleCompanion
+        }
+        do {
+            let added = try AudiobookImportService.addCompanionFiles([location], to: bookFolder)
+            appleBooksLog.info(
+                "apple_books_companion_finished message=apple_books_companion_finished requestId=\(requestID, privacy: .public) component=apple-books-library outcome=success added_count=\(added.count, privacy: .public)"
+            )
+            return added
+        } catch {
+            appleBooksLog.error(
+                "apple_books_companion_finished message=apple_books_companion_finished requestId=\(requestID, privacy: .public) component=apple-books-library outcome=failure error_type=\(String(reflecting: type(of: error)), privacy: .public)"
+            )
+            throw error
+        }
+    }
+
+    private func containsMedia(of kind: MacAppleBookItem.Kind, in folder: URL) -> Bool {
+        mediaURLs(of: kind, in: folder).isEmpty == false
+    }
+
+    private func isExactRepeat(
+        _ source: URL,
+        kind: MacAppleBookItem.Kind,
+        in folder: URL
+    ) throws -> Bool {
+        let sourceIsRegular = try source.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true
+        guard sourceIsRegular else { return false }
+        let sourceDigest = try AudiobookImportService.fileDigest(source)
+        return try mediaURLs(of: kind, in: folder).contains { candidate in
+            let candidateIsRegular = try candidate.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true
+            guard candidateIsRegular else { return false }
+            return try AudiobookImportService.fileDigest(candidate) == sourceDigest
+        }
+    }
+
+    private func mediaURLs(of kind: MacAppleBookItem.Kind, in folder: URL) -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: folder,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        let supported = kind == .audiobook ? LibraryScanner.audioExt : LibraryScanner.ebookExt
+        return enumerator.compactMap { entry in
+            guard let url = entry as? URL, supported.contains(url.pathExtension.lowercased()) else { return nil }
+            return url
         }
     }
 

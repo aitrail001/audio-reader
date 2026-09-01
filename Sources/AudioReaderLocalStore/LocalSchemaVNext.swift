@@ -3,7 +3,7 @@ import Foundation
 /// The branch-isolated schema starts empty by design. It never inspects or
 /// repairs the legacy database because that file remains owned by local-reader.
 public enum LocalSchemaVNext: Sendable {
-    public static let version = 2
+    public static let version = 3
 
     /// Version 1 shipped before these device-local metadata fields existed.
     /// Defaults preserve old rows without inventing provider or cache provenance.
@@ -14,6 +14,11 @@ public enum LocalSchemaVNext: Sendable {
         ("local_assistant_results", "prompt_version", "ALTER TABLE local_assistant_results ADD COLUMN prompt_version TEXT NOT NULL DEFAULT 'local'"),
         ("local_assistant_results", "model_policy_hash", "ALTER TABLE local_assistant_results ADD COLUMN model_policy_hash TEXT NOT NULL DEFAULT 'local'"),
         ("local_assistant_results", "shared_cache_entry_id", "ALTER TABLE local_assistant_results ADD COLUMN shared_cache_entry_id TEXT"),
+    ]
+
+    /// Version 3 keeps EPUB navigation identity nullable for audio-only and legacy rows.
+    static let version3ColumnAdditions: [(table: String, column: String, sql: String)] = [
+        ("local_chapters", "ebook_section_index", "ALTER TABLE local_chapters ADD COLUMN ebook_section_index INTEGER"),
     ]
 
     public static let requiredTables = [
@@ -74,7 +79,8 @@ public enum LocalSchemaVNext: Sendable {
         """
         CREATE TABLE IF NOT EXISTS local_chapters (
           id TEXT PRIMARY KEY, book_id TEXT NOT NULL, asset_id TEXT, position INTEGER NOT NULL DEFAULT 0,
-          title TEXT NOT NULL, duration REAL, start_time REAL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+          title TEXT NOT NULL, duration REAL, start_time REAL, ebook_section_index INTEGER,
+          created_at REAL NOT NULL, updated_at REAL NOT NULL,
           server_version INTEGER NOT NULL DEFAULT 0, deleted_at REAL, last_mutation_id TEXT,
           FOREIGN KEY(book_id) REFERENCES local_books(id), FOREIGN KEY(asset_id) REFERENCES local_assets(id)
         );

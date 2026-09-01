@@ -1608,6 +1608,22 @@ private struct ChapterAssistantView: View {
                     .controlSize(.small)
                     .disabled(state.transcript == nil)
 
+                    if let job = state.selectedChapterSummaryJob {
+                        assistantCard(title: job.stage) {
+                            if !job.state.isTerminal {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                            Text(job.detail)
+                                .font(.system(size: 12))
+                                .foregroundStyle(Palette.dim)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Chapter summary progress")
+                        .accessibilityValue("\(job.stage). \(job.detail)")
+                    }
+
                     if let checkpoint = state.selectedChapterTranslationCheckpoint {
                         Label(chapterTranslationStatus(checkpoint), systemImage: "checkmark.circle")
                             .font(.system(size: 11))
@@ -1638,7 +1654,8 @@ private struct ChapterAssistantView: View {
                         }
                     }
 
-                    if state.isChapterAssistantWorking {
+                    if state.isChapterAssistantWorking,
+                       !state.isLLMJobActive(kind: .chapterSummary) {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small)
                             Text("Asking \(state.selectedLLMModel)…")
@@ -2303,7 +2320,7 @@ private struct TranscriptTextColumn: View {
                             currentWordID: segment.id == cursor.segmentID ? cursor.wordID : nil,
                             focusedSegmentID: state.focusedSegmentID,
                             focusedWordID: state.focusedWordID,
-                            textSource: state.textSource,
+                            textSource: state.readerTextSource,
                             gloss: state.sentenceGloss(for: segment),
                             isTranslating: state.isLLMJobActive(kind: .sentenceTranslation, targetID: segment.id),
                             languageLabel: state.studyLanguage.menuLabel,
@@ -2450,6 +2467,81 @@ private struct TranscriptTextColumn: View {
     }
 }
 
+struct SentenceTranslationPresentation: Equatable, Sendable {
+    enum Status: Equatable, Sendable {
+        case draft(model: String)
+        case saved(model: String)
+    }
+
+    struct Actions: OptionSet, Sendable {
+        let rawValue: UInt8
+
+        static let translate = Actions(rawValue: 1 << 0)
+        static let accept = Actions(rawValue: 1 << 1)
+        static let reject = Actions(rawValue: 1 << 2)
+        static let edit = Actions(rawValue: 1 << 3)
+        static let retranslate = Actions(rawValue: 1 << 4)
+    }
+
+    let showsBlock: Bool
+    let showsSpinner: Bool
+    let glossText: String?
+    let status: Status?
+    let actions: Actions
+
+    /// Listen First is a hard boundary: hidden sentences cannot disclose assistant output or activity.
+    static func resolve(
+        isRevealed: Bool,
+        isSelected: Bool,
+        isTranslating: Bool,
+        gloss: GlossEntry?
+    ) -> SentenceTranslationPresentation {
+        guard isRevealed else {
+            return SentenceTranslationPresentation(
+                showsBlock: false,
+                showsSpinner: false,
+                glossText: nil,
+                status: nil,
+                actions: []
+            )
+        }
+
+        let status: Status?
+        switch gloss?.status {
+        case .pending, .edited, .replaced:
+            status = gloss.map { .draft(model: $0.model) }
+        case .accepted:
+            status = gloss.map { .saved(model: $0.model) }
+        case .rejected, .stale, nil:
+            status = nil
+        }
+
+        let actions: Actions
+        if !isSelected || isTranslating {
+            actions = []
+        } else {
+            switch gloss?.status {
+            case .pending, .edited, .replaced:
+                actions = [.accept, .reject, .edit, .retranslate]
+            case .accepted:
+                actions = [.edit, .retranslate]
+            case .rejected, .stale:
+                actions = []
+            case nil:
+                actions = [.translate]
+            }
+        }
+
+        return SentenceTranslationPresentation(
+            showsBlock: isTranslating || gloss != nil || isSelected,
+            showsSpinner: isTranslating,
+            glossText: gloss?.text,
+            status: status,
+            actions: actions
+        )
+    }
+}
+
 private struct SentenceRow: View {
     let segment: TranscriptSegment
     let currentID: String?
@@ -2522,6 +2614,12 @@ private struct SentenceRow: View {
     }
 
     var body: some View {
+        let translationPresentation = SentenceTranslationPresentation.resolve(
+            isRevealed: listenFirstVisibility == .revealed,
+            isSelected: isSelected,
+            isTranslating: isTranslating,
+            gloss: gloss
+        )
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Button { onSeek(segment.start) } label: {
@@ -2589,8 +2687,8 @@ private struct SentenceRow: View {
                     }
                 }
 
-                if isSelected {
-                    translationBlock
+                if translationPresentation.showsBlock {
+                    translationBlock(translationPresentation)
                 }
             } else {
                 HStack(spacing: 10) {
@@ -2627,50 +2725,54 @@ private struct SentenceRow: View {
         .accessibilityAction(named: "Seek to sentence") { onSeek(segment.start) }
     }
 
-    @ViewBuilder
-    private var translationBlock: some View {
+    private func translationBlock(_ presentation: SentenceTranslationPresentation) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            if isTranslating {
+            if presentation.showsSpinner {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("The LLM is translating…")
                         .font(.system(size: 12))
                         .foregroundStyle(Palette.dim)
                 }
-            } else if let gloss {
-                GlossBody(text: gloss.text, size: type.gloss)
+            }
+            if let glossText = presentation.glossText {
+                GlossBody(text: glossText, size: type.gloss)
+            }
+            if let status = presentation.status {
                 HStack(spacing: 8) {
-            if gloss.status == .pending || gloss.status == .edited || gloss.status == .replaced {
-                        Text("Draft · Model: \(gloss.model)")
+                    switch status {
+                    case .draft(let model):
+                        Text("Draft · Model: \(model)")
                             .font(.system(size: 11))
                             .foregroundStyle(Palette.gold)
+                    case .saved(let model):
+                        Text("Saved · Model: \(model)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Palette.gold)
+                    }
+                    if presentation.actions.contains(.accept) {
                         Button("Accept", action: onAccept)
                             .buttonStyle(.borderedProminent)
                             .tint(Palette.terracotta)
                             .controlSize(.small)
+                    }
+                    if presentation.actions.contains(.reject) {
                         Button("Reject", action: onReject)
                             .controlSize(.small)
+                    }
+                    if presentation.actions.contains(.edit) {
                         Button("Edit") {
-                            editedTranslation = gloss.text
+                            editedTranslation = presentation.glossText ?? ""
                             showTranslationEditor = true
                         }
                         .controlSize(.small)
-                        Button("Retranslate") { showRetranslateConfirmation = true }
-                            .controlSize(.small)
-                    } else if gloss.status == .accepted {
-                        Text("Saved · Model: \(gloss.model)")
-                            .font(.system(size: 11))
-                            .foregroundStyle(Palette.gold)
-                        Button("Edit") {
-                            editedTranslation = gloss.text
-                            showTranslationEditor = true
-                        }
-                        .controlSize(.small)
+                    }
+                    if presentation.actions.contains(.retranslate) {
                         Button("Retranslate") { showRetranslateConfirmation = true }
                             .controlSize(.small)
                     }
                 }
-            } else {
+            } else if presentation.actions.contains(.translate) {
                 Button(action: onTranslate) {
                     Label("Translate into \(languageLabel)", systemImage: "globe")
                 }
