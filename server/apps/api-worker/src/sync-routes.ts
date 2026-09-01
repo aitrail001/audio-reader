@@ -2,6 +2,7 @@ import type { Principal } from "@audio-reader/auth";
 import type { components } from "@audio-reader/contract";
 import {
   isSyncEntityType,
+  SyncStoreWriteError,
   type IdentityStore,
   type OpsStore,
   type SyncMutation,
@@ -13,6 +14,7 @@ import { withIdempotency, type IdempotencyStore } from "./idempotency";
 import { requireBoundDevice } from "./route-helpers";
 import type { AccountSyncReadinessService } from "./account-sync-readiness";
 import { validateSyncV2Payload } from "./sync-v2-payload-policy";
+import type { ObjectStore } from "./object-store";
 
 type SyncPushResponse = components["schemas"]["SyncPushResponse"];
 type SyncPullResponse = components["schemas"]["SyncPullResponse"];
@@ -39,6 +41,7 @@ export type SyncRouteContext = {
   sync?: SyncStore;
   identity?: IdentityStore;
   ops?: OpsStore;
+  objects?: ObjectStore;
   accountSyncReadiness: AccountSyncReadinessService;
 };
 
@@ -223,11 +226,24 @@ async function pushSync(context: SyncRouteContext): Promise<Response> {
         mutations: mutations.length,
         contentLength: context.request.headers.get("content-length") ?? "unknown",
       });
-      const pushed = await sync.push({
-        userId: principal.accountId,
+      let pushed;
+      try {
+        pushed = await sync.push({
+          userId: principal.accountId,
+          deviceId,
+          batchId,
+          mutations,
+        });
+      } catch (error) {
+        logSyncDatabaseFailure(context.requestId, mutations.length, error);
+        throw error;
+      }
+      await cleanupDeletedBookAssets({
+        context,
+        accountId: principal.accountId,
         deviceId,
-        batchId,
         mutations,
+        results: pushed.results,
       });
       logSync("sync_push_finish", context.requestId, {
         mutations: mutations.length,
@@ -260,6 +276,107 @@ async function pushSync(context: SyncRouteContext): Promise<Response> {
     context.requestId,
     principal,
     contentDigest,
+  );
+}
+
+/** A book tombstone owns deletion of its announced child objects; rows stay durable until storage confirms deletion. */
+async function cleanupDeletedBookAssets(input: {
+  context: SyncRouteContext;
+  accountId: string;
+  deviceId: string;
+  mutations: readonly SyncMutation[];
+  results: readonly { mutationId: string; status: string }[];
+}): Promise<void> {
+  const successfulMutationIds = new Set(
+    input.results
+      .filter((result) => result.status === "applied" || result.status === "duplicate")
+      .map((result) => result.mutationId),
+  );
+  const bookIds = [
+    ...new Set(
+      input.mutations
+        .filter(
+          (mutation) =>
+            mutation.entityType === "book" &&
+            mutation.operation === "delete" &&
+            successfulMutationIds.has(mutation.mutationId),
+        )
+        .map((mutation) => mutation.entityId),
+    ),
+  ];
+  if (bookIds.length === 0) return;
+  if (input.context.ops === undefined || input.context.objects === undefined) {
+    throw new Error("Deleted-book asset cleanup is not configured.");
+  }
+
+  logBookAssetCleanup(input, "start", { bookCount: bookIds.length });
+  try {
+    const claimed = await input.context.ops.claimDeletedBookAssets(input.accountId, bookIds);
+    const objectDeletionSucceeded: string[] = [];
+    let failed = 0;
+    let deferred = 0;
+    for (const manifest of claimed) {
+      if (manifest.deleteAfter !== null && Date.parse(manifest.deleteAfter) > Date.now()) {
+        deferred += 1;
+        continue;
+      }
+      try {
+        for (const key of new Set([manifest.uploadObjectKey, manifest.objectKey])) {
+          await input.context.objects.delete(key);
+        }
+        objectDeletionSucceeded.push(manifest.id);
+      } catch {
+        failed += 1;
+      }
+    }
+    if (objectDeletionSucceeded.length > 0) {
+      await input.context.ops.finishAbandonedAssetUploadGc(objectDeletionSucceeded);
+    }
+    if (failed > 0) {
+      logBookAssetCleanup(input, "partial_failure", {
+        bookCount: bookIds.length,
+        manifestCount: claimed.length,
+        objectDeleteSucceededCount: objectDeletionSucceeded.length,
+        failedCount: failed,
+        objectDeleteDeferredCount: deferred,
+      });
+      throw new Error("One or more deleted-book objects could not be removed.");
+    }
+    logBookAssetCleanup(input, "success", {
+      bookCount: bookIds.length,
+      manifestCount: claimed.length,
+      objectDeleteSucceededCount: objectDeletionSucceeded.length,
+      failedCount: 0,
+      objectDeleteDeferredCount: deferred,
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "One or more deleted-book objects could not be removed."
+    ) {
+      throw error;
+    }
+    logBookAssetCleanup(input, "failure", { bookCount: bookIds.length });
+    throw error;
+  }
+}
+
+function logBookAssetCleanup(
+  input: { context: SyncRouteContext; accountId: string; deviceId: string },
+  outcome: "start" | "success" | "partial_failure" | "failure",
+  details: Record<string, number>,
+): void {
+  console.warn(
+    JSON.stringify({
+      level: "warn",
+      message: "sync_book_asset_cleanup",
+      component: "sync",
+      requestId: input.context.requestId,
+      accountId: input.accountId,
+      deviceId: input.deviceId,
+      outcome,
+      ...details,
+    }),
   );
 }
 
@@ -327,6 +444,22 @@ function logSync(
 ): void {
   console.warn(
     JSON.stringify({ level: "warn", message, component: "sync", requestId, ...details }),
+  );
+}
+
+/** Database failures expose only classification fields; PostgREST text may contain book content. */
+function logSyncDatabaseFailure(requestId: string, mutations: number, error: unknown): void {
+  console.error(
+    JSON.stringify({
+      level: "error",
+      message: "sync_push_database_failed",
+      component: "database",
+      requestId,
+      operation: "sync_push",
+      mutations,
+      status: error instanceof SyncStoreWriteError ? error.status : 0,
+      code: error instanceof SyncStoreWriteError ? error.code : "unknown_error",
+    }),
   );
 }
 

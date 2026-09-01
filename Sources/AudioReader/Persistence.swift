@@ -7,6 +7,7 @@ import AudioReaderDomain
 enum Persistence {
     static let transcriptPageSize = 200
     private static let overlayLog = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "transcript-overlay")
+    private static let durabilityLog = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "persistence")
     static var root: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let dir = base.appendingPathComponent("AudioReader", isDirectory: true)
@@ -21,15 +22,22 @@ enum Persistence {
     static let store = LocalSQLiteStore(fileURL: databaseURL)
 
     static var importedBooksURL: URL {
+        let dir = defaultImportedBooksURL
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Resolves the platform path without creating it. In-memory AppState
+    /// construction uses this default and must not touch Application Support.
+    static var defaultImportedBooksURL: URL {
 #if os(iOS)
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let dir = documents.appendingPathComponent("ImportedBooks-vNext", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+        return documents.appendingPathComponent("ImportedBooks-vNext", isDirectory: true)
 #else
-        let dir = root.appendingPathComponent("ImportedBooks-vNext", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return base
+            .appendingPathComponent("AudioReader", isDirectory: true)
+            .appendingPathComponent("ImportedBooks-vNext", isDirectory: true)
 #endif
     }
 
@@ -127,23 +135,37 @@ enum Persistence {
         if let staged { try FileManager.default.removeItem(at: staged) }
     }
 
-    static func loadTranscript(chapterID: String) -> Transcript? {
-        try? store.loadTranscript(chapterID: ChapterID(rawValue: chapterID)).map(Transcript.init)
+    static func loadTranscript(
+        chapterID: String,
+        database: any TranscriptRepository = Persistence.store
+    ) -> Transcript? {
+        try? database.loadTranscript(chapterID: ChapterID(rawValue: chapterID)).map(Transcript.init)
     }
 
-    static func loadTranscriptPage(chapterID: String, range: Range<Int>) -> Transcript? {
-        try? store.loadTranscript(
+    static func loadTranscriptPage(
+        chapterID: String,
+        range: Range<Int>,
+        database: LocalSQLiteStore = Persistence.store
+    ) -> Transcript? {
+        try? database.loadTranscript(
             chapterID: ChapterID(rawValue: chapterID),
             range: range
         ).map(Transcript.init)
     }
 
-    static func transcriptSegmentCount(chapterID: String) -> Int {
-        (try? store.transcriptSegmentCount(chapterID: ChapterID(rawValue: chapterID))) ?? 0
+    static func transcriptSegmentCount(
+        chapterID: String,
+        database: LocalSQLiteStore = Persistence.store
+    ) -> Int {
+        (try? database.transcriptSegmentCount(chapterID: ChapterID(rawValue: chapterID))) ?? 0
     }
 
-    static func loadTranscriptPage(for chapter: Chapter, range: Range<Int>) -> Transcript? {
-        guard let transcript = loadTranscriptPage(chapterID: chapter.id, range: range),
+    static func loadTranscriptPage(
+        for chapter: Chapter,
+        range: Range<Int>,
+        database: LocalSQLiteStore = Persistence.store
+    ) -> Transcript? {
+        guard let transcript = loadTranscriptPage(chapterID: chapter.id, range: range, database: database),
               transcript.belongs(to: chapter)
         else { return nil }
         return transcript
@@ -151,16 +173,22 @@ enum Persistence {
 
     /// Assistant jobs deliberately opt into the complete revision, assembled
     /// by SQLite in bounded pages rather than reusing the reader's visible page.
-    static func loadCompleteTranscript(for chapter: Chapter) -> Transcript? {
-        guard let transcript = try? store.loadCompleteTranscript(
+    static func loadCompleteTranscript(
+        for chapter: Chapter,
+        database: LocalSQLiteStore = Persistence.store
+    ) -> Transcript? {
+        guard let transcript = try? database.loadCompleteTranscript(
             chapterID: ChapterID(rawValue: chapter.id),
             pageSize: transcriptPageSize
         ), Transcript(transcript).belongs(to: chapter) else { return nil }
         return Transcript(transcript)
     }
 
-    static func loadTranscript(for chapter: Chapter) -> Transcript? {
-        guard let transcript = loadTranscript(chapterID: chapter.id),
+    static func loadTranscript(
+        for chapter: Chapter,
+        database: any TranscriptRepository = Persistence.store
+    ) -> Transcript? {
+        guard let transcript = loadTranscript(chapterID: chapter.id, database: database),
               transcript.belongs(to: chapter)
         else { return nil }
         return transcript
@@ -170,19 +198,35 @@ enum Persistence {
         ((try? store.loadAllTranscripts()) ?? []).map(Transcript.init)
     }
 
-    static func readyChapterIDs(in books: [Book]) -> Set<String> {
-        let persisted = (try? store.activeTranscriptChapterIDs()) ?? []
+    static func readyChapterIDs(
+        in books: [Book],
+        database: LocalSQLiteStore = Persistence.store
+    ) -> Set<String> {
+        let persisted = (try? database.activeTranscriptChapterIDs()) ?? []
         return Set(books.flatMap(\.chapters).compactMap { chapter in
             chapter.hasAudio && persisted.contains(ChapterID(rawValue: chapter.id)) ? chapter.id : nil
         })
     }
 
-    static func saveTranscript(_ transcript: Transcript) throws {
-        try store.saveTranscript(StoredTranscript(transcript))
+    static func saveTranscript(
+        _ transcript: Transcript,
+        database: any TranscriptRepository = Persistence.store
+    ) throws {
+        durabilityLog.info("message=transcript.save component=persistence outcome=start chapter=\(transcript.chapterID, privacy: .public) segments=\(transcript.segments.count, privacy: .public)")
+        do {
+            try database.saveTranscript(StoredTranscript(transcript))
+            durabilityLog.info("message=transcript.save component=persistence outcome=success chapter=\(transcript.chapterID, privacy: .public) segments=\(transcript.segments.count, privacy: .public)")
+        } catch {
+            durabilityLog.error("message=transcript.save component=persistence outcome=failure chapter=\(transcript.chapterID, privacy: .public)")
+            throw error
+        }
     }
 
-    static func loadTranscriptOverlays(chapterID: String) -> [StoredTranscriptOverlay] {
-        (try? store.loadTranscriptOverlays(chapterID: ChapterID(rawValue: chapterID))) ?? []
+    static func loadTranscriptOverlays(
+        chapterID: String,
+        database: LocalSQLiteStore = Persistence.store
+    ) -> [StoredTranscriptOverlay] {
+        (try? database.loadTranscriptOverlays(chapterID: ChapterID(rawValue: chapterID))) ?? []
     }
 
     static func loadAllTranscriptOverlays() -> [StoredTranscriptOverlay] {
@@ -191,9 +235,10 @@ enum Persistence {
 
     static func loadTranscriptOverlayState(
         chapterID: String,
-        segmentID: String
+        segmentID: String,
+        database: LocalSQLiteStore = Persistence.store
     ) -> StoredTranscriptOverlayState? {
-        return try? store.loadTranscriptOverlayState(
+        return try? database.loadTranscriptOverlayState(
             chapterID: ChapterID(rawValue: chapterID),
             segmentID: segmentID
         )
@@ -201,11 +246,12 @@ enum Persistence {
 
     static func resolvedTranscript(
         _ transcript: Transcript,
-        chapterDuration: TimeInterval? = nil
+        chapterDuration: TimeInterval? = nil,
+        database: LocalSQLiteStore = Persistence.store
     ) -> ResolvedTranscript {
         TranscriptOverlayResolver.resolve(
             base: StoredTranscript(transcript),
-            overlays: loadTranscriptOverlays(chapterID: transcript.chapterID),
+            overlays: loadTranscriptOverlays(chapterID: transcript.chapterID, database: database),
             chapterDuration: chapterDuration
         )
     }
@@ -215,7 +261,8 @@ enum Persistence {
     static func saveTranscriptOverlay(
         _ overlay: StoredTranscriptOverlay,
         base: Transcript,
-        chapterDuration: TimeInterval? = nil
+        chapterDuration: TimeInterval? = nil,
+        database: LocalSQLiteStore = Persistence.store
     ) throws {
         let resolution = TranscriptOverlayResolver.resolve(
             base: StoredTranscript(base),
@@ -235,28 +282,29 @@ enum Persistence {
             }
         }
 
-        let state = try store.loadTranscriptOverlayState(
+        let state = try database.loadTranscriptOverlayState(
             chapterID: overlay.chapterID,
             segmentID: overlay.segmentID
         )
         let baseRevision = state?.current.revision ?? 0
-        _ = try store.mergeTranscriptOverlay(
+        _ = try database.mergeTranscriptOverlay(
             overlay,
             revision: baseRevision,
             mutation: overlayMutation(overlay, operation: .upsert, baseRevision: baseRevision)
         )
 
         if let baseSegment = base.segments.first(where: { $0.id == overlay.segmentID }) {
-            let priorGlosses = loadGlosses()
+            let priorGlosses = loadGlosses(database: database)
             let glosses = GlossEntry.stalingAcceptedSentenceTranslations(
                 priorGlosses,
                 chapterID: base.chapterID,
                 source: baseSegment.displayText
             )
             let priorByID = Dictionary(uniqueKeysWithValues: priorGlosses.map { ($0.id, $0.status) })
-            saveGlossUpdates(
+            try saveGlossUpdates(
                 glosses.filter { priorByID[$0.id] != $0.status },
-                allItems: glosses
+                allItems: glosses,
+                database: database
             )
         }
         overlayLog.info("message=overlay.save component=transcript-overlay outcome=success chapter=\(overlay.chapterID.rawValue, privacy: .public) segment=\(overlay.segmentID, privacy: .public)")
@@ -264,15 +312,18 @@ enum Persistence {
 
     /// Restore is represented as a sync tombstone before local deletion so a
     /// crash cannot silently revive the correction on another device.
-    static func restoreOriginalTranscriptSegment(overlayID: String) throws {
-        guard let overlay = try store.loadAllTranscriptOverlays().first(where: { $0.id == overlayID }) else {
+    static func restoreOriginalTranscriptSegment(
+        overlayID: String,
+        database: LocalSQLiteStore = Persistence.store
+    ) throws {
+        guard let overlay = try database.loadAllTranscriptOverlays().first(where: { $0.id == overlayID }) else {
             return
         }
-        let baseRevision = try store.loadTranscriptOverlayState(
+        let baseRevision = try database.loadTranscriptOverlayState(
             chapterID: overlay.chapterID,
             segmentID: overlay.segmentID
         )?.current.revision ?? 0
-        try store.deleteTranscriptOverlay(
+        try database.deleteTranscriptOverlay(
             id: overlayID,
             mutation: overlayMutation(overlay, operation: .delete, baseRevision: baseRevision)
         )
@@ -285,16 +336,17 @@ enum Persistence {
     static func resolveTranscriptOverlay(
         chapterID: String,
         segmentID: String,
-        choosing candidateID: String
+        choosing candidateID: String,
+        database: LocalSQLiteStore = Persistence.store
     ) throws -> StoredTranscriptOverlay? {
         let domainChapterID = ChapterID(rawValue: chapterID)
-        guard let state = try store.loadTranscriptOverlayState(
+        guard let state = try database.loadTranscriptOverlayState(
             chapterID: domainChapterID,
             segmentID: segmentID
         ) else { return nil }
         let choices = [state.current] + state.conflicts
         guard let chosen = choices.first(where: { $0.id == candidateID }) else { return nil }
-        try store.resolveTranscriptOverlay(
+        try database.resolveTranscriptOverlay(
             chapterID: domainChapterID,
             segmentID: segmentID,
             choosing: candidateID,
@@ -308,24 +360,34 @@ enum Persistence {
         return chosen.overlay
     }
 
-    static func loadReaderProgress(bookID: String) -> StoredReaderProgressState? {
-        try? store.loadReaderProgress(bookID: BookID(rawValue: bookID))
+    static func loadReaderProgress(
+        bookID: String,
+        database: LocalSQLiteStore = Persistence.store
+    ) -> StoredReaderProgressState? {
+        try? database.loadReaderProgress(bookID: BookID(rawValue: bookID))
     }
 
     /// Stores chapter-relative fractional seconds without rounding. Sync
     /// snapshots use the same record so resume remains exact across devices.
     @discardableResult
-    static func saveReaderProgress(_ progress: StoredReaderProgress) throws -> ReaderProgressMergeOutcome {
+    static func saveReaderProgress(
+        _ progress: StoredReaderProgress,
+        database: LocalSQLiteStore = Persistence.store
+    ) throws -> ReaderProgressMergeOutcome {
         guard progress.relativeSeconds.isFinite, progress.relativeSeconds >= 0 else {
             throw ReaderProgressSaveError.invalidSeconds
         }
-        let outcome = try store.mergeReaderProgress(progress)
+        let outcome = try database.mergeReaderProgress(progress)
         overlayLog.info("message=reader_progress.save component=reader-progress outcome=\(String(describing: outcome), privacy: .public) book=\(progress.bookID.rawValue, privacy: .public) chapter=\(progress.chapterID.rawValue, privacy: .public) device=\(progress.deviceID, privacy: .public)")
         return outcome
     }
 
-    static func resolveReaderProgress(bookID: String, choosing candidateID: String) throws {
-        try store.resolveReaderProgress(bookID: BookID(rawValue: bookID), choosing: candidateID)
+    static func resolveReaderProgress(
+        bookID: String,
+        choosing candidateID: String,
+        database: LocalSQLiteStore = Persistence.store
+    ) throws {
+        try database.resolveReaderProgress(bookID: BookID(rawValue: bookID), choosing: candidateID)
         overlayLog.info("message=reader_progress.resolve component=reader-progress outcome=success book=\(bookID, privacy: .public) candidate=\(candidateID, privacy: .public)")
     }
 
@@ -383,8 +445,11 @@ enum Persistence {
         StudyActivityLog(days: (try? database.loadStudyActivityDays()) ?? [])
     }
 
-    static func saveStudyActivityLog(_ log: StudyActivityLog) {
-        try? store.saveStudyActivityDays(log.days)
+    static func saveStudyActivityLog(
+        _ log: StudyActivityLog,
+        database: LocalSQLiteStore = Persistence.store
+    ) {
+        try? database.saveStudyActivityDays(log.days)
     }
 
     static func loadSettings(database: LocalSQLiteStore = Persistence.store) -> AppSettings {
@@ -394,9 +459,12 @@ enum Persistence {
     }
 
     @discardableResult
-    static func saveSettings(_ settings: AppSettings) -> Bool {
+    static func saveSettings(
+        _ settings: AppSettings,
+        database: LocalSQLiteStore = Persistence.store
+    ) -> Bool {
         do {
-            try store.saveSettings(StoredSettings(settings))
+            try database.saveSettings(StoredSettings(settings))
             return true
         } catch {
             return false
@@ -414,26 +482,51 @@ enum Persistence {
         try? store.replaceAssistantResults(durable + items.map(StoredAssistantResult.init))
     }
 
-    static func saveGlossUpdates(_ updates: [GlossEntry], allItems: [GlossEntry]) {
+    /// Generated results commit as one batch. Callers must publish them only
+    /// after this returns so an SQLite failure cannot masquerade as a saved translation.
+    static func saveGlossUpdates(
+        _ updates: [GlossEntry],
+        allItems: [GlossEntry],
+        database: LocalSQLiteStore = Persistence.store
+    ) throws {
+        durabilityLog.info("message=translation.generated.save component=persistence outcome=start count=\(updates.count, privacy: .public)")
+        do {
+            try database.performSyncPageTransaction {
+                try persistGlossUpdates(updates, database: database)
+            }
+            durabilityLog.info("message=translation.generated.save component=persistence outcome=success count=\(updates.count, privacy: .public)")
+        } catch {
+            durabilityLog.error("message=translation.generated.save component=persistence outcome=failure count=\(updates.count, privacy: .public)")
+            throw error
+        }
+    }
+
+    private static func persistGlossUpdates(
+        _ updates: [GlossEntry],
+        database: LocalSQLiteStore
+    ) throws {
         for update in updates {
             let result = StoredAssistantResult(update)
             if update.status == .stale || update.status == .edited || update.status == .replaced,
                UUID(uuidString: result.id) != nil {
-                try? saveAssistantResultLifecycle(result)
+                try saveAssistantResultLifecycle(result, database: database)
             } else {
-                try? store.saveAssistantResult(result)
+                try database.saveAssistantResult(result)
             }
         }
     }
 
     /// Non-acceptance lifecycle changes retain the server-issued assistant result UUID.
-    private static func saveAssistantResultLifecycle(_ result: StoredAssistantResult) throws {
+    private static func saveAssistantResultLifecycle(
+        _ result: StoredAssistantResult,
+        database: LocalSQLiteStore = Persistence.store
+    ) throws {
         let entityID = result.id
-        let baseRevision = try store.loadVersion(
+        let baseRevision = try database.loadVersion(
             entityType: OutboxEntityType.assistantResult.rawValue,
             entityID: entityID
         )?.serverVersion ?? 0
-        try store.updateAssistantResult(
+        try database.updateAssistantResult(
             result,
             mutation: OutboxMutation(
                 id: MutationID.generate(),
@@ -451,7 +544,11 @@ enum Persistence {
 
     /// Live acceptance has one owner: SQLite commits the decision, derived
     /// learning rows, and upload intent together before AppState publishes it.
-    static func acceptGlosses(_ items: [GlossEntry], vocabulary: [VocabEntry]) throws {
+    static func acceptGlosses(
+        _ items: [GlossEntry],
+        vocabulary: [VocabEntry],
+        database: LocalSQLiteStore = Persistence.store
+    ) throws {
         let storedVocabulary = vocabulary.map(StoredVocabularyOccurrence.init)
         let results = items.map(StoredAssistantResult.init)
         let mutations = try zip(items, results).map { item, result in
@@ -465,7 +562,7 @@ enum Persistence {
             let entityID = UUID(uuidString: result.id) == nil
                 ? AccountSyncApplicator.syncEntityID(result.id, kind: "assistant-result")
                 : result.id.lowercased()
-            let baseRevision = try store.loadVersion(
+            let baseRevision = try database.loadVersion(
                 entityType: OutboxEntityType.assistantResult.rawValue,
                 entityID: entityID
             )?.serverVersion ?? 0
@@ -479,12 +576,16 @@ enum Persistence {
                 payload: payload
             )
         }
-        try store.acceptAssistantResults(results, vocabulary: storedVocabulary, mutations: mutations)
+        try database.acceptAssistantResults(results, vocabulary: storedVocabulary, mutations: mutations)
     }
 
     /// A rejection removes only unreviewed assistant-derived learning rows and
     /// records the portable decision in the same SQLite transaction.
-    static func rejectGloss(_ item: GlossEntry, derivedVocabulary: [VocabEntry]) throws {
+    static func rejectGloss(
+        _ item: GlossEntry,
+        derivedVocabulary: [VocabEntry],
+        database: LocalSQLiteStore = Persistence.store
+    ) throws {
         let result = StoredAssistantResult(item)
         let removedIDs = derivedVocabulary.map { StoredVocabularyOccurrence($0).id }
         let payload = try JSONEncoder.iso.encode(StoredAssistantDecisionPayload(
@@ -495,11 +596,11 @@ enum Persistence {
         let entityID = UUID(uuidString: result.id) == nil
             ? AccountSyncApplicator.syncEntityID(result.id, kind: "assistant-result")
             : result.id.lowercased()
-        let baseRevision = try store.loadVersion(
+        let baseRevision = try database.loadVersion(
             entityType: OutboxEntityType.assistantResult.rawValue,
             entityID: entityID
         )?.serverVersion ?? 0
-        try store.rejectAssistantResult(
+        try database.rejectAssistantResult(
             result,
             derivedVocabularyIDs: removedIDs,
             mutation: OutboxMutation(
@@ -533,28 +634,65 @@ enum Persistence {
         }
     }
 
-    static func saveChapterTranslationCheckpoints(_ checkpoints: [ChapterTranslationCheckpoint]) {
-        let desired = Set(checkpoints.map(\.id))
-        for current in (try? store.loadTranslationCheckpoints()) ?? [] {
-            let id = ChapterTranslationCheckpoint.makeID(
-                chapterID: current.chapterID.rawValue,
-                language: current.language
-            )
-            if !desired.contains(id) {
-                try? store.deleteTranslationCheckpoint(chapterID: current.chapterID, language: current.language)
+    /// Upserts only one chapter/language checkpoint. Other devices may have
+    /// synchronized unrelated checkpoints that this caller has never loaded.
+    static func saveChapterTranslationCheckpoint(
+        _ checkpoint: ChapterTranslationCheckpoint,
+        database: LocalSQLiteStore = Persistence.store
+    ) throws {
+        durabilityLog.info("message=translation.checkpoint.save component=persistence outcome=start chapter=\(checkpoint.chapterID, privacy: .public)")
+        do {
+            try database.saveTranslationCheckpoint(storedCheckpoint(checkpoint))
+            durabilityLog.info("message=translation.checkpoint.save component=persistence outcome=success chapter=\(checkpoint.chapterID, privacy: .public)")
+        } catch {
+            durabilityLog.error("message=translation.checkpoint.save component=persistence outcome=failure chapter=\(checkpoint.chapterID, privacy: .public)")
+            throw error
+        }
+    }
+
+    /// Draft rows and their resume position are one durable unit. Publishing
+    /// either before this commits would make a failed checkpoint look resumable.
+    static func saveGeneratedTranslationDrafts(
+        _ drafts: [GlossEntry],
+        checkpoint: ChapterTranslationCheckpoint,
+        database: LocalSQLiteStore = Persistence.store
+    ) throws {
+        durabilityLog.info("message=translation.drafts.checkpoint.save component=persistence outcome=start chapter=\(checkpoint.chapterID, privacy: .public) count=\(drafts.count, privacy: .public)")
+        do {
+            try database.performSyncPageTransaction {
+                try persistGlossUpdates(drafts, database: database)
+                try database.saveTranslationCheckpoint(storedCheckpoint(checkpoint))
             }
+            durabilityLog.info("message=translation.drafts.checkpoint.save component=persistence outcome=success chapter=\(checkpoint.chapterID, privacy: .public) count=\(drafts.count, privacy: .public)")
+        } catch {
+            durabilityLog.error("message=translation.drafts.checkpoint.save component=persistence outcome=failure chapter=\(checkpoint.chapterID, privacy: .public) count=\(drafts.count, privacy: .public)")
+            throw error
         }
-        for checkpoint in checkpoints {
-            try? store.saveTranslationCheckpoint(StoredTranslationCheckpoint(
-                chapterID: ChapterID(rawValue: checkpoint.chapterID),
-                language: checkpoint.language,
-                mode: checkpoint.mode.rawValue,
-                completedSegmentCount: checkpoint.nextSegmentIndex,
-                totalSegmentCount: checkpoint.totalSentences,
-                status: checkpoint.status.rawValue,
-                updatedAt: checkpoint.updatedAt
-            ))
-        }
+    }
+
+    static func deleteChapterTranslationCheckpoint(
+        chapterID: String,
+        language: String,
+        database: LocalSQLiteStore = Persistence.store
+    ) throws {
+        try database.deleteTranslationCheckpoint(
+            chapterID: ChapterID(rawValue: chapterID),
+            language: language
+        )
+    }
+
+    private static func storedCheckpoint(
+        _ checkpoint: ChapterTranslationCheckpoint
+    ) -> StoredTranslationCheckpoint {
+        StoredTranslationCheckpoint(
+            chapterID: ChapterID(rawValue: checkpoint.chapterID),
+            language: checkpoint.language,
+            mode: checkpoint.mode.rawValue,
+            completedSegmentCount: checkpoint.nextSegmentIndex,
+            totalSegmentCount: checkpoint.totalSentences,
+            status: checkpoint.status.rawValue,
+            updatedAt: checkpoint.updatedAt
+        )
     }
 
     static func loadChapterSummaries(database: LocalSQLiteStore = Persistence.store) -> [ChapterSummaryRecord] {
@@ -568,12 +706,15 @@ enum Persistence {
         try? store.replaceAssistantResults(durable + summaries.compactMap(storedSummary(from:)))
     }
 
-    static func saveChapterSummaryUpdate(_ summary: ChapterSummaryRecord) {
+    static func saveChapterSummaryUpdate(
+        _ summary: ChapterSummaryRecord,
+        database: LocalSQLiteStore = Persistence.store
+    ) {
         guard let result = storedSummary(from: summary) else { return }
         if summary.status != .pending, UUID(uuidString: result.id) != nil {
-            try? saveAssistantResultLifecycle(result)
+            try? saveAssistantResultLifecycle(result, database: database)
         } else {
-            try? store.saveAssistantResult(result)
+            try? database.saveAssistantResult(result)
         }
     }
 
@@ -729,7 +870,7 @@ struct AppSettings: Codable, Equatable {
     }
 
     private static var defaultLibraryPath: String {
-        Persistence.importedBooksURL.path
+        Persistence.defaultImportedBooksURL.path
     }
 
     init(

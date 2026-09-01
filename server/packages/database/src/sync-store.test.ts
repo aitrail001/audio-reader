@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { createMemoryIdentityStore } from "./identity";
-import { createMemorySyncStore, createSupabaseSyncStore, type SyncMutation } from "./sync-store";
+import {
+  SyncStoreWriteError,
+  createMemorySyncStore,
+  createSupabaseSyncStore,
+  type SyncMutation,
+} from "./sync-store";
 import { createSupabaseRestClient, type RestFetch } from "./rest";
 
 const USER_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -87,6 +92,8 @@ describe("memory sync store", () => {
     expect(pulled.changes).toHaveLength(1);
     expect(pulled.changes[0]?.entityId).toBe(ENTITY);
     expect(pulled.hasMore).toBe(false);
+    await expect(store.currentRevision(USER_A, "progress", ENTITY)).resolves.toBe(1);
+    await expect(store.latestEntityOperation(USER_A, "progress", ENTITY)).resolves.toBe("upsert");
   });
 
   it("conflicts when baseRevision is behind another device", async () => {
@@ -311,6 +318,44 @@ describe("supabase sync store", () => {
         mutations: [progressMutation()],
       }),
     ).rejects.toThrow("sync batch write failed");
+  });
+
+  it("retains only safe database failure metadata from a rejected sync RPC", async () => {
+    const store = createSupabaseSyncStore(
+      createSupabaseRestClient({
+        url: "https://example.supabase.co",
+        serviceRoleKey: "service-role-key",
+        fetch: () =>
+          Promise.resolve(
+            jsonResponse(400, {
+              code: "P0001",
+              message: "private sentence text must never reach logs",
+              details: "private book text",
+            }),
+          ),
+      }),
+      "v2",
+    );
+
+    const failure = await store
+      .push({
+        userId: USER_A,
+        deviceId: DEVICE_A,
+        batchId: BATCH,
+        mutations: [progressMutation()],
+      })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(SyncStoreWriteError);
+    expect(failure).toMatchObject({
+      message: "sync batch write failed",
+      component: "database",
+      operation: "sync_push",
+      status: 400,
+      code: "P0001",
+    });
+    expect(String(failure)).not.toContain("private sentence");
+    expect(String(failure)).not.toContain("private book");
   });
 
   it("fails latest-cursor lookup when Postgres is unavailable", async () => {

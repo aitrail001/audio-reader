@@ -240,15 +240,18 @@ async function createUpload(
             "Content digest is already bound to different metadata.",
           );
         }
-        const upload = await uploadTarget(
-          objects,
-          existing.uploadObjectKey,
-          existing.uploadId,
-          existing.compressedBytes,
-          existing.contentType,
-          existing.sha256,
-          origin,
-        );
+        if (existing.status !== "pending" && existing.status !== "ready") {
+          return conflict(context.requestId, "Asset upload is no longer writable.");
+        }
+        const upload =
+          existing.status === "ready"
+            ? workerUploadTarget(
+                existing.uploadId,
+                existing.compressedBytes,
+                existing.contentType,
+                origin,
+              )
+            : await authorizedUploadTarget(ops, objects, principal.accountId, existing, origin);
         if (upload === undefined) {
           return directUploadUnavailable(context.requestId);
         }
@@ -266,18 +269,6 @@ async function createUpload(
       }
       const uploadId = crypto.randomUUID();
       const uploadObjectKey = pendingUploadObjectKey(principal.accountId, uploadId);
-      const upload = await uploadTarget(
-        objects,
-        uploadObjectKey,
-        uploadId,
-        manifest.compressedBytes,
-        manifest.contentType,
-        manifest.sha256,
-        origin,
-      );
-      if (upload === undefined) {
-        return directUploadUnavailable(context.requestId);
-      }
       let asset: OpsAsset;
       try {
         asset = await ops.createAsset(principal.accountId, {
@@ -289,6 +280,9 @@ async function createUpload(
         });
       } catch (error) {
         if (error instanceof AssetReservationError) {
+          if (error.code === "asset_book_deleted") {
+            return conflict(context.requestId, "Asset book is already deleted.");
+          }
           return problemResponse({
             status: 429,
             code: error.code,
@@ -301,6 +295,10 @@ async function createUpload(
           });
         }
         throw error;
+      }
+      const upload = await authorizedUploadTarget(ops, objects, principal.accountId, asset, origin);
+      if (upload === undefined) {
+        return directUploadUnavailable(context.requestId);
       }
       const ticket: UploadTicket = {
         uploadId: asset.uploadId,
@@ -319,6 +317,44 @@ async function createUpload(
   );
 }
 
+/** Persists a conservative capability deadline before any irrevocable direct-upload URL is issued. */
+async function authorizedUploadTarget(
+  ops: OpsStore,
+  objects: ObjectStore,
+  accountId: string,
+  asset: OpsAsset,
+  origin: string,
+): Promise<{ url: string; headers: Record<string, string>; expiresAt: string } | undefined> {
+  if (asset.compressedBytes <= MAX_WORKER_UPLOAD_BYTES) {
+    return workerUploadTarget(asset.uploadId, asset.compressedBytes, asset.contentType, origin);
+  }
+  const durableUntil = new Date(Date.now() + 16 * 60_000).toISOString();
+  const authorized = await ops.authorizeAssetUpload(accountId, asset.uploadId, durableUntil);
+  if (authorized === undefined) return undefined;
+  return uploadTarget(
+    objects,
+    asset.uploadObjectKey,
+    asset.uploadId,
+    asset.compressedBytes,
+    asset.contentType,
+    asset.sha256,
+    origin,
+  );
+}
+
+function workerUploadTarget(
+  uploadId: string,
+  compressedBytes: number,
+  contentType: string,
+  origin: string,
+): { url: string; headers: Record<string, string>; expiresAt: string } {
+  return {
+    url: `${origin}/v2/assets/uploads/${uploadId}/body`,
+    expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+    headers: { "content-type": contentType, "content-length": String(compressedBytes) },
+  };
+}
+
 async function uploadTarget(
   objects: ObjectStore,
   uploadObjectKey: string,
@@ -329,14 +365,7 @@ async function uploadTarget(
   origin: string,
 ): Promise<{ url: string; headers: Record<string, string>; expiresAt: string } | undefined> {
   if (compressedBytes <= MAX_WORKER_UPLOAD_BYTES) {
-    return {
-      url: `${origin}/v2/assets/uploads/${uploadId}/body`,
-      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
-      headers: {
-        "content-type": contentType,
-        "content-length": String(compressedBytes),
-      },
-    };
+    return workerUploadTarget(uploadId, compressedBytes, contentType, origin);
   }
   return objects.createBoundUpload?.(uploadObjectKey, {
     expiresSeconds: 15 * 60,
@@ -367,7 +396,7 @@ async function putUploadBody(
     return fieldError(context.requestId, "uploadId", "uploadId must be a UUID.");
   }
   const asset = await ops.getAssetByUpload(principal.accountId, uploadId);
-  if (asset === undefined) {
+  if (asset === undefined || asset.status !== "pending") {
     return notFound(context.requestId);
   }
   if (asset.compressedBytes > MAX_WORKER_UPLOAD_BYTES) {
@@ -400,14 +429,25 @@ async function putUploadBody(
   if (!(await objectWriteIsAllowed(context.identity, principal.accountId))) {
     return conflict(context.requestId, "Account deletion is already in progress.");
   }
-  const lease = await ops.beginObjectWrite(principal.accountId, asset.uploadObjectKey);
+  const lease = await ops.beginAssetObjectWrite(
+    principal.accountId,
+    asset.id,
+    asset.uploadObjectKey,
+  );
+  if (lease === undefined) {
+    return conflict(context.requestId, "Asset upload is no longer writable.");
+  }
   await objects.put(asset.uploadObjectKey, bytes);
   // Account deletion and storage writes are separate systems. Re-check after the write and
   // compensate so a request that raced the deletion sweep cannot recreate private media.
-  if (!(await objectWriteIsAllowed(context.identity, principal.accountId))) {
+  const current = await ops.getAssetByUpload(principal.accountId, uploadId);
+  if (
+    !(await objectWriteIsAllowed(context.identity, principal.accountId)) ||
+    current?.status !== "pending"
+  ) {
     await objects.delete(asset.uploadObjectKey);
     await ops.finishObjectWrite(lease.id);
-    return conflict(context.requestId, "Account deletion began while the upload was in progress.");
+    return conflict(context.requestId, "Asset deletion began while the upload was in progress.");
   }
   await ops.finishObjectWrite(lease.id);
   return jsonResponse({ ok: true });
@@ -478,6 +518,7 @@ async function completeUpload(
         return notFound(context.requestId);
       }
       if (stored.status === "ready") {
+        if (uploadCapabilityActive(stored)) return jsonResponse(assetResponse(stored));
         try {
           await objects.delete(stored.uploadObjectKey);
           await ops.finishReadyAssetUploadCleanup([stored.id]);
@@ -491,6 +532,9 @@ async function completeUpload(
           });
         }
         return jsonResponse(assetResponse(stored));
+      }
+      if (stored.status !== "pending") {
+        return conflict(context.requestId, "Asset upload is no longer writable.");
       }
       const object = await objects.open(stored.uploadObjectKey);
       if (object === undefined) {
@@ -528,7 +572,14 @@ async function completeUpload(
       if (!(await objectWriteIsAllowed(context.identity, principal.accountId))) {
         return conflict(context.requestId, "Account deletion is already in progress.");
       }
-      const lease = await ops.beginObjectWrite(principal.accountId, stored.objectKey);
+      const lease = await ops.beginAssetObjectWrite(
+        principal.accountId,
+        stored.id,
+        stored.objectKey,
+      );
+      if (lease === undefined) {
+        return conflict(context.requestId, "Asset upload is no longer writable.");
+      }
       const existing = await objects.open(stored.objectKey);
       if (
         existing !== undefined &&
@@ -552,18 +603,24 @@ async function completeUpload(
         );
       }
       if (existing === undefined) await objects.copy(stored.uploadObjectKey, stored.objectKey);
-      if (!(await objectWriteIsAllowed(context.identity, principal.accountId))) {
+      const current = await ops.getAssetByUpload(principal.accountId, uploadId);
+      if (
+        !(await objectWriteIsAllowed(context.identity, principal.accountId)) ||
+        current?.status !== "pending"
+      ) {
         await objects.delete(stored.objectKey);
         await ops.finishObjectWrite(lease.id);
-        return conflict(
-          context.requestId,
-          "Account deletion began while the upload was completing.",
-        );
+        return conflict(context.requestId, "Asset deletion began while the upload was completing.");
       }
       const completed = await ops.completeAsset(principal.accountId, uploadId);
       if (completed === undefined) {
+        await objects.delete(stored.objectKey);
         await ops.finishObjectWrite(lease.id);
         return notFound(context.requestId);
+      }
+      if (uploadCapabilityActive(completed)) {
+        await ops.finishObjectWrite(lease.id);
+        return jsonResponse(assetResponse(completed));
       }
       try {
         await objects.delete(stored.uploadObjectKey);
@@ -583,6 +640,12 @@ async function completeUpload(
     },
     context.requestId,
     principal,
+  );
+}
+
+function uploadCapabilityActive(asset: OpsAsset): boolean {
+  return (
+    asset.uploadAuthorizedUntil !== null && Date.parse(asset.uploadAuthorizedUntil) > Date.now()
   );
 }
 

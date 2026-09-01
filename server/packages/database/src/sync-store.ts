@@ -1,6 +1,20 @@
 import type { IdentitySettings, IdentityStore } from "./identity";
 import { restRows, type RestClient } from "./rest";
 
+/** Safe metadata for a failed sync RPC. Raw PostgREST messages can contain private payload values. */
+export class SyncStoreWriteError extends Error {
+  readonly component = "database";
+  readonly operation = "sync_push";
+
+  constructor(
+    readonly status: number,
+    readonly code: string,
+  ) {
+    super("sync batch write failed");
+    this.name = "SyncStoreWriteError";
+  }
+}
+
 export const SYNC_ENTITY_TYPES = [
   "settings",
   "book",
@@ -97,6 +111,12 @@ export type SyncStore = {
   bootstrap(input: SyncBootstrapInput): Promise<SyncBootstrapResult>;
   pull(input: SyncPullInput): Promise<SyncPullResult>;
   latestCursor(userId: string): Promise<string>;
+  currentRevision(userId: string, entityType: string, entityId: string): Promise<number>;
+  latestEntityOperation(
+    userId: string,
+    entityType: string,
+    entityId: string,
+  ): Promise<SyncMutation["operation"] | undefined>;
 };
 
 const ENTITY_TYPE_SET = new Set<string>(SYNC_ENTITY_TYPES);
@@ -105,7 +125,12 @@ export function isSyncEntityType(value: string): value is SyncEntityType {
   return ENTITY_TYPE_SET.has(value);
 }
 
-export function createMemorySyncStore(options: { identity?: IdentityStore } = {}): SyncStore {
+export function createMemorySyncStore(
+  options: {
+    identity?: IdentityStore;
+    afterAppliedMutation?: (userId: string, mutation: SyncMutation) => Promise<void>;
+  } = {},
+): SyncStore {
   const identity = options.identity;
   const changes = new Map<string, SyncChange[]>();
   const seenResults = new Map<string, SyncMutationResult>();
@@ -164,6 +189,7 @@ export function createMemorySyncStore(options: { identity?: IdentityStore } = {}
             changedAt: mutation.occurredAt,
             payload: mutation.payload,
           });
+          await options.afterAppliedMutation?.(input.userId, mutation);
         }
         seenResults.set(mutationKey(input.userId, mutation.mutationId), result);
         results.push(result);
@@ -221,6 +247,21 @@ export function createMemorySyncStore(options: { identity?: IdentityStore } = {}
       const log = userChanges(userId);
       return Promise.resolve(String(log.length));
     },
+
+    currentRevision(userId, entityType, entityId) {
+      return Promise.resolve(revisions.get(entityKey(userId, entityType, entityId)) ?? 0);
+    },
+
+    latestEntityOperation(userId, entityType, entityId) {
+      const log = userChanges(userId);
+      for (let index = log.length - 1; index >= 0; index -= 1) {
+        const change = log[index];
+        if (change?.entityType === entityType && change.entityId === entityId) {
+          return Promise.resolve(change.operation);
+        }
+      }
+      return Promise.resolve(undefined);
+    },
   };
 }
 
@@ -248,7 +289,12 @@ export function createSupabaseSyncStore(
       });
       const pushed = syncPushResultFromRpc(response.body, input);
       if (response.status < 200 || response.status >= 300 || pushed === undefined) {
-        throw new Error("sync batch write failed");
+        throw new SyncStoreWriteError(
+          response.status,
+          response.status >= 200 && response.status < 300
+            ? "invalid_rpc_response"
+            : safeDatabaseErrorCode(response.body, response.status),
+        );
       }
       const timestamp = new Date().toISOString();
       const [batchAttribution, deviceTouch] = await Promise.all([
@@ -347,7 +393,58 @@ export function createSupabaseSyncStore(
       }
       return String(numericValue(row.sequence, 0));
     },
+
+    async currentRevision(userId, entityType, entityId) {
+      const response = await rest.request({
+        method: "GET",
+        path: changesTable,
+        query: {
+          user_id: `eq.${userId}`,
+          entity_type: `eq.${entityType}`,
+          entity_id: `eq.${entityId}`,
+          select: "revision",
+          order: "sequence.desc",
+          limit: "1",
+        },
+      });
+      if (response.status >= 400 || response.status === 0) {
+        throw new Error("sync entity revision lookup failed");
+      }
+      return numericValue(restRows(response.body)[0]?.revision, 0);
+    },
+
+    async latestEntityOperation(userId, entityType, entityId) {
+      const response = await rest.request({
+        method: "GET",
+        path: changesTable,
+        query: {
+          user_id: `eq.${userId}`,
+          entity_type: `eq.${entityType}`,
+          entity_id: `eq.${entityId}`,
+          select: "operation",
+          order: "sequence.desc",
+          limit: "1",
+        },
+      });
+      if (response.status >= 400 || response.status === 0) {
+        throw new Error("sync entity operation lookup failed");
+      }
+      const operation = restRows(response.body)[0]?.operation;
+      return operation === "upsert" || operation === "delete" || operation === "append"
+        ? operation
+        : undefined;
+    },
   };
+}
+
+function safeDatabaseErrorCode(body: unknown, status: number): string {
+  if (typeof body === "object" && body !== null && !Array.isArray(body)) {
+    const code = (body as Record<string, unknown>).code;
+    if (typeof code === "string" && /^[A-Za-z0-9_]{1,64}$/.test(code)) {
+      return code;
+    }
+  }
+  return status === 0 ? "network_error" : "database_error";
 }
 
 function syncPullResultFromRpc(
@@ -445,6 +542,12 @@ export function createUnavailableSyncStore(): SyncStore {
     },
     latestCursor() {
       return Promise.resolve("0");
+    },
+    currentRevision() {
+      return Promise.reject(new Error("database unavailable"));
+    },
+    latestEntityOperation() {
+      return Promise.reject(new Error("database unavailable"));
     },
   };
 }

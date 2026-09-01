@@ -774,7 +774,13 @@ public final class AccountSession {
                 conflictCount: conflicts,
                 entityProgress: entityProgress
             )
-            let pageVersions = Self.entityVersions(for: orderedChanges)
+            // Even device-local media announcements are consumed with this cursor page.
+            // Keep their version ledger and cursor advancement in the same atomic transaction.
+            let appliedEntityKeys = Set(orderedChanges.map { "\($0.entityType)|\($0.entityId)" })
+            let skippedChanges = pulled.changes.filter {
+                !appliedEntityKeys.contains("\($0.entityType)|\($0.entityId)")
+            }
+            let pageVersions = Self.entityVersions(for: orderedChanges + skippedChanges)
             do {
                 try await Task.detached {
                     try runtime.applyPage(orderedChanges, pageVersions, pulled.cursor)
@@ -820,8 +826,8 @@ public final class AccountSession {
         }
     }
 
-    /// Resolves every v2 asset announcement through the authorized manifest API, then downloads
-    /// and verifies its immutable bytes before the page is allowed to advance its cursor.
+    /// Transcript revisions are the only consented cloud assets in this release. Explicit other or
+    /// unknown kinds are skipped; a missing kind on a transcript entity retains the legacy fallback.
     private func hydrateAssetChanges(
         _ changes: [SyncPulledChange],
         runtime: AccountSyncRuntime,
@@ -841,8 +847,22 @@ public final class AccountSession {
                 let announcedKind = change.payload["kind"]?.stringValue
                     ?? (change.entityType == OutboxEntityType.transcript.rawValue
                         ? SyncAssetKind.transcriptRevision.rawValue : "")
+                guard announcedKind == SyncAssetKind.transcriptRevision.rawValue else {
+                    Self.syncLog.info(
+                        "sync_asset_hydration_skipped message=sync_asset_hydration_skipped entityId=\(change.entityId, privacy: .public) kind=\(announcedKind, privacy: .public) outcome=device_local"
+                    )
+                    continue
+                }
+                if change.operation == OutboxOperation.delete.rawValue {
+                    // Cleanup tombstones carry no immutable bytes; the transcript deletion itself
+                    // remains consented learning data and must reach the atomic page application.
+                    Self.syncLog.info(
+                        "sync_asset_hydration_bypassed message=sync_asset_hydration_bypassed entityId=\(change.entityId, privacy: .public) kind=\(announcedKind, privacy: .public) outcome=tombstone"
+                    )
+                    hydrated.append(change)
+                    continue
+                }
                 guard let assetID = change.payload["assetId"]?.stringValue,
-                      !announcedKind.isEmpty,
                       let kind = SyncAssetKind(rawValue: announcedKind),
                       let sha256 = change.payload["sha256"]?.stringValue,
                       let bytesValue = change.payload["compressedBytes"]?.numberValue,

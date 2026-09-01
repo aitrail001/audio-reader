@@ -24,7 +24,10 @@ export class RestPersistenceError extends Error {
 }
 
 export class AssetReservationError extends Error {
-  constructor(readonly code: "pending_asset_count_exceeded" | "cloud_media_quota_exceeded") {
+  constructor(
+    readonly code:
+      "pending_asset_count_exceeded" | "cloud_media_quota_exceeded" | "asset_book_deleted",
+  ) {
     super(code);
     this.name = "AssetReservationError";
   }
@@ -64,6 +67,7 @@ export type OpsAsset = {
   uploadObjectKey: string;
   createdAt: string;
   deletedAt: string | null;
+  uploadAuthorizedUntil: string | null;
 };
 
 export type CacheState = "active" | "quarantined" | "superseded" | "expired" | "purged";
@@ -297,6 +301,30 @@ export type ObjectWriteLease = {
 };
 export type AbandonedAssetUpload = { id: string; objectKeys: string[] };
 export type ReadyAssetUploadCleanup = { id: string; uploadObjectKey: string };
+export type DeletedBookAssetCleanup = {
+  id: string;
+  objectKey: string;
+  uploadObjectKey: string;
+  deleteAfter: string | null;
+};
+
+function latestDeleteAfter(
+  asset: OpsAsset,
+  leases: ReadonlyMap<string, ObjectWriteLease>,
+): string | null {
+  const deadlines = [
+    asset.uploadAuthorizedUntil,
+    ...[...leases.values()]
+      .filter(
+        (lease) =>
+          lease.accountId === asset.accountId &&
+          (lease.objectKey === asset.objectKey || lease.objectKey === asset.uploadObjectKey) &&
+          Date.parse(lease.expiresAt) > Date.now(),
+      )
+      .map((lease) => lease.expiresAt),
+  ].filter((value): value is string => value !== null);
+  return deadlines.sort().at(-1) ?? null;
+}
 export type LegacyCleanupResult = {
   changes: number;
   outcomes: number;
@@ -339,6 +367,11 @@ export type OpsStore = {
   ): Promise<OpsAsset[]>;
   getAssetByContent(userId: string, kind: AssetKind, sha256: string): Promise<OpsAsset | undefined>;
   getAssetByUpload(userId: string, uploadId: string): Promise<OpsAsset | undefined>;
+  authorizeAssetUpload(
+    userId: string,
+    uploadId: string,
+    authorizedUntil: string,
+  ): Promise<OpsAsset | undefined>;
   completeAsset(userId: string, uploadId: string): Promise<OpsAsset | undefined>;
   lookupCache(cacheKey: string): Promise<OpsCacheEntry | undefined>;
   putCache(
@@ -444,6 +477,10 @@ export type OpsStore = {
   finishAbandonedAssetUploadGc(ids: readonly string[]): Promise<void>;
   claimReadyAssetUploadCleanup(limit: number): Promise<ReadyAssetUploadCleanup[]>;
   finishReadyAssetUploadCleanup(ids: readonly string[]): Promise<void>;
+  claimDeletedBookAssets(
+    userId: string,
+    bookIds: readonly string[],
+  ): Promise<DeletedBookAssetCleanup[]>;
   cleanupObsoleteV1Data(userId: string, execute: boolean): Promise<LegacyCleanupResult>;
   deleteAccountData(userId: string): Promise<boolean>;
   requestAccountDeletion(
@@ -453,6 +490,11 @@ export type OpsStore = {
   ): Promise<{ request: OpsPrivacyRequest; job: OpsJob }>;
   accountObjectKeys(userId: string): Promise<string[]>;
   beginObjectWrite(userId: string, objectKey: string): Promise<ObjectWriteLease>;
+  beginAssetObjectWrite(
+    userId: string,
+    assetId: string,
+    objectKey: string,
+  ): Promise<ObjectWriteLease | undefined>;
   finishObjectWrite(leaseId: string): Promise<void>;
   accountObjectWriteLeases(userId: string): Promise<ObjectWriteLease[]>;
   recordAssistantUse(
@@ -547,7 +589,14 @@ export function createMemoryOpsStore(
   let operatorSettings: OperatorSettingsRecord | undefined;
 
   return {
-    createAsset(userId, input) {
+    async createAsset(userId, input) {
+      if (
+        input.bookId !== null &&
+        options.syncV2 !== undefined &&
+        (await options.syncV2.latestEntityOperation(userId, "book", input.bookId)) === "delete"
+      ) {
+        throw new AssetReservationError("asset_book_deleted");
+      }
       const owned = [
         ...new Map(
           [...assets.values()]
@@ -556,12 +605,12 @@ export function createMemoryOpsStore(
         ).values(),
       ].filter((asset) => asset.status === "pending" || asset.status === "ready");
       if (owned.filter((asset) => asset.status === "pending").length >= 32) {
-        return Promise.reject(new AssetReservationError("pending_asset_count_exceeded"));
+        throw new AssetReservationError("pending_asset_count_exceeded");
       }
       const reserved = owned.reduce((sum, asset) => sum + asset.compressedBytes, 0);
       const limit = quotaLimits.get("cloud_media_bytes") ?? 10 * 1_024 * 1_024 * 1_024;
       if (reserved + input.compressedBytes > limit) {
-        return Promise.reject(new AssetReservationError("cloud_media_quota_exceeded"));
+        throw new AssetReservationError("cloud_media_quota_exceeded");
       }
       const id = crypto.randomUUID();
       const uploadId = input.uploadId;
@@ -585,10 +634,14 @@ export function createMemoryOpsStore(
         uploadObjectKey: input.uploadObjectKey,
         createdAt: now(),
         deletedAt: null,
+        uploadAuthorizedUntil:
+          input.compressedBytes > 8 * 1_024 * 1_024
+            ? new Date(Date.now() + 15 * 60_000).toISOString()
+            : null,
       };
       assets.set(`${userId}:${id}`, created);
       assets.set(`upload:${userId}:${uploadId}`, created);
-      return Promise.resolve({ ...created });
+      return { ...created };
     },
 
     getAsset(userId, assetId) {
@@ -617,6 +670,20 @@ export function createMemoryOpsStore(
     getAssetByUpload(userId, uploadId) {
       const asset = assets.get(`upload:${userId}:${uploadId}`);
       return Promise.resolve(asset === undefined ? undefined : { ...asset });
+    },
+
+    async authorizeAssetUpload(userId, uploadId, authorizedUntil) {
+      const asset = assets.get(`upload:${userId}:${uploadId}`);
+      if (asset === undefined || asset.status !== "pending") return undefined;
+      if (
+        asset.bookId !== null &&
+        options.syncV2 !== undefined &&
+        (await options.syncV2.latestEntityOperation(userId, "book", asset.bookId)) === "delete"
+      ) {
+        return undefined;
+      }
+      asset.uploadAuthorizedUntil = authorizedUntil;
+      return { ...asset };
     },
 
     async completeAsset(userId, uploadId) {
@@ -1118,14 +1185,27 @@ export function createMemoryOpsStore(
 
     gcAbandonedAssetUploads(before, limit) {
       const cutoff = Date.parse(before);
+      const timestamp = Date.now();
       const pending = [...new Map([...assets.values()].map((asset) => [asset.id, asset])).values()]
         .filter(
           (asset) =>
-            (asset.status === "pending" && Date.parse(asset.createdAt) < cutoff) ||
-            asset.status === "deleting",
+            ((asset.status === "pending" && Date.parse(asset.createdAt) < cutoff) ||
+              asset.status === "deleting") &&
+            (asset.uploadAuthorizedUntil === null ||
+              Date.parse(asset.uploadAuthorizedUntil) <= timestamp) &&
+            ![...objectWriteLeases.values()].some(
+              (lease) =>
+                lease.accountId === asset.accountId &&
+                (lease.objectKey === asset.objectKey ||
+                  lease.objectKey === asset.uploadObjectKey) &&
+                Date.parse(lease.expiresAt) > timestamp,
+            ),
         )
         .slice(0, Math.max(0, Math.min(Math.floor(limit), 1_000)));
-      for (const asset of pending) asset.status = "deleting";
+      for (const asset of pending) {
+        asset.status = "deleting";
+        asset.deletedAt ??= new Date(timestamp).toISOString();
+      }
       return Promise.resolve(
         pending.map((asset) => ({
           id: asset.id,
@@ -1135,9 +1215,25 @@ export function createMemoryOpsStore(
     },
 
     finishAbandonedAssetUploadGc(ids) {
+      const timestamp = Date.now();
       for (const id of ids) {
         const asset = [...assets.values()].find((candidate) => candidate.id === id);
-        if (asset === undefined || asset.status !== "deleting") continue;
+        if (
+          asset === undefined ||
+          asset.status !== "deleting" ||
+          asset.deletedAt === null ||
+          Date.parse(asset.deletedAt) > timestamp - 24 * 60 * 60_000 ||
+          (asset.uploadAuthorizedUntil !== null &&
+            Date.parse(asset.uploadAuthorizedUntil) > timestamp) ||
+          [...objectWriteLeases.values()].some(
+            (lease) =>
+              lease.accountId === asset.accountId &&
+              (lease.objectKey === asset.objectKey || lease.objectKey === asset.uploadObjectKey) &&
+              Date.parse(lease.expiresAt) > timestamp,
+          )
+        ) {
+          continue;
+        }
         assets.delete(`${asset.accountId}:${asset.id}`);
         assets.delete(`upload:${asset.accountId}:${asset.uploadId}`);
       }
@@ -1145,8 +1241,21 @@ export function createMemoryOpsStore(
     },
 
     claimReadyAssetUploadCleanup(limit) {
+      const timestamp = Date.now();
       const ready = [...new Map([...assets.values()].map((asset) => [asset.id, asset])).values()]
-        .filter((asset) => asset.status === "ready" && !cleanedReadyAssetUploads.has(asset.id))
+        .filter(
+          (asset) =>
+            asset.status === "ready" &&
+            !cleanedReadyAssetUploads.has(asset.id) &&
+            (asset.uploadAuthorizedUntil === null ||
+              Date.parse(asset.uploadAuthorizedUntil) <= timestamp) &&
+            ![...objectWriteLeases.values()].some(
+              (lease) =>
+                lease.accountId === asset.accountId &&
+                lease.objectKey === asset.uploadObjectKey &&
+                Date.parse(lease.expiresAt) > timestamp,
+            ),
+        )
         .slice(0, Math.max(0, Math.min(Math.floor(limit), 1_000)));
       return Promise.resolve(
         ready.map((asset) => ({
@@ -1157,8 +1266,90 @@ export function createMemoryOpsStore(
     },
 
     finishReadyAssetUploadCleanup(ids) {
-      for (const id of ids) cleanedReadyAssetUploads.add(id);
+      const timestamp = Date.now();
+      for (const id of ids) {
+        const asset = [...assets.values()].find((candidate) => candidate.id === id);
+        if (
+          asset?.status === "ready" &&
+          (asset.uploadAuthorizedUntil === null ||
+            Date.parse(asset.uploadAuthorizedUntil) <= timestamp) &&
+          ![...objectWriteLeases.values()].some(
+            (lease) =>
+              lease.accountId === asset.accountId &&
+              lease.objectKey === asset.uploadObjectKey &&
+              Date.parse(lease.expiresAt) > timestamp,
+          )
+        ) {
+          cleanedReadyAssetUploads.add(id);
+        }
+      }
       return Promise.resolve();
+    },
+
+    async claimDeletedBookAssets(userId, bookIds) {
+      const deletedBookIds = new Set(bookIds);
+      const syncV2 = options.syncV2;
+      const verifiedDeletedBookIds =
+        syncV2 === undefined
+          ? deletedBookIds
+          : new Set(
+              (
+                await Promise.all(
+                  [...deletedBookIds].map(async (bookId) => ({
+                    bookId,
+                    operation: await syncV2.latestEntityOperation(userId, "book", bookId),
+                  })),
+                )
+              )
+                .filter((entry) => entry.operation === "delete")
+                .map((entry) => entry.bookId),
+            );
+      const candidates = [
+        ...new Map([...assets.values()].map((asset) => [asset.id, asset])).values(),
+      ].filter(
+        (asset) =>
+          asset.accountId === userId &&
+          asset.bookId !== null &&
+          verifiedDeletedBookIds.has(asset.bookId) &&
+          (asset.status === "pending" || asset.status === "ready" || asset.status === "deleting"),
+      );
+      const announced = candidates.filter((asset) => asset.status === "ready");
+      if (syncV2 !== undefined && announced.length > 0) {
+        const deletions = await Promise.all(
+          announced.map(async (asset) => {
+            const entityType = asset.kind === "transcriptRevision" ? "transcript" : "asset";
+            const entityId =
+              asset.kind === "transcriptRevision" && asset.revisionId !== null
+                ? asset.revisionId
+                : asset.id;
+            return {
+              mutationId: crypto.randomUUID(),
+              entityType,
+              entityId,
+              operation: "delete" as const,
+              baseRevision: await syncV2.currentRevision(userId, entityType, entityId),
+              occurredAt: now(),
+              payload: {},
+            };
+          }),
+        );
+        await syncV2.push({
+          userId,
+          deviceId: "00000000-0000-4000-8000-000000000000",
+          batchId: crypto.randomUUID(),
+          mutations: deletions,
+        });
+      }
+      for (const asset of candidates) {
+        asset.status = "deleting";
+        asset.deletedAt ??= now();
+      }
+      return candidates.map((asset) => ({
+        id: asset.id,
+        objectKey: asset.objectKey,
+        uploadObjectKey: asset.uploadObjectKey,
+        deleteAfter: latestDeleteAfter(asset, objectWriteLeases),
+      }));
     },
 
     cleanupObsoleteV1Data(_userId, execute) {
@@ -1245,6 +1436,25 @@ export function createMemoryOpsStore(
     },
 
     beginObjectWrite(userId, objectKey) {
+      const lease: ObjectWriteLease = {
+        id: crypto.randomUUID(),
+        accountId: userId,
+        objectKey,
+        expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+      };
+      objectWriteLeases.set(lease.id, lease);
+      return Promise.resolve({ ...lease });
+    },
+
+    beginAssetObjectWrite(userId, assetId, objectKey) {
+      const asset = assets.get(`${userId}:${assetId}`);
+      if (
+        asset === undefined ||
+        asset.status !== "pending" ||
+        (objectKey !== asset.objectKey && objectKey !== asset.uploadObjectKey)
+      ) {
+        return Promise.resolve(undefined);
+      }
       const lease: ObjectWriteLease = {
         id: crypto.randomUUID(),
         accountId: userId,
@@ -1406,6 +1616,7 @@ export function createUnavailableOpsStore(): OpsStore {
     listAssets: () => Promise.resolve([]),
     getAssetByContent: () => Promise.resolve(undefined),
     getAssetByUpload: () => Promise.resolve(undefined),
+    authorizeAssetUpload: () => Promise.resolve(undefined),
     completeAsset: () => Promise.resolve(undefined),
     lookupCache: () => Promise.resolve(undefined),
     putCache: fail,
@@ -1451,11 +1662,13 @@ export function createUnavailableOpsStore(): OpsStore {
     finishAbandonedAssetUploadGc: fail,
     claimReadyAssetUploadCleanup: fail,
     finishReadyAssetUploadCleanup: fail,
+    claimDeletedBookAssets: fail,
     cleanupObsoleteV1Data: fail,
     deleteAccountData: fail,
     requestAccountDeletion: fail,
     accountObjectKeys: fail,
     beginObjectWrite: fail,
+    beginAssetObjectWrite: fail,
     finishObjectWrite: fail,
     accountObjectWriteLeases: fail,
     recordAssistantUse: (_userId, input) =>
@@ -1540,12 +1753,30 @@ export function createSupabaseOpsStore(
         if (detail?.includes("cloud_media_quota_exceeded") === true) {
           throw new AssetReservationError("cloud_media_quota_exceeded");
         }
+        if (detail?.includes("asset book is deleted") === true) {
+          throw new AssetReservationError("asset_book_deleted");
+        }
         throw new RestPersistenceError(502, "Postgres did not create the asset manifest.");
       }
       return asset;
     },
     async getAsset(userId, assetId) {
       return fetchAssetManifest(rest, userId, { id: assetId });
+    },
+    async authorizeAssetUpload(userId, uploadId, authorizedUntil) {
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/authorize_v2_asset_upload",
+        body: {
+          p_user_id: userId,
+          p_upload_id: uploadId,
+          p_authorized_until: authorizedUntil,
+        },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(502, "Postgres could not authorize the asset upload.");
+      }
+      return mapAssetManifestRow(restRow(response.body));
     },
     async listAssets(userId, filter) {
       const response = await rest.request({
@@ -2011,6 +2242,36 @@ export function createSupabaseOpsStore(
         throw new RestPersistenceError(502, "Postgres could not finish ready upload cleanup.");
       }
     },
+    async claimDeletedBookAssets(userId, bookIds) {
+      if (bookIds.length === 0) return [];
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/claim_deleted_book_v2_assets",
+        body: { p_user_id: userId, p_book_ids: [...new Set(bookIds)] },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(502, "Postgres could not claim deleted-book assets.");
+      }
+      const rows = restRows(response.body);
+      const claimed = rows.flatMap((row) =>
+        typeof row.id === "string" &&
+        typeof row.object_key === "string" &&
+        typeof row.upload_object_key === "string"
+          ? [
+              {
+                id: row.id,
+                objectKey: row.object_key,
+                uploadObjectKey: row.upload_object_key,
+                deleteAfter: typeof row.delete_after === "string" ? row.delete_after : null,
+              },
+            ]
+          : [],
+      );
+      if (claimed.length !== rows.length) {
+        throw new RestPersistenceError(502, "Postgres returned invalid deleted-book asset keys.");
+      }
+      return claimed;
+    },
     async cleanupObsoleteV1Data(userId, execute) {
       const response = await rest.request({
         method: "POST",
@@ -2118,6 +2379,17 @@ export function createSupabaseOpsStore(
         throw new RestPersistenceError(502, "Postgres could not begin the object write.");
       }
       return lease;
+    },
+    async beginAssetObjectWrite(userId, assetId, objectKey) {
+      const response = await rest.request({
+        method: "POST",
+        path: "/rpc/begin_v2_asset_object_write",
+        body: { p_user_id: userId, p_asset_id: assetId, p_object_key: objectKey },
+      });
+      if (!restOk(response) || isErrorBody(response.body)) {
+        throw new RestPersistenceError(502, "Postgres could not begin the asset object write.");
+      }
+      return mapObjectWriteLease(restRow(response.body));
     },
     async finishObjectWrite(leaseId) {
       const response = await rest.request({
@@ -3678,6 +3950,8 @@ function mapAssetManifestRow(row: Record<string, unknown> | undefined): OpsAsset
     uploadObjectKey: row.upload_object_key,
     createdAt: typeof row.created_at === "string" ? row.created_at : new Date().toISOString(),
     deletedAt: typeof row.deleted_at === "string" ? row.deleted_at : null,
+    uploadAuthorizedUntil:
+      typeof row.upload_authorized_until === "string" ? row.upload_authorized_until : null,
   };
 }
 

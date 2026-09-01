@@ -10,6 +10,7 @@ private let sqliteStatic = unsafeBitCast(0, to: sqlite3_destructor_type.self)
 
 final class SQLiteConnection: @unchecked Sendable {
     private var db: OpaquePointer?
+    private var terminalError: (any Error)?
     let url: URL
 
     init(fileURL: URL) {
@@ -34,8 +35,15 @@ final class SQLiteConnection: @unchecked Sendable {
         if let db { sqlite3_close(db) }
     }
 
+    /// A schema-open failure is terminal for this store instance. Keeping the
+    /// guard at the connection boundary also covers repository methods that do
+    /// not call the schema applicator themselves.
+    func failClosed(with error: any Error) {
+        if terminalError == nil { terminalError = error }
+    }
+
     func exec(_ sql: String) throws {
-        guard db != nil else { throw LocalSQLiteError.sqlite("closed") }
+        try ensureAvailable()
         var errorMessage: UnsafeMutablePointer<CChar>?
         let status = sqlite3_exec(db, sql, nil, nil, &errorMessage)
         if let errorMessage {
@@ -50,6 +58,7 @@ final class SQLiteConnection: @unchecked Sendable {
     }
 
     func prepare(_ sql: String) throws -> OpaquePointer {
+        try ensureAvailable()
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
             throw LocalSQLiteError.sqlite("prepare \(sql): \(errmsg())")
@@ -167,6 +176,11 @@ final class SQLiteConnection: @unchecked Sendable {
 
     private func errmsg() -> String {
         db.flatMap { sqlite3_errmsg($0) }.map { String(cString: $0) } ?? "unknown"
+    }
+
+    private func ensureAvailable() throws {
+        if let terminalError { throw terminalError }
+        guard db != nil else { throw LocalSQLiteError.sqlite("closed") }
     }
 
     var totalChangeCount: Int {

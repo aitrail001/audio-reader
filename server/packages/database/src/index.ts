@@ -167,6 +167,7 @@ export {
   createSupabaseSyncStore,
   createUnavailableSyncStore,
   isSyncEntityType,
+  SyncStoreWriteError,
 } from "./sync-store";
 export type {
   SyncChange,
@@ -199,7 +200,20 @@ export function createFakeDatabaseClient(
   const identity = createMemoryIdentityStore();
   const catalog = createMemoryCatalogStore();
   const sync = createMemorySyncStore({ identity });
-  const syncV2 = createMemorySyncStore({ identity });
+  const hooks: {
+    markDeletedBookAssets?: (userId: string, bookId: string) => Promise<unknown>;
+  } = {};
+  const syncV2 = createMemorySyncStore({
+    identity,
+    async afterAppliedMutation(userId, mutation) {
+      if (mutation.entityType === "book" && mutation.operation === "delete") {
+        await hooks.markDeletedBookAssets?.(userId, mutation.entityId);
+      }
+    },
+  });
+  const ops = createMemoryOpsStore({ identity, catalog, syncV2 });
+  const durableBookTransition = ops.claimDeletedBookAssets.bind(ops);
+  hooks.markDeletedBookAssets = (userId, bookId) => durableBookTransition(userId, [bookId]);
   return {
     ping: () => Promise.resolve(status),
     accountSyncSchemaVersion: () => Promise.resolve(schemaVersion),
@@ -207,7 +221,7 @@ export function createFakeDatabaseClient(
     sync,
     syncV2,
     catalog,
-    ops: createMemoryOpsStore({ identity, catalog, syncV2 }),
+    ops,
   };
 }
 

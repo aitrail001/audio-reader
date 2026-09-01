@@ -12,16 +12,20 @@ struct AppCompositionTests {
         let app = try source("Sources/AudioReader/AudioReaderApp.swift")
         let appState = try source("Sources/AudioReader/AppState.swift")
 
-        #expect(compositionSource.components(separatedBy: "Persistence.store").count - 1 == 4)
+        #expect(compositionSource.components(separatedBy: "Persistence.store").count - 1 == 1)
         #expect(!compositionSource.contains("LibraryStore"))
         #expect(!compositionSource.contains("RepositoryAdapter"))
-        #expect(compositionSource.contains("usesLivePersistence: true"))
+        #expect(compositionSource.contains("var usesLivePersistence: Bool { synchronizedStore != nil }"))
+        #expect(compositionSource.contains("transcripts: InMemoryTranscriptRepository"))
         #expect(!compositionSource.contains("#if os("))
         #expect(!compositionSource.contains("URLSession"))
         #expect(!compositionSource.contains("http"))
         #expect(app.contains("AppState(composition: .live)"))
         #expect(!app.contains("AppState()"))
         #expect(appState.contains("init(composition: AppComposition"))
+        #expect(appState.contains("init(composition: AppComposition = .inMemory()"))
+        #expect(!appState.contains("?? Persistence.store"))
+        #expect(!appState.contains("Persistence.store"))
         #expect(!appState.contains("Persistence.loadVocab"))
         #expect(!appState.contains("Persistence.saveVocab"))
         #expect(!appState.contains("Persistence.loadKnownLemmas"))
@@ -33,7 +37,7 @@ struct AppCompositionTests {
             from: "    private static var defaultLibraryPath: String {",
             to: "\n    init("
         )
-        #expect(defaultPath.contains("Persistence.importedBooksURL.path"))
+        #expect(defaultPath.contains("Persistence.defaultImportedBooksURL.path"))
         #expect(!AppSettings.default.libraryPath.isEmpty)
         #expect(AppSettings.default.libraryPath.contains("ImportedBooks-vNext"))
         #expect(AppSettings.default.libraryPath.hasPrefix("/"))
@@ -49,7 +53,7 @@ struct AppCompositionTests {
     @MainActor
     @Test("In-memory composition does not load live Persistence or LibraryStore")
     func inMemoryCompositionDoesNotLoadLiveStore() throws {
-        let state = AppState(composition: .inMemory())
+        let state = AppState()
 
         #expect(state.glosses.isEmpty)
         #expect(state.vocab.isEmpty)
@@ -81,6 +85,7 @@ struct AppCompositionTests {
                 status: status,
                 language: "zh-Hans",
                 model: "managed",
+                bookID: BookID(rawValue: "cloud-book"),
                 chapterID: ChapterID(rawValue: "cloud-chapter"),
                 source: "Source \(id)",
                 text: "Result \(id)",
@@ -98,13 +103,7 @@ struct AppCompositionTests {
             updatedAt: occurredAt
         ))
         let state = AppState(
-            composition: AppComposition(
-                vocabulary: store,
-                knownLemmas: store,
-                reviewEvents: store,
-                usesLivePersistence: true,
-                synchronizedStore: store
-            ),
+            composition: AppComposition(liveStore: store),
             account: AccountSession.isolated()
         )
 

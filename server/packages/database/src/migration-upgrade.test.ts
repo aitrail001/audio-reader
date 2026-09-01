@@ -8,6 +8,7 @@ const serverRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 const migrationsDir = join(serverRoot, "supabase", "migrations");
 const OLD_SCHEMA_CUTOFF = "20260831120000";
 const LIFECYCLE_UPGRADE = "20260831125000_assistant_result_lifecycle_upgrade.sql";
+const DELETED_BOOK_CLEANUP_VERSION = "20260901090000";
 const USER_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const DEVICE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
 const RESULT_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -114,8 +115,82 @@ describe("forward-only assistant result lifecycle migration (postgres)", () => {
 
     execOk(
       session,
-      migrationSql((version) => version > OLD_SCHEMA_CUTOFF),
+      migrationSql(
+        (version) => version > OLD_SCHEMA_CUTOFF && version < DELETED_BOOK_CLEANUP_VERSION,
+      ),
     );
+    const deletedBookId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const smallAssetId = "11111111-1111-4111-8111-111111111111";
+    const largeAssetId = "22222222-2222-4222-8222-222222222222";
+    const deletingAssetId = "33333333-3333-4333-8333-333333333333";
+    execOk(
+      session,
+      `insert into public.asset_manifests_v2 (
+         id, upload_id, user_id, kind, content_type, encoding, compressed_bytes,
+         original_bytes, sha256, object_key, upload_object_key, book_id, status, ready_at
+       ) values
+       (${sqlString(smallAssetId)}::uuid, gen_random_uuid(), ${sqlString(USER_ID)}::uuid,
+        'audio', 'audio/mp4', 'identity', 1, 1, repeat('1', 64),
+        'private/v2/${USER_ID}/audio/small', 'private/v2/${USER_ID}/pending/small',
+        ${sqlString(deletedBookId)}::uuid, 'ready', clock_timestamp()),
+       (${sqlString(largeAssetId)}::uuid, gen_random_uuid(), ${sqlString(USER_ID)}::uuid,
+        'audio', 'audio/mp4', 'identity', 8388609, 8388609, repeat('2', 64),
+        'private/v2/${USER_ID}/audio/large', 'private/v2/${USER_ID}/pending/large',
+        ${sqlString(deletedBookId)}::uuid, 'ready', clock_timestamp()),
+       (${sqlString(deletingAssetId)}::uuid, gen_random_uuid(), ${sqlString(USER_ID)}::uuid,
+        'audio', 'audio/mp4', 'identity', 1, 1, repeat('3', 64),
+        'private/v2/${USER_ID}/audio/deleting', 'private/v2/${USER_ID}/pending/deleting',
+        ${sqlString(deletedBookId)}::uuid, 'deleting', null);
+       insert into public.sync_v2_changes (
+         user_id, entity_type, entity_id, operation, revision, payload
+       ) values (${sqlString(USER_ID)}::uuid, 'book', ${sqlString(deletedBookId)}::uuid,
+         'delete', 1, '{}'::jsonb)`,
+    );
+    execOk(
+      session,
+      migrationSql((version) => version >= DELETED_BOOK_CLEANUP_VERSION),
+    );
+
+    expect(
+      scalar(
+        session,
+        `select string_agg(id::text || ':' || status, ',' order by id)
+         from public.asset_manifests_v2
+         where id in (${sqlString(smallAssetId)}::uuid, ${sqlString(largeAssetId)}::uuid,
+           ${sqlString(deletingAssetId)}::uuid)`,
+      ),
+    ).toBe(`${smallAssetId}:deleting,${largeAssetId}:deleting,${deletingAssetId}:deleting`);
+    expect(
+      scalar(
+        session,
+        `select (select upload_authorized_until is null from public.asset_manifests_v2
+           where id = ${sqlString(smallAssetId)}::uuid)::text || '|' ||
+          (select upload_authorized_until > clock_timestamp() + interval '23 hours'
+           from public.asset_manifests_v2 where id = ${sqlString(largeAssetId)}::uuid)::text`,
+      ),
+    ).toBe("true|true");
+    expect(
+      scalar(
+        session,
+        `select (deleted_at is not null)::text from public.asset_manifests_v2
+         where id = ${sqlString(deletingAssetId)}::uuid`,
+      ),
+    ).toBe("true");
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.sync_v2_changes where user_id = ${sqlString(USER_ID)}::uuid
+         and entity_type = 'asset' and operation = 'delete'
+         and entity_id in (${sqlString(smallAssetId)}::uuid, ${sqlString(largeAssetId)}::uuid)`,
+      ),
+    ).toBe("2");
+    expect(
+      scalar(
+        session,
+        `select migration_version from public.service_schema_versions
+         where component = 'account_sync'`,
+      ),
+    ).toBe(DELETED_BOOK_CLEANUP_VERSION);
 
     expect(
       scalar(

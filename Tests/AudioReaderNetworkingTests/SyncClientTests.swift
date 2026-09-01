@@ -11,8 +11,154 @@ private func syncAssetFile(_ bytes: Data) throws -> URL {
     return url
 }
 
+private struct LegacyAssistantPayload: Encodable {
+    var result: LegacyAssistantResult
+    var vocabulary: [String] = []
+}
+
+private struct LegacyAssistantResult: Encodable {
+    var id: String
+    var kind = "sentenceGloss"
+    var status = "accepted"
+    var timestamp = 12.5
+    var createdAt: Date
+    var decidedAt: Date
+}
+
 @Suite("Product sync client")
 struct SyncClientTests {
+    @Test("Legacy numeric assistant dates normalize in a realistic mixed push batch")
+    func legacyAssistantDatesNormalizeInMixedBatch() throws {
+        let intendedDate = Date(timeIntervalSince1970: 1_777_000_000.75)
+        let assistantMutations = try (0..<17).map { index in
+            let entityID = String(format: "aaaaaaaa-aaaa-4aaa-8aaa-%012d", index + 1)
+            return OutboxMutation(
+                id: MutationID(rawValue: String(format: "10000000-0000-4000-8000-%012d", index + 1)),
+                entityType: .assistantResult,
+                entityID: entityID,
+                operation: .upsert,
+                baseRevision: .zero,
+                occurredAt: intendedDate,
+                payload: try JSONEncoder().encode(
+                    LegacyAssistantPayload(result: LegacyAssistantResult(
+                        id: entityID,
+                        createdAt: intendedDate,
+                        decidedAt: intendedDate
+                    ))
+                )
+            )
+        }
+        let progress = OutboxMutation(
+            id: MutationID(rawValue: "20000000-0000-4000-8000-000000000001"),
+            entityType: .progress,
+            entityID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            operation: .upsert,
+            baseRevision: .zero,
+            occurredAt: intendedDate,
+            payload: Data(#"{"updatedAt":"2026-04-24T00:00:00Z"}"#.utf8)
+        )
+        let vocabularyMutations = (0..<46).map { index in
+            OutboxMutation(
+                id: MutationID(rawValue: String(format: "30000000-0000-4000-8000-%012d", index + 1)),
+                entityType: .vocabulary,
+                entityID: String(format: "cccccccc-cccc-4ccc-8ccc-%012d", index + 1),
+                operation: .upsert,
+                baseRevision: .zero,
+                occurredAt: intendedDate,
+                payload: Data(#"{"timestampSeconds":12.5}"#.utf8)
+            )
+        }
+        let batch = assistantMutations + [progress] + vocabularyMutations
+
+        let wireBatch = try batch.map { try $0.productMutation() }
+
+        #expect(wireBatch.count == 64)
+        for mutation in wireBatch.prefix(17) {
+            guard case .object(let result)? = mutation.payload["result"] else {
+                Issue.record("assistant result payload was not preserved")
+                continue
+            }
+            guard case .string(let createdAt)? = result["createdAt"],
+                  case .string(let decidedAt)? = result["decidedAt"] else {
+                Issue.record("legacy numeric assistant dates were not normalized")
+                continue
+            }
+            let createdDate = try #require(ISO8601DateFormatter().date(from: createdAt))
+            let decidedDate = try #require(ISO8601DateFormatter().date(from: decidedAt))
+            #expect(abs(createdDate.timeIntervalSince1970 - intendedDate.timeIntervalSince1970) < 1)
+            #expect(abs(decidedDate.timeIntervalSince1970 - intendedDate.timeIntervalSince1970) < 1)
+            #expect(result["timestamp"] == .number(12.5))
+        }
+        #expect(wireBatch[17].payload["updatedAt"] == .string("2026-04-24T00:00:00Z"))
+        #expect(wireBatch.dropFirst(18).allSatisfy {
+            $0.payload["timestampSeconds"] == .number(12.5)
+        })
+        let storedAssistant = try JSONDecoder().decode(
+            [String: SyncJSONValue].self,
+            from: assistantMutations[0].payload
+        )
+        guard case .object(let storedResult)? = storedAssistant["result"] else {
+            Issue.record("stored assistant result payload was not preserved")
+            return
+        }
+        #expect(storedResult["createdAt"] == .number(intendedDate.timeIntervalSinceReferenceDate))
+        #expect(storedResult["decidedAt"] == .number(intendedDate.timeIntervalSinceReferenceDate))
+    }
+
+    @Test("Malformed assistant date strings remain unchanged for server rejection")
+    func malformedAssistantDatesRemainUnchanged() throws {
+        let entityID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let mutation = OutboxMutation(
+            id: MutationID(rawValue: "00000000-0000-4000-8000-000000000002"),
+            entityType: .assistantResult,
+            entityID: entityID,
+            operation: .upsert,
+            baseRevision: .zero,
+            occurredAt: Date(timeIntervalSince1970: 1_777_000_000),
+            payload: Data(
+                #"{"result":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","createdAt":"not-a-date","decidedAt":"still-not-a-date"},"vocabulary":[]}"#.utf8
+            )
+        )
+
+        let wireMutation = try mutation.productMutation()
+
+        guard case .object(let result)? = wireMutation.payload["result"] else {
+            Issue.record("assistant result payload was not preserved")
+            return
+        }
+        #expect(result["createdAt"] == .string("not-a-date"))
+        #expect(result["decidedAt"] == .string("still-not-a-date"))
+    }
+
+    @Test("Legacy assistant hashes use the canonical sync entity UUID on the wire")
+    func legacyAssistantResultIdentityUsesEntityID() throws {
+        let legacyID = "f545a232f598b538822a1480e637abc44298e62b4daf75cb61d82b1ac01d6067"
+        let entityID = "e5557699-bde6-5f19-b2c4-78f2f9acb83b"
+        let payload = Data(
+            """
+            {"result":{"id":"\(legacyID)","kind":"sentenceGloss","status":"accepted"},"vocabulary":[]}
+            """.utf8
+        )
+        let mutation = OutboxMutation(
+            id: MutationID(rawValue: "00000000-0000-4000-8000-000000000001"),
+            entityType: .assistantResult,
+            entityID: entityID,
+            operation: .upsert,
+            baseRevision: .zero,
+            occurredAt: Date(timeIntervalSince1970: 1_777_000_000),
+            payload: payload
+        )
+
+        let wireMutation = try mutation.productMutation()
+
+        guard case .object(let result)? = wireMutation.payload["result"] else {
+            Issue.record("assistant result payload was not preserved as an object")
+            return
+        }
+        #expect(result["id"] == .string(entityID))
+        #expect(mutation.payload == payload)
+    }
+
     @MainActor
     @Test("Native refuses a new sync request when bootstrap says effective sync is unavailable")
     func unavailableBootstrapPreventsEnablingSync() async {
@@ -609,19 +755,27 @@ struct AccountSessionSyncTests {
     }
 
     @MainActor
-    @Test("a new device discovers and hydrates every v2 immutable asset kind before cursor commit")
-    func bootstrapHydratesEveryAssetKind() async throws {
+    @Test("a new device hydrates only transcript assets without cloud-media consent")
+    func bootstrapHydratesOnlyTranscriptAssetsWithoutCloudMediaConsent() async throws {
         let auth = FakeAuthClient()
         let sync = FakeSyncClient()
-        var expected: [String: Data] = [:]
-        let entities = SyncAssetKind.allCases.enumerated().map { index, kind in
+        var transcriptAssetID = ""
+        var transcriptEntityID = ""
+        var transcriptBytes = Data()
+        var entityIDs: [String] = []
+        var entities = SyncAssetKind.allCases.enumerated().map { index, kind in
             let assetID = String(format: "aaaaaaaa-aaaa-4aaa-8aaa-%012d", index + 1)
             let entityID = String(format: "bbbbbbbb-bbbb-4bbb-8bbb-%012d", index + 1)
             let bytes = kind == .transcriptRevision
                 ? Data(#"{"segments":[]}"#.utf8) : Data([UInt8(index + 1)])
             let sha = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
             sync.seedAssetBody(assetID: assetID, bytes: bytes, kind: kind)
-            expected[kind.rawValue] = bytes
+            entityIDs.append(entityID)
+            if kind == .transcriptRevision {
+                transcriptAssetID = assetID
+                transcriptEntityID = entityID
+                transcriptBytes = bytes
+            }
             return SyncBootstrapEntity(
                 sequence: index + 1,
                 entityType: kind == .transcriptRevision
@@ -639,23 +793,41 @@ struct AccountSessionSyncTests {
                 payloadHash: sha
             )
         }
+        let vocabularyID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        entityIDs.append(vocabularyID)
+        entities.append(SyncBootstrapEntity(
+            sequence: entities.count + 1,
+            entityType: OutboxEntityType.vocabulary.rawValue,
+            entityId: vocabularyID,
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-08-31T00:00:00Z",
+            payload: ["word": .string("kept")],
+            payloadHash: SyncJSONCoding.payloadHash(
+                SyncJSONCoding.data(from: ["word": .string("kept")])
+            )
+        ))
         sync.bootstrapPages = [SyncBootstrapResponse(
-            entities: entities, cursor: "11", nextOffset: 11, hasMore: false
+            entities: entities, cursor: "12", nextOffset: entities.count, hasMore: false
         )]
-        sync.pullCursor = "11"
+        sync.pullCursor = "12"
         let cursor = InMemorySyncCursorStore()
-        let hydrated = LockingBox<[String: Data]>([:])
+        let applied = LockingBox<[SyncPulledChange]>([])
+        let committedVersions = LockingBox<[SyncEntityVersion]>([])
+        let hydratedTranscript = LockingBox<Data?>(nil)
         let session = AccountSession(
             client: auth, store: InMemoryAuthSessionStore(),
             oauth: ScriptedOAuthBrowserSession.passthrough(), environment: .test,
             syncRuntime: AccountSyncRuntime(
                 client: sync, outbox: InMemorySyncOutboxRepository(), cursor: cursor,
                 snapshot: { [] },
-                applyPage: { changes, _, committedCursor in
-                    for change in changes {
-                        guard let kind = change.payload["kind"]?.stringValue,
-                              let path = change.payload["localObjectPath"]?.stringValue else { continue }
-                        hydrated.value[kind] = try Data(contentsOf: URL(fileURLWithPath: path))
+                applyPage: { changes, versions, committedCursor in
+                    applied.value += changes
+                    committedVersions.value += versions
+                    if let transcript = changes.first(where: {
+                        $0.payload["kind"]?.stringValue == SyncAssetKind.transcriptRevision.rawValue
+                    }), let path = transcript.payload["localObjectPath"]?.stringValue {
+                        hydratedTranscript.value = try Data(contentsOf: URL(fileURLWithPath: path))
                     }
                     try cursor.saveCursor(committedCursor)
                 }
@@ -666,44 +838,59 @@ struct AccountSessionSyncTests {
         session.setSyncEnabled(true)
         await session.synchronize()
 
-        #expect(hydrated.value == expected)
-        #expect(try cursor.loadCursor() == "11")
+        #expect(applied.value.map(\.entityId).sorted() == [
+            transcriptEntityID, vocabularyID,
+        ].sorted())
+        #expect(hydratedTranscript.value == transcriptBytes)
+        #expect(sync.manifestLookups == [transcriptAssetID])
+        #expect(sync.downloadedAssetIDs == [transcriptAssetID])
+        #expect(Set(committedVersions.value.map(\.entityID)) == Set(entityIDs))
+        #expect(try cursor.loadCursor() == "12")
     }
 
     @MainActor
-    @Test("native hydration resolves an announced 501st asset directly by ID")
-    func hydrationResolvesAssetBeyondDiscoveryWindow() async throws {
+    @Test("native transcript hydration resolves an announced 501st asset directly by ID")
+    func transcriptHydrationResolvesAssetBeyondDiscoveryWindow() async throws {
         let auth = FakeAuthClient()
         let sync = FakeSyncClient()
+        let bytes = Data(#"{"segments":[]}"#.utf8)
         var targetID = ""
-        var targetBytes = Data()
         for index in 0...500 {
             let assetID = String(format: "aaaaaaaa-aaaa-4aaa-8aaa-%012d", index + 1)
-            let bytes = Data([UInt8(index % 251)])
-            sync.seedAssetBody(assetID: assetID, bytes: bytes, kind: .cover)
+            sync.seedAssetBody(assetID: assetID, bytes: bytes)
             targetID = assetID
-            targetBytes = bytes
         }
-        let sha = SHA256.hash(data: targetBytes).map { String(format: "%02x", $0) }.joined()
+        let sha = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
         sync.bootstrapPages = [SyncBootstrapResponse(entities: [SyncBootstrapEntity(
-            sequence: 1, entityType: OutboxEntityType.asset.rawValue,
-            entityId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", operation: OutboxOperation.upsert.rawValue,
-            revision: 1, changedAt: "2026-08-31T00:00:00Z",
+            sequence: 1,
+            entityType: OutboxEntityType.transcript.rawValue,
+            entityId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-08-31T00:00:00Z",
             payload: [
-                "assetId": .string(targetID), "kind": .string(SyncAssetKind.cover.rawValue),
-                "sha256": .string(sha), "encoding": .string("identity"),
-                "compressedBytes": .number(Double(targetBytes.count)),
-                "originalBytes": .number(Double(targetBytes.count)),
-            ], payloadHash: sha
+                "assetId": .string(targetID),
+                "kind": .string(SyncAssetKind.transcriptRevision.rawValue),
+                "sha256": .string(sha),
+                "encoding": .string("identity-json-v1"),
+                "compressedBytes": .number(Double(bytes.count)),
+                "originalBytes": .number(Double(bytes.count)),
+                "segmentCount": .number(0),
+            ],
+            payloadHash: sha
         )], cursor: "1", nextOffset: 1, hasMore: false)]
         sync.pullCursor = "1"
         let cursor = InMemorySyncCursorStore()
         let hydrated = LockingBox<Data?>(nil)
         let session = AccountSession(
-            client: auth, store: InMemoryAuthSessionStore(),
-            oauth: ScriptedOAuthBrowserSession.passthrough(), environment: .test,
+            client: auth,
+            store: InMemoryAuthSessionStore(),
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
             syncRuntime: AccountSyncRuntime(
-                client: sync, outbox: InMemorySyncOutboxRepository(), cursor: cursor,
+                client: sync,
+                outbox: InMemorySyncOutboxRepository(),
+                cursor: cursor,
                 snapshot: { [] },
                 applyPage: { changes, _, committedCursor in
                     if let path = changes.first?.payload["localObjectPath"]?.stringValue {
@@ -713,16 +900,170 @@ struct AccountSessionSyncTests {
                 }
             )
         )
-        await session.requestEmailCode("direct-asset@example.com")
+        await session.requestEmailCode("direct-transcript@example.com")
         await session.verifyEmailCode("123456")
         session.setSyncEnabled(true)
 
         await session.synchronize()
 
-        #expect(hydrated.value == targetBytes)
+        #expect(hydrated.value == bytes)
         #expect(sync.manifestLookups == [targetID])
+        #expect(sync.downloadedAssetIDs == [targetID])
         #expect(sync.discoveryQueryCount == 0)
         #expect(try cursor.loadCursor() == "1")
+    }
+
+    @MainActor
+    @Test("an incremental media announcement advances its version and cursor without hydration")
+    func incrementalMediaAnnouncementAdvancesWithoutHydration() async throws {
+        let auth = FakeAuthClient()
+        let sync = FakeSyncClient()
+        let coverAssetID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let coverEntityID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        let vocabularyID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        let coverBytes = Data([1, 2, 3])
+        let sha = SHA256.hash(data: coverBytes).map { String(format: "%02x", $0) }.joined()
+        sync.seedAssetBody(assetID: coverAssetID, bytes: coverBytes, kind: .cover)
+        sync.pullChanges = [
+            SyncPulledChange(
+                sequence: 2,
+                entityType: OutboxEntityType.asset.rawValue,
+                entityId: coverEntityID,
+                operation: OutboxOperation.upsert.rawValue,
+                revision: 4,
+                changedAt: "2026-08-31T00:00:00Z",
+                payload: [
+                    "assetId": .string(coverAssetID),
+                    "kind": .string(SyncAssetKind.cover.rawValue),
+                    "sha256": .string(sha),
+                    "compressedBytes": .number(Double(coverBytes.count)),
+                ]
+            ),
+            SyncPulledChange(
+                sequence: 3,
+                entityType: OutboxEntityType.vocabulary.rawValue,
+                entityId: vocabularyID,
+                operation: OutboxOperation.upsert.rawValue,
+                revision: 2,
+                changedAt: "2026-08-31T00:00:00Z",
+                payload: ["word": .string("kept")]
+            ),
+        ]
+        sync.pullCursor = "3"
+        let cursor = InMemorySyncCursorStore()
+        try cursor.saveCursor("1")
+        let applied = LockingBox<[SyncPulledChange]>([])
+        let committedVersions = LockingBox<[SyncEntityVersion]>([])
+        let session = AccountSession(
+            client: auth,
+            store: InMemoryAuthSessionStore(),
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: InMemorySyncOutboxRepository(),
+                cursor: cursor,
+                snapshot: { [] },
+                applyPage: { changes, versions, committedCursor in
+                    applied.value = changes
+                    committedVersions.value = versions
+                    try cursor.saveCursor(committedCursor)
+                }
+            )
+        )
+        await session.requestEmailCode("incremental-media@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        #expect(applied.value.map(\.entityId) == [vocabularyID])
+        #expect(sync.manifestLookups.isEmpty)
+        #expect(sync.downloadedAssetIDs.isEmpty)
+        #expect(Set(committedVersions.value.map(\.entityID)) == [coverEntityID, vocabularyID])
+        #expect(try cursor.loadCursor() == "3")
+    }
+
+    @MainActor
+    @Test("transcript cleanup tombstones apply without asset hydration")
+    func transcriptCleanupTombstonesApplyWithoutAssetHydration() async throws {
+        let auth = FakeAuthClient()
+        let sync = FakeSyncClient()
+        let explicitTranscriptID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let fallbackTranscriptID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        let coverID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        sync.pullChanges = [
+            SyncPulledChange(
+                sequence: 2,
+                entityType: OutboxEntityType.transcript.rawValue,
+                entityId: explicitTranscriptID,
+                operation: OutboxOperation.delete.rawValue,
+                revision: 4,
+                changedAt: "2026-09-01T00:00:00Z",
+                payload: [
+                    "assetId": .string(explicitTranscriptID),
+                    "kind": .string(SyncAssetKind.transcriptRevision.rawValue),
+                ]
+            ),
+            SyncPulledChange(
+                sequence: 3,
+                entityType: OutboxEntityType.transcript.rawValue,
+                entityId: fallbackTranscriptID,
+                operation: OutboxOperation.delete.rawValue,
+                revision: 2,
+                changedAt: "2026-09-01T00:00:00Z",
+                payload: [:]
+            ),
+            SyncPulledChange(
+                sequence: 4,
+                entityType: OutboxEntityType.asset.rawValue,
+                entityId: coverID,
+                operation: OutboxOperation.delete.rawValue,
+                revision: 3,
+                changedAt: "2026-09-01T00:00:00Z",
+                payload: [
+                    "assetId": .string(coverID),
+                    "kind": .string(SyncAssetKind.cover.rawValue),
+                ]
+            ),
+        ]
+        sync.pullCursor = "4"
+        let cursor = InMemorySyncCursorStore()
+        try cursor.saveCursor("1")
+        let applied = LockingBox<[SyncPulledChange]>([])
+        let committedVersions = LockingBox<[SyncEntityVersion]>([])
+        let session = AccountSession(
+            client: auth,
+            store: InMemoryAuthSessionStore(),
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: InMemorySyncOutboxRepository(),
+                cursor: cursor,
+                snapshot: { [] },
+                applyPage: { changes, versions, committedCursor in
+                    applied.value = changes
+                    committedVersions.value = versions
+                    try cursor.saveCursor(committedCursor)
+                }
+            )
+        )
+        await session.requestEmailCode("transcript-cleanup@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        #expect(applied.value.map(\.entityId) == [explicitTranscriptID, fallbackTranscriptID])
+        #expect(applied.value.allSatisfy { $0.operation == OutboxOperation.delete.rawValue })
+        #expect(sync.manifestLookups.isEmpty)
+        #expect(sync.downloadedAssetIDs.isEmpty)
+        #expect(Set(committedVersions.value.map(\.entityID)) == [
+            explicitTranscriptID, fallbackTranscriptID, coverID,
+        ])
+        #expect(committedVersions.value.allSatisfy { $0.payload == SyncJSONCoding.tombstonePayload })
+        #expect(try cursor.loadCursor() == "4")
     }
 
     @Test("payload hashing canonicalizes JSON but preserves raw fallback semantics")

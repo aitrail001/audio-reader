@@ -251,6 +251,163 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
     ).toBe(before);
   });
 
+  it("keeps a mixed 64-row v2 push atomic when one assistant payload has its legacy identity", () => {
+    const session = requireDb(db);
+    const beforeGlobalSequence = Number(
+      scalar(session, "select coalesce(max(sequence), 0)::text from public.sync_v2_changes"),
+    );
+    const batchUser = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const batchDevice = "dddddddd-dddd-4ddd-8ddd-dddddddddd01";
+    execOk(
+      session,
+      `insert into public.profiles (user_id, display_name, account_status)
+       values (${sqlString(batchUser)}::uuid, 'mixed batch', 'active');
+       insert into public.devices (id, user_id, platform, name, app_version)
+       values (
+         ${sqlString(batchDevice)}::uuid, ${sqlString(batchUser)}::uuid,
+         'macos', 'Mixed batch device', '2.0.1'
+       );`,
+    );
+    const beforeChanges = Number(
+      scalar(
+        session,
+        `select count(*)::text from public.sync_v2_changes where user_id = ${sqlString(batchUser)}::uuid`,
+      ),
+    );
+    const beforeOtherUsers = scalar(
+      session,
+      `select count(*)::text from public.sync_v2_changes
+       where user_id in (${sqlString(USER_A)}::uuid, ${sqlString(USER_B)}::uuid)`,
+    );
+    const uuid = (prefix: string, index: number) =>
+      `${prefix}000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+    const vocabulary = Array.from({ length: 46 }, (_, index) => ({
+      mutationId: uuid("71", index + 1),
+      entityType: "vocabulary",
+      entityId: uuid("72", index + 1),
+      operation: "upsert",
+      baseRevision: 0,
+      occurredAt: "2026-09-01T00:00:00Z",
+      payload: {
+        vocabularySchemaVersion: 1,
+        surface: `word-${String(index + 1)}`,
+        context: "private context",
+        state: "learning",
+      },
+    }));
+    const progress = {
+      mutationId: uuid("73", 1),
+      entityType: "progress",
+      entityId: uuid("74", 1),
+      operation: "upsert",
+      baseRevision: 0,
+      occurredAt: "2026-09-01T00:00:00Z",
+      payload: { progressKind: "reader", relativeSeconds: 1 },
+    };
+    const assistantResults = Array.from({ length: 17 }, (_, index) => {
+      const entityId = uuid("75", index + 1);
+      return {
+        mutationId: uuid("76", index + 1),
+        entityType: "assistant_result",
+        entityId,
+        operation: "upsert",
+        baseRevision: 0,
+        occurredAt: "2026-09-01T00:00:00Z",
+        payload: {
+          result: {
+            id: entityId,
+            kind: "sentenceGloss",
+            status: "accepted",
+            language: "zh-Hans",
+            model: "managed",
+            promptVersion: "policy-v1",
+            modelPolicyHash: "a".repeat(64),
+            source: `private source ${String(index + 1)}`,
+            text: `private result ${String(index + 1)}`,
+            createdAt: "2026-09-01T00:00:00Z",
+          },
+          vocabulary: [],
+        },
+      };
+    });
+    const mutations = [...vocabulary, progress, ...assistantResults];
+    const malformed = structuredClone(mutations);
+    const malformedResult = requireJsonObject(requireJsonObject(malformed.at(-1)?.payload).result);
+    malformedResult.id = "f545a232f598b538822a1480e637abc44298e62b4daf75cb61d82b1ac01d6067";
+    const batchId = "77777777-7777-4777-8777-777777777777";
+
+    const failed = session.exec(`select public.push_sync_v2_batch(
+      ${sqlString(batchUser)}::uuid, ${sqlString(batchDevice)}::uuid,
+      ${sqlString(batchId)}::uuid, ${sqlJson(malformed)}::jsonb
+    )`);
+    expect(failed.ok).toBe(false);
+    expect(failed.stderr).toMatch(/assistant_result payload identity or status is invalid/i);
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.sync_v2_changes where user_id = ${sqlString(batchUser)}::uuid`,
+      ),
+    ).toBe(String(beforeChanges));
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.sync_v2_mutation_outcomes where mutation_id in (${mutations
+          .map((mutation) => `${sqlString(mutation.mutationId)}::uuid`)
+          .join(",")})`,
+      ),
+    ).toBe("0");
+
+    const applied = callJson(
+      session,
+      `select public.push_sync_v2_batch(
+        ${sqlString(batchUser)}::uuid, ${sqlString(batchDevice)}::uuid,
+        ${sqlString(batchId)}::uuid, ${sqlJson(mutations)}::jsonb
+      )`,
+    );
+    const appliedResults = requireJsonObjectArray(applied.results);
+    expect(appliedResults).toHaveLength(64);
+    expect(appliedResults.every((result) => result.status === "applied")).toBe(true);
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.sync_v2_changes where user_id = ${sqlString(batchUser)}::uuid`,
+      ),
+    ).toBe(String(beforeChanges + 64));
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.sync_v2_changes
+         where user_id in (${sqlString(USER_A)}::uuid, ${sqlString(USER_B)}::uuid)`,
+      ),
+    ).toBe(beforeOtherUsers);
+
+    const replay = callJson(
+      session,
+      `select public.push_sync_v2_batch(
+        ${sqlString(batchUser)}::uuid, ${sqlString(batchDevice)}::uuid,
+        ${sqlString(batchId)}::uuid, ${sqlJson(mutations)}::jsonb
+      )`,
+    );
+    expect(
+      requireJsonObjectArray(replay.results).every((result) => result.status === "duplicate"),
+    ).toBe(true);
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.sync_v2_changes where user_id = ${sqlString(batchUser)}::uuid`,
+      ),
+    ).toBe(String(beforeChanges + 64));
+    execOk(
+      session,
+      `delete from public.profiles where user_id = ${sqlString(batchUser)}::uuid;
+       select setval(
+         pg_get_serial_sequence('public.sync_v2_changes', 'sequence'),
+         greatest(${String(beforeGlobalSequence)}, 1),
+         ${beforeGlobalSequence > 0 ? "true" : "false"}
+       );`,
+    );
+  });
+
   it("dry-runs and idempotently executes complete per-user v1 cleanup", () => {
     const session = requireDb(db);
     const userId = "99999999-9999-4999-8999-999999999999";
@@ -1089,6 +1246,267 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
          ) from asset_manifests_v2 where upload_id = ${sqlString(failedUpload)}::uuid`,
       ),
     ).toBe("pending:0");
+  });
+
+  it("atomically tombstones deleted-book assets with current revisions and account isolation", () => {
+    const session = requireDb(db);
+    const bookId = "14141414-1414-4414-8414-141414141414";
+    const readyId = "15151515-1515-4515-8515-151515151515";
+    const readyUploadId = "16161616-1616-4616-8616-161616161616";
+    const pendingId = "17171717-1717-4717-8717-171717171717";
+    const pendingUploadId = "18181818-1818-4818-8818-181818181818";
+    const otherId = "19191919-1919-4919-8919-191919191919";
+    const otherUploadId = "20202020-2020-4020-8020-202020202020";
+    const revisionId = "21212121-2121-4121-8121-212121212121";
+    execOk(
+      session,
+      `insert into public.asset_manifests_v2 (
+         id, upload_id, user_id, kind, content_type, encoding, compressed_bytes, original_bytes,
+         sha256, object_key, upload_object_key, revision_id, book_id, chapter_id, segment_count,
+         status, ready_at, upload_authorized_until
+       ) values
+       (${sqlString(readyId)}::uuid, ${sqlString(readyUploadId)}::uuid,
+        ${sqlString(USER_A)}::uuid, 'transcriptRevision', 'application/json', 'identity-json-v1',
+        3, 3, repeat('c', 64), 'private/v2/${USER_A}/transcriptRevision/' || repeat('c', 64),
+        'private/v2/${USER_A}/pending/${readyUploadId}', ${sqlString(revisionId)}::uuid,
+        ${sqlString(bookId)}::uuid, '22222222-2222-4222-8222-222222222222'::uuid, 1,
+        'ready', now(), null),
+       (${sqlString(pendingId)}::uuid, ${sqlString(pendingUploadId)}::uuid,
+        ${sqlString(USER_A)}::uuid, 'audio', 'audio/mp4', 'identity', 3, 3, repeat('d', 64),
+        'private/v2/${USER_A}/audio/' || repeat('d', 64),
+        'private/v2/${USER_A}/pending/${pendingUploadId}', null, ${sqlString(bookId)}::uuid,
+        null, null, 'pending', null, clock_timestamp() + interval '1 hour'),
+       (${sqlString(otherId)}::uuid, ${sqlString(otherUploadId)}::uuid,
+        ${sqlString(USER_B)}::uuid, 'audio', 'audio/mp4', 'identity', 3, 3, repeat('e', 64),
+        'private/v2/${USER_B}/audio/' || repeat('e', 64),
+        'private/v2/${USER_B}/pending/${otherUploadId}', null, ${sqlString(bookId)}::uuid,
+        null, null, 'ready', now(), null);
+       insert into public.object_write_leases (user_id, object_key)
+       values (${sqlString(USER_A)}::uuid,
+         'private/v2/${USER_A}/transcriptRevision/' || repeat('c', 64));
+       insert into public.sync_v2_changes (
+         user_id, entity_type, entity_id, operation, revision, payload
+       ) values
+       (${sqlString(USER_A)}::uuid, 'transcript', ${sqlString(revisionId)}::uuid,
+        'upsert', 1, '{}'::jsonb),
+       (${sqlString(USER_A)}::uuid, 'transcript', ${sqlString(revisionId)}::uuid,
+        'upsert', 2, '{}'::jsonb),
+       (${sqlString(USER_A)}::uuid, 'transcript', ${sqlString(revisionId)}::uuid,
+        'upsert', 3, '{}'::jsonb),
+       (${sqlString(USER_A)}::uuid, 'book', ${sqlString(bookId)}::uuid,
+        'delete', 1, '{}'::jsonb)`,
+    );
+
+    expect(
+      scalar(
+        session,
+        `select string_agg(id::text || ':' || status, ',' order by id)
+         from asset_manifests_v2 where id in (
+           ${sqlString(readyId)}::uuid, ${sqlString(pendingId)}::uuid
+         )`,
+      ),
+    ).toBe(`${readyId}:deleting,${pendingId}:deleting`);
+    expect(
+      scalar(
+        session,
+        `select revision::text from sync_v2_changes
+         where user_id = ${sqlString(USER_A)}::uuid
+           and entity_type = 'transcript' and entity_id = ${sqlString(revisionId)}::uuid
+           and operation = 'delete'`,
+      ),
+    ).toBe("4");
+
+    const first = callJson(
+      session,
+      `select jsonb_build_object('rows', coalesce(jsonb_agg(row_to_json(claimed)), '[]'::jsonb))
+       from public.claim_deleted_book_v2_assets(
+         ${sqlString(USER_A)}::uuid, array[${sqlString(bookId)}::uuid]
+       ) claimed`,
+    );
+    const claimedRows = requireJsonObjectArray(first.rows);
+    expect(claimedRows).toHaveLength(2);
+    expect(claimedRows.every((row) => typeof row.delete_after === "string")).toBe(true);
+    expect(
+      scalar(
+        session,
+        `select string_agg(id::text || ':' || status, ',' order by id)
+         from asset_manifests_v2 where id in (
+           ${sqlString(readyId)}::uuid, ${sqlString(pendingId)}::uuid, ${sqlString(otherId)}::uuid
+         )`,
+      ),
+    ).toContain(`${otherId}:ready`);
+    expect(
+      scalar(
+        session,
+        `select revision::text from sync_v2_changes
+         where user_id = ${sqlString(USER_A)}::uuid
+           and entity_type = 'transcript' and entity_id = ${sqlString(revisionId)}::uuid
+           and operation = 'delete'`,
+      ),
+    ).toBe("4");
+
+    callJson(
+      session,
+      `select jsonb_build_object('rows', coalesce(jsonb_agg(row_to_json(claimed)), '[]'::jsonb))
+       from public.claim_deleted_book_v2_assets(
+         ${sqlString(USER_A)}::uuid, array[${sqlString(bookId)}::uuid]
+       ) claimed`,
+    );
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from sync_v2_changes
+         where user_id = ${sqlString(USER_A)}::uuid
+           and entity_type = 'transcript' and entity_id = ${sqlString(revisionId)}::uuid
+           and operation = 'delete'`,
+      ),
+    ).toBe("1");
+    expect(
+      scalar(
+        session,
+        `select public.finish_v2_asset_upload_gc(array[
+          ${sqlString(readyId)}::uuid, ${sqlString(pendingId)}::uuid
+        ])::text`,
+      ),
+    ).toBe("0");
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.gc_abandoned_v2_uploads(
+          clock_timestamp() + interval '2 days', 10
+        ) claimed where claimed.id in (
+          ${sqlString(readyId)}::uuid, ${sqlString(pendingId)}::uuid
+        )`,
+      ),
+    ).toBe("0");
+    execOk(
+      session,
+      `delete from public.object_write_leases where user_id = ${sqlString(USER_A)}::uuid;
+       update public.asset_manifests_v2 set upload_authorized_until = clock_timestamp() - interval '1 second'
+       where id = ${sqlString(pendingId)}::uuid`,
+    );
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.gc_abandoned_v2_uploads(
+          clock_timestamp() + interval '2 days', 10
+        ) claimed where claimed.id in (
+          ${sqlString(readyId)}::uuid, ${sqlString(pendingId)}::uuid
+        )`,
+      ),
+    ).toBe("2");
+    expect(
+      scalar(
+        session,
+        `select public.finish_v2_asset_upload_gc(array[
+          ${sqlString(readyId)}::uuid, ${sqlString(pendingId)}::uuid
+        ])::text`,
+      ),
+    ).toBe("0");
+    execOk(
+      session,
+      `insert into public.object_write_leases (user_id, object_key)
+       values (${sqlString(USER_A)}::uuid,
+         'private/v2/${USER_A}/transcriptRevision/' || repeat('c', 64))`,
+    );
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.gc_abandoned_v2_uploads(
+          clock_timestamp() + interval '2 days', 10
+        ) claimed where claimed.id in (
+          ${sqlString(readyId)}::uuid, ${sqlString(pendingId)}::uuid
+        )`,
+      ),
+    ).toBe("1");
+    execOk(
+      session,
+      `delete from public.object_write_leases where user_id = ${sqlString(USER_A)}::uuid;
+       update public.asset_manifests_v2
+       set deleted_at = clock_timestamp() - interval '25 hours'
+       where id in (${sqlString(readyId)}::uuid, ${sqlString(pendingId)}::uuid)`,
+    );
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.gc_abandoned_v2_uploads(
+          clock_timestamp() + interval '2 days', 10
+        ) claimed where claimed.id in (
+          ${sqlString(readyId)}::uuid, ${sqlString(pendingId)}::uuid
+        )`,
+      ),
+    ).toBe("2");
+    expect(
+      scalar(
+        session,
+        `select public.finish_v2_asset_upload_gc(array[
+          ${sqlString(readyId)}::uuid, ${sqlString(pendingId)}::uuid
+        ])::text`,
+      ),
+    ).toBe("2");
+  });
+
+  it("preserves a new asset when a later book upsert wins before cleanup acquires the profile lock", async () => {
+    const session = requireDb(db);
+    const bookId = "24242424-2424-4424-8424-242424242424";
+    const assetId = "25252525-2525-4525-8525-252525252525";
+    const uploadId = "26262626-2626-4626-8626-262626262626";
+    execOk(
+      session,
+      `insert into public.sync_v2_changes (
+         user_id, entity_type, entity_id, operation, revision, payload
+       ) values (${sqlString(USER_A)}::uuid, 'book', ${sqlString(bookId)}::uuid,
+         'delete', 1, '{}'::jsonb)`,
+    );
+
+    const winningUpsert = session.start(
+      `begin;
+       select 1 from public.profiles where user_id = ${sqlString(USER_A)}::uuid for update;
+       insert into public.sync_v2_changes (
+         user_id, entity_type, entity_id, operation, revision, payload
+       ) values (${sqlString(USER_A)}::uuid, 'book', ${sqlString(bookId)}::uuid,
+         'upsert', 2, '{"title":"Restored"}'::jsonb);
+       insert into public.asset_manifests_v2 (
+         id, upload_id, user_id, kind, content_type, encoding, compressed_bytes,
+         original_bytes, sha256, object_key, upload_object_key, book_id, status, ready_at
+       ) values (${sqlString(assetId)}::uuid, ${sqlString(uploadId)}::uuid,
+         ${sqlString(USER_A)}::uuid, 'audio', 'audio/mp4', 'identity', 1, 1, repeat('f', 64),
+         'private/v2/${USER_A}/audio/' || repeat('f', 64),
+         'private/v2/${USER_A}/pending/${uploadId}', ${sqlString(bookId)}::uuid,
+         'ready', clock_timestamp());
+       insert into public.sync_v2_changes (
+         user_id, entity_type, entity_id, operation, revision, payload
+       ) values (${sqlString(USER_A)}::uuid, 'asset', ${sqlString(assetId)}::uuid,
+         'upsert', 1, '{}'::jsonb);
+       select pg_sleep(0.5);
+       commit;`,
+      { timeout: 20_000 },
+    );
+    await delay(100);
+    const staleClaim = session.start(
+      `select count(*)::text from public.claim_deleted_book_v2_assets(
+         ${sqlString(USER_A)}::uuid, array[${sqlString(bookId)}::uuid]
+       )`,
+      { timeout: 20_000 },
+    );
+    const [upserted, claimed] = await Promise.all([winningUpsert, staleClaim]);
+    expect(upserted.ok, upserted.stderr || upserted.stdout).toBe(true);
+    expect(claimed.ok, claimed.stderr || claimed.stdout).toBe(true);
+    expect(claimed.stdout.trim()).toBe("0");
+    expect(
+      scalar(
+        session,
+        `select status from public.asset_manifests_v2 where id = ${sqlString(assetId)}::uuid`,
+      ),
+    ).toBe("ready");
+    expect(
+      scalar(
+        session,
+        `select count(*)::text from public.sync_v2_changes
+         where user_id = ${sqlString(USER_A)}::uuid and entity_type = 'asset'
+           and entity_id = ${sqlString(assetId)}::uuid and operation = 'delete'`,
+      ),
+    ).toBe("0");
   });
 
   it("claims one assistant generation per cache key and attaches another user", () => {

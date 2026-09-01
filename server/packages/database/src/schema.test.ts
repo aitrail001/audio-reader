@@ -45,6 +45,10 @@ function loadMigrationSql(): string {
   return files.map((name) => readFileSync(join(migrationsDir, name), "utf8")).join("\n");
 }
 
+function loadDeletedBookCleanupMigration(): string {
+  return readFileSync(join(migrationsDir, "20260901090000_deleted_book_asset_cleanup.sql"), "utf8");
+}
+
 function columnIsNotNull(definition: string | undefined): boolean {
   if (definition === undefined) {
     return false;
@@ -98,11 +102,65 @@ describe("multi-user postgres schema migrations", () => {
     expect(schema.hasCheck("asset_manifests_v2", "status")).toBe(true);
     expect(sql).toContain("function public.complete_v2_asset_and_publish");
     expect(sql).toMatch(/set status = 'deleting'[\s\S]*finish_v2_asset_upload_gc/i);
+    expect(sql).toMatch(
+      /mark_deleted_book_v2_assets[\s\S]*status in \('pending', 'ready'\)[\s\S]*sync_v2_changes[\s\S]*'delete'[\s\S]*status = 'deleting'/i,
+    );
+    expect(sql).toMatch(
+      /mark_deleted_book_v2_assets[\s\S]*profiles[\s\S]*for update[\s\S]*entity_type = 'book'[\s\S]*order by changes\.sequence desc[\s\S]*is distinct from 'delete'[\s\S]*status in \('pending', 'ready'\)/i,
+    );
+    expect(sql).toMatch(
+      /create trigger sync_v2_book_delete_asset_cleanup[\s\S]*after insert on public\.sync_v2_changes/i,
+    );
+    expect(sql).toMatch(
+      /distinct on \(changes\.user_id, changes\.entity_id\)[\s\S]*latest\.operation = 'delete'[\s\S]*mark_deleted_book_v2_assets/i,
+    );
+    expect(sql).toMatch(/interval '24 hours'[\s\S]*compressed_bytes > 8388608/i);
+    expect(sql).toMatch(
+      /set deleted_at = coalesce\(deleted_at, clock_timestamp\(\)\)[\s\S]*where status = 'deleting'/i,
+    );
+    expect(sql).toMatch(
+      /finish_v2_asset_upload_gc[\s\S]*deleted_at <= clock_timestamp\(\) - interval '24 hours'/i,
+    );
+    expect(sql).toMatch(/asset_manifests_v2[\s\S]*upload_authorized_until timestamptz/i);
+    expect(sql).toMatch(
+      /gc_abandoned_v2_uploads[\s\S]*upload_authorized_until[\s\S]*object_write_leases[\s\S]*expires_at > clock_timestamp\(\)/i,
+    );
+    expect(sql).toMatch(
+      /begin_v2_asset_object_write[\s\S]*status <> 'pending'[\s\S]*object_write_leases/i,
+    );
+    expect(sql).toMatch(
+      /authorize_v2_asset_upload[\s\S]*status <> 'pending'[\s\S]*upload_authorized_until/i,
+    );
     expect(sql).not.toMatch(/insert into public\.asset_manifests_v2[\s\S]{0,500}transcript_json/i);
   });
 
   it("seeds account sync requested-off in a new environment", () => {
     expect(loadMigrationSql()).toMatch(/\('account_sync',\s*false,\s*100\)/i);
+  });
+
+  it("gates deleted-book cleanup on native 2.0.1 without changing requested state", () => {
+    const sql = loadMigrationSql();
+    expect(sql).toMatch(
+      /update public\.feature_flags\s+set min_app_version = '2\.0\.1'\s+where key = 'account_sync'/i,
+    );
+    expect(sql).not.toMatch(
+      /update public\.feature_flags\s+set[^;]*enabled[^;]*where key = 'account_sync'/i,
+    );
+  });
+
+  it("publishes deleted-book cleanup readiness only after its transactional repair", () => {
+    const sql = loadDeletedBookCleanupMigration();
+    expect(sql.trimStart()).toMatch(/^begin;/i);
+    expect(sql.trimEnd()).toMatch(/commit;$/i);
+    expect(sql.indexOf("values ('account_sync', '20260901090000')")).toBeGreaterThan(
+      sql.indexOf("sync_v2_book_delete_asset_cleanup"),
+    );
+    expect(sql.indexOf("values ('account_sync', '20260901090000')")).toBeGreaterThan(
+      sql.indexOf("latest.operation = 'delete'"),
+    );
+    expect(sql).not.toMatch(
+      /grant execute on function public\.mark_deleted_book_v2_assets\(uuid, uuid\)/i,
+    );
   });
 
   it("publishes an exact service-role-only account sync migration identity", () => {

@@ -148,9 +148,11 @@ final class AppState {
     @ObservationIgnored private let vocabularyRepository: any VocabularyRepository
     @ObservationIgnored private let knownLemmaRepository: any KnownLemmaRepository
     @ObservationIgnored private let reviewEventRepository: any ReviewEventRepository
+    @ObservationIgnored private let transcriptRepository: any TranscriptRepository
     @ObservationIgnored private let vocabularyCanonicalizationFallback: VocabularyCanonicalizationFallbackResolver?
     @ObservationIgnored private let usesLivePersistence: Bool
-    @ObservationIgnored private let synchronizedStore: LocalSQLiteStore?
+    /// Present only for an explicitly live composition; in-memory construction has no disk fallback.
+    @ObservationIgnored private let liveDatabase: LocalSQLiteStore?
     @ObservationIgnored private var lastPersistedReaderSeconds: TimeInterval?
     @ObservationIgnored private var inMemoryTranscriptOverlays: [StoredTranscriptOverlay] = []
 
@@ -178,8 +180,11 @@ final class AppState {
         let selectedOverlays: [StoredTranscriptOverlay]
         if let overlays {
             selectedOverlays = overlays
-        } else if usesLivePersistence {
-            selectedOverlays = Persistence.loadTranscriptOverlays(chapterID: transcript.chapterID)
+        } else if let database = liveDatabase {
+            selectedOverlays = Persistence.loadTranscriptOverlays(
+                chapterID: transcript.chapterID,
+                database: database
+            )
         } else {
             selectedOverlays = inMemoryTranscriptOverlays.filter { $0.chapterID.rawValue == transcript.chapterID }
         }
@@ -191,11 +196,12 @@ final class AppState {
         presentedTranscript = Transcript(resolved)
         transcriptOverlayStatuses = resolved.statuses
         retainedTranscriptOverlays = resolved.retainedOverlays
-        if usesLivePersistence {
+        if let database = liveDatabase {
             transcriptOverlayConflictStates = Dictionary(uniqueKeysWithValues: selectedOverlays.compactMap { overlay in
                 guard let state = Persistence.loadTranscriptOverlayState(
                     chapterID: overlay.chapterID.rawValue,
-                    segmentID: overlay.segmentID
+                    segmentID: overlay.segmentID,
+                    database: database
                 ), !state.conflicts.isEmpty else { return nil }
                 return (overlay.segmentID, state)
             })
@@ -216,11 +222,13 @@ final class AppState {
     /// Promotes one device's candidate and clears its competing corrections;
     /// the immutable transcript stays untouched and the choice is resynchronized.
     func resolveTranscriptOverlayConflict(segmentID: String, choosing candidateID: String) throws {
-        guard let chapterID = transcript?.chapterID ?? selectedChapterID else { return }
+        guard let chapterID = transcript?.chapterID ?? selectedChapterID,
+              let database = liveDatabase else { return }
         _ = try Persistence.resolveTranscriptOverlay(
             chapterID: chapterID,
             segmentID: segmentID,
-            choosing: candidateID
+            choosing: candidateID,
+            database: database
         )
         reloadResolvedTranscriptForCurrentChapter()
     }
@@ -253,13 +261,14 @@ final class AppState {
             ),
             updatedAt: now
         )
-        if usesLivePersistence {
+        if let database = liveDatabase {
             try Persistence.saveTranscriptOverlay(
                 overlay,
                 base: transcript,
-                chapterDuration: selectedChapter?.duration
+                chapterDuration: selectedChapter?.duration,
+                database: database
             )
-            glosses = Persistence.loadGlosses()
+            glosses = Persistence.loadGlosses(database: database)
         } else {
             let resolution = TranscriptOverlayResolver.resolve(
                 base: StoredTranscript(transcript),
@@ -284,8 +293,8 @@ final class AppState {
     func restoreTranscriptCorrection(segmentID: String) throws {
         let chapterID = ChapterID(rawValue: transcript?.chapterID ?? selectedChapterID ?? "")
         let overlayID = StoredTranscriptOverlay.stableID(chapterID: chapterID, segmentID: segmentID)
-        if usesLivePersistence {
-            try Persistence.restoreOriginalTranscriptSegment(overlayID: overlayID)
+        if let database = liveDatabase {
+            try Persistence.restoreOriginalTranscriptSegment(overlayID: overlayID, database: database)
         } else {
             inMemoryTranscriptOverlays.removeAll { $0.id == overlayID }
         }
@@ -559,8 +568,8 @@ final class AppState {
 
     func recordStudyActivity(now: Date = Date()) {
         studyActivityLog = studyActivityLog.recording(on: now)
-        guard usesLivePersistence else { return }
-        Persistence.saveStudyActivityLog(studyActivityLog)
+        guard let database = liveDatabase else { return }
+        Persistence.saveStudyActivityLog(studyActivityLog, database: database)
     }
 
     func refreshAppleIntelligenceAvailability() {
@@ -799,7 +808,7 @@ final class AppState {
             return
         }
         do {
-            try Persistence.saveTranscript(transcript)
+            try Persistence.saveTranscript(transcript, database: transcriptRepository)
             self.transcript = transcript
         } catch {
             errorMessage = "Could not save the EPUB override: \(error.localizedDescription)"
@@ -839,7 +848,7 @@ final class AppState {
         saved.ebookUseOverride = false
         saved.ebookAligned = result.segments.contains { $0.trustedEbookText != nil }
         do {
-            try Persistence.saveTranscript(saved)
+            try Persistence.saveTranscript(saved, database: transcriptRepository)
             if selectedChapterID == saved.chapterID {
                 transcript = saved
             }
@@ -862,13 +871,15 @@ final class AppState {
             reason: "The EPUB changed. Select Recheck EPUB to validate it against the saved transcript.",
             metrics: .empty
         )
-        let originals = book.chapters.compactMap { Persistence.loadTranscript(for: $0) }
+        let originals = book.chapters.compactMap {
+            Persistence.loadTranscript(for: $0, database: transcriptRepository)
+        }
         var invalidated: [Transcript] = []
         do {
             for original in originals {
                 var saved = original
                 invalidateEbookText(in: &saved, assessment: assessment)
-                try Persistence.saveTranscript(saved)
+                try Persistence.saveTranscript(saved, database: transcriptRepository)
                 invalidated.append(saved)
             }
             replacement.commit()
@@ -881,7 +892,7 @@ final class AppState {
             }
             for original in originals {
                 do {
-                    try Persistence.saveTranscript(original)
+                    try Persistence.saveTranscript(original, database: transcriptRepository)
                 } catch {
                     rollbackFailures.append(
                         "transcript \(original.chapterID) rollback failed: \(error.localizedDescription)"
@@ -930,13 +941,14 @@ final class AppState {
         }
     }
 
-    init(composition: AppComposition = .live, account: AccountSession? = nil) {
+    init(composition: AppComposition = .inMemory(), account: AccountSession? = nil) {
         vocabularyRepository = composition.vocabulary
         knownLemmaRepository = composition.knownLemmas
         reviewEventRepository = composition.reviewEvents
+        transcriptRepository = composition.transcripts
         vocabularyCanonicalizationFallback = composition.canonicalizationFallback
         usesLivePersistence = composition.usesLivePersistence
-        synchronizedStore = composition.synchronizedStore
+        liveDatabase = composition.synchronizedStore
         if let account {
             self.account = account
         } else if usesLivePersistence {
@@ -945,7 +957,8 @@ final class AppState {
             self.account = AccountSession.isolated()
         }
         if usesLivePersistence {
-            settings = Persistence.loadSettings()
+            let database = composition.synchronizedStore!
+            settings = Persistence.loadSettings(database: database)
 #if os(iOS)
             // iOS data-container UUIDs can change after reinstalling an app, so a
             // persisted absolute Documents path must never drive library scanning.
@@ -957,7 +970,7 @@ final class AppState {
                 installedNames: DictionaryLookup.installedNames()
             ), settings.preferredDictionary != normalizedDictionary {
                 settings.preferredDictionary = normalizedDictionary
-                Persistence.saveSettings(settings)
+                Persistence.saveSettings(settings, database: database)
             }
 #endif
         } else {
@@ -978,11 +991,11 @@ final class AppState {
         )
         vocabReviewEvents = loadedReviewEvents
         appleIntelligenceAvailability = AppleIntelligenceAvailability.current()
-        if usesLivePersistence {
-            studyActivityLog = Persistence.loadStudyActivityLog()
-            glosses = Persistence.loadGlosses()
-            chapterTranslationCheckpoints = Persistence.loadChapterTranslationCheckpoints()
-            chapterSummaries = Persistence.loadChapterSummaries()
+        if usesLivePersistence, let database = liveDatabase {
+            studyActivityLog = Persistence.loadStudyActivityLog(database: database)
+            glosses = Persistence.loadGlosses(database: database)
+            chapterTranslationCheckpoints = Persistence.loadChapterTranslationCheckpoints(database: database)
+            chapterSummaries = Persistence.loadChapterSummaries(database: database)
         }
         selectedDictionaryName = settings.preferredDictionary
         if let raw = TextSource(rawValue: settings.textSource) {
@@ -1048,6 +1061,7 @@ final class AppState {
     }
 
     func rescan() async {
+        guard let database = liveDatabase else { return }
         isScanning = true
         libraryScanProgress = .init(
             stage: "Scanning library",
@@ -1070,7 +1084,7 @@ final class AppState {
         }.value
         let scanned: [Book]
         do {
-            scanned = try Persistence.filterSuppressedBooks(discovered)
+            scanned = try Persistence.filterSuppressedBooks(discovered, database: database)
         } catch {
             scanned = discovered
             errorMessage = "Deleted-library state could not be loaded: \(error.localizedDescription)"
@@ -1087,7 +1101,7 @@ final class AppState {
         }.value
         books = scanned
         migrateVocabularySourceLanguages()
-        readyChapterIDs = Persistence.readyChapterIDs(in: scanned)
+        readyChapterIDs = Persistence.readyChapterIDs(in: scanned, database: database)
 
         libraryScanProgress = .init(
             stage: "Reading chapter information",
@@ -1116,22 +1130,23 @@ final class AppState {
             }
         }
         do {
-            books = try Persistence.reconcileScannedBooks(books)
+            books = try Persistence.reconcileScannedBooks(books, database: database)
         } catch {
             errorMessage = "Library metadata could not be saved: \(error.localizedDescription)"
         }
-        readyChapterIDs = Persistence.readyChapterIDs(in: books)
+        readyChapterIDs = Persistence.readyChapterIDs(in: books, database: database)
     }
 
     /// Both platform shells use the same catalog/assets/outbox deletion path;
     /// the only platform distinction is the managed media root.
     func deleteBookFromLibrary(_ book: Book) throws {
+        guard let database = liveDatabase else { return }
 #if os(iOS)
         let mediaRoot = Persistence.importedBooksURL
 #else
         let mediaRoot = URL(fileURLWithPath: settings.libraryPath, isDirectory: true)
 #endif
-        try Persistence.deleteBook(book, mediaRoot: mediaRoot)
+        try Persistence.deleteBook(book, mediaRoot: mediaRoot, database: database)
         books.removeAll { $0.id == book.id }
         readyChapterIDs.subtract(book.chapters.map(\.id))
         if selectedBookID == book.id {
@@ -1240,17 +1255,28 @@ final class AppState {
         } else {
             player.tearDown()
         }
-        readerProgressState = usesLivePersistence ? Persistence.loadReaderProgress(bookID: book.id) : nil
+        readerProgressState = liveDatabase.flatMap {
+            Persistence.loadReaderProgress(bookID: book.id, database: $0)
+        }
         lastPersistedReaderSeconds = nil
         deepReadingActiveSentenceID = nil
         deepReadingPausedSentenceID = nil
         player.rate = Float(settings.playbackRate)
         if chapter.hasAudio {
-            transcriptSegmentCount = Persistence.transcriptSegmentCount(chapterID: chapter.id)
-            transcript = Persistence.loadTranscriptPage(
-                for: chapter,
-                range: 0..<Persistence.transcriptPageSize
-            )
+            if let database = liveDatabase {
+                transcriptSegmentCount = Persistence.transcriptSegmentCount(
+                    chapterID: chapter.id,
+                    database: database
+                )
+                transcript = Persistence.loadTranscriptPage(
+                    for: chapter,
+                    range: 0..<Persistence.transcriptPageSize,
+                    database: database
+                )
+            } else {
+                transcript = Persistence.loadTranscript(for: chapter, database: transcriptRepository)
+                transcriptSegmentCount = transcript?.segments.count ?? 0
+            }
         } else if let ebookPath = book.ebookPath, let sectionIndex = chapter.ebookSectionIndex {
             transcript = EPUBParser.readerTranscript(
                 from: ebookPath,
@@ -1294,14 +1320,18 @@ final class AppState {
     /// Reader navigation grows the visible window one bounded SQLite page at a
     /// time; opening a large chapter never materializes the remaining segments.
     func loadMoreTranscriptSegments() {
-        guard usesLivePersistence,
+        guard let database = liveDatabase,
               let chapter = selectedChapter,
               var current = transcript,
               current.segments.count < transcriptSegmentCount
         else { return }
         let start = current.segments.count
         let end = min(start + Persistence.transcriptPageSize, transcriptSegmentCount)
-        guard let page = Persistence.loadTranscriptPage(for: chapter, range: start..<end) else { return }
+        guard let page = Persistence.loadTranscriptPage(
+            for: chapter,
+            range: start..<end,
+            database: database
+        ) else { return }
         current.segments.append(contentsOf: page.segments)
         transcript = current
     }
@@ -1309,14 +1339,15 @@ final class AppState {
     /// Whole-chapter jobs may materialize the chapter, but only through the
     /// store's bounded page loader; the reader's visible transcript stays paged.
     func completeTranscriptForChapterAssistant() -> Transcript? {
-        guard usesLivePersistence,
+        guard let database = liveDatabase,
               let chapter = selectedChapter,
               (presentedTranscript?.segments.count ?? 0) < transcriptSegmentCount,
-              let complete = Persistence.loadCompleteTranscript(for: chapter)
+              let complete = Persistence.loadCompleteTranscript(for: chapter, database: database)
         else { return presentedTranscript }
         return Transcript(Persistence.resolvedTranscript(
             complete,
-            chapterDuration: chapter.duration
+            chapterDuration: chapter.duration,
+            database: database
         ))
     }
 
@@ -1342,7 +1373,9 @@ final class AppState {
     /// Opens the exact chapter-relative account position when one exists.
     @discardableResult
     func continueReading(_ book: Book, autoplay: Bool = false) -> Bool {
-        let stored = usesLivePersistence ? Persistence.loadReaderProgress(bookID: book.id) : nil
+        let stored = liveDatabase.flatMap {
+            Persistence.loadReaderProgress(bookID: book.id, database: $0)
+        }
         let chapter = stored.flatMap { progress in
             book.chapters.first { $0.id == progress.current.chapterID.rawValue }
         } ?? book.chapters.first(where: { $0.id == selectedChapterID }) ?? book.chapters.first
@@ -1363,9 +1396,13 @@ final class AppState {
     }
 
     func resolveReaderProgress(choosing candidateID: String) throws {
-        guard let bookID = selectedBookID else { return }
-        try Persistence.resolveReaderProgress(bookID: bookID, choosing: candidateID)
-        readerProgressState = Persistence.loadReaderProgress(bookID: bookID)
+        guard let bookID = selectedBookID, let database = liveDatabase else { return }
+        try Persistence.resolveReaderProgress(
+            bookID: bookID,
+            choosing: candidateID,
+            database: database
+        )
+        readerProgressState = Persistence.loadReaderProgress(bookID: bookID, database: database)
         guard let selectedBook,
               let chosen = readerProgressState?.current,
               let chapter = selectedBook.chapters.first(where: { $0.id == chosen.chapterID.rawValue })
@@ -1377,7 +1414,7 @@ final class AppState {
     /// Persists chapter-relative fractional seconds. Normal playback writes at
     /// most once per second; explicit pause/seek/navigation forces the latest value.
     func persistCurrentReaderProgress(force: Bool = false) {
-        guard usesLivePersistence,
+        guard let database = liveDatabase,
               let book = selectedBook,
               let chapter = selectedChapter,
               player.currentTime.isFinite,
@@ -1400,8 +1437,8 @@ final class AppState {
             revision: revision
         )
         do {
-            _ = try Persistence.saveReaderProgress(progress)
-            readerProgressState = Persistence.loadReaderProgress(bookID: book.id)
+            _ = try Persistence.saveReaderProgress(progress, database: database)
+            readerProgressState = Persistence.loadReaderProgress(bookID: book.id, database: database)
             lastPersistedReaderSeconds = player.currentTime
         } catch {
             errorMessage = "Could not save reading position: \(error.localizedDescription)"
@@ -1481,7 +1518,7 @@ final class AppState {
             errorMessage = "This EPUB-only section has no audio to transcribe."
             return
         }
-        if !force, let existing = Persistence.loadTranscript(for: chapter) {
+        if !force, let existing = Persistence.loadTranscript(for: chapter, database: transcriptRepository) {
             transcript = existing
             return
         }
@@ -1557,7 +1594,7 @@ final class AppState {
             ebookAlignment: ebookAlignment
         )
         do {
-            try Persistence.saveTranscript(transcript)
+            try Persistence.saveTranscript(transcript, database: transcriptRepository)
             readyChapterIDs.insert(chapter.id)
             if selectedChapterID == chapter.id {
                 self.transcript = transcript
@@ -1569,9 +1606,6 @@ final class AppState {
             return true
         } catch {
             errorMessage = "Could not save transcript: \(error.localizedDescription)"
-            if selectedChapterID == chapter.id {
-                self.transcript = transcript
-            }
             return false
         }
     }
@@ -2059,8 +2093,13 @@ final class AppState {
             errorMessage = "This EPUB-only passage has no audio playback."
             return false
         }
-        let transcript = Persistence.loadTranscript(for: located.chapter).map {
-            Transcript(Persistence.resolvedTranscript($0, chapterDuration: located.chapter.duration))
+        let transcript = Persistence.loadTranscript(for: located.chapter, database: transcriptRepository).map {
+            guard let database = liveDatabase else { return $0 }
+            return Transcript(Persistence.resolvedTranscript(
+                $0,
+                chapterDuration: located.chapter.duration,
+                database: database
+            ))
         }
         let bounds = VocabSentencePlayback.bounds(for: entry, transcript: transcript)
         if player.loadedPath != located.chapter.audioPath {
@@ -2169,13 +2208,13 @@ final class AppState {
     func persistSettings() {
         settings.playbackRate = Double(player.rate)
         settings.textSource = textSource.rawValue
-        guard usesLivePersistence else { return }
-        Persistence.saveSettings(settings)
+        guard let database = liveDatabase else { return }
+        Persistence.saveSettings(settings, database: database)
     }
 
     func reloadSyncedLearningData() {
         guard usesLivePersistence else { return }
-        let database = synchronizedStore ?? Persistence.store
+        guard let database = liveDatabase else { return }
         var loaded = Persistence.loadSettings(database: database)
 #if os(iOS)
         loaded.libraryPath = Persistence.importedBooksURL.path
@@ -2206,7 +2245,7 @@ final class AppState {
                 selectedBookID = synchronizedBooks.first?.id
                 selectedChapterID = synchronizedBooks.first?.chapters.first?.id
             }
-            readyChapterIDs = Persistence.readyChapterIDs(in: synchronizedBooks)
+            readyChapterIDs = Persistence.readyChapterIDs(in: synchronizedBooks, database: database)
         }
         glosses = Persistence.loadGlosses(database: database)
         chapterTranslationCheckpoints = Persistence.loadChapterTranslationCheckpoints(database: database)
@@ -2423,7 +2462,7 @@ final class AppState {
         copy.decidedAt = Date()
         copy.replacedText = nil
         copy.replacedModel = nil
-        if usesLivePersistence {
+        if let database = liveDatabase {
             let prepared = ChapterAcceptanceBatch.prepare(
                 glosses: [copy],
                 vocab: vocab,
@@ -2431,7 +2470,7 @@ final class AppState {
                 defaults: chapterAcceptanceDefaults
             )
             do {
-                try Persistence.acceptGlosses([copy], vocabulary: prepared.upserts)
+                try Persistence.acceptGlosses([copy], vocabulary: prepared.upserts, database: database)
                 glosses = GlossBatch.merging([copy], into: glosses)
                 mergeVocabUpserts(prepared.upserts, orderedAs: prepared.vocab)
             } catch {
@@ -2439,7 +2478,7 @@ final class AppState {
                 return
             }
         } else {
-            saveGloss(copy)
+            try? saveGloss(copy)
         }
         account.recordUsage(name: "ai.translation.accepted", properties: ["kind": entry.kind.rawValue])
         refreshSelectedChapterTranslationStatus()
@@ -2453,7 +2492,11 @@ final class AppState {
         edited.text = editedText
         edited.status = .edited
         edited.decidedAt = Date()
-        saveGloss(edited)
+        do {
+            try saveGloss(edited)
+        } catch {
+            errorMessage = "The translation edit could not be saved. Nothing was changed."
+        }
     }
 
     func rejectGloss(_ entry: GlossEntry) {
@@ -2466,16 +2509,16 @@ final class AppState {
             restored.decidedAt = Date()
             restored.replacedText = nil
             restored.replacedModel = nil
-            if usesLivePersistence {
+            if let database = liveDatabase {
                 do {
-                    try Persistence.acceptGlosses([restored], vocabulary: [])
+                    try Persistence.acceptGlosses([restored], vocabulary: [], database: database)
                     glosses = GlossBatch.merging([restored], into: glosses)
                 } catch {
                     errorMessage = "The translation decision could not be saved. Nothing was changed."
                     return
                 }
             } else {
-                saveGloss(restored)
+                try? saveGloss(restored)
             }
             refreshSelectedChapterTranslationStatus()
             return
@@ -2489,9 +2532,9 @@ final class AppState {
                 && $0.reviewCount == 0
                 && GlossEntry.normalize($0.context) == source
         }
-        if usesLivePersistence {
+        if let database = liveDatabase {
             do {
-                try Persistence.rejectGloss(copy, derivedVocabulary: derived)
+                try Persistence.rejectGloss(copy, derivedVocabulary: derived, database: database)
                 glosses = GlossBatch.merging([copy], into: glosses)
                 let removed = Set(derived.map(\.id))
                 vocab.removeAll { removed.contains($0.id) }
@@ -2500,7 +2543,7 @@ final class AppState {
                 return
             }
         } else {
-            saveGloss(copy)
+            try? saveGloss(copy)
             vocab.removeAll { candidate in
                 derived.contains(where: { $0.id == candidate.id })
             }
@@ -2775,7 +2818,7 @@ final class AppState {
                 chapterTitle: origin.chapterTitle,
                 lookupOnly: true
             )
-            applySentenceBlockResults(
+            try applySentenceBlockResults(
                 ManagedProductLLM.chapterResults(from: batch),
                 segments: missing,
                 language: language,
@@ -2913,7 +2956,7 @@ final class AppState {
                         expectedIDs: missing.map(\.id)
                     )
                 }
-                self.applySentenceBlockResults(
+                try self.applySentenceBlockResults(
                     parsed.results,
                     segments: missing,
                     language: language,
@@ -2939,7 +2982,7 @@ final class AppState {
         model: String,
         origin: BackgroundJobOrigin,
         forceIDs: Set<String>
-    ) {
+    ) throws {
         var entries: [GlossEntry] = []
         entries.reserveCapacity(results.count)
         for result in results {
@@ -2969,7 +3012,7 @@ final class AppState {
                 replacedModel: replaced?.status == .accepted ? replaced?.model : nil
             ))
         }
-        saveGlosses(entries)
+        try saveGlosses(entries)
         refreshSelectedChapterTranslationStatus()
     }
 
@@ -3108,10 +3151,10 @@ final class AppState {
                     replacedText: replaced?.status == .accepted ? replaced?.text : nil,
                     replacedModel: replaced?.status == .accepted ? replaced?.model : nil
                 )
-                self.saveGloss(entry)
+                try self.saveGloss(entry)
             } catch {
                 if let replaced {
-                    self.saveGloss(replaced)
+                    try? self.saveGloss(replaced)
                 }
                 if self.isSelected(origin) {
                     self.translationError = error.localizedDescription
@@ -3196,14 +3239,19 @@ final class AppState {
                 total: total
             )
         }
-        saveTranslationCheckpoint(
+        guard saveTranslationCheckpoint(
             chapterID: checkpointChapterID,
             language: language.rawValue,
             mode: resumedMode,
             nextSegmentIndex: startIndex,
             total: transcript.segments.count,
             status: .inProgress
-        )
+        ) else {
+            chapterAssistantError = "Translation could not start because its resume checkpoint was not saved."
+            chapterTranslationProgress = nil
+            chapterTranslationJobOrigin = nil
+            return
+        }
 
         enqueueLLMJob(
             id: jobID,
@@ -3324,11 +3372,24 @@ final class AppState {
                                 replacedModel: resumedMode == .retranslateAll && existing?.status == .accepted ? existing?.model : nil
                             ))
                         }
-                        self.saveGlosses(completedEntries)
-                        completed += completedEntries.count
                         let missing = Set(parsed.missingIDs)
-                        remaining.removeAll { !missing.contains($0.id) }
-                        if !remaining.isEmpty {
+                        let nextRemaining = remaining.filter { missing.contains($0.id) }
+                        let nextIndex = nextRemaining.first.flatMap { pending in
+                            transcript.segments.firstIndex { $0.id == pending.id }
+                        } ?? ((block.compactMap { item in
+                            transcript.segments.firstIndex { $0.id == item.id }
+                        }.max() ?? startIndex) + 1)
+                        try self.saveGeneratedChapterDrafts(
+                            completedEntries,
+                            chapterID: checkpointChapterID,
+                            language: language.rawValue,
+                            mode: resumedMode,
+                            nextSegmentIndex: nextIndex,
+                            total: transcript.segments.count
+                        )
+                        completed += completedEntries.count
+                        remaining = nextRemaining
+                        if !nextRemaining.isEmpty {
                             lastIssue = ChapterTranslationBatchError.missingSentences.localizedDescription
                         }
                     } catch {
@@ -3340,8 +3401,6 @@ final class AppState {
                 }
                 if !remaining.isEmpty {
                     jobFailed = true
-                    let nextIndex = transcript.segments.firstIndex { $0.id == remaining[0].id } ?? startIndex
-                    self.saveTranslationCheckpoint(chapterID: checkpointChapterID, language: language.rawValue, mode: resumedMode, nextSegmentIndex: nextIndex, total: transcript.segments.count, status: .inProgress)
                     if self.isSelected(origin) {
                         self.chapterTranslationFailed = true
                         self.chapterAssistantError = "Translation paused after \(ChapterTranslationBatch.maximumAttempts) attempts. \(remaining.count) sentence(s) in this block still need translation. Last issue: \(lastIssue)"
@@ -3349,10 +3408,6 @@ final class AppState {
                     }
                     break
                 }
-                let nextIndex = (block.compactMap { item in
-                    transcript.segments.firstIndex { $0.id == item.id }
-                }.max() ?? startIndex) + 1
-                self.saveTranslationCheckpoint(chapterID: checkpointChapterID, language: language.rawValue, mode: resumedMode, nextSegmentIndex: nextIndex, total: transcript.segments.count, status: .inProgress)
                 if self.chapterTranslationStopRequests.contains(jobID) {
                     stoppedAfterBlock = true
                     if self.isSelected(origin) {
@@ -3479,11 +3534,15 @@ final class AppState {
             )
             let vocabulary = vocabularyRepository
             let storedVocabUpdates = result.upserts.map(StoredVocabularyOccurrence.init)
-            let persistLiveGlosses = usesLivePersistence
+            let database = liveDatabase
             let saveSucceeded = await Task.detached(priority: .utility) { () -> Bool in
                 do {
-                    if persistLiveGlosses {
-                        try Persistence.acceptGlosses(accepted, vocabulary: result.upserts)
+                    if let database {
+                        try Persistence.acceptGlosses(
+                            accepted,
+                            vocabulary: result.upserts,
+                            database: database
+                        )
                     } else {
                         try vocabulary.upsertVocabulary(storedVocabUpdates)
                     }
@@ -3523,6 +3582,7 @@ final class AppState {
         }
     }
 
+    @discardableResult
     private func saveTranslationCheckpoint(
         chapterID: String,
         language: String,
@@ -3530,7 +3590,7 @@ final class AppState {
         nextSegmentIndex: Int,
         total: Int,
         status: ChapterTranslationStatus
-    ) {
+    ) -> Bool {
         let id = ChapterTranslationCheckpoint.makeID(chapterID: chapterID, language: language)
         let previous = chapterTranslationCheckpoints.first { $0.id == id }
         let checkpoint = ChapterTranslationCheckpoint(
@@ -3542,13 +3602,59 @@ final class AppState {
             status: status,
             updatedAt: Date()
         )
-        if let index = chapterTranslationCheckpoints.firstIndex(where: { $0.id == checkpoint.id }) {
-            chapterTranslationCheckpoints[index] = checkpoint
+        var updated = chapterTranslationCheckpoints
+        if let index = updated.firstIndex(where: { $0.id == checkpoint.id }) {
+            updated[index] = checkpoint
         } else {
-            chapterTranslationCheckpoints.append(checkpoint)
+            updated.append(checkpoint)
         }
-        guard usesLivePersistence else { return }
-        Persistence.saveChapterTranslationCheckpoints(chapterTranslationCheckpoints)
+        if usesLivePersistence {
+            guard let database = liveDatabase else { return false }
+            do {
+                try Persistence.saveChapterTranslationCheckpoint(checkpoint, database: database)
+            } catch {
+                return false
+            }
+        }
+        chapterTranslationCheckpoints = updated
+        return true
+    }
+
+    /// Chapter drafts and their resume cursor publish only after the shared
+    /// SQLite transaction commits both records.
+    func saveGeneratedChapterDrafts(
+        _ entries: [GlossEntry],
+        chapterID: String,
+        language: String,
+        mode: ChapterTranslationMode,
+        nextSegmentIndex: Int,
+        total: Int
+    ) throws {
+        let checkpoint = ChapterTranslationCheckpoint(
+            chapterID: chapterID,
+            language: language,
+            mode: mode,
+            nextSegmentIndex: nextSegmentIndex,
+            totalSentences: total,
+            status: .inProgress,
+            updatedAt: Date()
+        )
+        let updatedGlosses = GlossBatch.merging(entries, into: glosses)
+        var updatedCheckpoints = chapterTranslationCheckpoints
+        if let index = updatedCheckpoints.firstIndex(where: { $0.id == checkpoint.id }) {
+            updatedCheckpoints[index] = checkpoint
+        } else {
+            updatedCheckpoints.append(checkpoint)
+        }
+        if let database = liveDatabase {
+            try Persistence.saveGeneratedTranslationDrafts(
+                entries,
+                checkpoint: checkpoint,
+                database: database
+            )
+        }
+        glosses = updatedGlosses
+        chapterTranslationCheckpoints = updatedCheckpoints
     }
 
     private func refreshSelectedChapterTranslationStatus() {
@@ -3678,8 +3784,8 @@ final class AppState {
         } else {
             chapterSummaries.append(summary)
         }
-        if usesLivePersistence {
-            Persistence.saveChapterSummaryUpdate(summary)
+        if let database = liveDatabase {
+            Persistence.saveChapterSummaryUpdate(summary, database: database)
         }
         if isSelected(origin) {
             chapterSummary = summary.status == .rejected ? nil : summary
@@ -3848,7 +3954,9 @@ final class AppState {
                         chapterTitle: origin.chapterTitle
                     )
                 } else if provider == .managedQwen, kind == .chapterSummary {
-                    let transcript = origin.chapterID.flatMap { Persistence.loadTranscript(chapterID: $0) }
+                    let transcript = origin.chapterID.flatMap {
+                        Persistence.loadTranscript(chapterID: $0, database: self.transcriptRepository)
+                    }
                         ?? self.transcript
                     let segments = transcript?.segments.map(\.displayText) ?? []
                     let summary = try await ManagedProductLLM.summarizeResult(
@@ -3942,16 +4050,22 @@ final class AppState {
         return "\(metadata)\n\nComplete chapter transcript:\n\(text)"
     }
 
-    private func saveGloss(_ entry: GlossEntry) {
-        saveGlosses([entry])
+    private func saveGloss(_ entry: GlossEntry) throws {
+        try saveGlosses([entry])
     }
 
-    private func saveGlosses(_ entries: [GlossEntry]) {
+    private func saveGlosses(_ entries: [GlossEntry]) throws {
         guard !entries.isEmpty else { return }
-        glosses = GlossBatch.merging(entries, into: glosses)
+        let updated = GlossBatch.merging(entries, into: glosses)
         if usesLivePersistence {
-            Persistence.saveGlossUpdates(entries, allItems: glosses)
+            guard let database = liveDatabase else { return }
+            try Persistence.saveGlossUpdates(
+                entries,
+                allItems: updated,
+                database: database
+            )
         }
+        glosses = updated
         var vocabularyChanged = false
         for entry in entries where entry.status == .accepted {
             let changed = autoreleasepool {

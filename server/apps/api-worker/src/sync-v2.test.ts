@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { createFakeDatabaseClient, SyncStoreWriteError } from "@audio-reader/database";
+import { describe, expect, it, vi } from "vitest";
 import { createTestApp } from "./app";
 
 const DEVICE_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
@@ -16,6 +17,57 @@ function headers(key?: string): Record<string, string> {
 }
 
 describe("object-backed sync v2", () => {
+  it("logs safe structured database context for a failed atomic push", async () => {
+    const database = createFakeDatabaseClient();
+    await database.ops.patchFlag("account_sync", { enabled: true });
+    database.syncV2 = {
+      ...database.syncV2,
+      push: () => Promise.reject(new SyncStoreWriteError(400, "P0001")),
+    };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const response = await createTestApp({ database }).fetch(
+        new Request("http://localhost/v2/sync/push", {
+          method: "POST",
+          headers: { ...headers("failed-database-push"), "X-Request-Id": "sync-db-request-1" },
+          body: JSON.stringify({
+            deviceId: DEVICE_ID,
+            batchId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            mutations: [
+              {
+                mutationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                entityType: "progress",
+                entityId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                operation: "upsert",
+                baseRevision: 0,
+                occurredAt: "2026-09-01T00:00:00Z",
+                payload: { progressKind: "reader", relativeSeconds: 1 },
+              },
+            ],
+          }),
+        }),
+      );
+
+      expect(response.status).toBe(500);
+      const entries = errorLog.mock.calls.map(
+        ([line]) => JSON.parse(String(line)) as Record<string, unknown>,
+      );
+      expect(entries).toContainEqual({
+        level: "error",
+        message: "sync_push_database_failed",
+        component: "database",
+        requestId: "sync-db-request-1",
+        operation: "sync_push",
+        mutations: 1,
+        status: 400,
+        code: "P0001",
+      });
+      expect(JSON.stringify(entries)).not.toContain("relativeSeconds");
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
   it("preserves epubReadingPackage and emits no second manifest, change, or transfer", async () => {
     const app = createTestApp();
     const bytes = new Uint8Array([1]);

@@ -1,6 +1,7 @@
 import AuthenticationServices
 import CryptoKit
 import Foundation
+import OSLog
 import ZIPFoundation
 #if os(macOS)
 import AppKit
@@ -46,6 +47,10 @@ extension AccountSession {
 
 enum AccountSyncApplicator {
     static let settingsEntityID = "00000000-0000-4000-8000-00000000000a"
+    private static let syncLog = Logger(
+        subsystem: "com.johnsonzhang.AudioReader",
+        category: "account-sync-apply"
+    )
 
     /// Full local snapshot. `drainSync` enqueues only rows whose payload differs
     /// from the last applied `entity_versions` row; mutation IDs are new solely
@@ -68,9 +73,21 @@ enum AccountSyncApplicator {
 
     /// All generated upload files must remain inside the publisher-owned staging directory.
     static func assetUploads(stagingDirectory: URL) throws -> [SyncAssetUpload] {
-        let sqlite = LocalSQLiteStore(fileURL: Persistence.databaseURL)
-        let books = (try? sqlite.loadBooks()) ?? []
-        let transcripts = try ((try? sqlite.loadTranscripts()) ?? []).map { transcript in
+        try assetUploads(
+            database: LocalSQLiteStore(fileURL: Persistence.databaseURL),
+            stagingDirectory: stagingDirectory
+        )
+    }
+
+    /// A caller-supplied store keeps upload candidate selection testable without opening live app data.
+    static func assetUploads(
+        database sqlite: LocalSQLiteStore,
+        stagingDirectory: URL
+    ) throws -> [SyncAssetUpload] {
+        let transcriptCandidates = try sqlite.loadActiveSyncTranscriptCandidates()
+        // A durable catalog tombstone is authoritative even when immutable child rows remain locally.
+        let transcripts: [SyncAssetUpload] = try transcriptCandidates.map { candidate in
+            let transcript = candidate.transcript
             let data = try JSONEncoder.iso.encode(Transcript(transcript))
             let fileURL = stagingDirectory
                 .appendingPathComponent("AudioReader-\(UUID().uuidString).transcript.json")
@@ -78,12 +95,9 @@ enum AccountSyncApplicator {
             let digest = try SyncAssetFileIO.digest(fileURL: fileURL)
             let localChapterID = transcript.chapterID.rawValue
             let chapterID = syncEntityID(localChapterID, kind: "chapter")
-            let bookID = books.first { book in
-                book.chapters.contains { $0.id == transcript.chapterID }
-            }.map { syncEntityID($0.id.rawValue, kind: "book") }
             return SyncAssetUpload(
                 revisionID: syncEntityID("\(localChapterID):\(digest.sha256)", kind: "transcript-revision"),
-                bookID: bookID,
+                bookID: syncEntityID(candidate.bookID.rawValue, kind: "book"),
                 chapterID: chapterID,
                 sha256: digest.sha256,
                 originalBytes: digest.byteCount,
@@ -93,10 +107,9 @@ enum AccountSyncApplicator {
                 deleteFileAfterUpload: true
             )
         }
-        let localAssets = try ((try? sqlite.loadAssets()) ?? []).compactMap {
-            try assetUpload($0, stagingDirectory: stagingDirectory)
-        }
-        return transcripts + localAssets
+        // Operator storage availability is not user consent. This release exposes only
+        // learning-data sync, so audio, EPUB, and cover rows must remain device-local.
+        return transcripts
     }
 
     /// The server kind remains authoritative after hydration, including reading packages installed as local EPUBs.
@@ -373,6 +386,9 @@ enum AccountSyncApplicator {
             )
         }
         for result in assistantResults {
+            var canonicalResult = result
+            canonicalResult.createdAt = syncCanonicalAssistantDate(result.createdAt)
+            canonicalResult.decidedAt = result.decidedAt.map(syncCanonicalAssistantDate)
             let entityID = UUID(uuidString: result.id) == nil
                 ? syncEntityID(result.id, kind: "assistant-result")
                 : result.id.lowercased()
@@ -385,7 +401,7 @@ enum AccountSyncApplicator {
                     baseRevision: .zero,
                     occurredAt: result.decidedAt ?? result.createdAt,
                     payload: try encodePayload(
-                        StoredAssistantDecisionPayload(result: result, vocabulary: [])
+                        StoredAssistantDecisionPayload(result: canonicalResult, vocabulary: [])
                     )
                 )
             )
@@ -497,17 +513,18 @@ enum AccountSyncApplicator {
         }
     }
 
-    /// Every row, entity version, and cursor in a downloaded page shares the
-    /// canonical SQLite transaction. A thrown apply leaves none of them visible.
+    /// Every row, transcript eligibility decision, entity version, and cursor in a downloaded
+    /// page shares the canonical SQLite transaction. The interleave seam lets WAL race tests
+    /// commit a second connection immediately before this store takes its write reservation.
     static func applyPage(
         _ changes: [SyncPulledChange],
         versions: [SyncEntityVersion]? = nil,
         cursor: String,
-        to sqlite: LocalSQLiteStore
+        to sqlite: LocalSQLiteStore,
+        interleavingBeforeTransaction: (() throws -> Void)? = nil
     ) throws {
-        var ordered = SyncPulledChange.applying(changes)
-        let installedFiles = try installAssetFiles(in: &ordered)
-        let pageVersions = versions ?? ordered.map { change in
+        let allOrdered = SyncPulledChange.applying(changes)
+        var pageVersions = versions ?? allOrdered.map { change in
             SyncEntityVersion(
                 entityType: change.entityType,
                 entityID: change.entityId,
@@ -517,23 +534,68 @@ enum AccountSyncApplicator {
                     : SyncJSONCoding.data(from: change.payload)
             )
         }
-        let vocabularyUpserts = ordered.filter {
-            $0.entityType == OutboxEntityType.vocabulary.rawValue
-                && $0.operation != OutboxOperation.delete.rawValue
+        for change in allOrdered where change.entityType == OutboxEntityType.assistantResult.rawValue {
+            let decision = try assistantDecisionPayload(from: change)
+            guard let index = pageVersions.firstIndex(where: {
+                $0.entityType == change.entityType
+                    && $0.entityID == change.entityId
+                    && $0.serverVersion == Int64(change.revision)
+            }) else { continue }
+            // Derived vocabulary has its own snapshot entities. Keep applying it from the pulled
+            // decision, but fingerprint the assistant result in the same shape as snapshot().
+            pageVersions[index].payload = try encodePayload(
+                StoredAssistantDecisionPayload(result: decision.result, vocabulary: [])
+            )
         }
-        let existingVocabulary = Dictionary(
-            uniqueKeysWithValues: try sqlite.loadVocabulary().map { ($0.id.rawValue.lowercased(), VocabEntry($0)) }
-        )
-        let vocabularyRows = try vocabularyUpserts.map { change -> StoredVocabularyOccurrence in
-            let incoming = try vocabulary(from: change)
-            let resolved = existingVocabulary[change.entityId.lowercased()]
-                .map { mergingVocabulary(existing: $0, incoming: incoming, payload: change.payload) } ?? incoming
-            return StoredVocabularyOccurrence(resolved)
+        for change in allOrdered where
+            change.entityType == OutboxEntityType.progress.rawValue
+                && change.payload["progressKind"]?.stringValue == "reader" {
+            guard let index = pageVersions.firstIndex(where: {
+                $0.entityType == change.entityType
+                    && $0.entityID == change.entityId
+                    && $0.serverVersion == Int64(change.revision)
+            }) else { continue }
+            var canonicalPayload = change.payload
+            // Pull application promotes reader progress to the server revision. Persist the same
+            // value in the version ledger so the next snapshot is not perpetually one revision ahead.
+            canonicalPayload["revision"] = .number(Double(change.revision))
+            pageVersions[index].payload = SyncJSONCoding.data(from: canonicalPayload)
         }
+        var installedChanges = allOrdered
+        let installedFiles = try installAssetFiles(in: &installedChanges)
         do {
+            let vocabularyUpserts = installedChanges.filter {
+                $0.entityType == OutboxEntityType.vocabulary.rawValue
+                    && $0.operation != OutboxOperation.delete.rawValue
+            }
+            let existingVocabulary = Dictionary(
+                uniqueKeysWithValues: try sqlite.loadVocabulary().map {
+                    ($0.id.rawValue.lowercased(), VocabEntry($0))
+                }
+            )
+            let vocabularyRows = try vocabularyUpserts.map { change -> StoredVocabularyOccurrence in
+                let incoming = try vocabulary(from: change)
+                let resolved = existingVocabulary[change.entityId.lowercased()]
+                    .map {
+                        mergingVocabulary(existing: $0, incoming: incoming, payload: change.payload)
+                    } ?? incoming
+                return StoredVocabularyOccurrence(resolved)
+            }
+            try interleavingBeforeTransaction?()
+            var retainedInstalledPaths: Set<String> = []
             try sqlite.performSyncPageTransaction {
+                let transcriptChapterIDs = try projectedTranscriptChapterIDs(
+                    afterApplying: installedChanges,
+                    sqlite: sqlite
+                )
+                let applicableChanges = installedChanges.compactMap { change in
+                    transcriptChangeWithActiveCatalogParent(
+                        change,
+                        chapterIDs: transcriptChapterIDs
+                    )
+                }
                 try sqlite.upsertVocabulary(vocabularyRows)
-                for change in ordered {
+                for change in applicableChanges {
                     if change.entityType == OutboxEntityType.vocabulary.rawValue,
                        change.operation != OutboxOperation.delete.rawValue {
                         continue
@@ -542,11 +604,97 @@ enum AccountSyncApplicator {
                 }
                 for version in pageVersions { try sqlite.saveVersion(version) }
                 try sqlite.saveCursor(cursor)
+                retainedInstalledPaths = Set(
+                    applicableChanges.compactMap { $0.payload["installedObjectPath"]?.stringValue }
+                )
+            }
+            for url in installedFiles where !retainedInstalledPaths.contains(url.path) {
+                try? FileManager.default.removeItem(at: url)
             }
         } catch {
             for url in installedFiles { try? FileManager.default.removeItem(at: url) }
             throw error
         }
+    }
+
+    /// Historical immutable revisions can outlive their catalog chapter. Only an active local
+    /// chapter may own downloaded transcript bytes; skipped rows still commit their version/cursor.
+    private static func transcriptChangeWithActiveCatalogParent(
+        _ change: SyncPulledChange,
+        chapterIDs: [ChapterID]
+    ) -> SyncPulledChange? {
+        guard change.entityType == OutboxEntityType.transcript.rawValue,
+              change.operation != OutboxOperation.delete.rawValue else {
+            return change
+        }
+        let localChapterID: ChapterID?
+        if let remoteChapterID = nonempty(change.payload["chapterId"]?.stringValue) {
+            localChapterID = chapterIDs.first {
+                syncEntityID($0.rawValue, kind: "chapter")
+                    .caseInsensitiveCompare(remoteChapterID) == .orderedSame
+            }
+        } else if let announcedLocalID = nonempty(change.payload["localChapterId"]?.stringValue) {
+            localChapterID = chapterIDs.first { $0.rawValue == announcedLocalID }
+        } else if let path = nonempty(
+            change.payload["localObjectPath"]?.stringValue
+                ?? change.payload["installedObjectPath"]?.stringValue
+        ), let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let transcript = try? JSONDecoder.iso.decode(Transcript.self, from: data) {
+            localChapterID = chapterIDs.first { $0.rawValue == transcript.chapterID }
+        } else {
+            return change
+        }
+        guard let localChapterID else {
+            Self.syncLog.info(
+                "sync_transcript_revision_skipped message=sync_transcript_revision_skipped component=account-sync entityId=\(change.entityId, privacy: .public) outcome=orphan_catalog_parent"
+            )
+            return nil
+        }
+        var resolved = change
+        resolved.payload["localChapterId"] = .string(localChapterID.rawValue)
+        return resolved
+    }
+
+    /// Transcript eligibility observes catalog mutations from the same ordered page so a new
+    /// device can install a revision immediately, while a same-page tombstone still wins.
+    private static func projectedTranscriptChapterIDs(
+        afterApplying changes: [SyncPulledChange],
+        sqlite: LocalSQLiteStore
+    ) throws -> [ChapterID] {
+        guard changes.contains(where: {
+            $0.entityType == OutboxEntityType.transcript.rawValue
+                && $0.operation != OutboxOperation.delete.rawValue
+        }) else { return [] }
+        var chaptersByBook = Dictionary(uniqueKeysWithValues: try sqlite.loadBooks().map { book in
+            (book.id.rawValue, Set(book.chapters.map { $0.id.rawValue }))
+        })
+        for change in changes {
+            switch change.entityType {
+            case OutboxEntityType.book.rawValue:
+                if change.operation == OutboxOperation.delete.rawValue {
+                    chaptersByBook.removeValue(forKey: change.payload["localId"]?.stringValue ?? change.entityId)
+                } else {
+                    guard let portable = try? JSONDecoder.iso.decode(
+                        PortableBook.self,
+                        from: SyncJSONCoding.data(from: change.payload)
+                    ) else { throw AccountSyncApplyError.invalidPayload(change.entityType) }
+                    chaptersByBook[portable.localId] = Set(portable.chapters.map(\.localId))
+                }
+            case OutboxEntityType.chapter.rawValue:
+                let bookID = try requiredString("localBookId", fallback: "bookId", in: change)
+                guard var chapterIDs = chaptersByBook[bookID] else { continue }
+                let chapterID = change.payload["localChapterId"]?.stringValue ?? change.entityId
+                if change.operation == OutboxOperation.delete.rawValue {
+                    chapterIDs.remove(chapterID)
+                } else {
+                    chapterIDs.insert(chapterID)
+                }
+                chaptersByBook[bookID] = chapterIDs
+            default:
+                continue
+            }
+        }
+        return chaptersByBook.values.flatMap { $0 }.map(ChapterID.init(rawValue:))
     }
 
     /// Copies verified temporary objects to a content-addressed device path before the SQLite
@@ -555,9 +703,9 @@ enum AccountSyncApplicator {
         let root = Persistence.root.appendingPathComponent("SyncAssets-v2", isDirectory: true)
         var created: [URL] = []
         do {
-            for index in changes.indices where
-                changes[index].entityType == OutboxEntityType.asset.rawValue
-                    || changes[index].entityType == OutboxEntityType.transcript.rawValue {
+            for index in changes.indices where changes[index].operation != OutboxOperation.delete.rawValue
+                && (changes[index].entityType == OutboxEntityType.asset.rawValue
+                    || changes[index].entityType == OutboxEntityType.transcript.rawValue) {
                 guard let sourcePath = changes[index].payload["localObjectPath"]?.stringValue,
                       let kind = changes[index].payload["kind"]?.stringValue,
                       let sha256 = changes[index].payload["sha256"]?.stringValue
@@ -825,6 +973,23 @@ enum AccountSyncApplicator {
     }
 
     private static func applyTranscript(_ change: SyncPulledChange, to sqlite: LocalSQLiteStore) throws {
+        if change.operation == OutboxOperation.delete.rawValue {
+            let localChapterID: ChapterID?
+            if let localID = nonempty(change.payload["localChapterId"]?.stringValue) {
+                localChapterID = ChapterID(rawValue: localID)
+            } else if let remoteID = nonempty(change.payload["chapterId"]?.stringValue) {
+                localChapterID = try sqlite.activeTranscriptChapterIDs().first {
+                    syncEntityID($0.rawValue, kind: "chapter")
+                        .caseInsensitiveCompare(remoteID) == .orderedSame
+                }
+            } else {
+                localChapterID = nil
+            }
+            if let localChapterID {
+                try sqlite.deleteTranscript(chapterID: localChapterID)
+            }
+            return
+        }
         guard let path = change.payload["installedObjectPath"]?.stringValue,
               let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               var transcript = try? JSONDecoder.iso.decode(Transcript.self, from: data)
@@ -986,17 +1151,66 @@ enum AccountSyncApplicator {
         _ change: SyncPulledChange,
         to sqlite: LocalSQLiteStore
     ) throws {
-        guard change.operation == OutboxOperation.upsert.rawValue,
-              let payload = try? JSONDecoder.iso.decode(
-                StoredAssistantDecisionPayload.self,
-                from: SyncJSONCoding.data(from: change.payload)
-              )
-        else { throw AccountSyncApplyError.invalidPayload(change.entityType) }
+        let payload = try assistantDecisionPayload(from: change)
         try sqlite.applyAssistantResults(
             [payload.result],
             vocabulary: payload.vocabulary,
             removingVocabularyIDs: payload.removedVocabularyIDs ?? []
         )
+    }
+
+    private static func assistantDecisionPayload(
+        from change: SyncPulledChange
+    ) throws -> StoredAssistantDecisionPayload {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let value = try decoder.singleValueContainer()
+            if let seconds = try? value.decode(Double.self), seconds.isFinite {
+                // Historical outbox payloads used JSONEncoder's 2001 reference-date numbers.
+                return Date(timeIntervalSinceReferenceDate: seconds)
+            }
+            let raw = try value.decode(String.self)
+            guard let date = isoDate(raw) else {
+                throw DecodingError.dataCorruptedError(
+                    in: value,
+                    debugDescription: "Expected an ISO-8601 or legacy reference-date value."
+                )
+            }
+            return date
+        }
+        guard change.operation == OutboxOperation.upsert.rawValue,
+              var payload = try? decoder.decode(
+                  StoredAssistantDecisionPayload.self,
+                  from: SyncJSONCoding.data(from: change.payload)
+              )
+        else { throw AccountSyncApplyError.invalidPayload(change.entityType) }
+        // Assistant dates use whole-second wire precision. Normalize both legacy numeric and
+        // current ISO payloads before the result and its entity version are written atomically.
+        payload.result.createdAt = syncCanonicalAssistantDate(payload.result.createdAt)
+        payload.result.decidedAt = payload.result.decidedAt.map(syncCanonicalAssistantDate)
+        if payload.result.id.lowercased() == change.entityId.lowercased(),
+           let glossKind = legacyGlossKind(payload.result.kind) {
+            let legacyID = GlossEntry.makeID(
+                kind: glossKind,
+                language: payload.result.language,
+                source: payload.result.source,
+                context: payload.result.context
+            )
+            // v2 uses a UUID entity, but pre-v2 gloss rows keep their content-hash identity on
+            // every device. Require the deterministic mapping before restoring that local ID.
+            if syncEntityID(legacyID, kind: "assistant-result") == change.entityId.lowercased() {
+                payload.result.id = legacyID
+            }
+        }
+        return payload
+    }
+
+    private static func legacyGlossKind(_ kind: AssistantResultKind) -> GlossKind? {
+        switch kind {
+        case .sentenceGloss: .sentence
+        case .wordGloss: .word
+        case .chapterSummary, .chapterTranslation: nil
+        }
     }
 
     private static func applySRSProgress(_ change: SyncPulledChange, to entry: inout VocabEntry) throws {
@@ -1157,6 +1371,12 @@ enum AccountSyncApplicator {
         if let date = formatter.date(from: raw) { return date }
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter.date(from: raw)
+    }
+
+    /// Assistant timestamps use second-precision ISO text on the wire. Snapshotting that same
+    /// representation keeps an immutable local subsecond from looking like a new decision forever.
+    private static func syncCanonicalAssistantDate(_ date: Date) -> Date {
+        Date(timeIntervalSince1970: floor(date.timeIntervalSince1970))
     }
 
     private static func nonempty(_ value: String?) -> String? {

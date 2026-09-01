@@ -163,6 +163,9 @@ export const TRANSACTION_FUNCTIONS = [
   "bootstrap_sync_v2_page",
   "gc_abandoned_v2_uploads",
   "finish_v2_asset_upload_gc",
+  "authorize_v2_asset_upload",
+  "begin_v2_asset_object_write",
+  "claim_deleted_book_v2_assets",
   "cleanup_obsolete_v1_data",
   "push_sync_batch",
   "pull_sync_page",
@@ -181,7 +184,7 @@ export const TRANSACTION_FUNCTIONS = [
 ] as const;
 
 /** Latest database contract that account sync must prove before it can become effective. */
-export const ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION = "20260831133000" as const;
+export const ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION = "20260901090000" as const;
 
 export const AUDIT_ACTOR_TYPES = ["user", "admin", "system"] as const;
 

@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 #if canImport(AudioReaderDomain)
 import AudioReaderDomain
 #endif
@@ -12,6 +13,38 @@ private enum LocalSQLiteStoreError: Error {
 }
 
 public final class LocalSQLiteStore: SettingsRepository, BookRepository, TranscriptRepository, VocabularyRepository, KnownLemmaRepository, AssistantResultRepository, TranslationCheckpointRepository, StudyActivityRepository, SyncOutboxRepository, SyncCursorStoring, SyncEntityVersionStoring, TranscriptOverlayRepository, ReaderProgressRepository, ReviewEventRepository, @unchecked Sendable {
+    /// An uploadable transcript paired with the active catalog owner observed in the same snapshot.
+    public struct ActiveSyncTranscriptCandidate: Equatable, Sendable {
+        public let bookID: BookID
+        public let transcript: StoredTranscript
+
+        init(bookID: BookID, transcript: StoredTranscript) {
+            self.bookID = bookID
+            self.transcript = transcript
+        }
+    }
+
+    private static let schemaLog = Logger(
+        subsystem: "com.johnsonzhang.AudioReader",
+        category: "local-schema"
+    )
+
+    private struct VocabularyRepairCandidate {
+        var occurrence: StoredVocabularyOccurrence
+        var updatedAt: Date
+    }
+
+    private struct ReviewCardRepairCandidate {
+        var card: StoredLocalReviewCard
+        var updatedAt: Date
+    }
+
+    private struct VocabularyReviewState {
+        var schedule: StoredVocabularyReviewSchedule
+        var updatedAt: Date
+        var stableID: String
+    }
+
     public let url: URL
 
     private let lock = NSRecursiveLock()
@@ -27,7 +60,11 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
         connection = SQLiteConnection(fileURL: fileURL)
         lock.lock()
         defer { lock.unlock() }
-        try? applySchemaUnlocked()
+        do {
+            try applySchemaUnlocked()
+        } catch {
+            connection.failClosed(with: error)
+        }
     }
 
     /// Canonical sync rows, entity versions, and the acknowledgement cursor commit together.
@@ -672,6 +709,48 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
         return rows
     }
 
+    /// Fails closed unless the book, chapter, and active transcript all coexist in one SQLite snapshot.
+    public func loadActiveSyncTranscriptCandidates() throws -> [ActiveSyncTranscriptCandidate] {
+        try loadActiveSyncTranscriptCandidates(interleavingAfterCandidateQuery: nil)
+    }
+
+    /// The internal interleave seam lets tests commit a WAL writer after this read snapshot is established.
+    func loadActiveSyncTranscriptCandidates(
+        interleavingAfterCandidateQuery: (() throws -> Void)?
+    ) throws -> [ActiveSyncTranscriptCandidate] {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let ownsTransaction = syncPageTransactionDepth == 0
+        if ownsTransaction { try connection.exec("BEGIN DEFERRED TRANSACTION") }
+        do {
+            let rows = try connection.query(
+                """
+                SELECT revision.*, chapter.book_id AS sync_book_id
+                FROM local_transcript_revisions AS revision
+                JOIN local_chapters AS chapter
+                  ON chapter.id = revision.chapter_id AND chapter.deleted_at IS NULL
+                JOIN local_books AS book
+                  ON book.id = chapter.book_id AND book.deleted_at IS NULL
+                WHERE revision.is_active = 1 AND revision.deleted_at IS NULL
+                ORDER BY revision.chapter_id
+                """
+            )
+            try interleavingAfterCandidateQuery?()
+            let candidates = try rows.map { row in
+                ActiveSyncTranscriptCandidate(
+                    bookID: BookID(rawValue: try row.required("sync_book_id")),
+                    transcript: try loadTranscriptUnlocked(from: row)
+                )
+            }
+            if ownsTransaction { try connection.exec("COMMIT") }
+            return candidates
+        } catch {
+            if ownsTransaction { try? connection.exec("ROLLBACK") }
+            throw error
+        }
+    }
+
     public func loadAllTranscripts() throws -> [StoredTranscript] {
         try loadTranscripts()
     }
@@ -687,6 +766,28 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
 
     public func loadTranscript(chapterID: ChapterID) throws -> StoredTranscript? {
         try loadTranscript(chapterID: chapterID, range: nil)
+    }
+
+    /// A remote transcript tombstone hides the active immutable revision without requiring
+    /// its already-deleted object. An unknown chapter is an idempotent no-op.
+    public func deleteTranscript(chapterID: ChapterID) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        let ownsTransaction = syncPageTransactionDepth == 0
+        if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
+        do {
+            try connection.run(
+                "UPDATE local_transcript_revisions SET is_active = 0, deleted_at = ? WHERE chapter_id = ? AND is_active = 1"
+            ) { [connection] statement in
+                connection.bindDate(statement, 1, Date())
+                connection.bind(statement, 2, chapterID.rawValue)
+            }
+            if ownsTransaction { try connection.exec("COMMIT") }
+        } catch {
+            if ownsTransaction { try? connection.exec("ROLLBACK") }
+            throw error
+        }
     }
 
     /// Reader-facing loads request a bounded sequence range; a nil range is
@@ -1574,7 +1675,7 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
                 ?? vocabularies.first
             else { throw LocalSQLiteStoreError.missingReviewVocabulary }
             let cardID = event.cardID ?? "card:\(vocabulary.id.rawValue):\(event.face)"
-            try insertReviewCards([
+            let cardMapping = try insertReviewCards([
                 StoredLocalReviewCard(
                     id: cardID,
                     vocabularyID: vocabulary.id,
@@ -1587,7 +1688,11 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
                     reviewEaseFactor: vocabulary.reviewEaseFactor
                 )
             ])
-            try insertReviewEvents([event], includeCard: true)
+            var persistedEvent = event
+            if event.cardID != nil {
+                persistedEvent.cardID = cardMapping[cardID] ?? cardID
+            }
+            try insertReviewEvents([persistedEvent], includeCard: true)
             if ownsTransaction { try connection.exec("COMMIT") }
         } catch {
             if ownsTransaction { try? connection.exec("ROLLBACK") }
@@ -1816,12 +1921,339 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
 
     private func applySchemaUnlocked() throws {
         guard !schemaIsReady else { return }
-        for sql in LocalSchemaVNext.createStatements {
-            try connection.exec(sql)
+        var previousVersion: Int?
+        do {
+            // Take the write reservation before inspecting the version so no
+            // other connection can advance the schema behind this decision.
+            try connection.exec("BEGIN IMMEDIATE TRANSACTION")
+            let storedVersion = try connection.query("PRAGMA user_version").first?.int("user_version") ?? 0
+            previousVersion = storedVersion
+            guard storedVersion <= LocalSchemaVNext.version else {
+                throw LocalSQLiteError.sqlite(
+                    "unsupported schema version \(storedVersion); current version is \(LocalSchemaVNext.version)"
+                )
+            }
+            if storedVersion > 0, storedVersion < LocalSchemaVNext.version {
+                Self.schemaLog.info("message=schema.migrate component=local-store outcome=start from=\(storedVersion, privacy: .public) to=\(LocalSchemaVNext.version, privacy: .public)")
+            }
+            for sql in LocalSchemaVNext.createStatements {
+                try connection.exec(sql)
+            }
+            if storedVersion < 2 {
+                for addition in LocalSchemaVNext.version2ColumnAdditions {
+                    let columns = try connection.query("PRAGMA table_info(\(addition.table))")
+                    guard !columns.contains(where: { $0["name"] == addition.column }) else { continue }
+                    try connection.exec(addition.sql)
+                }
+            }
+            try repairCaseVariantVocabularyIDsUnlocked()
+            if storedVersion < LocalSchemaVNext.version {
+                try connection.exec("PRAGMA user_version = \(LocalSchemaVNext.version)")
+            }
+            try connection.exec("COMMIT")
+            if storedVersion > 0, storedVersion < LocalSchemaVNext.version {
+                Self.schemaLog.info("message=schema.migrate component=local-store outcome=success from=\(storedVersion, privacy: .public) to=\(LocalSchemaVNext.version, privacy: .public)")
+            }
+        } catch {
+            try? connection.exec("ROLLBACK")
+            Self.schemaLog.error("message=schema.migrate component=local-store outcome=failure from=\(previousVersion ?? -1, privacy: .public) to=\(LocalSchemaVNext.version, privacy: .public) error=\(String(describing: error), privacy: .private)")
+            throw error
         }
-        try connection.exec("PRAGMA user_version = \(LocalSchemaVNext.version)")
         schemaIsReady = true
         schemaApplicationCount += 1
+    }
+
+    /// Sync UUID identity is case-insensitive, while SQLite text primary keys are not. Repair
+    /// legacy aliases inside the store-open transaction before callers build ID-keyed snapshots.
+    private func repairCaseVariantVocabularyIDsUnlocked() throws {
+        let candidates = try connection.query(
+            "SELECT * FROM local_vocabulary_occurrences ORDER BY id"
+        ).map { row in
+            VocabularyRepairCandidate(
+                occurrence: try Self.vocabulary(from: row),
+                updatedAt: row.date("updated_at")
+            )
+        }
+        let duplicateGroups = Dictionary(grouping: candidates) {
+            $0.occurrence.id.rawValue.lowercased()
+        }.filter { canonicalID, rows in
+            rows.count > 1 && UUID(uuidString: canonicalID) != nil
+        }
+        guard !duplicateGroups.isEmpty else { return }
+
+        for canonicalID in duplicateGroups.keys.sorted() {
+            guard let rows = duplicateGroups[canonicalID] else { continue }
+            try repairCaseVariantVocabularyGroupUnlocked(rows, canonicalID: canonicalID)
+        }
+        Self.schemaLog.info(
+            "message=vocabulary.case_alias_repair component=local-store outcome=success groups=\(duplicateGroups.count, privacy: .public)"
+        )
+    }
+
+    /// Ongoing sync checks only the IDs in its current batch. The expression index keeps this
+    /// lookup bounded instead of rescanning the full vocabulary library for each row.
+    private func repairCaseVariantVocabularyIDUnlocked(_ rawID: String) throws {
+        let canonicalID = rawID.lowercased()
+        guard UUID(uuidString: canonicalID) != nil else { return }
+        let rows = try connection.query(
+            "SELECT * FROM local_vocabulary_occurrences WHERE lower(id) = ? ORDER BY id",
+            bind: { [connection] statement in connection.bind(statement, 1, canonicalID) }
+        ).map { row in
+            VocabularyRepairCandidate(
+                occurrence: try Self.vocabulary(from: row),
+                updatedAt: row.date("updated_at")
+            )
+        }
+        guard rows.count > 1 else { return }
+        try repairCaseVariantVocabularyGroupUnlocked(rows, canonicalID: canonicalID)
+        Self.schemaLog.info(
+            "message=vocabulary.case_alias_repair component=local-store outcome=success groups=1"
+        )
+    }
+
+    private func repairCaseVariantVocabularyGroupUnlocked(
+        _ rows: [VocabularyRepairCandidate],
+        canonicalID: String
+    ) throws {
+        let cards = try reviewCardRepairCandidates(vocabularyID: canonicalID)
+        let merged = Self.mergeCaseVariantVocabulary(rows, cards: cards, canonicalID: canonicalID)
+
+        // Insert the canonical parent first so child reparenting remains foreign-key safe.
+        try insertVocabulary([merged], repairingCaseAliases: false)
+        for table in ["local_review_events", "local_review_cards"] {
+            try connection.run(
+                "UPDATE \(table) SET vocabulary_id = ? WHERE lower(vocabulary_id) = ?"
+            ) { [connection] statement in
+                connection.bind(statement, 1, canonicalID)
+                connection.bind(statement, 2, canonicalID)
+            }
+        }
+        try consolidateReviewCardsUnlocked(
+            cards,
+            vocabularyID: canonicalID,
+            schedule: StoredVocabularyReviewSchedule(merged)
+        )
+        try connection.run(
+            "DELETE FROM local_vocabulary_occurrences WHERE lower(id) = ? AND id != ?"
+        ) { [connection] statement in
+            connection.bind(statement, 1, canonicalID)
+            connection.bind(statement, 2, canonicalID)
+        }
+        try connection.run(
+            "UPDATE local_vocabulary_occurrences SET updated_at = ? WHERE id = ?"
+        ) { [connection] statement in
+            connection.bindDate(statement, 1, rows.map(\.updatedAt).max() ?? merged.addedAt)
+            connection.bind(statement, 2, canonicalID)
+        }
+    }
+
+    /// Newest durable content wins with stable tie-breaking; optional enrichment is additive,
+    /// capture time is earliest, and scheduler/learn-list state is never reduced.
+    private static func mergeCaseVariantVocabulary(
+        _ candidates: [VocabularyRepairCandidate],
+        cards: [ReviewCardRepairCandidate],
+        canonicalID: String
+    ) -> StoredVocabularyOccurrence {
+        let newestFirst = candidates.sorted { lhs, rhs in
+            if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+            let lhsIsCanonical = lhs.occurrence.id.rawValue == canonicalID
+            let rhsIsCanonical = rhs.occurrence.id.rawValue == canonicalID
+            if lhsIsCanonical != rhsIsCanonical { return lhsIsCanonical }
+            return lhs.occurrence.id.rawValue < rhs.occurrence.id.rawValue
+        }
+        var merged = newestFirst[0].occurrence
+        merged.id = VocabularyOccurrenceID(rawValue: canonicalID)
+        merged.addedAt = candidates.map(\.occurrence.addedAt).min() ?? merged.addedAt
+        merged.reviewEligible = candidates.contains { $0.occurrence.reviewEligible }
+        merged.isInLearnList = candidates.contains { $0.occurrence.isInLearnList }
+
+        for candidate in newestFirst.dropFirst().map(\.occurrence) {
+            if merged.senseID == nil { merged.senseID = candidate.senseID }
+            if merged.canonicalizationTraceID == nil {
+                merged.canonicalizationTraceID = candidate.canonicalizationTraceID
+            }
+            if merged.definition == nil { merged.definition = candidate.definition }
+            if merged.dictionaryName == nil { merged.dictionaryName = candidate.dictionaryName }
+            if merged.dictionaryHTML == nil { merged.dictionaryHTML = candidate.dictionaryHTML }
+            if merged.translation == nil { merged.translation = candidate.translation }
+            if merged.translationLanguage == nil {
+                merged.translationLanguage = candidate.translationLanguage
+            }
+            if merged.translationModel == nil { merged.translationModel = candidate.translationModel }
+            if merged.sourceLanguage == nil { merged.sourceLanguage = candidate.sourceLanguage }
+            if merged.spokenText == nil { merged.spokenText = candidate.spokenText }
+            if merged.ebookText == nil { merged.ebookText = candidate.ebookText }
+            if merged.segmentID == nil { merged.segmentID = candidate.segmentID }
+            if merged.wordID == nil { merged.wordID = candidate.wordID }
+        }
+
+        let occurrenceStates = candidates.map {
+            VocabularyReviewState(
+                schedule: StoredVocabularyReviewSchedule($0.occurrence),
+                updatedAt: $0.updatedAt,
+                stableID: $0.occurrence.id.rawValue
+            )
+        }
+        let cardStates = cards.map { cardReviewState($0, vocabularyID: canonicalID) }
+        if let strongest = (occurrenceStates + cardStates).sorted(by: reviewStateIsStronger).first {
+            merged = strongest.schedule.merging(into: merged)
+        }
+        if merged.reviewCount > 0 { merged.reviewEligible = true }
+        return merged
+    }
+
+    private static func reviewStateIsStronger(
+        _ lhs: VocabularyReviewState,
+        _ rhs: VocabularyReviewState
+    ) -> Bool {
+        if lhs.schedule.reviewCount != rhs.schedule.reviewCount {
+            return lhs.schedule.reviewCount > rhs.schedule.reviewCount
+        }
+        let lhsReviewedAt = lhs.schedule.lastReviewedAt ?? .distantPast
+        let rhsReviewedAt = rhs.schedule.lastReviewedAt ?? .distantPast
+        if lhsReviewedAt != rhsReviewedAt { return lhsReviewedAt > rhsReviewedAt }
+        if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+        return lhs.stableID < rhs.stableID
+    }
+
+    private static func cardReviewState(
+        _ candidate: ReviewCardRepairCandidate,
+        vocabularyID: String
+    ) -> VocabularyReviewState {
+        VocabularyReviewState(
+            schedule: StoredVocabularyReviewSchedule(
+                vocabularyID: VocabularyOccurrenceID(rawValue: vocabularyID),
+                reviewCount: candidate.card.reviewCount,
+                nextReview: candidate.card.nextReview,
+                lastReviewedAt: candidate.card.lastReviewedAt,
+                lastReviewQuality: candidate.card.lastReviewQuality,
+                reviewIntervalDays: candidate.card.reviewIntervalDays,
+                reviewEaseFactor: candidate.card.reviewEaseFactor
+            ),
+            updatedAt: candidate.updatedAt,
+            stableID: candidate.card.id
+        )
+    }
+
+    private func reviewCardRepairCandidates(
+        vocabularyID: String
+    ) throws -> [ReviewCardRepairCandidate] {
+        try connection.query(
+            "SELECT * FROM local_review_cards WHERE lower(vocabulary_id) = ? ORDER BY id",
+            bind: { [connection] statement in connection.bind(statement, 1, vocabularyID) }
+        ).map { row in
+            ReviewCardRepairCandidate(
+                card: StoredLocalReviewCard(
+                    id: try row.required("id"),
+                    vocabularyID: VocabularyOccurrenceID(rawValue: try row.required("vocabulary_id")),
+                    face: try row.required("face"),
+                    reviewCount: row.int("review_count"),
+                    nextReview: row.optionalDate("next_review"),
+                    lastReviewedAt: row.optionalDate("last_reviewed_at"),
+                    lastReviewQuality: row.string("last_review_quality"),
+                    reviewIntervalDays: row.double("review_interval_days"),
+                    reviewEaseFactor: row.double("review_ease_factor")
+                ),
+                updatedAt: row.date("updated_at")
+            )
+        }
+    }
+
+    private func reviewCardRepairCandidates(
+        vocabularyID: String,
+        face: String
+    ) throws -> [ReviewCardRepairCandidate] {
+        try connection.query(
+            "SELECT * FROM local_review_cards WHERE vocabulary_id = ? AND face = ? ORDER BY id",
+            bind: { [connection] statement in
+                connection.bind(statement, 1, vocabularyID)
+                connection.bind(statement, 2, face)
+            }
+        ).map { row in
+            ReviewCardRepairCandidate(
+                card: StoredLocalReviewCard(
+                    id: try row.required("id"),
+                    vocabularyID: VocabularyOccurrenceID(rawValue: try row.required("vocabulary_id")),
+                    face: try row.required("face"),
+                    reviewCount: row.int("review_count"),
+                    nextReview: row.optionalDate("next_review"),
+                    lastReviewedAt: row.optionalDate("last_reviewed_at"),
+                    lastReviewQuality: row.string("last_review_quality"),
+                    reviewIntervalDays: row.double("review_interval_days"),
+                    reviewEaseFactor: row.double("review_ease_factor")
+                ),
+                updatedAt: row.date("updated_at")
+            )
+        }
+    }
+
+    /// Review events remain immutable; mutable card mirrors collapse to the strongest schedule
+    /// per face, and every historical event is retargeted before a superseded card is removed.
+    private func consolidateReviewCardsUnlocked(
+        _ cards: [ReviewCardRepairCandidate],
+        vocabularyID: String,
+        schedule: StoredVocabularyReviewSchedule
+    ) throws {
+        for face in Set(cards.map(\.card.face)).sorted() {
+            let faceCards = cards.filter { $0.card.face == face }
+            _ = try consolidateReviewCardFaceUnlocked(
+                faceCards,
+                vocabularyID: vocabularyID,
+                face: face,
+                schedule: schedule
+            )
+        }
+    }
+
+    /// One mutable card owns each persisted parent and face. Immutable events are reparented
+    /// before losers are removed, while the strongest schedule is copied onto the survivor.
+    private func consolidateReviewCardFaceUnlocked(
+        _ cards: [ReviewCardRepairCandidate],
+        vocabularyID: String,
+        face: String,
+        schedule override: StoredVocabularyReviewSchedule? = nil
+    ) throws -> String? {
+        guard let strongest = cards.sorted(by: {
+            Self.reviewStateIsStronger(
+                Self.cardReviewState($0, vocabularyID: vocabularyID),
+                Self.cardReviewState($1, vocabularyID: vocabularyID)
+            )
+        }).first else { return nil }
+        let canonicalGeneratedID = "card:\(vocabularyID):\(face)"
+        let winner = cards.first { $0.card.id == canonicalGeneratedID } ?? strongest
+        let schedule = override ?? Self.cardReviewState(strongest, vocabularyID: vocabularyID).schedule
+        for loser in cards where loser.card.id != winner.card.id {
+            try connection.run("UPDATE local_review_events SET card_id = ? WHERE card_id = ?") {
+                [connection] statement in
+                connection.bind(statement, 1, winner.card.id)
+                connection.bind(statement, 2, loser.card.id)
+            }
+            try connection.run("DELETE FROM local_review_cards WHERE id = ?") {
+                [connection] statement in connection.bind(statement, 1, loser.card.id)
+            }
+        }
+        try connection.run(
+            """
+            UPDATE local_review_cards SET vocabulary_id = ?, review_count = ?, next_review = ?,
+              last_reviewed_at = ?, last_review_quality = ?, review_interval_days = ?,
+              review_ease_factor = ?, updated_at = ? WHERE id = ?
+            """
+        ) { [connection] statement in
+            connection.bind(statement, 1, vocabularyID)
+            connection.bind(statement, 2, schedule.reviewCount)
+            connection.bindDate(statement, 3, schedule.nextReview)
+            connection.bindDate(statement, 4, schedule.lastReviewedAt)
+            connection.bind(statement, 5, schedule.lastReviewQuality)
+            connection.bind(statement, 6, schedule.reviewIntervalDays)
+            connection.bind(statement, 7, schedule.reviewEaseFactor)
+            connection.bindDate(
+                statement,
+                8,
+                [schedule.lastReviewedAt, strongest.updatedAt, winner.updatedAt].compactMap { $0 }.max()
+            )
+            connection.bind(statement, 9, winner.card.id)
+        }
+        return winner.card.id
     }
 
     private func insertTranscriptSegments(
@@ -1936,7 +2368,12 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
         connection.bind(statement, start + 14, alignment?.metrics.detailedAlignmentPerformed)
     }
 
-    private func insertVocabulary(_ entries: [StoredVocabularyOccurrence]) throws {
+    /// Every vocabulary writer passes through this boundary inside its owning transaction. Alias
+    /// repair is disabled only for the repair's own canonical insert to prevent recursion.
+    private func insertVocabulary(
+        _ entries: [StoredVocabularyOccurrence],
+        repairingCaseAliases: Bool = true
+    ) throws {
         let sql = """
             INSERT INTO local_vocabulary_occurrences(
               id, surface, canonical_form, part_of_speech, sense_id,
@@ -1977,6 +2414,7 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
               segment_id=excluded.segment_id,
               word_id=excluded.word_id,
               timestamp=excluded.timestamp,
+              added_at=MIN(local_vocabulary_occurrences.added_at, excluded.added_at),
               review_count=excluded.review_count,
               next_review=excluded.next_review,
               last_reviewed_at=excluded.last_reviewed_at,
@@ -2029,17 +2467,35 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
                 connection.bindDate(stmt, 39, entry.addedAt)
             }
         }
+        if repairingCaseAliases {
+            for id in Set(entries.map { $0.id.rawValue.lowercased() }) {
+                try repairCaseVariantVocabularyIDUnlocked(id)
+            }
+        }
     }
 
     private func vocabularyPreservingNewerReviewState(
         _ incoming: [StoredVocabularyOccurrence]
     ) throws -> [StoredVocabularyOccurrence] {
-        let existing = Dictionary(uniqueKeysWithValues: try loadVocabulary().map { ($0.id, $0) })
-        let cards = Dictionary(uniqueKeysWithValues: try loadReviewCards().map { ($0.vocabularyID, $0) })
+        let existing = Dictionary(uniqueKeysWithValues: try loadVocabulary().map {
+            (Self.vocabularyIdentityKey($0.id.rawValue), $0)
+        })
+        let cards = Dictionary(grouping: try loadReviewCards()) {
+            Self.vocabularyIdentityKey($0.vocabularyID.rawValue)
+        }.mapValues { candidates in
+            candidates.sorted { lhs, rhs in
+                if lhs.reviewCount != rhs.reviewCount { return lhs.reviewCount > rhs.reviewCount }
+                let lhsReviewedAt = lhs.lastReviewedAt ?? .distantPast
+                let rhsReviewedAt = rhs.lastReviewedAt ?? .distantPast
+                if lhsReviewedAt != rhsReviewedAt { return lhsReviewedAt > rhsReviewedAt }
+                return lhs.id < rhs.id
+            }.first!
+        }
         return incoming.map { entry in
-            guard let local = existing[entry.id] else { return entry }
+            let identityKey = Self.vocabularyIdentityKey(entry.id.rawValue)
+            guard let local = existing[identityKey] else { return entry }
             var strongest = local
-            if let card = cards[entry.id],
+            if let card = cards[identityKey],
                card.reviewCount > strongest.reviewCount
                 || (card.reviewCount == strongest.reviewCount
                     && (card.lastReviewedAt ?? .distantPast) > (strongest.lastReviewedAt ?? .distantPast)) {
@@ -2163,7 +2619,9 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
         }
     }
 
-    private func insertReviewCards(_ cards: [StoredLocalReviewCard]) throws {
+    /// Returns each supplied card ID's persisted survivor after enforcing one card per parent/face.
+    @discardableResult
+    private func insertReviewCards(_ cards: [StoredLocalReviewCard]) throws -> [String: String] {
         let sql = """
             INSERT INTO local_review_cards(
               id, vocabulary_id, face, review_count, next_review, last_reviewed_at,
@@ -2171,6 +2629,8 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
               created_at, updated_at, server_version
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,0)
             ON CONFLICT(id) DO UPDATE SET
+              vocabulary_id=excluded.vocabulary_id,
+              face=excluded.face,
               review_count=excluded.review_count,
               next_review=excluded.next_review,
               last_reviewed_at=excluded.last_reviewed_at,
@@ -2178,12 +2638,23 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
               review_interval_days=excluded.review_interval_days,
               review_ease_factor=excluded.review_ease_factor,
               updated_at=excluded.updated_at
-            """
+        """
+        var survivingIDs: [String: String] = [:]
+        var inserted: [(originalID: String, vocabularyID: String, face: String)] = []
         for card in cards {
             let timestamp = card.lastReviewedAt ?? card.nextReview ?? Date(timeIntervalSince1970: 0)
+            let rawVocabularyID = card.vocabularyID.rawValue
+            let identityKey = Self.vocabularyIdentityKey(rawVocabularyID)
+            let vocabularyID: String
+            if let survivingID = survivingIDs[identityKey] {
+                vocabularyID = survivingID
+            } else {
+                vocabularyID = try survivingVocabularyIDUnlocked(rawVocabularyID)
+                survivingIDs[identityKey] = vocabularyID
+            }
             try connection.run(sql) { stmt in
                 connection.bind(stmt, 1, card.id)
-                connection.bind(stmt, 2, card.vocabularyID.rawValue)
+                connection.bind(stmt, 2, vocabularyID)
                 connection.bind(stmt, 3, card.face)
                 connection.bind(stmt, 4, card.reviewCount)
                 connection.bindDate(stmt, 5, card.nextReview)
@@ -2194,7 +2665,26 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
                 connection.bindDate(stmt, 10, timestamp)
                 connection.bindDate(stmt, 11, timestamp)
             }
+            inserted.append((card.id, vocabularyID, card.face))
         }
+        var mappings: [String: String] = [:]
+        let groups = Dictionary(grouping: inserted) { "\($0.vocabularyID)\u{0}\($0.face)" }
+        for groupKey in groups.keys.sorted() {
+            guard let items = groups[groupKey], let group = items.first else { continue }
+            let candidates = try reviewCardRepairCandidates(
+                vocabularyID: group.vocabularyID,
+                face: group.face
+            )
+            guard let survivor = try consolidateReviewCardFaceUnlocked(
+                candidates,
+                vocabularyID: group.vocabularyID,
+                face: group.face
+            ) else { continue }
+            for item in items {
+                mappings[item.originalID] = survivor
+            }
+        }
+        return mappings
     }
 
     private static func reviewCard(for vocabulary: StoredVocabularyOccurrence) -> StoredLocalReviewCard {
@@ -2220,10 +2710,20 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
               id, vocabulary_id, card_id, face, rating, reviewed_at, created_at, server_version
             ) VALUES (?,?,?,?,?,?,?,0)
             """
+        var survivingIDs: [String: String] = [:]
         for event in events {
+            let rawVocabularyID = event.vocabularyID.rawValue
+            let identityKey = Self.vocabularyIdentityKey(rawVocabularyID)
+            let vocabularyID: String
+            if let survivingID = survivingIDs[identityKey] {
+                vocabularyID = survivingID
+            } else {
+                vocabularyID = try survivingVocabularyIDUnlocked(rawVocabularyID)
+                survivingIDs[identityKey] = vocabularyID
+            }
             try connection.run(sql) { stmt in
                 connection.bind(stmt, 1, event.id.rawValue)
-                connection.bind(stmt, 2, event.vocabularyID.rawValue)
+                connection.bind(stmt, 2, vocabularyID)
                 connection.bind(
                     stmt,
                     3,
@@ -2235,6 +2735,21 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
                 connection.bindDate(stmt, 7, event.reviewedAt)
             }
         }
+    }
+
+    /// Alias repair can retain a legacy singleton's spelling or replace a duplicate group with
+    /// lowercase. Child writes resolve the row that exists now instead of guessing either form.
+    private func survivingVocabularyIDUnlocked(_ rawID: String) throws -> String {
+        let canonicalID = rawID.lowercased()
+        guard UUID(uuidString: canonicalID) != nil else { return rawID }
+        return try connection.query(
+            "SELECT id FROM local_vocabulary_occurrences WHERE lower(id) = ? ORDER BY id LIMIT 1",
+            bind: { [connection] statement in connection.bind(statement, 1, canonicalID) }
+        ).first?["id"] ?? rawID
+    }
+
+    private static func vocabularyIdentityKey(_ rawID: String) -> String {
+        UUID(uuidString: rawID) == nil ? rawID : rawID.lowercased()
     }
 
     private func reviewEventExistsUnlocked(_ id: ReviewEventID) throws -> Bool {

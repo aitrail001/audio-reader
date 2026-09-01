@@ -3,7 +3,18 @@ import Foundation
 /// The branch-isolated schema starts empty by design. It never inspects or
 /// repairs the legacy database because that file remains owned by local-reader.
 public enum LocalSchemaVNext: Sendable {
-    public static let version = 1
+    public static let version = 2
+
+    /// Version 1 shipped before these device-local metadata fields existed.
+    /// Defaults preserve old rows without inventing provider or cache provenance.
+    static let version2ColumnAdditions: [(table: String, column: String, sql: String)] = [
+        ("local_assets", "content_hash", "ALTER TABLE local_assets ADD COLUMN content_hash TEXT"),
+        ("local_assets", "byte_count", "ALTER TABLE local_assets ADD COLUMN byte_count INTEGER"),
+        ("local_assets", "metadata_json", "ALTER TABLE local_assets ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"),
+        ("local_assistant_results", "prompt_version", "ALTER TABLE local_assistant_results ADD COLUMN prompt_version TEXT NOT NULL DEFAULT 'local'"),
+        ("local_assistant_results", "model_policy_hash", "ALTER TABLE local_assistant_results ADD COLUMN model_policy_hash TEXT NOT NULL DEFAULT 'local'"),
+        ("local_assistant_results", "shared_cache_entry_id", "ALTER TABLE local_assistant_results ADD COLUMN shared_cache_entry_id TEXT"),
+    ]
 
     public static let requiredTables = [
         "entity_versions",
@@ -233,8 +244,12 @@ public enum LocalSchemaVNext: Sendable {
         "CREATE INDEX IF NOT EXISTS idx_local_overlays_chapter ON local_transcript_overlays(chapter_id, segment_id);",
         "CREATE INDEX IF NOT EXISTS idx_local_overlay_conflicts_segment ON local_transcript_overlay_conflicts(chapter_id, segment_id, updated_at);",
         "CREATE INDEX IF NOT EXISTS idx_local_vocab_book ON local_vocabulary_occurrences(book_id, chapter_id);",
+        "CREATE INDEX IF NOT EXISTS idx_local_vocab_canonical_id ON local_vocabulary_occurrences(lower(id));",
         "CREATE INDEX IF NOT EXISTS idx_local_review_cards_vocab ON local_review_cards(vocabulary_id);",
+        "CREATE INDEX IF NOT EXISTS idx_local_review_cards_canonical_vocab ON local_review_cards(lower(vocabulary_id));",
         "CREATE INDEX IF NOT EXISTS idx_local_review_events_vocab ON local_review_events(vocabulary_id, reviewed_at);",
+        "CREATE INDEX IF NOT EXISTS idx_local_review_events_canonical_vocab ON local_review_events(lower(vocabulary_id));",
+        "CREATE INDEX IF NOT EXISTS idx_local_review_events_card ON local_review_events(card_id);",
         "CREATE INDEX IF NOT EXISTS idx_local_assistant_chapter ON local_assistant_results(chapter_id, kind, status);",
         "CREATE INDEX IF NOT EXISTS idx_local_assistant_history_result ON local_assistant_result_history(result_id, sequence);",
         "CREATE INDEX IF NOT EXISTS idx_local_reader_progress_book ON local_reader_progress(book_id, is_current, updated_at);",

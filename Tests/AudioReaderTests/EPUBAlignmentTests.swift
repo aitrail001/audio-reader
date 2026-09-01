@@ -246,9 +246,13 @@ struct EPUBAlignmentTests {
             ebookPath: old.path,
             chapters: [chapter]
         )
-        try Persistence.store.saveBook(StoredBook(book))
-        try Persistence.saveTranscript(saved)
-        let state = AppState()
+        let database = LocalSQLiteStore(fileURL: fixture.root.appendingPathComponent("replacement.sqlite"))
+        try database.saveBook(StoredBook(book))
+        try Persistence.saveTranscript(saved, database: database)
+        let state = AppState(
+            composition: AppComposition(liveStore: database),
+            account: AccountSession.isolated()
+        )
         state.books = [book]
         state.selectedBookID = state.books[0].id
         state.selectedChapterID = chapterID
@@ -256,7 +260,7 @@ struct EPUBAlignmentTests {
 
         try state.replaceCurrentEbook(with: replacement)
 
-        let reloaded = try #require(Persistence.loadTranscript(for: chapter))
+        let reloaded = try #require(Persistence.loadTranscript(for: chapter, database: database))
         #expect(reloaded.ebookAligned == false)
         #expect(reloaded.alignmentStatus == .uncertain)
         #expect(reloaded.segments[0].ebookText == nil)
@@ -318,12 +322,16 @@ struct EPUBAlignmentTests {
             ebookPath: old.path,
             chapters: [chapter]
         )
-        try Persistence.store.saveBook(StoredBook(book))
-        try Persistence.saveTranscript(saved)
+        let database = LocalSQLiteStore(fileURL: fixture.root.appendingPathComponent("failed-replacement.sqlite"))
+        try database.saveBook(StoredBook(book))
+        try Persistence.saveTranscript(saved, database: database)
         let persistedTranscriptBefore = try JSONEncoder.iso.encode(
-            #require(Persistence.loadTranscript(chapterID: chapterID))
+            #require(Persistence.loadTranscript(chapterID: chapterID, database: database))
         )
-        let state = AppState()
+        let state = AppState(
+            composition: AppComposition(liveStore: database),
+            account: AccountSession.isolated()
+        )
         state.books = [book]
         state.selectedBookID = state.books[0].id
         state.selectedChapterID = chapterID
@@ -336,12 +344,12 @@ struct EPUBAlignmentTests {
             didThrow = true
         }
 
-        let reloaded = try #require(Persistence.loadTranscript(for: chapter))
+        let reloaded = try #require(Persistence.loadTranscript(for: chapter, database: database))
         #expect(didThrow)
         #expect(FileManager.default.fileExists(atPath: old.path))
         #expect(try Data(contentsOf: old) == oldBytes)
         #expect(try JSONEncoder.iso.encode(
-            #require(Persistence.loadTranscript(chapterID: chapterID))
+            #require(Persistence.loadTranscript(chapterID: chapterID, database: database))
         ) == persistedTranscriptBefore)
         #expect(state.books[0].ebookPath == old.path)
         #expect(reloaded.ebookAligned)

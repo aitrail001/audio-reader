@@ -819,9 +819,25 @@ extension SyncPulledChange {
 
 extension OutboxMutation {
     func productMutation() throws -> SyncPushMutation {
-        let object = (try? JSONDecoder().decode([String: SyncJSONValue].self, from: payload)) ?? [:]
+        var object = (try? JSONDecoder().decode([String: SyncJSONValue].self, from: payload)) ?? [:]
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
+        if entityType == .assistantResult,
+           case .object(var result)? = object["result"] {
+            if case .string(let legacyID)? = result["id"],
+               legacyAssistantEntityID(for: legacyID) == entityID.lowercased() {
+                // Older sentence results used their content hash locally. The database owns a UUID
+                // identity, so only the matching deterministic UUID replaces that redundant wire ID.
+                result["id"] = .string(entityID.lowercased())
+            }
+            // Legacy JSONEncoder rows used seconds from Apple's 2001 reference date, while PostgreSQL
+            // requires timestamp text. Normalize only finite numbers so malformed values stay rejectable.
+            for key in ["createdAt", "decidedAt"] {
+                guard case .number(let seconds)? = result[key], seconds.isFinite else { continue }
+                result[key] = .string(formatter.string(from: Date(timeIntervalSinceReferenceDate: seconds)))
+            }
+            object["result"] = .object(result)
+        }
         return SyncPushMutation(
             mutationId: id.rawValue,
             entityType: entityType.rawValue,
@@ -831,5 +847,15 @@ extension OutboxMutation {
             occurredAt: formatter.string(from: occurredAt),
             payload: object
         )
+    }
+
+    private func legacyAssistantEntityID(for resultID: String) -> String? {
+        guard resultID.count == 64, resultID.allSatisfy(\.isHexDigit) else { return nil }
+        let digest = SHA256.hash(data: Data("assistant-result:\(resultID)".utf8))
+        var bytes = Array(digest.prefix(16))
+        bytes[6] = (bytes[6] & 0x0f) | 0x50
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+        return "\(hex.prefix(8))-\(hex.dropFirst(8).prefix(4))-\(hex.dropFirst(12).prefix(4))-\(hex.dropFirst(16).prefix(4))-\(hex.dropFirst(20).prefix(12))"
     }
 }

@@ -170,6 +170,48 @@ function opsRest(options: {
 }
 
 describe("supabase policy store", () => {
+  it("claims exact account-scoped deleted-book manifest and object keys through the transaction RPC", async () => {
+    let captured: RestRequest | undefined;
+    const ops = createSupabaseOpsStore({
+      async request(input: RestRequest): Promise<RestResponse> {
+        await Promise.resolve();
+        captured = input;
+        return {
+          status: 200,
+          body: [
+            {
+              id: "00000000-0000-4000-8000-0000000000d1",
+              object_key: "private/v2/user/transcriptRevision/hash",
+              upload_object_key: "private/v2/user/pending/upload",
+            },
+          ],
+        };
+      },
+    });
+
+    await expect(
+      ops.claimDeletedBookAssets("00000000-0000-4000-8000-000000000002", [
+        "10000000-0000-4000-8000-000000000001",
+        "10000000-0000-4000-8000-000000000001",
+      ]),
+    ).resolves.toEqual([
+      {
+        id: "00000000-0000-4000-8000-0000000000d1",
+        objectKey: "private/v2/user/transcriptRevision/hash",
+        uploadObjectKey: "private/v2/user/pending/upload",
+        deleteAfter: null,
+      },
+    ]);
+    expect(captured).toEqual({
+      method: "POST",
+      path: "/rpc/claim_deleted_book_v2_assets",
+      body: {
+        p_user_id: "00000000-0000-4000-8000-000000000002",
+        p_book_ids: ["10000000-0000-4000-8000-000000000001"],
+      },
+    });
+  });
+
   it("keeps object-write leases durable until the writer releases them", async () => {
     const ops = createMemoryOpsStore();
     const lease = await ops.beginObjectWrite("user-1", "user-1/audio.m4b");

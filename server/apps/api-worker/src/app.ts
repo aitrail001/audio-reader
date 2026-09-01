@@ -566,6 +566,7 @@ async function handleRequest(
       sync: path.startsWith("/v2/") ? options.database.syncV2 : options.database.sync,
       identity: options.database.identity,
       ops: options.database.ops,
+      objects: options.storage,
       accountSyncReadiness,
     });
     if (routed !== undefined) {

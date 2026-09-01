@@ -1,10 +1,120 @@
 import Foundation
+import SQLite3
 import Testing
 @testable import AudioReaderDomain
 @testable import AudioReaderLocalStore
 
 @Suite("Clean vNext local persistence")
 struct LocalVNextPersistenceTests {
+    @Test
+    func priorV1SchemaMigratesWithoutLosingAssetsOrAssistantResults() throws {
+        let url = temporaryDirectory().appendingPathComponent("library-vNext.sqlite")
+        try installPriorV1Schema(at: url)
+
+        let store = LocalSQLiteStore(fileURL: url)
+
+        #expect(try store.currentSchemaVersion() == 2)
+        #expect(Set(try store.columnNames(in: "local_assets")).isSuperset(of: [
+            "content_hash", "byte_count", "metadata_json",
+        ]))
+        #expect(Set(try store.columnNames(in: "local_assistant_results")).isSuperset(of: [
+            "prompt_version", "model_policy_hash", "shared_cache_entry_id",
+        ]))
+        #expect(try store.loadAssets(bookID: BookID(rawValue: "legacy-book")) == [
+            StoredLocalAsset(
+                id: AssetID(rawValue: "legacy-asset"),
+                bookID: BookID(rawValue: "legacy-book"),
+                kind: "epub",
+                localMediaKey: "/legacy/book.epub"
+            ),
+        ])
+        let legacyResult = try #require(try store.loadAssistantResults().first {
+            $0.id == "legacy-result"
+        })
+        #expect(legacyResult.promptVersion == "local")
+        #expect(legacyResult.modelPolicyHash == "local")
+        #expect(legacyResult.sharedCacheEntryID == nil)
+
+        let currentAsset = StoredLocalAsset(
+            id: AssetID(rawValue: "current-asset"),
+            bookID: BookID(rawValue: "legacy-book"),
+            kind: "audio",
+            localMediaKey: "/current/chapter.m4b",
+            contentHash: "sha256:current",
+            byteCount: 42,
+            metadata: ["chapterID": "legacy-chapter"]
+        )
+        try store.saveAssets([currentAsset], bookID: BookID(rawValue: "legacy-book"))
+        let currentResult = StoredAssistantResult(
+            id: "current-result",
+            kind: .sentenceGloss,
+            status: .accepted,
+            language: "zh-Hans",
+            model: "qwen",
+            promptVersion: "prompt-v2",
+            modelPolicyHash: "policy-v2",
+            source: "Source",
+            text: "Translation",
+            createdAt: Date(timeIntervalSince1970: 20),
+            sharedCacheEntryID: "cache-v2"
+        )
+        try store.saveAssistantResult(currentResult)
+
+        let reopened = LocalSQLiteStore(fileURL: url)
+        #expect(try reopened.currentSchemaVersion() == 2)
+        #expect(try reopened.loadAssets(bookID: BookID(rawValue: "legacy-book")) == [currentAsset])
+        #expect(try reopened.loadAssistantResults().contains(currentResult))
+        #expect(try reopened.rowCount("local_assets") == 1)
+        #expect(try reopened.rowCount("local_assistant_results") == 2)
+    }
+
+    @Test
+    func futureSchemaVersionIsRejectedWithoutModification() throws {
+        let url = temporaryDirectory().appendingPathComponent("library-vNext.sqlite")
+        try installPriorV1Schema(at: url)
+        try installVersion2Columns(at: url)
+        try execute("PRAGMA user_version = 3", at: url)
+        let schemaBeforeOpen = try schemaFingerprint(at: url)
+        let assetsBeforeOpen = try rawRows("SELECT * FROM local_assets ORDER BY id", at: url)
+
+        let store = LocalSQLiteStore(fileURL: url)
+
+        #expect(throws: (any Error).self) {
+            try store.currentSchemaVersion()
+        }
+        #expect(throws: (any Error).self) {
+            try store.deleteAssets(bookID: BookID(rawValue: "legacy-book"))
+        }
+        #expect(try rawUserVersion(at: url) == 3)
+        #expect(try schemaFingerprint(at: url) == schemaBeforeOpen)
+        #expect(try rawRows("SELECT * FROM local_assets ORDER BY id", at: url) == assetsBeforeOpen)
+    }
+
+    @Test
+    func failedV1MigrationRollsBackColumnsAndSchemaVersion() throws {
+        let url = temporaryDirectory().appendingPathComponent("library-vNext.sqlite")
+        try installPriorV1Schema(at: url)
+        try execute(
+            """
+            ALTER TABLE local_assistant_results RENAME TO local_assistant_results_v1;
+            CREATE VIEW local_assistant_results AS SELECT * FROM local_assistant_results_v1;
+            """,
+            at: url
+        )
+        let schemaBeforeOpen = try schemaFingerprint(at: url)
+
+        let store = LocalSQLiteStore(fileURL: url)
+
+        #expect(throws: (any Error).self) {
+            try store.currentSchemaVersion()
+        }
+        #expect(try rawUserVersion(at: url) == 1)
+        #expect(Set(try rawColumnNames(in: "local_assets", at: url)).isDisjoint(with: [
+            "content_hash", "byte_count", "metadata_json",
+        ]))
+        #expect(try schemaFingerprint(at: url) == schemaBeforeOpen)
+    }
+
     @Test
     func schemaContainsOnlyCurrentTablesAndNormalizedTranscriptRows() throws {
         let url = temporaryDirectory().appendingPathComponent("library-vNext.sqlite")
@@ -106,6 +216,32 @@ struct LocalVNextPersistenceTests {
         #expect(loaded.segments.first?.id == "segment-0")
         #expect(loaded.segments.last?.id == "segment-450")
         #expect(store.maximumTranscriptSegmentQueryCount == 200)
+    }
+
+    @Test("sync transcript candidate hydration stays in its established WAL snapshot")
+    func syncTranscriptCandidateHydrationStaysInEstablishedWALSnapshot() throws {
+        let url = temporaryDirectory().appendingPathComponent("library-vNext.sqlite")
+        let reader = LocalSQLiteStore(fileURL: url)
+        let transcript = sampleTranscript(segmentCount: 1)
+        try saveCatalog(for: transcript, to: reader)
+        try reader.saveTranscript(transcript)
+        #expect(try reader.journalMode() == "wal")
+
+        let candidates = try reader.loadActiveSyncTranscriptCandidates {
+            try execute(
+                """
+                UPDATE local_transcript_revisions
+                SET is_active = 0, deleted_at = 1000
+                WHERE chapter_id = '\(transcript.chapterID.rawValue)'
+                """,
+                at: url
+            )
+        }
+
+        #expect(candidates.count == 1)
+        #expect(candidates.first?.bookID == BookID(rawValue: "book-for-\(transcript.chapterID.rawValue)"))
+        #expect(candidates.first?.transcript == transcript)
+        #expect(try LocalSQLiteStore(fileURL: url).activeTranscriptChapterIDs().isEmpty)
     }
 
     @Test
@@ -804,5 +940,114 @@ struct LocalVNextPersistenceTests {
             .appendingPathComponent("audio-reader-vnext-tests-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    private func installPriorV1Schema(at url: URL) throws {
+        try execute(PriorV1SchemaFixture.sql, at: url)
+        try execute(
+            """
+            INSERT INTO local_books(id, title, source, created_at, updated_at)
+              VALUES ('legacy-book', 'Legacy Book', 'files', 10, 10);
+            INSERT INTO local_chapters(id, book_id, position, title, created_at, updated_at)
+              VALUES ('legacy-chapter', 'legacy-book', 0, 'Legacy Chapter', 10, 10);
+            INSERT INTO local_assets(id, book_id, kind, local_media_key, created_at, updated_at)
+              VALUES ('legacy-asset', 'legacy-book', 'epub', '/legacy/book.epub', 10, 10);
+            INSERT INTO local_assistant_results(
+              id, kind, status, language, model, source, text, created_at, updated_at
+            ) VALUES ('legacy-result', 'sentence_gloss', 'pending', 'zh-Hans', 'legacy', 'Source', 'Draft', 10, 10);
+            """,
+            at: url
+        )
+
+        #expect(Set(try rawTableNames(at: url)) == Set([
+            "entity_versions", "local_assets", "local_sync_asset_manifests",
+            "local_book_tombstones", "local_assistant_result_history", "local_assistant_results",
+            "local_books", "local_chapters", "local_known_lemmas", "local_reader_progress",
+            "local_review_cards", "local_review_events", "local_settings", "local_study_activity",
+            "local_transcript_overlay_conflicts", "local_transcript_overlays",
+            "local_transcript_revisions", "local_transcript_segments",
+            "local_translation_checkpoints", "local_vocabulary_occurrences", "sync_outbox", "sync_state",
+        ]))
+        let currentURL = url.deletingLastPathComponent().appendingPathComponent("current-schema.sqlite")
+        try execute(LocalSchemaVNext.createStatements.joined(separator: "\n"), at: currentURL)
+        let priorColumns = try rawSchemaColumns(at: url)
+        let currentColumns = try rawSchemaColumns(at: currentURL)
+        let additions = Set(currentColumns.flatMap { table, columns in
+            columns.subtracting(priorColumns[table] ?? []).map { "\(table).\($0)" }
+        })
+        #expect(additions == Set([
+            "local_assets.content_hash", "local_assets.byte_count", "local_assets.metadata_json",
+            "local_assistant_results.prompt_version", "local_assistant_results.model_policy_hash",
+            "local_assistant_results.shared_cache_entry_id",
+        ]))
+        #expect(priorColumns.allSatisfy { table, columns in
+            columns.subtracting(currentColumns[table] ?? []).isEmpty
+        })
+    }
+
+    private func installVersion2Columns(at url: URL) throws {
+        try execute(LocalSchemaVNext.version2ColumnAdditions.map(\.sql).joined(separator: ";\n"), at: url)
+    }
+
+    private func execute(_ sql: String, at url: URL) throws {
+        var database: OpaquePointer?
+        guard sqlite3_open(url.path, &database) == SQLITE_OK, let database else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        defer { sqlite3_close(database) }
+        guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+    }
+
+    private func rawUserVersion(at url: URL) throws -> Int {
+        try rawRows("PRAGMA user_version", at: url).first.flatMap { Int($0["user_version"] ?? "") } ?? 0
+    }
+
+    private func rawTableNames(at url: URL) throws -> [String] {
+        try rawRows("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name", at: url)
+            .compactMap { $0["name"] }
+    }
+
+    private func rawColumnNames(in table: String, at url: URL) throws -> [String] {
+        try rawRows("PRAGMA table_info(\(table))", at: url).compactMap { $0["name"] }
+    }
+
+    private func rawSchemaColumns(at url: URL) throws -> [String: Set<String>] {
+        try Dictionary(uniqueKeysWithValues: rawTableNames(at: url).map { table in
+            (table, Set(try rawColumnNames(in: table, at: url)))
+        })
+    }
+
+    private func schemaFingerprint(at url: URL) throws -> [String] {
+        try rawRows(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name",
+            at: url
+        ).map { row in
+            ["type", "name", "tbl_name", "sql"].map { row[$0] ?? "NULL" }.joined(separator: "|")
+        }
+    }
+
+    private func rawRows(_ sql: String, at url: URL) throws -> [[String: String]] {
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+              let database else { throw CocoaError(.fileReadUnknown) }
+        defer { sqlite3_close(database) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+              let statement else { throw CocoaError(.fileReadUnknown) }
+        defer { sqlite3_finalize(statement) }
+        var rows: [[String: String]] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            var row: [String: String] = [:]
+            for index in 0..<sqlite3_column_count(statement) {
+                let name = String(cString: sqlite3_column_name(statement, index))
+                if let value = sqlite3_column_text(statement, index) {
+                    row[name] = String(cString: value)
+                }
+            }
+            rows.append(row)
+        }
+        return rows
     }
 }

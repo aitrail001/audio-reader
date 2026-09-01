@@ -341,6 +341,7 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
     public var echoPublishedAssets = false
     public private(set) var publishedAssets: [SyncAssetUpload] = []
     public private(set) var manifestLookups: [String] = []
+    public private(set) var downloadedAssetIDs: [String] = []
     public private(set) var discoveryQueryCount = 0
     private var publishedAssetBodies: [String: Data] = [:]
     private var publishedAssetFiles: [String: URL] = [:]
@@ -428,6 +429,7 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
         _ = accessToken
         _ = deviceID
         let source = try withLock { () throws -> URL in
+            downloadedAssetIDs.append(assetID)
             if let file = publishedAssetFiles[assetID] { return file }
             guard let bytes = publishedAssetBodies[assetID] else {
                 throw AuthClientError.problem(status: 404, code: "asset_missing", detail: "Asset is missing.")
