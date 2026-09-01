@@ -1,4 +1,8 @@
-import { createFakeDatabaseClient, type DatabaseClient } from "@audio-reader/database";
+import {
+  createFakeDatabaseClient,
+  type DatabaseClient,
+  type SyncMutation,
+} from "@audio-reader/database";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestApp, type ApiApp } from "./app";
 import { createFakeObjectStore, type ObjectStore } from "./object-store";
@@ -84,7 +88,7 @@ function deleteMutation(input: {
   mutationId: string;
   entityType?: "book" | "chapter";
   entityId?: string;
-}) {
+}): SyncMutation {
   return {
     mutationId: input.mutationId,
     entityType: input.entityType ?? "book",

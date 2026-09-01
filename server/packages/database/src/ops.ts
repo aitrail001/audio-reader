@@ -10,7 +10,7 @@ import {
   type QuotaKey,
 } from "./product-limits";
 import { isErrorBody, restOk, restRow, restRows, type RestClient } from "./rest";
-import type { SyncStore } from "./sync-store";
+import type { SyncEntityType, SyncStore } from "./sync-store";
 
 /** Operator-visible Postgres write failure. Admin routes map this to 502; never treat it as an in-memory success. */
 export class RestPersistenceError extends Error {
@@ -1317,7 +1317,8 @@ export function createMemoryOpsStore(
       if (syncV2 !== undefined && announced.length > 0) {
         const deletions = await Promise.all(
           announced.map(async (asset) => {
-            const entityType = asset.kind === "transcriptRevision" ? "transcript" : "asset";
+            const entityType: SyncEntityType =
+              asset.kind === "transcriptRevision" ? "transcript" : "asset";
             const entityId =
               asset.kind === "transcriptRevision" && asset.revisionId !== null
                 ? asset.revisionId
