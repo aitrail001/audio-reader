@@ -7,10 +7,28 @@ enum IPadBackgroundJobsToolbarPlacement: Equatable {
     static func owner(
         isVocabularySelected: Bool,
         isReaderActive: Bool,
+        isSettingsSelected: Bool = false,
         hasSelectedBook: Bool
     ) -> Self {
-        isVocabularySelected || isReaderActive || hasSelectedBook ? .detail : .content
+        isVocabularySelected || isReaderActive || isSettingsSelected || hasSelectedBook ? .detail : .content
     }
+}
+
+enum IPadLibraryImportToolbarPlacement: Equatable {
+    case content
+
+    static let owner: Self = .content
+}
+
+enum IPadAnkiExportToolbarPlacement: Equatable {
+    case detail
+
+    static let owner: Self = .detail
+}
+
+enum IPadEPUBImportPolicy {
+    static let appleBooksLibraryEnumerationSupported = false
+    static let supportedEquivalent = "Import a DRM-free EPUB with the Files document picker, share sheet, or an export from Apple Books."
 }
 
 enum IPadSplitColumnPolicy: Equatable {
@@ -26,13 +44,18 @@ enum IPadSplitColumnPolicy: Equatable {
         case readingFocused
         case readingWithLibrary
         case vocabularyFocused
+        case settings
     }
 
     static func mode(
         isReaderActive: Bool,
         isVocabularySelected: Bool,
+        isSettingsSelected: Bool = false,
         showsLibraryAlongside: Bool
     ) -> Mode {
+        if isSettingsSelected {
+            return .settings
+        }
         if isReaderActive {
             return showsLibraryAlongside ? .readingWithLibrary : .readingFocused
         }
@@ -51,30 +74,36 @@ import UIKit
 
 private enum IPadLibrarySource: String, CaseIterable, Identifiable {
     case allBooks
+    case nowReading
     case deviceAudiobooks
     case files
     case folders
     case vocabulary
+    case settings
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .allBooks: "All Books"
+        case .nowReading: "Now Reading"
         case .deviceAudiobooks: "Device Audiobooks"
         case .files: "Files"
         case .folders: "Folders"
         case .vocabulary: "Vocabulary"
+        case .settings: "Settings"
         }
     }
 
     var symbol: String {
         switch self {
         case .allBooks: "books.vertical"
+        case .nowReading: "text.alignleft"
         case .deviceAudiobooks: "ipad.and.iphone"
         case .files: "doc"
         case .folders: "folder"
         case .vocabulary: "bookmark"
+        case .settings: "gearshape"
         }
     }
 }
@@ -82,13 +111,15 @@ private enum IPadLibrarySource: String, CaseIterable, Identifiable {
 private enum IPadImportRequest: Identifiable {
     case files
     case folder
-    case ebook(bookID: String)
+    case companion(bookID: String)
+    case appleBooksExport(bookID: String)
 
     var id: String {
         switch self {
         case .files: "files"
         case .folder: "folder"
-        case .ebook(let bookID): "ebook-\(bookID)"
+        case .companion(let bookID): "companion-\(bookID)"
+        case .appleBooksExport(let bookID): "apple-books-export-\(bookID)"
         }
     }
 
@@ -96,20 +127,35 @@ private enum IPadImportRequest: Identifiable {
         switch self {
         case .files: [.mp3, .mpeg4Audio, .epub, .image, .audio]
         case .folder: [.folder]
-        case .ebook: [.epub]
+        case .companion: [.mp3, .mpeg4Audio, .epub, .image, .audio]
+        case .appleBooksExport: [.epub]
         }
     }
 
     var allowsMultipleSelection: Bool {
         switch self {
         case .files: true
-        case .folder, .ebook: false
+        case .folder, .appleBooksExport: false
+        case .companion: true
         }
     }
     var importsAsCopy: Bool {
         switch self {
-        case .files, .ebook: true
+        case .files, .companion, .appleBooksExport: true
         case .folder: false
+        }
+    }
+}
+
+private enum IPadPendingDuplicateImport {
+    case files([URL], title: String)
+    case folder(URL, title: String)
+    case deviceAudiobook(DeviceAudiobookItem, DeviceAudiobookImportPreflight)
+
+    var title: String {
+        switch self {
+        case .files(_, let title), .folder(_, let title): title
+        case .deviceAudiobook(let item, _): item.title
         }
     }
 }
@@ -124,55 +170,29 @@ struct IPadRootView: View {
     @State private var importingDeviceID: UInt64?
     @State private var importMessage: String?
     @State private var importError: String?
+    @State private var pendingDuplicateImport: IPadPendingDuplicateImport?
     @State private var pendingBookDelete: Book?
+    @State private var companionTargetBookID: String?
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            sourceSidebar
-                .navigationTitle("Library")
-                .navigationSplitViewColumnWidth(
-                    min: IPadSplitColumnPolicy.sidebarMin,
-                    ideal: IPadSplitColumnPolicy.sidebarIdeal,
-                    max: IPadSplitColumnPolicy.sidebarMax
-                )
-        } content: {
-            contentColumn
-                .navigationSplitViewColumnWidth(
-                    min: IPadSplitColumnPolicy.contentMin,
-                    ideal: IPadSplitColumnPolicy.contentIdeal,
-                    max: IPadSplitColumnPolicy.contentMax
-                )
-                .toolbar {
-                    backgroundJobsToolbar(for: .content)
-                }
-        } detail: {
-            detailColumn
-                .toolbar {
-                    backgroundJobsToolbar(for: .detail)
-                }
-        }
-        .navigationSplitViewStyle(.prominentDetail)
-        .tint(Palette.terracotta)
-        .overlay {
-            if state.isScanning, let progress = state.libraryScanProgress {
-                VStack(spacing: 12) {
-                    ProgressView(value: progress.fraction)
-                        .frame(width: 220)
-                    Text(progress.stage)
-                        .font(.headline)
-                    Text(progress.detail)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(24)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        Group {
+            if source == .settings {
+                settingsSplit
+                    .navigationSplitViewStyle(.automatic)
+            } else {
+                librarySplit
+                    .navigationSplitViewStyle(.prominentDetail)
             }
+        }
+        .tint(Palette.terracotta)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            WorkStatusBanner(
+                library: state.libraryScanProgress,
+                accountMessage: state.account.activityMessage
+            )
         }
         .sheet(item: $state.chapterStudyPresentation) { _ in
             ChapterStudyListView(state: state)
-        }
-        .sheet(isPresented: $state.showSettings) {
-            SettingsView(state: state)
         }
         .alert("Could Not Open Background Job", isPresented: Binding(
             get: { state.backgroundJobNavigationError != nil },
@@ -187,7 +207,8 @@ struct IPadRootView: View {
                 switch request {
                 case .files: importFiles(result)
                 case .folder: importFolder(result)
-                case .ebook(let bookID): importEbook(result, bookID: bookID)
+                case .companion(let bookID): importCompanion(result, bookID: bookID)
+                case .appleBooksExport(let bookID): importCompanion(result, bookID: bookID)
                 }
                 importRequest = nil
             }
@@ -199,6 +220,15 @@ struct IPadRootView: View {
             Button("OK", role: .cancel) { importError = nil }
         } message: {
             Text(importError ?? "Unknown import error")
+        }
+        .alert("Import another copy?", isPresented: Binding(
+            get: { pendingDuplicateImport != nil || state.pendingExternalEPUBDuplicate != nil },
+            set: { if !$0 { cancelPendingDuplicateImport() } }
+        )) {
+            Button("Cancel", role: .cancel) { cancelPendingDuplicateImport() }
+            Button("Import Another Copy") { confirmPendingDuplicateImport() }
+        } message: {
+            Text("“\(duplicateImportTitle)” is already in your AudioReader library. Import another copy anyway?")
         }
         .alert("Delete book?", isPresented: Binding(
             get: { pendingBookDelete != nil },
@@ -215,22 +245,63 @@ struct IPadRootView: View {
             Text("Delete “\(pendingBookDelete?.title ?? "this book")” and its imported audio, ebook, cover, and chapter metadata from AudioReader? Vocabulary entries will be kept. This cannot be undone.")
         }
         .task {
+#if DEBUG
+            if UITestLaunchScenario.isRequested {
+                UITestLaunchScenario.applyIfRequested(to: state)
+            } else {
+                await state.boot()
+            }
+#else
             await state.boot()
+#endif
+            if state.tab == .settings {
+                source = .settings
+                applyColumnMode(
+                    isReaderActive: false,
+                    isSettingsSelected: true,
+                    showsLibraryAlongsideReader: false
+                )
+            } else if state.tab == .player {
+                source = .nowReading
+                applyColumnMode(isReaderActive: true, showsLibraryAlongsideReader: false)
+            } else if state.tab == .vocab {
+                source = .vocabulary
+                applyColumnMode(
+                    isReaderActive: false,
+                    isVocabularySelected: true,
+                    showsLibraryAlongsideReader: false
+                )
+            }
         }
         .onChange(of: source) { _, selected in
+            if selected != .deviceAudiobooks {
+                companionTargetBookID = nil
+            }
             if selected == .deviceAudiobooks {
                 Task { await deviceLibrary.requestAccessAndReload() }
             }
             if selected == .vocabulary {
                 state.tab = .vocab
-            } else if state.tab == .vocab {
+            } else if selected == .nowReading {
+                state.tab = .player
+            } else if selected == .settings {
+                state.tab = .settings
+            } else if state.tab != .library {
                 state.tab = .library
             }
         }
         .onChange(of: state.tab) { _, tab in
+            if tab == .settings {
+                source = .settings
+            } else if tab == .player {
+                source = .nowReading
+            } else if tab == .vocab {
+                source = .vocabulary
+            }
             applyColumnMode(
                 isReaderActive: tab == .player,
                 isVocabularySelected: tab == .vocab,
+                isSettingsSelected: tab == .settings,
                 showsLibraryAlongsideReader: false
             )
         }
@@ -239,15 +310,17 @@ struct IPadRootView: View {
     private func applyColumnMode(
         isReaderActive: Bool,
         isVocabularySelected: Bool = false,
+        isSettingsSelected: Bool = false,
         showsLibraryAlongsideReader: Bool
     ) {
         self.showsLibraryAlongsideReader = showsLibraryAlongsideReader
         switch IPadSplitColumnPolicy.mode(
             isReaderActive: isReaderActive,
             isVocabularySelected: isVocabularySelected,
+            isSettingsSelected: isSettingsSelected,
             showsLibraryAlongside: showsLibraryAlongsideReader
         ) {
-        case .library:
+        case .library, .settings:
             columnVisibility = .all
         case .readingFocused, .vocabularyFocused:
             columnVisibility = .detailOnly
@@ -256,28 +329,66 @@ struct IPadRootView: View {
         }
     }
 
+    private var librarySidebar: some View {
+        sourceSidebar
+            .navigationTitle("Library")
+            .navigationSplitViewColumnWidth(
+                min: IPadSplitColumnPolicy.sidebarMin,
+                ideal: IPadSplitColumnPolicy.sidebarIdeal,
+                max: IPadSplitColumnPolicy.sidebarMax
+            )
+    }
+
+    private var librarySplit: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            librarySidebar
+        } content: {
+            contentColumn
+                .navigationSplitViewColumnWidth(
+                    min: IPadSplitColumnPolicy.contentMin,
+                    ideal: IPadSplitColumnPolicy.contentIdeal,
+                    max: IPadSplitColumnPolicy.contentMax
+                )
+                .toolbar {
+                    backgroundJobsToolbar(for: .content)
+                }
+        } detail: {
+            detailColumn
+                .toolbar {
+                    backgroundJobsToolbar(for: .detail)
+                }
+        }
+    }
+
+    private var settingsSplit: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            librarySidebar
+        } detail: {
+            SettingsView(state: state)
+                .toolbar {
+                    backgroundJobsToolbar(for: .detail)
+                }
+        }
+    }
+
     private var sourceSidebar: some View {
         List {
-            Section("Library") {
+            Section {
                 sourceRow(.allBooks)
+                sourceRow(.nowReading)
+                sourceRow(.vocabulary)
+                sourceRow(.settings)
+            }
+            Section("Sources") {
                 sourceRow(.deviceAudiobooks)
                 sourceRow(.files)
                 sourceRow(.folders)
             }
-            Section("Study") {
-                sourceRow(.vocabulary)
+            Section("Cloud") {
+                iPadSyncStatus
             }
         }
         .listStyle(.sidebar)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    state.showSettings = true
-                } label: {
-                    Label("Settings", systemImage: "gear")
-                }
-            }
-        }
     }
 
     private func sourceRow(_ item: IPadLibrarySource) -> some View {
@@ -291,7 +402,35 @@ struct IPadRootView: View {
         .buttonStyle(.plain)
         .listRowBackground(source == item ? Palette.terracotta.opacity(0.16) : Color.clear)
         .accessibilityLabel(item.title)
+        .accessibilityIdentifier(sidebarIdentifier(for: item))
         .accessibilityAddTraits(source == item ? .isSelected : [])
+    }
+
+    private func sidebarIdentifier(for item: IPadLibrarySource) -> String {
+        switch item {
+        case .allBooks: "sidebar.library"
+        case .nowReading: "sidebar.nowReading"
+        case .vocabulary: "sidebar.words"
+        case .settings: "sidebar.settings"
+        case .deviceAudiobooks: "source.deviceAudiobooks"
+        case .files: "source.files"
+        case .folders: "source.folders"
+        }
+    }
+
+    private var iPadSyncStatus: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            AccountSyncStatusView(session: state.account, compact: true)
+            Button {
+                Task { await state.account.synchronize() }
+            } label: {
+                Label("Sync now", systemImage: "arrow.triangle.2.circlepath")
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .disabled(state.account.isBusy || !state.account.mode.isSyncEnabled)
+            .accessibilityIdentifier("sync.now")
+        }
     }
 
     @ViewBuilder
@@ -303,17 +442,24 @@ struct IPadRootView: View {
                 importedBooks: filteredBooks,
                 selectedBookID: $state.selectedBookID,
                 importingID: importingDeviceID,
+                companionBookTitle: companionTargetBookID.flatMap { targetID in
+                    state.books.first(where: { $0.id == targetID })?.title
+                },
                 importMessage: importMessage,
                 onRefresh: { Task { await deviceLibrary.requestAccessAndReload() } },
                 onImport: importDeviceAudiobook,
+                onCancelCompanion: { companionTargetBookID = nil },
                 onDelete: { pendingBookDelete = $0 }
             )
             .navigationTitle("Apple Books & Device")
+        case .settings:
+            Color.clear
+                .accessibilityHidden(true)
         case .vocabulary:
             List {
                 Section("Saved") {
                     LabeledContent("Items", value: "\(state.vocab.count)")
-                    LabeledContent("Learn list", value: "\(state.vocab.count(where: \.isInLearnList))")
+                    LabeledContent("My list", value: "\(state.vocab.count(where: \.isInLearnList))")
                 }
             }
             .navigationTitle("Saved words")
@@ -327,21 +473,26 @@ struct IPadRootView: View {
             )
             .navigationTitle((source ?? .allBooks).title)
             .toolbar {
-                ToolbarItemGroup(placement: .primaryAction) {
-                    if source == .files {
-                        Button { importRequest = .files } label: { Label("Import Files", systemImage: "doc.badge.plus") }
-                    } else if source == .folders {
-                        Button { importRequest = .folder } label: { Label("Import Folder", systemImage: "folder.badge.plus") }
-                    } else {
-                        Menu {
-                            Button { importRequest = .files } label: { Label("Files", systemImage: "doc.badge.plus") }
-                            Button { importRequest = .folder } label: { Label("Folder", systemImage: "folder.badge.plus") }
-                        } label: {
-                            Label("Import", systemImage: "plus")
+                if IPadLibraryImportToolbarPlacement.owner == .content {
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        if source == .files {
+                            Button { importRequest = .files } label: { Label("Import Files", systemImage: "doc.badge.plus") }
+                        } else if source == .folders {
+                            Button { importRequest = .folder } label: { Label("Import Folder", systemImage: "folder.badge.plus") }
+                        } else {
+                            Menu {
+                                Button { importRequest = .files } label: { Label("Files", systemImage: "doc.badge.plus") }
+                                Button { importRequest = .folder } label: { Label("Folder", systemImage: "folder.badge.plus") }
+                            } label: {
+                                Label("Import Audio or EPUB", systemImage: "plus")
+                            }
+                            .accessibilityIdentifier("library.importMedia")
                         }
                     }
                 }
             }
+        case .nowReading:
+            Color.clear.accessibilityHidden(true)
         }
     }
 
@@ -362,7 +513,7 @@ struct IPadRootView: View {
                     }
                 }
             }
-        } else if state.tab == .player {
+        } else if source == .nowReading || state.tab == .player {
             PlayerView(state: state)
                 .toolbar {
                     ToolbarItem(placement: .navigation) {
@@ -394,21 +545,24 @@ struct IPadRootView: View {
             IPadBookDetail(
                 state: state,
                 book: book,
-                onAddEbook: { importRequest = .ebook(bookID: book.id) },
+                onAddFiles: { importRequest = .companion(bookID: book.id) },
+                onBrowseAppleBooks: { browseAppleBooksCompanion(for: book) },
+                onAddAppleBooksExport: { importRequest = .appleBooksExport(bookID: book.id) },
                 onDelete: { pendingBookDelete = book }
             )
         } else {
-            ContentUnavailableView("Choose an audiobook", systemImage: "books.vertical", description: Text("Select a book, or import one from Files, a folder, Apple Books, or the device audiobook library."))
+            ContentUnavailableView("Choose a book", systemImage: "books.vertical", description: Text("Select a book, or import audiobook audio or a DRM-free EPUB from Files. Apple Books exposes audiobooks here, but does not provide an iPadOS API for enumerating its EPUB library."))
         }
     }
 
     private var filteredBooks: [Book] {
         switch source ?? .allBooks {
         case .allBooks: state.books
+        case .nowReading: state.books
         case .files: state.books.filter { $0.source == .files }
         case .folders: state.books.filter { $0.source == .localFolder }
         case .deviceAudiobooks: state.books.filter { $0.source == .deviceAudiobooks }
-        case .vocabulary: []
+        case .vocabulary, .settings: []
         }
     }
 
@@ -416,6 +570,7 @@ struct IPadRootView: View {
         .owner(
             isVocabularySelected: source == .vocabulary,
             isReaderActive: state.tab == .player,
+            isSettingsSelected: source == .settings,
             hasSelectedBook: state.selectedBook != nil
         )
     }
@@ -437,6 +592,11 @@ struct IPadRootView: View {
     private func importFiles(_ result: Result<[URL], any Error>) {
         do {
             let urls = try result.get()
+            let preflight = try AudiobookImportService.preflightFiles(urls)
+            if let duplicate = preflight.duplicates.first {
+                pendingDuplicateImport = .files(urls, title: duplicate.title)
+                return
+            }
             let imported = try AudiobookImportService.importFiles(urls)
             if imported.createdBook {
                 importMessage = "Imported \(urls.count) selected files."
@@ -451,7 +611,7 @@ struct IPadRootView: View {
         }
     }
 
-    private func importEbook(_ result: Result<[URL], any Error>, bookID: String) {
+    private func importCompanion(_ result: Result<[URL], any Error>, bookID: String) {
         do {
             guard let book = state.books.first(where: { $0.id == bookID }) else { return }
             let urls = try result.get()
@@ -460,7 +620,7 @@ struct IPadRootView: View {
                 to: URL(fileURLWithPath: book.folderPath, isDirectory: true)
             )
             importMessage = added.isEmpty
-                ? "This EPUB is already attached to \(book.title)."
+                ? "Those files are already attached to \(book.title)."
                 : "Added \(added.joined(separator: ", ")) to \(book.title)."
             Task {
                 await state.rescan()
@@ -474,6 +634,11 @@ struct IPadRootView: View {
     private func importFolder(_ result: Result<[URL], any Error>) {
         do {
             guard let url = try result.get().first else { return }
+            let preflight = try AudiobookImportService.preflightFolder(url)
+            if let duplicate = preflight.duplicates.first {
+                pendingDuplicateImport = .folder(url, title: duplicate.title)
+                return
+            }
             try AudiobookImportService.importFolder(url)
             importMessage = "Imported \(url.lastPathComponent)."
             Task { await state.rescan() }
@@ -488,7 +653,28 @@ struct IPadRootView: View {
         Task {
             defer { importingDeviceID = nil }
             do {
-                let result = try await deviceLibrary.importAudiobook(item)
+                if let targetID = companionTargetBookID {
+                    guard let book = state.books.first(where: { $0.id == targetID }) else {
+                        throw AudiobookImportError.protectedOrUnavailable
+                    }
+                    let added = try await deviceLibrary.addCompanion(
+                        item,
+                        to: URL(fileURLWithPath: book.folderPath, isDirectory: true)
+                    )
+                    importMessage = added.isEmpty
+                        ? "That device audiobook is already attached to \(book.title)."
+                        : "Added \(item.title) to \(book.title)."
+                    companionTargetBookID = nil
+                    await state.rescan()
+                    state.selectedBookID = targetID
+                    return
+                }
+                let preflight = try await deviceLibrary.preflightAudiobook(item)
+                if preflight.identity.requiresConfirmation {
+                    pendingDuplicateImport = .deviceAudiobook(item, preflight)
+                    return
+                }
+                let result = try await deviceLibrary.importAudiobook(item, prepared: preflight)
                 importMessage = result.createdBook
                     ? "Imported \(item.title)."
                     : "\(item.title) is already imported; its metadata was updated."
@@ -502,28 +688,87 @@ struct IPadRootView: View {
         }
     }
 
-    private func deleteBook(_ book: Book) {
-        do {
-            if state.selectedBookID == book.id {
-                state.cancelTranscription()
-                state.player.tearDown()
-                state.selectedBookID = nil
-                state.selectedChapterID = nil
-                state.transcript = nil
-                state.tab = .library
-            }
-            try AudiobookImportService.deleteBookFolder(
-                URL(fileURLWithPath: book.folderPath, isDirectory: true),
-                in: Persistence.importedBooksURL
-            )
-            importMessage = "Deleted \(book.title). Vocabulary entries were kept."
-            Task {
-                await state.rescan()
-                if state.selectedBookID == nil {
-                    state.selectedBookID = state.books.first?.id
-                    state.selectedChapterID = state.books.first?.chapters.first?.id
+    /// iPadOS can enumerate accessible device audiobooks, while Apple Books
+    /// EPUBs must arrive as an explicit exported document chosen by the reader.
+    private func browseAppleBooksCompanion(for book: Book) {
+        if book.chapters.contains(where: \.hasAudio) {
+            importRequest = .appleBooksExport(bookID: book.id)
+            return
+        }
+        companionTargetBookID = book.id
+        source = .deviceAudiobooks
+        applyColumnMode(isReaderActive: false, showsLibraryAlongsideReader: false)
+        Task { await deviceLibrary.requestAccessAndReload() }
+    }
+
+    private var duplicateImportTitle: String {
+        pendingDuplicateImport?.title
+            ?? state.pendingExternalEPUBDuplicate?.title
+            ?? "This book"
+    }
+
+    private func cancelPendingDuplicateImport() {
+        if case .deviceAudiobook(_, let preflight) = pendingDuplicateImport {
+            preflight.discard()
+        }
+        pendingDuplicateImport = nil
+        state.cancelExternalEPUBImport()
+    }
+
+    /// Confirmation is the only path that passes `confirmedReimport`; picker
+    /// cancellation and alert cancellation perform no library mutation.
+    private func confirmPendingDuplicateImport() {
+        if let pending = pendingDuplicateImport {
+            pendingDuplicateImport = nil
+            switch pending {
+            case .files(let urls, _):
+                do {
+                    let imported = try AudiobookImportService.importFiles(
+                        urls,
+                        duplicatePolicy: .confirmedReimport
+                    )
+                    importMessage = "Imported another copy of \(imported.folder.lastPathComponent)."
+                    Task { await state.rescan() }
+                } catch {
+                    importError = error.localizedDescription
+                }
+            case .folder(let url, _):
+                do {
+                    _ = try AudiobookImportService.importFolder(
+                        url,
+                        duplicatePolicy: .confirmedReimport
+                    )
+                    importMessage = "Imported another copy from \(url.lastPathComponent)."
+                    Task { await state.rescan() }
+                } catch {
+                    importError = error.localizedDescription
+                }
+            case .deviceAudiobook(let item, let preflight):
+                importingDeviceID = item.id
+                Task {
+                    defer { importingDeviceID = nil }
+                    do {
+                        _ = try await deviceLibrary.importAudiobook(
+                            item,
+                            prepared: preflight,
+                            duplicatePolicy: .confirmedReimport
+                        )
+                        importMessage = "Confirmed \(item.title); its device metadata was updated."
+                        await state.rescan()
+                    } catch {
+                        importError = error.localizedDescription
+                    }
                 }
             }
+            return
+        }
+        Task { await state.confirmExternalEPUBImport() }
+    }
+
+    private func deleteBook(_ book: Book) {
+        do {
+            try state.deleteBookFromLibrary(book)
+            importMessage = "Deleted \(book.title). Vocabulary entries were kept."
         } catch {
             importError = error.localizedDescription
         }
@@ -574,6 +819,16 @@ private struct IPadBookList: View {
     let readyChapterIDs: Set<String>
     let importMessage: String?
     let onDelete: (Book) -> Void
+    @State private var query = ""
+
+    private var filteredBooks: [Book] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return books }
+        return books.filter {
+            $0.title.localizedCaseInsensitiveContains(trimmed)
+                || ($0.author?.localizedCaseInsensitiveContains(trimmed) ?? false)
+        }
+    }
 
     var body: some View {
         List(selection: $selectedBookID) {
@@ -584,7 +839,7 @@ private struct IPadBookList: View {
                 }
             }
             Section {
-                ForEach(books) { book in
+                ForEach(filteredBooks) { book in
                     HStack(spacing: 12) {
                         IPadCover(path: book.coverPath, title: book.title, width: 48, height: 70)
                         VStack(alignment: .leading, spacing: 4) {
@@ -594,7 +849,11 @@ private struct IPadBookList: View {
                             Text(book.author ?? "Unknown author")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
-                            Text("\(book.chapters.lazy.filter { readyChapterIDs.contains($0.id) }.count)/\(book.chapters.count) transcribed")
+                            Text(book.mediaAvailability == .metadataOnly
+                                ? "Local media unavailable — re-import required"
+                                : book.mediaAvailability == .ebookOnly
+                                    ? "\(book.chapters.count) readable sections"
+                                    : "\(book.chapters.lazy.filter { readyChapterIDs.contains($0.id) }.count)/\(book.chapters.count) transcribed")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -611,9 +870,13 @@ private struct IPadBookList: View {
                 }
             }
         }
+        .searchable(text: $query, prompt: "Search title or author")
+        .accessibilityIdentifier("library.search")
         .overlay {
             if books.isEmpty {
-                ContentUnavailableView("No audiobooks", systemImage: "books.vertical", description: Text("Use Import to add MP3 or M4B books."))
+                ContentUnavailableView("No books", systemImage: "books.vertical", description: Text(Persistence.localMediaReimportNotice))
+            } else if filteredBooks.isEmpty {
+                ContentUnavailableView.search(text: query)
             }
         }
     }
@@ -622,8 +885,13 @@ private struct IPadBookList: View {
 private struct IPadBookDetail: View {
     @Bindable var state: AppState
     let book: Book
-    let onAddEbook: () -> Void
+    let onAddFiles: () -> Void
+    let onBrowseAppleBooks: () -> Void
+    let onAddAppleBooksExport: () -> Void
     let onDelete: () -> Void
+
+    private var needsAudio: Bool { !book.chapters.contains(where: \.hasAudio) }
+    private var needsEbook: Bool { book.ebookPath == nil }
 
     var body: some View {
         ScrollView {
@@ -636,7 +904,16 @@ private struct IPadBookDetail: View {
                         Text(book.author ?? "Unknown author")
                             .font(.title3)
                             .foregroundStyle(.secondary)
-                        Label("\(state.transcribedChapterCount(in: book)) of \(book.chapters.count) chapters transcribed", systemImage: "waveform.badge.checkmark")
+                        Label(
+                            book.mediaAvailability == .metadataOnly
+                                ? "Local media unavailable — re-import required"
+                                : book.mediaAvailability == .ebookOnly
+                                    ? "\(book.chapters.count) readable EPUB sections"
+                                    : "\(state.transcribedChapterCount(in: book)) of \(book.chapters.count) chapters transcribed",
+                            systemImage: book.mediaAvailability == .metadataOnly
+                                ? "externaldrive.badge.exclamationmark"
+                                : book.mediaAvailability == .ebookOnly ? "book.pages" : "waveform.badge.checkmark"
+                        )
                             .foregroundStyle(.secondary)
                         AudiobookLanguagePicker(state: state, book: book)
                     }
@@ -656,15 +933,15 @@ private struct IPadBookDetail: View {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(chapter.title)
                                         .font(.headline)
-                                    Text(chapter.duration.map(formatClock) ?? "Duration unavailable")
+                                    Text(chapter.hasAudio ? (chapter.duration.map(formatClock) ?? "Duration unavailable") : "Published text")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                if state.readyChapterIDs.contains(chapter.id) {
-                                    Image(systemName: "checkmark.circle.fill")
+                                if !chapter.hasAudio || state.readyChapterIDs.contains(chapter.id) {
+                                    Image(systemName: chapter.hasAudio ? "checkmark.circle.fill" : "book.pages.fill")
                                         .foregroundStyle(Palette.gold)
-                                        .accessibilityLabel("Transcribed")
+                                        .accessibilityLabel(chapter.hasAudio ? "Transcribed" : "Readable EPUB section")
                                 }
                                 Image(systemName: "chevron.forward")
                                     .foregroundStyle(.tertiary)
@@ -684,18 +961,34 @@ private struct IPadBookDetail: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    if let chapter = book.chapters.first(where: { $0.id == state.selectedChapterID }) ?? book.chapters.first {
-                        state.open(chapter: chapter, in: book, autoplay: false)
-                    }
+                    _ = state.continueReading(book)
                 } label: {
                     Label("Open Book", systemImage: "book.pages")
                 }
+                .accessibilityIdentifier("library.continue")
+                .disabled(book.mediaAvailability == .metadataOnly)
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Button(action: onAddEbook) {
+                    Menu {
+                        Button("Choose Files…") { onAddFiles() }
+                            .accessibilityIdentifier("library.repair.files")
+                        if needsAudio {
+                            Button("Apple Books & Device…") { onBrowseAppleBooks() }
+                                .accessibilityIdentifier("library.repair.appleBooksAudio")
+                        }
+                        if needsEbook {
+                            Button("Apple Books Export…") { onAddAppleBooksExport() }
+                                .accessibilityIdentifier("library.repair.appleBooksEPUB")
+                            Text(IPadEPUBImportPolicy.supportedEquivalent)
+                        }
+                    } label: {
                         Label(
-                            book.ebookPath == nil ? "Add EPUB" : "Add Another EPUB",
+                            book.mediaAvailability == .metadataOnly
+                                ? "Re-import Media"
+                                : book.mediaAvailability == .ebookOnly
+                                    ? "Add Audio"
+                                    : (book.ebookPath == nil ? "Add EPUB" : "Add Files"),
                             systemImage: "book.closed"
                         )
                     }
@@ -706,6 +999,7 @@ private struct IPadBookDetail: View {
                     Label("Book Actions", systemImage: "ellipsis.circle")
                 }
                 .accessibilityLabel("Book actions")
+                .accessibilityIdentifier("library.repair")
             }
         }
     }
@@ -716,13 +1010,21 @@ private struct DeviceAudiobooksView: View {
     let importedBooks: [Book]
     @Binding var selectedBookID: String?
     let importingID: UInt64?
+    let companionBookTitle: String?
     let importMessage: String?
     let onRefresh: () -> Void
     let onImport: (DeviceAudiobookItem) -> Void
+    let onCancelCompanion: () -> Void
     let onDelete: (Book) -> Void
 
     var body: some View {
         List {
+            if let companionBookTitle {
+                Section {
+                    LabeledContent("Adding audio to", value: companionBookTitle)
+                    Button("Cancel companion selection", action: onCancelCompanion)
+                }
+            }
             if !importedBooks.isEmpty {
                 Section("Imported into AudioReader") {
                     ForEach(importedBooks) { book in
@@ -793,9 +1095,13 @@ private struct DeviceAudiobooksView: View {
                         if importingID == item.id {
                             ProgressView()
                         } else {
-                            Button("Import") { onImport(item) }
+                            Button(companionBookTitle == nil ? "Import" : "Add") { onImport(item) }
                                 .buttonStyle(.bordered)
+                                .frame(minHeight: 44)
                                 .disabled(!item.canImport || importingID != nil)
+                                .accessibilityIdentifier(companionBookTitle == nil
+                                    ? "library.importDevice.\(item.id)"
+                                    : "library.addDeviceCompanion.\(item.id)")
                         }
                     }
                     .padding(.vertical, 4)

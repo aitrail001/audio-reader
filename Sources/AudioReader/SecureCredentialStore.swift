@@ -86,6 +86,52 @@ protocol CredentialVaultKeyProvider {
     func key(vaultExists: Bool) throws -> SymmetricKey
 }
 
+/// Read/delete-only wrapping-key source used to seed `credential-vault.key` once.
+protocol CredentialVaultWrappingKeySource: Sendable {
+    func read() throws -> Data?
+    func delete() -> Bool
+}
+
+/// Older builds stored the vault wrapping key in Keychain. The file next to the
+/// vault is now source of truth; this type only copies that key onto disk once.
+struct LegacyKeychainCredentialVaultWrappingKey: CredentialVaultWrappingKeySource {
+    static let service = "com.johnsonzhang.AudioReader.credential-vault-key"
+    static let account = "credential-vault-wrapping-key"
+
+    func read() throws -> Data? {
+        var query = baseQuery()
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data else {
+            throw CredentialVaultKeyError.unavailable
+        }
+        return data.isEmpty ? nil : data
+    }
+
+    func delete() -> Bool {
+        let status = SecItemDelete(baseQuery() as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
+    }
+
+    private func baseQuery() -> [String: Any] {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecAttrAccount as String: Self.account
+        ]
+#if os(macOS)
+        // Fail closed without a permission prompt; a missing copy must not mint a new key.
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        query[kSecUseAuthenticationContext as String] = context
+#endif
+        return query
+    }
+}
+
 struct LegacyCredentialMigrationSession {
     private(set) var hasRun = false
 
@@ -96,20 +142,31 @@ struct LegacyCredentialMigrationSession {
     }
 }
 
-enum CredentialVaultKeyError: Error {
+enum CredentialVaultKeyError: Error, Equatable {
     case unavailable
     case missingForExistingVault
     case invalidStoredKey
 }
 
-final class KeychainCredentialVaultKeyProvider: CredentialVaultKeyProvider, @unchecked Sendable {
-    static let shared = KeychainCredentialVaultKeyProvider()
+final class FileCredentialVaultKeyProvider: CredentialVaultKeyProvider, @unchecked Sendable {
+    static let shared = FileCredentialVaultKeyProvider(
+        fileURL: Persistence.root.appendingPathComponent("credential-vault.key"),
+        legacyWrappingKey: LegacyKeychainCredentialVaultWrappingKey()
+    )
 
-    private let service = "com.johnsonzhang.AudioReader.credential-vault-key"
-    private let account = "credential-vault-wrapping-key"
+    private let fileURL: URL
+    private let legacyWrappingKey: (any CredentialVaultWrappingKeySource)?
     private let lock = NSLock()
     private var cachedKey: SymmetricKey?
     private var cachedError: CredentialVaultKeyError?
+
+    init(
+        fileURL: URL,
+        legacyWrappingKey: (any CredentialVaultWrappingKeySource)? = nil
+    ) {
+        self.fileURL = fileURL
+        self.legacyWrappingKey = legacyWrappingKey
+    }
 
     func key(vaultExists: Bool) throws -> SymmetricKey {
         lock.lock()
@@ -131,53 +188,70 @@ final class KeychainCredentialVaultKeyProvider: CredentialVaultKeyProvider, @unc
         }
     }
 
+    /// File `credential-vault.key` owns the wrapping key. Copy a 32-byte legacy
+    /// Keychain item onto that file when the vault already exists and the file
+    /// is missing. Never mint a replacement key for a vault that cannot unlock.
     private func loadOrCreateKey(vaultExists: Bool) throws -> SymmetricKey {
-        if let stored = try readStoredKey() {
+        if let stored = try readFileKey() {
             guard stored.count == 32 else { throw CredentialVaultKeyError.invalidStoredKey }
             return SymmetricKey(data: stored)
         }
-        guard !vaultExists else { throw CredentialVaultKeyError.missingForExistingVault }
+        if vaultExists {
+            try migrateLegacyWrappingKeyToFile()
+            if let migrated = try readFileKey() {
+                guard migrated.count == 32 else { throw CredentialVaultKeyError.invalidStoredKey }
+                return SymmetricKey(data: migrated)
+            }
+            throw CredentialVaultKeyError.missingForExistingVault
+        }
         let key = SymmetricKey(size: .bits256)
         let data = key.withUnsafeBytes { Data($0) }
-        try saveStoredKey(data)
+        try saveFileKey(data)
         return key
     }
 
-    private func readStoredKey() throws -> Data? {
-        var query = baseQuery()
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = result as? Data else {
+    /// One-shot Keychain → file copy. Leaves the vault locked if the item is
+    /// missing or not 32 bytes so an existing ciphertext is never re-keyed.
+    private func migrateLegacyWrappingKeyToFile() throws {
+        guard let legacy = try legacyWrappingKey?.read(), legacy.count == 32 else { return }
+        try saveFileKey(legacy)
+        guard let stored = try readFileKey(), stored == legacy else {
             throw CredentialVaultKeyError.unavailable
         }
-        return data
+        _ = legacyWrappingKey?.delete()
     }
 
-    private func saveStoredKey(_ data: Data) throws {
-        var item = baseQuery()
-        item[kSecValueData as String] = data
-        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else {
-            throw CredentialVaultKeyError.unavailable
-        }
+    private func readFileKey() throws -> Data? {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+        let data = try Data(contentsOf: fileURL)
+        return data.isEmpty ? nil : data
     }
 
-    private func baseQuery() -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
+    private func saveFileKey(_ data: Data) throws {
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data.write(to: fileURL, options: .atomic)
+#if os(iOS)
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: fileURL.path
+        )
+#elseif os(macOS)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: fileURL.path
+        )
+#endif
     }
+
 }
 
 final class EncryptedFileCredentialVault: CredentialVault, @unchecked Sendable {
     static let shared = EncryptedFileCredentialVault(
         fileURL: Persistence.root.appendingPathComponent("llm-credentials.vault"),
-        keyProvider: KeychainCredentialVaultKeyProvider.shared
+        keyProvider: FileCredentialVaultKeyProvider.shared
     )
 
     private struct EncryptedDocument: Codable {

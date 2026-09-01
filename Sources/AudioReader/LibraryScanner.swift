@@ -29,7 +29,8 @@ enum LibraryScanner {
     private static func book(from folder: URL) -> Book? {
         let files = allFiles(in: folder)
         let audio = files.filter { audioExt.contains($0.pathExtension.lowercased()) }
-        guard !audio.isEmpty else { return nil }
+        let epubs = files.filter { ebookExt.contains($0.pathExtension.lowercased()) }
+        guard !audio.isEmpty || !epubs.isEmpty else { return nil }
 
         let chapterMP3s = audio
             .filter { $0.pathExtension.lowercased() == "mp3" }
@@ -52,7 +53,8 @@ enum LibraryScanner {
             }
         }
 
-        let chapters = resolvedChapters.enumerated().map { idx, url in
+        let ebookDocument = epubs.first.flatMap { EPUBParser.document(from: $0.path) }
+        let audioChapters = resolvedChapters.enumerated().map { idx, url in
             Chapter(
                 id: stableID(url.path),
                 index: idx,
@@ -61,14 +63,32 @@ enum LibraryScanner {
                 duration: nil
             )
         }
+        let keepsEbookSections = resolvedChapters.isEmpty
+            || textMarker(named: ".audioreader-ebook-sections", in: folder) == "1"
+        let ebookChapters: [Chapter]
+        if keepsEbookSections, !epubs.isEmpty, let ebookDocument {
+            ebookChapters = ebookDocument.sections.enumerated().map { index, section in
+                Chapter(
+                    id: stableID("\(folder.path)#epub-section-\(index)"),
+                    index: audioChapters.count + index,
+                    title: section.title,
+                    audioPath: "",
+                    duration: nil,
+                    ebookSectionIndex: index
+                )
+            }
+        } else {
+            ebookChapters = []
+        }
+        let chapters = audioChapters + ebookChapters
         guard !chapters.isEmpty else { return nil }
 
-        let epubs = files.filter { $0.pathExtension.lowercased() == "epub" }
         let covers = files.filter { coverExt.contains($0.pathExtension.lowercased()) }
 
         let folderName = folder.lastPathComponent
-        let title = prettyBookTitle(folderName: folderName, m4b: m4bs.first, epub: epubs.first)
-        let author = guessAuthor(from: m4bs.first) ?? guessAuthor(from: epubs.first)
+        let title = ebookDocument?.title
+            ?? prettyBookTitle(folderName: folderName, m4b: m4bs.first, epub: epubs.first)
+        let author = ebookDocument?.author ?? guessAuthor(from: m4bs.first) ?? guessAuthor(from: epubs.first)
         let source = sourceMarker(in: folder)
         let markedTitle = textMarker(named: ".audioreader-title", in: folder)
         let markedAuthor = textMarker(named: ".audioreader-author", in: folder)
@@ -87,6 +107,7 @@ enum LibraryScanner {
 
     static func loadDurations(for book: Book) async -> Book {
         var copy = book
+        guard copy.chapters.contains(where: \.hasAudio) else { return copy }
         let folder = URL(fileURLWithPath: copy.folderPath, isDirectory: true)
         if copy.coverPath == nil,
            let audioPath = copy.chapters.first?.audioPath,
@@ -106,7 +127,7 @@ enum LibraryScanner {
             }
         }
         var loaded: [Chapter] = []
-        for chapter in copy.chapters {
+        for chapter in copy.chapters where chapter.hasAudio {
             let url = URL(fileURLWithPath: chapter.audioPath)
             if ["m4a", "m4b"].contains(url.pathExtension.lowercased()) {
                 let embedded = await M4BChapterExtractor.extract(from: url)
@@ -122,6 +143,7 @@ enum LibraryScanner {
             }
             loaded.append(updated)
         }
+        loaded.append(contentsOf: copy.chapters.filter { !$0.hasAudio })
         copy.chapters = loaded.enumerated().map { index, chapter in
             var updated = chapter
             updated.index = index
@@ -199,13 +221,24 @@ enum LibraryScanner {
     }
 
     static func persistentPathIdentity(_ path: String) -> String {
-        let marker = "/ImportedBooks/"
-        guard let range = path.range(of: marker) else { return path }
-        return "ImportedBooks/" + path[range.upperBound...]
+        for directory in ["ImportedBooks-vNext", "ImportedBooks"] {
+            let marker = "/\(directory)/"
+            if let range = path.range(of: marker) {
+                return "\(directory)/" + path[range.upperBound...]
+            }
+        }
+        return path
     }
 
     static func containsAudio(in folder: URL) -> Bool {
         allFiles(in: folder).contains { audioExt.contains($0.pathExtension.lowercased()) }
+    }
+
+    static func containsBookMedia(in folder: URL) -> Bool {
+        allFiles(in: folder).contains {
+            let ext = $0.pathExtension.lowercased()
+            return audioExt.contains(ext) || ebookExt.contains(ext)
+        }
     }
 
     private static func sourceMarker(in folder: URL) -> BookSource {

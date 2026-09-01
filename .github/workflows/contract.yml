@@ -1,0 +1,64 @@
+name: Contract
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  openapi:
+    name: OpenAPI v1
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install validator dependencies
+        run: python3 -m pip install -r contracts/requirements-validator.txt
+
+      - name: Run contract tests
+        run: python3 -m unittest discover -s Tests/contract -v
+
+      - name: Lint OpenAPI contract
+        run: python3 scripts/validate_openapi.py
+
+  generated-types:
+    name: Generated TypeScript types
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: server/package.json
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: server/.nvmrc
+          cache: pnpm
+          cache-dependency-path: server/pnpm-lock.yaml
+
+      - name: Install workspace
+        run: pnpm install --frozen-lockfile
+
+      - name: Check generated types for drift
+        run: pnpm contract:check
+
+      - name: Typecheck workspace
+        run: pnpm typecheck
+
+      - name: Pull Postgres test image
+        run: docker pull postgres:18-alpine
+
+      - name: Run server tests
+        run: pnpm test

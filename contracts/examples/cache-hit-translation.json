@@ -1,0 +1,16 @@
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "translation": "She hesitated at the doorway.",
+  "notes": [
+    {
+      "source": "hesitated",
+      "category": "challenging_word",
+      "explanation": "Paused because of uncertainty or reluctance, not because of a physical obstacle."
+    }
+  ],
+  "provenance": "cache_shared_exact",
+  "cacheKeyVersion": 1,
+  "modelLabel": "qwen-plus",
+  "policyVersion": "translation-sentence-v3",
+  "createdAt": "2026-08-26T08:41:11Z"
+}

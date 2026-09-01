@@ -16,13 +16,9 @@
 		<data>
 		IIjf339fKevHha6E2BwE3e7QnSc=
 		</data>
-		<key>AudioReader.debug.dylib</key>
-		<data>
-		YvXoNPY2Ol7rhOVQiyTXNBuK9zY=
-		</data>
 		<key>Info.plist</key>
 		<data>
-		4dKxSDd2KdCZmSCLc7bUwphhOrA=
+		3vtIoQOGK4KSyLs8yvg2W8G8rD0=
 		</data>
 		<key>PkgInfo</key>
 		<data>
@@ -30,19 +26,15 @@
 		</data>
 		<key>ReadingAssistantPrompts.json</key>
 		<data>
-		B3ru+yOFBrSq9KqTWafmI2CL/9g=
+		NmoDyEnC4MDL9tXlsTixAVH/Wss=
 		</data>
 		<key>ZIPFoundation_ZIPFoundation.bundle/Info.plist</key>
 		<data>
-		3yKil/oJZzLKzCKpYaaQHXnLV6s=
+		LF8WgZJo5Gzd2es5cnyzFdSRP58=
 		</data>
 		<key>ZIPFoundation_ZIPFoundation.bundle/PrivacyInfo.xcprivacy</key>
 		<data>
 		EilOcsnHrO9NZ6W656aQq2ncTOA=
-		</data>
-		<key>__preview.dylib</key>
-		<data>
-		lDgW8saeg7443uvoTZ2ZjpWHP6o=
 		</data>
 	</dict>
 	<key>files2</key>
@@ -68,25 +60,18 @@
 			n1AXCXhS9D14v+noKj5qDU0snaH9WQHooGUIMy25wPo=
 			</data>
 		</dict>
-		<key>AudioReader.debug.dylib</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			K37SJDdvWIMvlXup2RqQeFS3WIKzR4Pdz04m7LvP0K0=
-			</data>
-		</dict>
 		<key>ReadingAssistantPrompts.json</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			On1b1K9l7/V1z7C2+Y39YoFkwQUoHzfeKFbJM+wkeuY=
+			NynASXjr1HXItubAM4kvmCzm462sXSML1pC/CJ/cBiI=
 			</data>
 		</dict>
 		<key>ZIPFoundation_ZIPFoundation.bundle/Info.plist</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			FEB10VojXriJH4mNV0hHAChcLoLYeM7HVCqzqHM0Jjs=
+			OGiw3EbMAc9RA+/vAS3NMq5zQKqi8iHsJbwvg/iEphc=
 			</data>
 		</dict>
 		<key>ZIPFoundation_ZIPFoundation.bundle/PrivacyInfo.xcprivacy</key>
@@ -94,13 +79,6 @@
 			<key>hash2</key>
 			<data>
 			mi+TDO241YMJpYG5v5vzZzaF7AKuIZfZ8cVoKLcY3/0=
-			</data>
-		</dict>
-		<key>__preview.dylib</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			3BBUNAZjBlqGjYpXMHmoCArjQFOqDcQc0pepqYb4dCA=
 			</data>
 		</dict>
 	</dict>

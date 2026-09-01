@@ -201,7 +201,7 @@ struct VocabularyReviewTests {
     @MainActor
     @Test("Learn-list management removes an item without deleting its vocabulary")
     func removesOnlyLearnListMembership() {
-        let state = AppState()
+        let state = AppState(composition: .inMemory())
         state.vocab = [entry(id: "learned", isInLearnList: true)]
 
         state.setVocabularyLearnList("learned", included: false)
@@ -239,6 +239,252 @@ struct VocabularyReviewTests {
         let second = entry(id: "second", nextReview: tomorrow)
 
         #expect(VocabReviewScheduler.nextReviewDate(in: [first, unscheduled, second], after: now) == tomorrow)
+    }
+
+    @Test("Learning queue separates due reviews, learning cards, and new cards")
+    func buildsLearningQueue() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let new = entry(id: "new")
+        let learningDue = entry(
+            id: "learning-due",
+            reviewCount: 2,
+            nextReview: now.addingTimeInterval(-30),
+            reviewIntervalDays: 3
+        )
+        let learningLater = entry(
+            id: "learning-later",
+            reviewCount: 1,
+            nextReview: now.addingTimeInterval(86_400),
+            reviewIntervalDays: 1
+        )
+        let reviewDue = entry(
+            id: "review-due",
+            reviewCount: 4,
+            nextReview: now.addingTimeInterval(-60),
+            reviewIntervalDays: 14
+        )
+        let reviewLater = entry(
+            id: "review-later",
+            reviewCount: 3,
+            nextReview: now.addingTimeInterval(7 * 86_400),
+            reviewIntervalDays: 7
+        )
+
+        let queue = VocabularyLearningAnalytics.queue(
+            entries: [reviewLater, new, learningLater, reviewDue, learningDue],
+            at: now
+        )
+
+        #expect(queue.new.map(\.id) == ["new"])
+        #expect(queue.learning.map(\.id) == ["learning-due", "learning-later"])
+        #expect(queue.due.map(\.id) == ["learning-due", "review-due"])
+        #expect(queue.session.map(\.id) == ["learning-due", "review-due", "new"])
+    }
+
+    @Test("Daily learning sessions cap new cards without hiding the backlog")
+    func capsDailyNewCards() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let entries = (0..<25).map { index in
+            entry(id: String(format: "new-%02d", index))
+        }
+
+        let queue = VocabularyLearningAnalytics.queue(entries: entries, at: now)
+
+        #expect(queue.new.count == 25)
+        #expect(queue.session.count == VocabularyLearningPolicy.dailyNewCardLimit)
+        #expect(queue.session.map(\.id) == entries.prefix(20).map(\.id))
+    }
+
+    @Test("Learning snapshot derives today, streak, retention, forecast, and book distribution")
+    func buildsLearningSnapshot() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = try #require(calendar.date(from: DateComponents(year: 2026, month: 8, day: 30, hour: 12)))
+        let today = try #require(calendar.date(byAdding: .hour, value: -1, to: now))
+        let yesterday = try #require(calendar.date(byAdding: .day, value: -1, to: today))
+        let twoDaysAgo = try #require(calendar.date(byAdding: .day, value: -2, to: today))
+        let nextDay = try #require(calendar.date(byAdding: .day, value: 1, to: now))
+
+        var newA = entry(id: "new-a", bookID: "book-a")
+        newA.bookTitle = "Book A"
+        var learningA = entry(
+            id: "learning-a",
+            bookID: "book-a",
+            reviewCount: 2,
+            nextReview: now.addingTimeInterval(-60),
+            reviewIntervalDays: 3
+        )
+        learningA.bookTitle = "Book A"
+        var reviewB = entry(
+            id: "review-b",
+            bookID: "book-b",
+            reviewCount: 4,
+            nextReview: nextDay,
+            reviewIntervalDays: 14
+        )
+        reviewB.bookTitle = "Book B"
+        let events = [
+            reviewEvent(id: "today-good", vocabularyID: learningA.id, rating: .remember, at: today),
+            reviewEvent(id: "today-again", vocabularyID: newA.id, rating: .forgot, at: today),
+            reviewEvent(id: "yesterday", vocabularyID: reviewB.id, rating: .vague, at: yesterday),
+            reviewEvent(id: "two-days", vocabularyID: learningA.id, rating: .remember, at: twoDaysAgo)
+        ]
+
+        let snapshot = VocabularyLearningAnalytics.snapshot(
+            entries: [newA, learningA, reviewB],
+            events: events,
+            at: now,
+            calendar: calendar
+        )
+
+        #expect(snapshot.todayReviewCount == 2)
+        #expect(snapshot.streakDays == 3)
+        #expect(snapshot.retention == 0.75)
+        #expect(snapshot.forecast.prefix(2).map(\.count) == [1, 1])
+        #expect(snapshot.books.map(\.bookTitle) == ["Book A", "Book B"])
+        #expect(snapshot.books[0].newCount == 1)
+        #expect(snapshot.books[0].learningCount == 1)
+        #expect(snapshot.books[0].dueCount == 1)
+        #expect(snapshot.books[0].reviewedToday == 2)
+        #expect(snapshot.books[1].reviewCount == 1)
+    }
+
+    @MainActor
+    @Test("Grading appends a local review event with the displayed face and rating")
+    func gradingAppendsReviewEvent() async throws {
+        let reviews = InMemoryReviewEventRepository()
+        let state = AppState(composition: .inMemory(reviewEvents: reviews))
+        state.vocab = [entry(id: "reviewed")]
+        state.vocabReviewPrompt = .reverse
+        let reviewedAt = Date(timeIntervalSince1970: 2_000_000)
+
+        let saved = await state.reviewVocabulary(
+            "reviewed",
+            quality: .vague,
+            face: .recognition,
+            at: reviewedAt
+        )
+
+        #expect(saved)
+        let event = try #require(reviews.loadReviewEvents().only)
+        #expect(event.vocabularyID.rawValue == "reviewed")
+        #expect(event.face == VocabReviewPrompt.recognition.rawValue)
+        #expect(event.rating == VocabReviewQuality.vague.rawValue)
+        #expect(event.reviewedAt == reviewedAt)
+        #expect(state.vocabReviewEvents == [event])
+    }
+
+    @MainActor
+    @Test("A canonical review updates every occurrence and attributes the event to the study card")
+    func canonicalReviewUpdatesOccurrencesAndEvent() async throws {
+        var first = entry(id: "did-a", bookID: "book-a")
+        first.word = "did"
+        first.canonicalForm = "do"
+        first.partOfSpeech = .verb
+        first.senseID = "do:verb"
+        first.canonicalizationSource = .irregularRule
+        first.canonicalizationConfidence = 0.99
+        first.canonicalizationStatus = .confirmed
+        var second = first
+        second.id = "done-b"
+        second.word = "done"
+        second.bookID = "book-b"
+        second.bookTitle = "Book B"
+        let reviews = InMemoryReviewEventRepository()
+        let state = AppState(composition: .inMemory(reviewEvents: reviews))
+        state.vocab = [first, second]
+        let card = try #require(VocabularyStudyCards.cards(state.vocab).only)
+        let reviewedAt = Date(timeIntervalSince1970: 2_000_000)
+
+        let saved = await state.reviewVocabulary(
+            card.id,
+            occurrenceID: second.id,
+            quality: .remember,
+            face: .recognition,
+            at: reviewedAt
+        )
+
+        #expect(saved)
+        #expect(state.vocab.allSatisfy { $0.reviewCount == 1 && $0.lastReviewedAt == reviewedAt })
+        let event = try #require(reviews.loadReviewEvents().only)
+        #expect(event.cardID == card.id)
+        #expect(event.vocabularyID.rawValue == second.id)
+        #expect(card.occurrence(id: second.id)?.bookID == "book-b")
+    }
+
+    @MainActor
+    @Test("A history write failure leaves the review due instead of advancing an unsynced card")
+    func gradingFailureDoesNotAdvanceCard() async {
+        let state = AppState(composition: AppComposition(
+            vocabulary: InMemoryVocabularyRepository(),
+            knownLemmas: InMemoryKnownLemmaRepository(),
+            reviewEvents: FailingReviewEventRepository()
+        ))
+        state.vocab = [entry(id: "reviewed")]
+
+        let saved = await state.reviewVocabulary("reviewed", quality: .remember, face: .recognition)
+
+        #expect(!saved)
+        #expect(state.vocab.first?.reviewCount == 0)
+        #expect(state.vocab.first?.nextReview == nil)
+        #expect(state.vocabReviewEvents.isEmpty)
+        #expect(state.errorMessage == "The review could not be saved. This card is still due.")
+    }
+
+    @MainActor
+    @Test("Grading a missing card reports failure without creating history")
+    func gradingMissingCardReportsFailure() async {
+        let reviews = InMemoryReviewEventRepository()
+        let state = AppState(composition: .inMemory(reviewEvents: reviews))
+
+        let saved = await state.reviewVocabulary("missing", quality: .remember)
+
+        #expect(!saved)
+        #expect((try? reviews.loadReviewEvents())?.isEmpty == true)
+    }
+
+    @MainActor
+    @Test("Durable review history repairs a failed vocabulary mirror on reload")
+    func reviewHistoryRepairsFailedMirror() async {
+        let original = entry(id: "reviewed")
+        let vocabulary = FailingUpsertVocabularyRepository(entries: [original])
+        let reviews = InMemoryReviewEventRepository()
+        let composition = AppComposition(
+            vocabulary: vocabulary,
+            knownLemmas: InMemoryKnownLemmaRepository(),
+            reviewEvents: reviews
+        )
+        let reviewedAt = Date(timeIntervalSince1970: 2_000_000)
+        let state = AppState(composition: composition)
+
+        #expect(await state.reviewVocabulary("reviewed", quality: .remember, at: reviewedAt))
+
+        let reloaded = AppState(composition: composition)
+        #expect(reloaded.vocab.first?.reviewCount == 1)
+        #expect(reloaded.vocab.first?.lastReviewedAt == reviewedAt)
+        #expect(reloaded.vocabReviewEvents.count == 1)
+    }
+
+    @MainActor
+    @Test("Review schedule recovery distinguishes events with the same timestamp")
+    func reviewHistoryRepairsSameTimestampMirrorFailure() async {
+        let vocabulary = FailOnSecondUpsertVocabularyRepository(entries: [entry(id: "reviewed")])
+        let reviews = InMemoryReviewEventRepository()
+        let composition = AppComposition(
+            vocabulary: vocabulary,
+            knownLemmas: InMemoryKnownLemmaRepository(),
+            reviewEvents: reviews
+        )
+        let reviewedAt = Date(timeIntervalSince1970: 2_000_000)
+        let state = AppState(composition: composition)
+
+        #expect(await state.reviewVocabulary("reviewed", quality: .remember, at: reviewedAt))
+        #expect(await state.reviewVocabulary("reviewed", quality: .vague, at: reviewedAt))
+
+        let reloaded = AppState(composition: composition)
+        #expect(reloaded.vocab.first?.reviewCount == 2)
+        #expect(reloaded.vocab.first?.lastReviewQuality == .vague)
+        #expect(reloaded.vocabReviewEvents.count == 2)
     }
 
     @Test("Sentence playback uses the matching transcript segment bounds")
@@ -434,5 +680,80 @@ struct VocabularyReviewTests {
             reviewEaseFactor: reviewEaseFactor,
             isInLearnList: isInLearnList
         )
+    }
+
+    private func reviewEvent(
+        id: String,
+        vocabularyID: String,
+        rating: VocabReviewQuality,
+        at date: Date
+    ) -> StoredReviewEvent {
+        StoredReviewEvent(
+            id: ReviewEventID(rawValue: id),
+            vocabularyID: VocabularyOccurrenceID(rawValue: vocabularyID),
+            face: VocabReviewPrompt.recognition.rawValue,
+            rating: rating.rawValue,
+            reviewedAt: date
+        )
+    }
+}
+
+private extension Collection {
+    var only: Element? {
+        count == 1 ? first : nil
+    }
+}
+
+private struct FailingReviewEventRepository: ReviewEventRepository {
+    struct Failure: Error {}
+
+    func loadReviewEvents() throws -> [StoredReviewEvent] { [] }
+
+    func appendReviewEvent(_ event: StoredReviewEvent) throws {
+        throw Failure()
+    }
+}
+
+private final class FailingUpsertVocabularyRepository: VocabularyRepository, @unchecked Sendable {
+    struct Failure: Error {}
+    private let entries: [StoredVocabularyOccurrence]
+
+    init(entries: [VocabEntry]) {
+        self.entries = entries.map(StoredVocabularyOccurrence.init)
+    }
+
+    func loadVocabulary() throws -> [StoredVocabularyOccurrence] { entries }
+    func saveVocabulary(_ entries: [StoredVocabularyOccurrence]) throws {}
+    func upsertVocabulary(_ entries: [StoredVocabularyOccurrence]) throws { throw Failure() }
+    func deleteVocabulary(id: VocabularyOccurrenceID) throws {}
+}
+
+private final class FailOnSecondUpsertVocabularyRepository: VocabularyRepository, @unchecked Sendable {
+    struct Failure: Error {}
+    private let lock = NSLock()
+    private var entries: [StoredVocabularyOccurrence]
+    private var upsertCount = 0
+
+    init(entries: [VocabEntry]) {
+        self.entries = entries.map(StoredVocabularyOccurrence.init)
+    }
+
+    func loadVocabulary() throws -> [StoredVocabularyOccurrence] { lock.withLock { entries } }
+    func saveVocabulary(_ entries: [StoredVocabularyOccurrence]) throws { lock.withLock { self.entries = entries } }
+    func upsertVocabulary(_ updates: [StoredVocabularyOccurrence]) throws {
+        try lock.withLock {
+            upsertCount += 1
+            guard upsertCount < 2 else { throw Failure() }
+            for update in updates {
+                if let index = entries.firstIndex(where: { $0.id == update.id }) {
+                    entries[index] = update
+                } else {
+                    entries.append(update)
+                }
+            }
+        }
+    }
+    func deleteVocabulary(id: VocabularyOccurrenceID) throws {
+        lock.withLock { entries.removeAll { $0.id == id } }
     }
 }

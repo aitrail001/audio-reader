@@ -1,0 +1,43 @@
+{
+  "name": "@audio-reader/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.22.0",
+  "engines": {
+    "node": ">=22.18.0",
+    "pnpm": ">=11.22.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:contract": "python3 -m unittest discover -s ../Tests/contract -v",
+    "test:all": "bash ./scripts/run-test-suites.sh",
+    "dev:api": "bash ./scripts/run-api-worker.sh",
+    "dev:db": "bash ./scripts/start-local-db.sh",
+    "dev:docker": "bash ./scripts/run-local-stack.sh",
+    "dev:docker:down": "docker compose down --remove-orphans",
+    "test:e2e-local": "bash ./scripts/e2e-local-api.sh",
+    "test:e2e-operator": "playwright test",
+    "preflight:deploy": "bash ./scripts/preflight-deploy.sh",
+    "deploy:staging": "bash ./scripts/deploy-worker.sh staging",
+    "deploy:production": "bash ./scripts/deploy-worker.sh production",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit -p tsconfig.json && pnpm --filter \"./apps/**\" --filter \"./packages/**\" -r typecheck",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "contract:generate": "pnpm --filter @audio-reader/contract generate",
+    "contract:check": "pnpm --filter @audio-reader/contract check"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "^1.62.1",
+    "@types/node": "catalog:",
+    "eslint": "10.9.1",
+    "eslint-config-prettier": "10.1.8",
+    "prettier": "3.9.6",
+    "typescript": "catalog:",
+    "typescript-eslint": "8.68.0",
+    "vitest": "catalog:"
+  }
+}

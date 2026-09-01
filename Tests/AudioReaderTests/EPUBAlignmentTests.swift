@@ -237,9 +237,7 @@ struct EPUBAlignmentTests {
             ebookAligned: true,
             ebookAlignment: .init(status: .trusted, reason: "test", metrics: .empty)
         )
-        try Persistence.saveTranscript(saved)
-        let state = AppState()
-        state.books = [Book(
+        let book = Book(
             id: "book-\(UUID().uuidString)",
             title: "Book",
             author: nil,
@@ -247,14 +245,22 @@ struct EPUBAlignmentTests {
             coverPath: nil,
             ebookPath: old.path,
             chapters: [chapter]
-        )]
+        )
+        let database = LocalSQLiteStore(fileURL: fixture.root.appendingPathComponent("replacement.sqlite"))
+        try database.saveBook(StoredBook(book))
+        try Persistence.saveTranscript(saved, database: database)
+        let state = AppState(
+            composition: AppComposition(liveStore: database),
+            account: AccountSession.isolated()
+        )
+        state.books = [book]
         state.selectedBookID = state.books[0].id
         state.selectedChapterID = chapterID
         state.transcript = saved
 
         try state.replaceCurrentEbook(with: replacement)
 
-        let reloaded = try #require(Persistence.loadTranscript(for: chapter))
+        let reloaded = try #require(Persistence.loadTranscript(for: chapter, database: database))
         #expect(reloaded.ebookAligned == false)
         #expect(reloaded.alignmentStatus == .uncertain)
         #expect(reloaded.segments[0].ebookText == nil)
@@ -275,6 +281,7 @@ struct EPUBAlignmentTests {
             in: bookFolder,
             text: Self.bookSentences.joined(separator: " ")
         )
+        let oldBytes = try Data(contentsOf: old)
         let replacement = try fixture.makeEPUB(
             named: "blocked.epub",
             in: incoming,
@@ -306,9 +313,7 @@ struct EPUBAlignmentTests {
             ebookAligned: true,
             ebookAlignment: .init(status: .trusted, reason: "test", metrics: .empty)
         )
-        try Persistence.saveTranscript(saved)
-        let state = AppState()
-        state.books = [Book(
+        let book = Book(
             id: "book-\(UUID().uuidString)",
             title: "Book",
             author: nil,
@@ -316,7 +321,18 @@ struct EPUBAlignmentTests {
             coverPath: nil,
             ebookPath: old.path,
             chapters: [chapter]
-        )]
+        )
+        let database = LocalSQLiteStore(fileURL: fixture.root.appendingPathComponent("failed-replacement.sqlite"))
+        try database.saveBook(StoredBook(book))
+        try Persistence.saveTranscript(saved, database: database)
+        let persistedTranscriptBefore = try JSONEncoder.iso.encode(
+            #require(Persistence.loadTranscript(chapterID: chapterID, database: database))
+        )
+        let state = AppState(
+            composition: AppComposition(liveStore: database),
+            account: AccountSession.isolated()
+        )
+        state.books = [book]
         state.selectedBookID = state.books[0].id
         state.selectedChapterID = chapterID
         state.transcript = saved
@@ -328,9 +344,14 @@ struct EPUBAlignmentTests {
             didThrow = true
         }
 
-        let reloaded = try #require(Persistence.loadTranscript(for: chapter))
+        let reloaded = try #require(Persistence.loadTranscript(for: chapter, database: database))
         #expect(didThrow)
         #expect(FileManager.default.fileExists(atPath: old.path))
+        #expect(try Data(contentsOf: old) == oldBytes)
+        #expect(try JSONEncoder.iso.encode(
+            #require(Persistence.loadTranscript(chapterID: chapterID, database: database))
+        ) == persistedTranscriptBefore)
+        #expect(state.books[0].ebookPath == old.path)
         #expect(reloaded.ebookAligned)
         #expect(reloaded.alignmentStatus == .trusted)
         #expect(reloaded.segments[0].trustedEbookText == Self.bookSentences[0])
@@ -529,7 +550,7 @@ struct EPUBAlignmentTests {
         segment.individualEbookMatchTrusted = true
         segment.documentEbookUseAllowed = false
         let chapter = Chapter(id: "chapter", index: 0, title: "One", audioPath: "/tmp/book.m4b")
-        let state = AppState()
+        let state = AppState(composition: .inMemory())
         state.books = [Book(
             id: "book", title: "Book", author: nil, folderPath: "/tmp", coverPath: nil,
             ebookPath: "/tmp/book.epub", chapters: [chapter]

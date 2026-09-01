@@ -17,9 +17,22 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.54</string>
+	<string>2.1.0</string>
 	<key>CFBundleVersion</key>
-	<string>55</string>
+	<string>93</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.johnsonzhang.AudioReader.auth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>audioreader</string>
+			</array>
+		</dict>
+	</array>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
 	<key>NSHighResolutionCapable</key>
@@ -32,5 +45,12 @@
 	<string>AudioReader uses on-device speech recognition for chapter questions and for scoring how closely you spoke the current sentence.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>AudioReader reads local audiobook and ebook files from the folder you choose.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>ProductAPIBaseURL</key>
+	<string>https://audio-reader-api-worker-production.audio-reader-service.workers.dev</string>
 </dict>
 </plist>

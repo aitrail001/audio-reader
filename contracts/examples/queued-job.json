@@ -1,0 +1,13 @@
+{
+  "id": "6ec0bd7f-11c0-43da-975e-2a8ad9ebae0b",
+  "accountId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "kind": "account_export",
+  "status": "queued",
+  "attempts": 0,
+  "maxAttempts": 5,
+  "lastError": null,
+  "createdAt": "2026-08-26T11:02:00Z",
+  "updatedAt": "2026-08-26T11:02:00Z",
+  "startedAt": null,
+  "finishedAt": null
+}

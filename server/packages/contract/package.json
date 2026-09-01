@@ -1,0 +1,23 @@
+{
+  "name": "@audio-reader/contract",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "generate": "node --experimental-strip-types --disable-warning=ExperimentalWarning ./scripts/codegen.ts generate",
+    "check": "node --experimental-strip-types --disable-warning=ExperimentalWarning ./scripts/codegen.ts check"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "openapi-typescript": "7.13.0",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

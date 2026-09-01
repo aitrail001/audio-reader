@@ -10,9 +10,9 @@ AudioReader is designed for focused listening and reading rather than passive au
 - compare the narration with the published text in a companion EPUB;
 - look up unfamiliar words and save them with their original sentence, book, chapter, and timestamp;
 - mark words known, see coverage for the current chapter, underline unknown or learning words across the chapter, shadow a sentence, and take a local chapter quiz;
-- review vocabulary as recognition, cloze, or reverse cards, still using the original narration;
+- study vocabulary in a due-first daily queue as recognition, cloze, or reverse cards, still using the original narration, with a bounded new-card load, review history, retention, due forecast, and per-book progress;
 - replay or loop a sentence and return to saved vocabulary in context;
-- translate words, sentences, or chapters and ask questions about the current chapter through an optional LLM provider, including on-device Apple Intelligence.
+- translate words, sentences, or chapters and ask questions about the current chapter through an optional LLM provider, including on-device Apple Intelligence. Managed Qwen (account) checks a shared exact-content cache first, auto-loads sentence translations and chapter summaries when a hit exists, and translates chapter-aligned sentence blocks so neighbors are cached together.
 
 The transcript is the timing source. Audio narration often contains publisher introductions, omitted footnotes, or wording that differs from the ebook, so AudioReader first transcribes what was actually spoken with Apple SpeechAnalyzer. When an EPUB is present, it then matches sufficiently similar sentences and lets you switch between **Spoken**, **Ebook**, and **Both**.
 
@@ -35,12 +35,14 @@ M4B chapter metadata is detected and exposed as separate playable and transcriba
 - SpeechAnalyzer assets for the selected audiobook language; AudioReader requests their installation on the first transcription
 - Optional: Apple Intelligence on this device, or a Grok, QwenCloud, OpenAI API, or ChatGPT plan account and network connection for translation, summaries, and chapter chat
 
+Build, device install, remote deploy, and a Docker local API for account
+end-to-end tests are documented in [docs/operations.md](docs/operations.md).
+
 ### Build and run on macOS
 
 Open `AudioReader.xcodeproj`, select the **AudioReader-macOS** scheme, and run it. You can also build the standalone app from Terminal:
 
 ```bash
-cd /Users/johnsonzhang/Documents/AI/Dataiku/src/audio-reader
 ./scripts/package_app.sh
 open AudioReader.app
 ```
@@ -52,7 +54,6 @@ Open `AudioReader.xcodeproj`, select the **AudioReader-iOS** scheme, choose a ph
 To package and install the Simulator build from Terminal:
 
 ```bash
-cd /Users/johnsonzhang/Documents/AI/Dataiku/src/audio-reader
 ./scripts/package_ipad_simulator.sh
 xcrun simctl install booted AudioReader-iPad.app
 xcrun simctl launch booted com.johnsonzhang.AudioReader
@@ -60,9 +61,9 @@ xcrun simctl launch booted com.johnsonzhang.AudioReader
 
 ### Import a book
 
-On macOS, use **Import** to select audiobook files, an audiobook folder, or an accessible downloaded title from Apple Books. You can also choose a library folder containing one subfolder per book.
+On macOS, use **Import** to select audiobook audio, a DRM-free EPUB, both together, or a folder/collection containing those resources. The Apple Books source can also copy accessible downloaded audiobooks and non-DRM EPUB files when macOS grants file access. It cannot list or bypass protected, cloud-only, or inaccessible Apple Books content.
 
-On iPad, use **Import Files** or **Import Folder** to choose resources from Files or iCloud Drive. The **Apple Books & Device** source lists audiobooks exposed through the device media library.
+On iPad, use **Import Files** or **Import Folder** to choose audiobook audio, a DRM-free EPUB, or both from Files, iCloud Drive, or a document-provider/export location. iPadOS has no supported API for enumerating Apple Books EPUBs, so AudioReader does not inspect or copy the protected Apple Books library. The **Apple Books & Device** source continues to list audiobooks that the public device media-library API exposes.
 
 For the best result, keep each book in its own folder:
 
@@ -74,22 +75,24 @@ Book Title/
 └── cover.jpg
 ```
 
-AudioReader copies explicitly imported resources into its own imported-books library. Re-importing the same audio does not create a duplicate; it can add a missing EPUB or cover to the existing book.
+AudioReader copies explicitly imported resources into its own imported-books library. EPUB-only books open as ordered published-text sections and support reading, dictionary lookup, vocabulary, translation, chapter assistance, summaries, quiz, and review without audio controls. Re-importing the same audio does not create a duplicate. Use a book's **Add Audio**, **Add EPUB**, or **Add Files** action to attach missing companion media explicitly; this preserves the logical book and avoids unsafe title-only merging.
 
 ### Transcribe and read
 
-1. In **Settings → Languages**, choose the audiobook's spoken language independently from **Translate into**.
-2. Select a book and chapter, then select **Transcribe**. The first run may download the selected language's speech assets.
+1. For an audiobook, in **Settings → Languages**, choose the spoken language independently from **Translate into**. EPUB-only books do not require a transcription language.
+2. Select a book and chapter. For audiobook chapters, select **Transcribe**; the first run may download the selected language's speech assets. EPUB-only sections open directly as published text and intentionally omit playback and transcription controls.
    If the book has no companion ebook, the reader displays **EPUB ebook missing** at the top. Select **Add EPUB** and choose the matching `.epub` file.
 3. Wait for transcription and optional EPUB validation/alignment to finish. AudioReader checks extraction quality, book metadata, sampled content, match coverage and scores, reading order, and unmatched passages before EPUB wording can replace speech.
 4. Play the chapter and use the highlighted transcript to follow, seek, replay, or loop sentences.
 5. Choose **Spoken**, **Ebook**, or **Both** when the EPUB and individual sentence matches are trusted. Unreadable, likely-wrong, different-edition, and uncertain EPUBs show the same warning and recovery actions on macOS and iPadOS. **Recheck EPUB** validates an existing transcript again without retranscribing audio; **Replace EPUB** installs another file; and **Use This EPUB Anyway** remains an explicit option after assessment and still permits only strong individual matches.
 6. Select a word for dictionary lookup or save it to **Vocabulary**. Use **Open in text** later to return to its source passage.
-7. Turn on **Study overlay** in the reader header or **Reading** menu to underline unknown and learning content words throughout the chapter, not only the current sentence. **Chapter words** is a chapter-level list (macOS also has a header button, not only a menu item). **Shadow this sentence** scores on-device speech against the current sentence. **Chapter quiz** is a local cloze and “what comes next” check; it does not add XP, streaks-as-flames, or remote content libraries. Study days are a quiet local calendar count.
+7. Turn on **Study overlay** in the reader header or **Reading** menu to underline unknown and learning content words throughout the chapter, not only the current sentence. **Chapter words** is a chapter-level list (macOS also has a header button, not only a menu item). **Shadow this sentence** reports how many expected words on-device speech recognition heard; it is not a pronunciation or accent score. **Chapter quiz** is a local cloze and “what comes next” check; it does not add XP, streaks-as-flames, or remote content libraries. Study days are a quiet local calendar count.
 
-Enable **Deep Reading** from the playback controls when you want time to inspect or research each sentence. AudioReader plays the current sentence and pauses while keeping it highlighted. Select **Continue** to advance to and play the next sentence. On iPad, both controls are available in the reader playback bar, and **Command–Return** also continues when using a hardware keyboard. Deep Reading and sentence looping are mutually exclusive.
+Enable **Listen First** from the playback controls or **Reading** menu when you want to practise decoding speech before relying on text. AudioReader conceals the unfinished and future sentences, pauses at the current sentence boundary, then reveals the completed sentence with Replay, Explain, Shadow, Quick Quiz, and Continue actions. Quick Quiz is opt-in: it sends only a bounded set of already-heard resolved sentences to the selected AI provider, validates structured output, and falls back to the same local quiz when AI is unavailable or invalid. On iPad, controls retain 44-point targets, and **Command–Return** continues with a hardware keyboard. Listen First and sentence looping are mutually exclusive.
 
 Transcripts, vocabulary, settings, accepted translations, and chapter-translation checkpoints are stored locally under the platform's AudioReader application-support container. Imported iPad books are stored in the app's Documents directory.
+
+Signed-in learners control optional Operator learning analytics under **Settings → Account**. The switch defaults off. When enabled, support can see aggregate counts and timestamps for sync, reading, review, vocabulary, and AI-feature use; it never exposes reading text, transcripts, saved words, translations, notes, prompts, or audio.
 
 ### Configure optional AI assistance
 
@@ -101,7 +104,7 @@ Open **Settings → LLM provider** and choose Apple Intelligence, Grok, QwenClou
 - QwenCloud accepts a `DASHSCOPE_API_KEY` and defaults to `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`.
 - OpenAI API mode accepts an `OPENAI_API_KEY` and defaults to `https://api.openai.com/v1` on macOS and iPadOS. On macOS, the separate **ChatGPT plan** tab can instead reuse an existing Codex **Sign in with ChatGPT** session: install the Codex CLI, run `codex login`, and select that authentication mode in AudioReader. This is an unofficial integration and may violate OpenAI's terms; review the linked current terms before using it. AudioReader prefers the native executable included with Codex installations, so an npm-installed Codex does not require `node` to be present in the Finder app's `PATH`; if only the JavaScript launcher is available, AudioReader adds its sibling Node directory for that process. AudioReader asks Codex to run an ephemeral, read-only, tool-disabled request and never reads or displays its cached OAuth tokens.
 
-All three API endpoints have provider defaults and remain editable in their API settings. Saved API keys are held in an AES-GCM encrypted local vault; only the vault's random wrapping key is stored as a device-only Keychain item and cached for the running app session. AudioReader never writes API keys into its settings JSON or plaintext credential files. Older per-provider Keychain items and plaintext key files are deleted only after the encrypted value has been written and verified. Environment variables remain externally managed and are never copied into app storage.
+All three API endpoints have provider defaults and remain editable in their API settings. Saved API keys are held in an AES-GCM encrypted local vault; the vault's random wrapping key is a 256-bit file next to the vault and is cached for the running app session. AudioReader never writes API keys into Apple Keychain, its settings JSON, or plaintext credential files. Older per-provider Keychain items and plaintext key files are deleted only after the encrypted value has been written and verified. Environment variables remain externally managed and are never copied into app storage.
 
 After configuration, AudioReader can translate a selected word or sentence, translate or summarise a transcribed chapter, and provide chapter-aware chat. Single-sentence and chapter-batch translation use the same structured learning contract: a natural translation plus categorized notes for phrasal verbs, phrases, idioms, challenging words or combinations, and book-specific concepts. The selected translation language is treated as the reader's mother language, so explanations focus on difficulties relevant to that language and use the book plus nearby previous and next sentences as context.
 
@@ -113,18 +116,74 @@ Core reading-assistant prompts and translation results are provider-neutral. Pro
 
 | Shortcut | Action |
 |---|---|
+| Command–1 | Library |
+| Command–2 | Now Reading |
+| Command–3 | Words |
+| Command–, | Settings |
 | Space | Play or pause |
 | Left / Right arrow | Skip backward or forward |
 | Option–Left / Option–Right | Previous or next sentence |
 | Command–R | Replay the current sentence |
 | Command–L | Toggle sentence loop |
-| Command–D | Toggle Deep Reading |
+| Command–D | Toggle Listen First |
 | Command–Return | Continue with the next sentence |
 | Command–Option–S | Toggle study overlay |
 | Command–K | Mark the selected word known |
 | Command–T | Transcribe the selected chapter |
 
+### Correct a sentence
+
+Use a sentence's **Edit transcript** action to correct its displayed text or
+sentence start/end time, preview the local audio, and save the correction.
+**Restore original** removes the overlay without changing the imported EPUB or
+speech-recognition result. Corrections must match the source fingerprint, stay
+inside the chapter, last at least 0.25 seconds, and avoid neighboring sentences.
+See [Transcript corrections and Anki export](docs/transcript-corrections-and-anki.md)
+for conflict, translation-staleness, and word-timing limitations.
+
+### Sync and resume
+
+When account sync is enabled, the sidebar and Settings identify the current
+phase and entity—for example preparing changes, uploading vocabulary, applying
+review history, or resolving progress—along with batch, item, pending, and
+conflict counts where available. Completed and failed states retain enough
+detail to understand what finished or needs retrying. **Sync now** retries
+immediately. **Continue** returns to the exact synchronized chapter and
+playback offset. Concurrent progress or transcript corrections require an
+explicit choice instead of being silently overwritten. Audio and EPUB files
+stay local; another device may need the same local media for playback. See
+[Sync and account export](docs/sync-and-account-export.md).
+
+### Learn in AudioReader
+
+**Words** is a complete local-first learning loop rather than an Anki launcher.
+It opens on a shared macOS/iPadOS **Today** page with the exact cards in the
+next session. Its primary action starts due learning cards, then due mature
+reviews, then up to 20 new cards per day. Grades update the card schedule and
+append immutable review history atomically, so a failed save never advances
+the visible session. Today also reports review count, study-day streak, 30-day
+retention, a seven-day due forecast, and progress by book. The separate
+**Vocabulary** page keeps search, book/list/category filters, list management,
+paginated cards, and export available without crowding the study flow. Review
+schedules and history synchronize with the rest of learning data when account
+sync is on; the same workflow remains available offline without an account.
+
+### Export to Anki
+
+Anki is an optional alternative and interoperability path. In **Words**, select
+entries and choose **Export to Anki**, or use the current
+filtered view, My List, or All Vocabulary scope. AudioReader creates a
+ZIP with `notes.tsv`, `manifest.json`, and deduplicated flat M4A clips. Missing
+or protected media produces text-only cards and an omission report instead of
+failing the export. Extract the ZIP before importing the TSV into Anki Desktop;
+the detailed temporary-profile procedure is in
+[Transcript corrections and Anki export](docs/transcript-corrections-and-anki.md#export-vocabulary-for-anki).
+
 ## Limitations
+
+The prioritization and evidence behind the recovery, continuity, study-export,
+and incident-first changes are recorded in
+[Product research: recovery, continuity, and operator trust](docs/product-research-2026-08.md).
 
 - **Protected audiobooks cannot be imported or transcribed.** AudioReader can list some downloaded Apple Books titles, but DRM-protected items remain disabled and must be played in Apple Books. It does not remove or bypass DRM.
 - **Cloud-only Apple Books titles are unavailable.** Download a title first. Even when downloaded, the operating system must expose an unprotected, accessible asset URL before AudioReader can import it.
@@ -134,10 +193,12 @@ Core reading-assistant prompts and translation results are provider-neutral. Pro
 - **EPUB alignment remains probabilistic.** Document-level validation prevents one incidental sentence from trusting a book and keeps untrusted EPUB wording out of LLM and vocabulary workflows, but speech recognition and edition differences can still leave valid passages unmatched. Reordered or weak matches remain spoken text unless the reader explicitly accepts individually verified matches. MOBI and PDF text extraction are not supported.
 - **LLM features are optional.** Apple Intelligence runs on-device when available. Grok, QwenCloud, and OpenAI need valid credentials and network access, may incur provider charges, and can fail because of model availability, account limits, endpoint changes, or unsupported reasoning settings. Text sent to a remote provider is governed by that provider's privacy and usage terms.
 - **Provider-managed login integrations are unofficial.** Reusing Grok Build or a ChatGPT-plan Codex session through AudioReader may not be permitted by the provider's current terms. Review the xAI or OpenAI terms linked in Settings before choosing either mode. Supported API-key modes remain available separately.
-- **Saved API keys use an encrypted local vault.** Provider keys are AES-GCM encrypted and are not stored as Keychain items, in AudioReader settings, or in plaintext app files. One device-only Keychain item protects the vault's wrapping key. Environment-provided keys remain the responsibility of the environment configuration.
+- **Saved API keys use an encrypted local vault.** Provider keys are AES-GCM encrypted and are not stored in Apple Keychain, AudioReader settings, or plaintext app files. A 256-bit wrapping-key file next to the vault protects it. Environment-provided keys remain the responsibility of the environment configuration.
 - **ChatGPT-plan access requires an installed, signed-in Codex on macOS.** AudioReader does not bundle Codex or its OAuth credentials. The standalone Codex installer avoids a Node.js dependency, while AudioReader also supports npm installations by selecting their bundled native binary when available. ChatGPT-plan access is distinct from OpenAI API billing and is unavailable on iPadOS; use an OpenAI API key there. Model access and usage limits depend on the signed-in ChatGPT plan.
 - **Publisher permissions still apply.** Possessing an accessible audio file or RSS URL does not necessarily grant permission to transcribe, translate, summarise, or otherwise process it. Use AudioReader only with content you are authorized to process.
-- **Data is local to each installation.** There is no built-in cross-device library, transcript, vocabulary, or playback-position synchronization.
+- **Source media stays on each installation.** Optional product sign-in can synchronize small reading records—including progress, vocabulary, transcripts, and transcript overlays—but never uploads audiobook, EPUB, provider credentials, or Anki clip media. See [Sync and account export](docs/sync-and-account-export.md).
+- **Transcript corrections are sentence-level.** They can change resolved sentence text and bounds but do not perform forced word alignment. The immutable imported/ASR base remains the source of the original word timings.
+- **Anki export is TSV plus local media, not `.apkg`.** Anki Desktop does not import AudioReader's transport ZIP directly; extract it, copy the flat clips into the temporary profile's media folder, then import `notes.tsv`.
 - **Chapter summaries and chat history are session-only.** They are kept while the app is running but are not restored after relaunch. Accepted vocabulary translations and chapter-translation checkpoints are persisted.
 - **Background execution is platform-controlled.** Long transcription or chapter-AI work can be interrupted if the operating system suspends or terminates the app; retained progress is best effort.
 - **This is a development build.** It requires current Apple platform tooling and has not been presented as an App Store release.

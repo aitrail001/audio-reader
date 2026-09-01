@@ -1,0 +1,6 @@
+{
+  "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.example",
+  "refreshToken": "rt_example_not_a_secret",
+  "expiresAt": "2026-08-26T10:15:30Z",
+  "tokenType": "Bearer"
+}

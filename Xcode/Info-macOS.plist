@@ -20,6 +20,19 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.johnsonzhang.AudioReader.auth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>audioreader</string>
+			</array>
+		</dict>
+	</array>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>NSAppleEventsUsageDescription</key>
@@ -32,5 +45,12 @@
 	<string>AudioReader listens while you dictate a chapter question or speak a sentence for shadowing practice.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>AudioReader uses on-device speech recognition for chapter questions and for scoring how closely you spoke the current sentence.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>ProductAPIBaseURL</key>
+	<string>https://audio-reader-api-worker-production.audio-reader-service.workers.dev</string>
 </dict>
 </plist>

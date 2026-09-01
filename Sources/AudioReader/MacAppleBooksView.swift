@@ -4,8 +4,12 @@ import SwiftUI
 
 struct MacAppleBooksView: View {
     @Bindable var library: MacAppleBooksLibrary
+    @Binding var pendingDuplicateImport: MacAppleBookItem?
     let importingID: String?
+    let companionBookTitle: String?
+    let companionRequirement: MacAppleBooksCompanionRequirement?
     let onImport: (MacAppleBookItem) -> Void
+    let onConfirmDuplicate: (MacAppleBookItem) -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -14,7 +18,9 @@ struct MacAppleBooksView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Apple Books")
                         .font(.system(size: 22, weight: .semibold))
-                    Text("Downloaded MP3, M4A, and M4B audiobooks stored by Apple Books")
+                    Text(companionBookTitle.map {
+                        "\(companionRequirement?.prompt ?? "Choose companion media.") Add it to \($0)"
+                    } ?? "Accessible downloaded audiobooks and non-DRM EPUB books stored by Apple Books")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -34,8 +40,9 @@ struct MacAppleBooksView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Section("Audiobooks") {
+                Section("Downloaded Books") {
                     ForEach(library.items) { item in
+                        let isCompatibleCompanion = companionRequirement?.accepts(item.kind) ?? true
                         HStack(spacing: 14) {
                             cover(item)
                             VStack(alignment: .leading, spacing: 4) {
@@ -45,13 +52,18 @@ struct MacAppleBooksView: View {
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                                 if item.isProtected {
-                                    Label("Protected — unavailable for transcription", systemImage: "lock.fill")
+                                    Label("Protected or unreadable — unavailable to AudioReader", systemImage: "lock.fill")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 } else {
-                                    Text(formatClock(item.duration))
+                                    Text(item.kind == .ebook ? "EPUB book" : formatClock(item.duration))
                                         .font(.caption.monospacedDigit())
                                         .foregroundStyle(.secondary)
+                                    if companionRequirement != nil, !isCompatibleCompanion {
+                                        Text("This book needs a different media type")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                             }
                             Spacer()
@@ -60,10 +72,16 @@ struct MacAppleBooksView: View {
                             if importingID == item.id {
                                 ProgressView().controlSize(.small)
                             } else {
-                                Button("Import") { onImport(item) }
+                                Button(companionBookTitle == nil ? "Import" : "Add") { onImport(item) }
                                     .buttonStyle(.borderedProminent)
                                     .tint(Palette.terracotta)
-                                    .disabled(!item.canImport || importingID != nil)
+                                    .disabled(!item.canImport || !isCompatibleCompanion || importingID != nil)
+                                    .accessibilityLabel(companionBookTitle == nil
+                                        ? "Import \(item.title)"
+                                        : "Add \(item.title) to \(companionBookTitle ?? "selected book")")
+                                    .accessibilityIdentifier(companionBookTitle == nil
+                                        ? "library.importAppleBooks.\(item.id)"
+                                        : "library.addAppleBooksCompanion.\(item.id)")
                             }
                         }
                         .padding(.vertical, 5)
@@ -75,9 +93,9 @@ struct MacAppleBooksView: View {
                     ProgressView("Reading Apple Books…")
                 } else if library.items.isEmpty {
                     ContentUnavailableView(
-                        "No audiobooks found",
+                        "No accessible books found",
                         systemImage: "books.vertical",
-                        description: Text("Download an audiobook in Apple Books, then refresh. Cloud-only titles are not stored on this Mac and cannot be listed here.")
+                        description: Text("Download an audiobook or DRM-free EPUB in Apple Books, then refresh. Cloud-only, protected, and files macOS does not grant access to cannot be imported.")
                     )
                 }
             }
@@ -95,6 +113,18 @@ struct MacAppleBooksView: View {
         .frame(minWidth: 760, minHeight: 560)
         .task {
             if library.items.isEmpty { await library.reload() }
+        }
+        .alert("Import another copy?", isPresented: Binding(
+            get: { pendingDuplicateImport != nil },
+            set: { if !$0 { pendingDuplicateImport = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { pendingDuplicateImport = nil }
+            Button("Import Another Copy") {
+                guard let item = pendingDuplicateImport else { return }
+                onConfirmDuplicate(item)
+            }
+        } message: {
+            Text("“\(pendingDuplicateImport?.title ?? "This book")” is already in your AudioReader library. Import another copy anyway?")
         }
     }
 

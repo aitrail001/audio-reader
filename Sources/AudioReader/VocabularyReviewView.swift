@@ -9,15 +9,29 @@ struct VocabularyReviewView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var currentIndex = 0
+    @State private var occurrenceIndex = 0
     @State private var isRevealed = false
     @State private var reviewedCount = 0
     @State private var dictHeight: CGFloat = 160
     @State private var showDictionaryEntry = false
+    @State private var dictionaryPresentation = VocabularyDictionaryPresentation.empty
+    @State private var completionDescription = "Review complete."
+    @State private var isPreparingAnswer = false
+    @State private var isSavingReview = false
+
+    private var card: VocabularyStudyCard? {
+        guard entryIDs.indices.contains(currentIndex) else { return nil }
+        return VocabularyStudyCards.card(containing: entryIDs[currentIndex], in: state.vocab)
+    }
+
+    private var reviewOccurrence: VocabEntry? {
+        guard let card, card.occurrences.indices.contains(occurrenceIndex) else { return card?.occurrences.first }
+        return card.occurrences[occurrenceIndex]
+    }
 
     private var entry: VocabEntry? {
-        guard entryIDs.indices.contains(currentIndex) else { return nil }
-        let id = entryIDs[currentIndex]
-        return state.vocab.first { $0.id == id }
+        guard let card, let reviewOccurrence else { return nil }
+        return reviewOccurrence.applyingStudySchedule(card.schedule)
     }
 
     private var reviewCardMinimumHeight: CGFloat {
@@ -31,8 +45,8 @@ struct VocabularyReviewView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if let entry {
-                    review(entry)
+                if let card {
+                    review(card)
                 } else {
                     completion
                 }
@@ -41,11 +55,14 @@ struct VocabularyReviewView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { dismiss() }
+                        .disabled(isSavingReview)
                 }
             }
         }
+        .interactiveDismissDisabled(isSavingReview)
         .background(Palette.bg)
         .onChange(of: currentIndex) { _, _ in
+            occurrenceIndex = 0
             state.stopVocabSentencePlayback()
         }
         .onDisappear {
@@ -53,19 +70,47 @@ struct VocabularyReviewView: View {
         }
     }
 
-    private func review(_ entry: VocabEntry) -> some View {
-        ScrollView {
+    private func review(_ card: VocabularyStudyCard) -> some View {
+        let entry = reviewOccurrence?.applyingStudySchedule(card.schedule) ?? card.studyEntry
+        return ScrollView {
             VStack(spacing: 18) {
                 HStack {
                     Text("Card \(currentIndex + 1) of \(entryIDs.count)")
                     Spacer()
-                    Text("\(prompt(for: entry).title) · \(entry.category.title)")
+                    Text("\(learningStage(for: entry)) · \(prompt(for: entry).title) · \(entry.category.title)")
                 }
                 .font(.caption.weight(.medium))
                 .foregroundStyle(Palette.dim)
 
                 VocabOriginalPlayButton(state: state, entry: entry)
                     .frame(maxWidth: .infinity, alignment: .leading)
+
+                if card.occurrences.count > 1 {
+                    HStack {
+                        Button("Previous occurrence") {
+                            occurrenceIndex = max(0, occurrenceIndex - 1)
+                        }
+                        .disabled(occurrenceIndex == 0)
+                        Spacer()
+                        Text("Occurrence \(occurrenceIndex + 1) of \(card.occurrences.count)")
+                            .font(.caption)
+                            .foregroundStyle(Palette.dim)
+                        Spacer()
+                        Button("Next occurrence") {
+                            occurrenceIndex = min(card.occurrences.count - 1, occurrenceIndex + 1)
+                        }
+                        .disabled(occurrenceIndex == card.occurrences.count - 1)
+                    }
+                }
+
+                Button {
+                    if let reviewOccurrence, state.jumpToVocab(reviewOccurrence) { dismiss() }
+                } label: {
+                    Label("Open in text", systemImage: "text.alignleft")
+                }
+                .buttonStyle(.bordered)
+                .disabled(reviewOccurrence == nil)
+                .accessibilityHint("Opens this exact occurrence in its source chapter.")
 
                 Group {
                     if isRevealed {
@@ -82,13 +127,21 @@ struct VocabularyReviewView: View {
                     qualityButtons(for: entry)
                         .transition(.opacity)
                 } else {
-                    Button("Show answer") {
-                        isRevealed = true
+                    Button {
+                        reveal(entry)
+                    } label: {
+                        if isPreparingAnswer {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("Show answer")
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Palette.gold)
                     .foregroundStyle(Palette.inkOnGold)
                     .controlSize(.large)
+                    .disabled(isPreparingAnswer)
                     .keyboardShortcut(.space, modifiers: [])
                     .accessibilityHint("Flips the card to show the translation and dictionary entry.")
                 }
@@ -101,12 +154,12 @@ struct VocabularyReviewView: View {
 
     private func front(of entry: VocabEntry) -> some View {
         Button {
-            isRevealed = true
+            reveal(entry)
         } label: {
             VStack(alignment: .leading, spacing: 22) {
                 switch prompt(for: entry) {
                 case .recognition:
-                    Text(entry.word)
+                    Text(entry.studyForm)
                         .font(.system(.largeTitle, design: .serif, weight: .semibold))
                         .foregroundStyle(Palette.ink)
                         .textSelection(.enabled)
@@ -124,7 +177,7 @@ struct VocabularyReviewView: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 case .reverse:
-                    Text(VocabReversePrompt.promptText(for: entry) ?? entry.word)
+                    Text(VocabReversePrompt.promptText(for: entry) ?? entry.studyForm)
                         .font(.system(.title, design: .serif, weight: .semibold))
                         .foregroundStyle(Palette.ink)
                         .fixedSize(horizontal: false, vertical: true)
@@ -153,13 +206,13 @@ struct VocabularyReviewView: View {
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(entry.word). \(entry.context). From \(entry.bookTitle), \(entry.chapterTitle).")
+        .accessibilityLabel("\(entry.studyForm). \(entry.context). From \(entry.bookTitle), \(entry.chapterTitle).")
         .accessibilityHint("Double tap to show the answer.")
     }
 
     private func back(of entry: VocabEntry) -> some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text(entry.word)
+            Text(entry.studyForm)
                 .font(.system(.title, design: .serif, weight: .semibold))
                 .foregroundStyle(Palette.ink)
                 .textSelection(.enabled)
@@ -170,12 +223,12 @@ struct VocabularyReviewView: View {
                 }
             }
 
-            if dictionaryHTML(for: entry) != nil || !dictionarySummary(for: entry).isEmpty {
+            if dictionaryPresentation.html != nil || !dictionaryPresentation.summary.isEmpty {
                 answerSection(entry.dictionaryName.map { "Apple Dictionary · \($0)" } ?? "Apple Dictionary") {
-                    if !dictionarySummary(for: entry).isEmpty {
-                        DictionarySummaryView(lines: dictionarySummary(for: entry))
+                    if !dictionaryPresentation.summary.isEmpty {
+                        DictionarySummaryView(lines: dictionaryPresentation.summary)
                     }
-                    if let html = dictionaryHTML(for: entry) {
+                    if let html = dictionaryPresentation.html {
                         Button(showDictionaryEntry ? "Hide full entry" : "Show full dictionary entry") {
                             showDictionaryEntry.toggle()
                         }
@@ -192,7 +245,7 @@ struct VocabularyReviewView: View {
             }
 
             if entry.translation?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
-               dictionarySummary(for: entry).isEmpty {
+               dictionaryPresentation.summary.isEmpty {
                 ContentUnavailableView(
                     "No saved answer",
                     systemImage: "text.book.closed",
@@ -249,6 +302,7 @@ struct VocabularyReviewView: View {
         }
         .buttonStyle(.borderedProminent)
         .tint(quality.tint)
+        .disabled(isSavingReview)
         .accessibilityHint("Schedules the next review in \(quality.intervalLabel(for: entry)).")
     }
 
@@ -265,27 +319,69 @@ struct VocabularyReviewView: View {
         }
     }
 
-    private var completionDescription: String {
-        let count = "You reviewed \(reviewedCount) \(reviewedCount == 1 ? "card" : "cards")."
-        let sessionIDs = Set(entryIDs)
-        let sessionEntries = state.vocab.filter { sessionIDs.contains($0.id) }
-        guard let next = VocabReviewScheduler.nextReviewDate(in: sessionEntries, after: Date()) else {
-            return count
+    private func grade(_ entry: VocabEntry, quality: VocabReviewQuality) {
+        guard !isSavingReview else { return }
+        isSavingReview = true
+        Task { @MainActor in
+            defer { isSavingReview = false }
+            guard await state.reviewVocabulary(
+                card?.id ?? entry.id,
+                occurrenceID: reviewOccurrence?.id,
+                quality: quality,
+                face: prompt(for: entry)
+            ) else { return }
+            let nextReviewedCount = reviewedCount + 1
+            if currentIndex + 1 >= entryIDs.count {
+                let entries = state.vocab
+                let events = state.vocabReviewEvents
+                let sessionIDs = entryIDs
+                completionDescription = await Task.detached(priority: .utility) {
+                    VocabularyReviewCompletion.description(
+                        reviewedCount: nextReviewedCount,
+                        entryIDs: sessionIDs,
+                        entries: entries,
+                        events: events,
+                        at: Date()
+                    )
+                }.value
+            }
+            reviewedCount = nextReviewedCount
+            currentIndex += 1
+            isRevealed = false
+            showDictionaryEntry = false
+            dictionaryPresentation = .empty
+            dictHeight = 160
         }
-        return "\(count) Next round: \(next.formatted(date: .abbreviated, time: .shortened))."
     }
 
-    private func grade(_ entry: VocabEntry, quality: VocabReviewQuality) {
-        state.reviewVocabulary(entry.id, quality: quality)
-        reviewedCount += 1
-        currentIndex += 1
-        isRevealed = false
-        showDictionaryEntry = false
-        dictHeight = 160
+    private func reveal(_ entry: VocabEntry) {
+        guard !isPreparingAnswer else { return }
+        isPreparingAnswer = true
+        let entryID = entry.id
+        Task { @MainActor in
+            let presentation = await Task.detached(priority: .userInitiated) {
+                VocabularyDictionaryPresentation(entry: entry)
+            }.value
+            guard self.entry?.id == entryID else {
+                isPreparingAnswer = false
+                return
+            }
+            dictionaryPresentation = presentation
+            isRevealed = true
+            isPreparingAnswer = false
+        }
     }
 
     private func prompt(for entry: VocabEntry) -> VocabReviewPrompt {
         VocabReversePrompt.effectivePrompt(for: entry, requested: state.vocabReviewPrompt)
+    }
+
+    private func learningStage(for entry: VocabEntry) -> String {
+        switch VocabularyLearningStage.resolve(entry) {
+        case .new: "New"
+        case .learning: "Learning"
+        case .review: "Review"
+        }
     }
 
     private func highlightedSentence(_ entry: VocabEntry) -> Text {
@@ -308,19 +404,27 @@ struct VocabularyReviewView: View {
         }
     }
 
-    private func dictionarySummary(for entry: VocabEntry) -> [String] {
-        DictionaryLookup.concisePreview(
-            definition: entry.definition,
-            html: entry.dictionaryHTML,
-            limit: 3
-        )
-    }
+}
 
-    private func dictionaryHTML(for entry: VocabEntry) -> String? {
-        let source = entry.dictionaryHTML
-            ?? (entry.definition.flatMap { DictionaryLookup.looksLikeMarkup($0) ? $0 : nil })
-        guard let source, !source.isEmpty else { return nil }
-        return DictionaryLookup.displayHTML(source)
+private enum VocabularyReviewCompletion {
+    static func description(
+        reviewedCount: Int,
+        entryIDs: [String],
+        entries: [VocabEntry],
+        events: [StoredReviewEvent],
+        at date: Date
+    ) -> String {
+        let count = "You reviewed \(reviewedCount) \(reviewedCount == 1 ? "card" : "cards")."
+        let snapshot = VocabularyLearningAnalytics.snapshot(entries: entries, events: events, at: date)
+        let progress = "Today: \(snapshot.todayReviewCount). Streak: \(snapshot.streakDays) \(snapshot.streakDays == 1 ? "day" : "days")."
+        let sessionIDs = Set(entryIDs)
+        let sessionEntries = VocabularyStudyCards.cards(entries)
+            .filter { sessionIDs.contains($0.id) }
+            .map(\.studyEntry)
+        guard let next = VocabReviewScheduler.nextReviewDate(in: sessionEntries, after: date) else {
+            return "\(count) \(progress)"
+        }
+        return "\(count) \(progress) Next round: \(next.formatted(date: .abbreviated, time: .shortened))."
     }
 }
 

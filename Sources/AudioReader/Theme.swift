@@ -69,16 +69,17 @@ enum AppAppearance: String, CaseIterable, Identifiable {
 }
 
 enum Palette {
-    static let bg = Color(light: (0.97, 0.95, 0.91), dark: (0.078, 0.067, 0.055))
-    static let panel = Color(light: (0.995, 0.98, 0.955), dark: (0.118, 0.102, 0.086))
-    static let panel2 = Color(light: (0.93, 0.90, 0.85), dark: (0.157, 0.133, 0.110))
+    static let bg = Color(light: (0.965, 0.953, 0.932), dark: (0.072, 0.064, 0.057))
+    static let panel = Color(light: (0.995, 0.988, 0.975), dark: (0.112, 0.100, 0.090))
+    static let panel2 = Color(light: (0.918, 0.899, 0.872), dark: (0.168, 0.149, 0.132))
     static let ink = Color(light: (0.16, 0.12, 0.09), dark: (0.957, 0.929, 0.890))
-    static let dim = Color(light: (0.42, 0.37, 0.32), dark: (0.56, 0.51, 0.47))
-    static let mute = Color(light: (0.55, 0.50, 0.44), dark: (0.365, 0.325, 0.286))
-    static let gold = Color(light: (0.72, 0.50, 0.18), dark: (0.910, 0.722, 0.427))
+    // Secondary copy remains AA-readable on both tonal surfaces; `mute` is for non-text ornament only.
+    static let dim = Color(light: (0.34, 0.29, 0.25), dark: (0.76, 0.72, 0.68))
+    static let mute = Color(light: (0.40, 0.35, 0.30), dark: (0.68, 0.63, 0.58))
+    static let gold = Color(light: (0.55, 0.35, 0.09), dark: (0.925, 0.735, 0.430))
     static let goldSoft = Color(light: (0.91, 0.72, 0.43, 0.22), dark: (0.910, 0.722, 0.427, 0.18))
-    static let terracotta = Color(light: (0.72, 0.32, 0.12), dark: (0.769, 0.361, 0.149))
-    static let line = Color(light: (0, 0, 0, 0.08), dark: (1, 1, 1, 0.06))
+    static let terracotta = Color(light: (0.64, 0.25, 0.08), dark: (0.90, 0.45, 0.20))
+    static let line = Color(light: (0.16, 0.12, 0.09, 0.14), dark: (0.957, 0.929, 0.890, 0.14))
     static let inkOnGold = Color(light: (0.14, 0.10, 0.06), dark: (0.078, 0.067, 0.055))
 }
 

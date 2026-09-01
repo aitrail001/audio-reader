@@ -80,7 +80,7 @@ struct ChapterStudyPresentationTests {
     @MainActor
     @Test("Marking known refreshes the open snapshot instead of leaving a stale empty sheet")
     func markKnownUpdatesOpenSnapshot() {
-        let state = AppState()
+        let state = AppState(composition: .inMemory())
         state.settings.transcriptionLanguage = TranscriptionLanguage.englishUS.rawValue
         state.vocab = []
         state.knownLemmas = []
@@ -209,6 +209,15 @@ struct ChapterQuizTests {
         #expect(session.selections.dropFirst().allSatisfy { $0 == nil })
     }
 
+    @Test("Quiz rationale stays hidden until the learner scores the attempt")
+    func rationaleRequiresAnAttempt() {
+        let quiz = ChapterQuizBuilder.build(segments: quizSegments(), language: "en", limit: 4)
+        var session = ChapterQuizSession(quiz: quiz)
+        #expect(session.visibleRationale(for: 0) == nil)
+        session.isRevealed = true
+        #expect(session.visibleRationale(for: 0) == quiz.questions[0].rationale)
+    }
+
     @Test("Quiz choice identities are unique across every question")
     func choiceIdentitiesAreUnique() {
         let quiz = ChapterQuizBuilder.build(segments: quizSegments(), language: "en", limit: 6)
@@ -280,19 +289,18 @@ struct StudyStreakTests {
     @Test("Study activity round-trips without XP or remote library fields")
     func roundTripsWithoutXP() throws {
         let fixture = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AudioReader-streak-\(UUID().uuidString).json")
+            .appendingPathComponent("AudioReader-streak-\(UUID().uuidString).sqlite")
         defer { try? FileManager.default.removeItem(at: fixture) }
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         let day = Date(timeIntervalSince1970: 1_800_000_000)
         let log = StudyActivityLog.empty.recording(on: day, calendar: calendar)
-        Persistence.saveStudyActivityLog(log, to: fixture)
-        let loaded = Persistence.loadStudyActivityLog(from: fixture)
+        let store = LocalSQLiteStore(fileURL: fixture)
+        try store.saveStudyActivityDays(log.days)
+        let loaded = StudyActivityLog(days: try LocalSQLiteStore(fileURL: fixture).loadStudyActivityDays())
         #expect(loaded.days == log.days)
-        let encoded = try String(contentsOf: fixture, encoding: .utf8)
-        #expect(!encoded.contains("xp"))
-        #expect(!encoded.contains("leaderboard"))
-        #expect(!encoded.contains("libraryURL"))
+        #expect(try !store.columnNames(in: "local_study_activity").contains("xp"))
+        #expect(try !store.tableNames().contains("leaderboard"))
     }
 }
 
@@ -318,26 +326,21 @@ struct StudyOverlayChromeContractTests {
         #expect(!wordToken.contains("if studyOverlayEnabled, !dimmed, familiarity != .known"))
     }
 
-    @Test("Chapter words uses a snapshot sheet and a real Mac button outside the Reading menu")
+    @Test("Chapter words uses a snapshot sheet from the native macOS toolbar")
     func chapterWordsUsesSnapshotSheet() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
         let listView = try source("Sources/AudioReader/ChapterStudyListView.swift")
         let macRoot = try source("Sources/AudioReader/RootView.swift")
         let iPadRoot = try source("Sources/AudioReader/IPadRootView.swift")
         let app = try source("Sources/AudioReader/AudioReaderApp.swift")
-        let expandedHeader = try section(
+        let compactHeader = try section(
             in: playerView,
-            from: "    private var desktopExpandedHeaderControls",
-            to: "    private var desktopCompactHeaderControls"
-        )
-        let expandedMenu = try section(
-            in: expandedHeader,
-            from: "            Menu {",
-            to: "            } label: {"
+            from: "    private var desktopCompactHeaderControls",
+            to: "    private var desktopExpandedPlaybackControls"
         )
 
-        #expect(expandedHeader.contains("Button(\"Chapter words\")"))
-        #expect(!expandedMenu.contains("Button(\"Chapter words\")"))
+        #expect(compactHeader.contains("sharedReadingMenu"))
+        #expect(playerView.contains("Button(\"Chapter words\")"))
         #expect(playerView.contains("presentChapterStudyList()"))
         #expect(app.contains("presentChapterStudyList()"))
         #expect(macRoot.contains(".sheet(item: $state.chapterStudyPresentation)"))
@@ -360,7 +363,7 @@ struct StudyOverlayChromeContractTests {
         let body = try section(
             in: playerView,
             from: "    var body: some View {",
-            to: "    private var ebookMissingNotice"
+            to: "    private var readerProgressConflictBanner"
         )
         #expect(!body.contains("player.currentTime"))
         #expect(!body.contains("currentReaderPosition"))

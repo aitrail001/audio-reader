@@ -334,7 +334,7 @@ struct StudyIndexCacheTests {
     @MainActor
     @Test("Marking known updates the cached chapter index without requiring a view pass")
     func cachedIndexUpdatesWhenMarkingKnown() {
-        let state = AppState()
+        let state = AppState(composition: .inMemory())
         state.settings.transcriptionLanguage = TranscriptionLanguage.englishUS.rawValue
         state.vocab = []
         state.knownLemmas = []
@@ -433,7 +433,7 @@ struct KnownLemmaPersistenceTests {
     @Test("Known lemmas round-trip language and form")
     func roundTripsLanguageAndForm() throws {
         let fixture = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AudioReader-known-\(UUID().uuidString).json")
+            .appendingPathComponent("AudioReader-known-\(UUID().uuidString).sqlite")
         defer { try? FileManager.default.removeItem(at: fixture) }
 
         let records = KnownLemmaStore.upsert(
@@ -441,8 +441,9 @@ struct KnownLemmaPersistenceTests {
             into: [],
             at: Date(timeIntervalSince1970: 2_000_000)
         )
-        Persistence.saveKnownLemmas(records, to: fixture)
-        let loaded = Persistence.loadKnownLemmas(from: fixture)
+        let store = LocalSQLiteStore(fileURL: fixture)
+        try store.saveKnownLemmas(records.map(StoredKnownLemma.init))
+        let loaded = try LocalSQLiteStore(fileURL: fixture).loadKnownLemmas().map(KnownLemmaRecord.init)
 
         #expect(loaded.map(\.form) == ["forest"])
         #expect(loaded.first?.language == "en")
@@ -468,7 +469,7 @@ struct KnownLemmaPersistenceTests {
     @MainActor
     @Test("Marking known does not delete vocabulary and uses the audiobook language")
     func markDoesNotRemoveVocabOrUseGlossLanguage() {
-        let state = AppState()
+        let state = AppState(composition: .inMemory())
         state.settings.targetLanguage = StudyLanguage.zhHans.rawValue
         state.settings.transcriptionLanguage = TranscriptionLanguage.englishUS.rawValue
         let word = TranscriptWord(id: "w1", text: "Forest.", start: 0.2, end: 0.6, confidence: nil)

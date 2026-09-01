@@ -1,5 +1,15 @@
 import Foundation
 import CryptoKit
+#if canImport(AudioReaderDomain)
+// Re-export so other AudioReader files see Domain IDs under SPM; Xcode compiles those sources into this module.
+@_exported import AudioReaderDomain
+#endif
+#if canImport(AudioReaderLocalStore)
+@_exported import AudioReaderLocalStore
+#endif
+#if canImport(AudioReaderNetworking)
+@_exported import AudioReaderNetworking
+#endif
 
 enum AppVersion {
     static var marketing: String {
@@ -17,6 +27,14 @@ enum BookSource: String, Codable, Sendable {
     case localFolder
     case files
     case deviceAudiobooks
+    case appleBooks
+}
+
+enum BookMediaAvailability: String, Codable, Hashable, Sendable {
+    case audioOnly
+    case ebookOnly
+    case audioAndEbook
+    case metadataOnly
 }
 
 struct Book: Identifiable, Hashable, Codable, Sendable {
@@ -28,6 +46,17 @@ struct Book: Identifiable, Hashable, Codable, Sendable {
     var ebookPath: String?
     var chapters: [Chapter]
     var source: BookSource = .localFolder
+
+    var mediaAvailability: BookMediaAvailability {
+        let hasAudio = chapters.contains(where: \.hasAudio)
+        if hasAudio { return ebookPath == nil ? .audioOnly : .audioAndEbook }
+        return ebookPath == nil ? .metadataOnly : .ebookOnly
+    }
+
+    var bookID: BookID {
+        get { BookID(rawValue: id) }
+        set { id = newValue.rawValue }
+    }
 }
 
 struct Chapter: Identifiable, Hashable, Codable, Sendable {
@@ -37,8 +66,15 @@ struct Chapter: Identifiable, Hashable, Codable, Sendable {
     var audioPath: String
     var duration: TimeInterval?
     var startTime: TimeInterval?
+    var ebookSectionIndex: Int? = nil
 
     var audioStart: TimeInterval { startTime ?? 0 }
+    var hasAudio: Bool { ebookSectionIndex == nil && !audioPath.isEmpty }
+
+    var chapterID: ChapterID {
+        get { ChapterID(rawValue: id) }
+        set { id = newValue.rawValue }
+    }
 }
 
 struct TranscriptWord: Identifiable, Hashable, Codable, Sendable {
@@ -121,15 +157,71 @@ struct TranscriptSegment: Identifiable, Hashable, Codable, Sendable {
     var individualEbookMatchTrusted: Bool? = nil
     /// Separate document-level gate. A strong sentence match is insufficient by itself.
     var documentEbookUseAllowed: Bool? = nil
+    /// Presentation-only overlay text. It is deliberately excluded from Codable
+    /// so saving a resolved view can never rewrite immutable ASR/EPUB source.
+    var resolvedOverlayText: String? = nil
+
+    init(
+        id: String,
+        start: TimeInterval,
+        end: TimeInterval,
+        words: [TranscriptWord],
+        ebookText: String? = nil,
+        alignmentScore: Double? = nil,
+        individualEbookMatchTrusted: Bool? = nil,
+        documentEbookUseAllowed: Bool? = nil,
+        resolvedOverlayText: String? = nil
+    ) {
+        self.id = id
+        self.start = start
+        self.end = end
+        self.words = words
+        self.ebookText = ebookText
+        self.alignmentScore = alignmentScore
+        self.individualEbookMatchTrusted = individualEbookMatchTrusted
+        self.documentEbookUseAllowed = documentEbookUseAllowed
+        self.resolvedOverlayText = resolvedOverlayText
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, start, end, words, ebookText, alignmentScore
+        case individualEbookMatchTrusted, documentEbookUseAllowed
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        start = try container.decode(TimeInterval.self, forKey: .start)
+        end = try container.decode(TimeInterval.self, forKey: .end)
+        words = try container.decode([TranscriptWord].self, forKey: .words)
+        ebookText = try container.decodeIfPresent(String.self, forKey: .ebookText)
+        alignmentScore = try container.decodeIfPresent(Double.self, forKey: .alignmentScore)
+        individualEbookMatchTrusted = try container.decodeIfPresent(Bool.self, forKey: .individualEbookMatchTrusted)
+        documentEbookUseAllowed = try container.decodeIfPresent(Bool.self, forKey: .documentEbookUseAllowed)
+        resolvedOverlayText = nil
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(start, forKey: .start)
+        try container.encode(end, forKey: .end)
+        try container.encode(words, forKey: .words)
+        try container.encodeIfPresent(ebookText, forKey: .ebookText)
+        try container.encodeIfPresent(alignmentScore, forKey: .alignmentScore)
+        try container.encodeIfPresent(individualEbookMatchTrusted, forKey: .individualEbookMatchTrusted)
+        try container.encodeIfPresent(documentEbookUseAllowed, forKey: .documentEbookUseAllowed)
+    }
 
     var spokenText: String {
-        words.map(\.text).joined()
+        if let resolvedOverlayText { return resolvedOverlayText }
+        return words.map(\.text).joined()
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var displayText: String {
-        trustedEbookText ?? spokenText
+        resolvedOverlayText ?? trustedEbookText ?? spokenText
     }
 
     var trustedEbookText: String? {
@@ -272,17 +364,20 @@ struct LibraryScanProgress: Equatable, Sendable {
 struct BackgroundJobOrigin: Equatable, Sendable {
     var bookID: String?
     var bookTitle: String
+    var author: String
     var chapterID: String?
     var chapterTitle: String
 
     init(
         bookID: String? = nil,
         bookTitle: String,
+        author: String = "",
         chapterID: String? = nil,
         chapterTitle: String
     ) {
         self.bookID = bookID
         self.bookTitle = bookTitle
+        self.author = author
         self.chapterID = chapterID
         self.chapterTitle = chapterTitle
     }
@@ -301,6 +396,16 @@ struct BackgroundJob: Identifiable, Equatable, Sendable {
     enum State: String, Sendable {
         case queued
         case running
+        case completed
+        case failed
+        case cancelled
+
+        var isTerminal: Bool {
+            switch self {
+            case .completed, .failed, .cancelled: true
+            case .queued, .running: false
+            }
+        }
     }
 
     var id: UUID
@@ -311,9 +416,11 @@ struct BackgroundJob: Identifiable, Equatable, Sendable {
     var chapterID: String?
     var chapterTitle: String
     var targetID: String?
+    var language: String?
     var stage: String
     var detail: String
     var fraction: Double?
+    var chapterSummaryPhase: ChapterSummaryProgress.Phase?
 
     init(
         id: UUID = UUID(),
@@ -324,9 +431,11 @@ struct BackgroundJob: Identifiable, Equatable, Sendable {
         chapterID: String? = nil,
         chapterTitle: String,
         targetID: String? = nil,
+        language: String? = nil,
         stage: String,
         detail: String,
-        fraction: Double?
+        fraction: Double?,
+        chapterSummaryPhase: ChapterSummaryProgress.Phase? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -336,9 +445,11 @@ struct BackgroundJob: Identifiable, Equatable, Sendable {
         self.chapterID = chapterID
         self.chapterTitle = chapterTitle
         self.targetID = targetID
+        self.language = language
         self.stage = stage
         self.detail = detail
         self.fraction = fraction
+        self.chapterSummaryPhase = chapterSummaryPhase
     }
 
     var origin: BackgroundJobOrigin {
@@ -362,6 +473,48 @@ struct BackgroundJob: Identifiable, Equatable, Sendable {
     }
 }
 
+/// Chapter-summary progress describes observable work phases only; providers do not
+/// expose trustworthy token completion, so every phase remains indeterminate.
+struct ChapterSummaryProgress: Equatable, Sendable {
+    enum Phase: String, CaseIterable, Sendable {
+        case queued
+        case preparing
+        case cacheOrRequest
+        case waitingForModel
+        case processing
+        case completed
+        case failed
+        case cancelled
+    }
+
+    var phase: Phase
+    var detail: String
+
+    var stage: String {
+        switch phase {
+        case .queued: "Chapter summary queued"
+        case .preparing: "Preparing chapter summary"
+        case .cacheOrRequest: "Checking cache or requesting summary"
+        case .waitingForModel: "Waiting for model"
+        case .processing: "Processing chapter summary"
+        case .completed: "Chapter summary ready"
+        case .failed: "Chapter summary failed"
+        case .cancelled: "Chapter summary cancelled"
+        }
+    }
+
+    var fraction: Double? { nil }
+
+    var isTerminal: Bool {
+        switch phase {
+        case .completed, .failed, .cancelled: true
+        case .queued, .preparing, .cacheOrRequest, .waitingForModel, .processing: false
+        }
+    }
+
+    var accessibilityValue: String { "\(stage). \(detail)" }
+}
+
 struct LLMChatMessage: Identifiable, Hashable, Sendable {
     enum Role: String, Sendable {
         case user
@@ -373,7 +526,7 @@ struct LLMChatMessage: Identifiable, Hashable, Sendable {
     var text: String
 }
 
-enum VocabCategory: String, Codable, CaseIterable, Identifiable, Sendable {
+enum VocabCategory: String, Codable, CaseIterable, Hashable, Identifiable, Sendable {
     case word
     case phrase
     case sentence
@@ -400,6 +553,15 @@ enum VocabCategory: String, Codable, CaseIterable, Identifiable, Sendable {
 struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
     var id: String
     var word: String
+    var canonicalForm: String
+    var partOfSpeech: VocabularyPartOfSpeech
+    var senseID: String?
+    var canonicalizationSource: VocabularyCanonicalizationSource
+    var canonicalizationConfidence: Double
+    var canonicalizationStatus: VocabularyCanonicalizationStatus
+    var canonicalizationTraceID: String?
+    var captureSource: VocabularyCaptureSource
+    var reviewEligible: Bool
     var category: VocabCategory
     var definition: String?
     var dictionaryName: String?
@@ -428,7 +590,9 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
     var isInLearnList: Bool
 
     enum CodingKeys: String, CodingKey {
-        case id, word, category, definition, dictionaryName, dictionaryHTML
+        case id, word, canonicalForm, partOfSpeech, senseID
+        case canonicalizationSource, canonicalizationConfidence, canonicalizationStatus, canonicalizationTraceID
+        case captureSource, reviewEligible, category, definition, dictionaryName, dictionaryHTML
         case translation, translationLanguage, translationModel, sourceLanguage, context, spokenText, ebookText
         case bookID, bookTitle, chapterID, chapterTitle, segmentID, wordID
         case timestamp, addedAt, reviewCount, nextReview
@@ -439,6 +603,15 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
     init(
         id: String,
         word: String,
+        canonicalForm: String? = nil,
+        partOfSpeech: VocabularyPartOfSpeech = .unknown,
+        senseID: String? = nil,
+        canonicalizationSource: VocabularyCanonicalizationSource = .normalized,
+        canonicalizationConfidence: Double = 0.4,
+        canonicalizationStatus: VocabularyCanonicalizationStatus = .needsReview,
+        canonicalizationTraceID: String? = nil,
+        captureSource: VocabularyCaptureSource? = nil,
+        reviewEligible: Bool? = nil,
         category: VocabCategory = .word,
         definition: String? = nil,
         dictionaryName: String? = nil,
@@ -468,6 +641,16 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
     ) {
         self.id = id
         self.word = word
+        self.canonicalForm = canonicalForm ?? word
+        self.partOfSpeech = partOfSpeech
+        self.senseID = senseID
+        self.canonicalizationSource = canonicalizationSource
+        self.canonicalizationConfidence = canonicalizationConfidence
+        self.canonicalizationStatus = canonicalizationStatus
+        self.canonicalizationTraceID = canonicalizationTraceID
+        let resolvedCaptureSource = captureSource ?? Self.defaultCaptureSource(for: category)
+        self.captureSource = resolvedCaptureSource
+        self.reviewEligible = reviewEligible ?? resolvedCaptureSource.defaultReviewEligibility
         self.category = category
         self.definition = definition
         self.dictionaryName = dictionaryName
@@ -501,6 +684,20 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
         id = try c.decode(String.self, forKey: .id)
         word = try c.decode(String.self, forKey: .word)
         category = try c.decodeIfPresent(VocabCategory.self, forKey: .category) ?? .word
+        reviewCount = try c.decodeIfPresent(Int.self, forKey: .reviewCount) ?? 0
+        isInLearnList = try c.decodeIfPresent(Bool.self, forKey: .isInLearnList) ?? false
+        canonicalForm = try c.decodeIfPresent(String.self, forKey: .canonicalForm) ?? word
+        partOfSpeech = try c.decodeIfPresent(VocabularyPartOfSpeech.self, forKey: .partOfSpeech) ?? .unknown
+        senseID = try c.decodeIfPresent(String.self, forKey: .senseID)
+        canonicalizationSource = try c.decodeIfPresent(VocabularyCanonicalizationSource.self, forKey: .canonicalizationSource) ?? .normalized
+        canonicalizationConfidence = try c.decodeIfPresent(Double.self, forKey: .canonicalizationConfidence) ?? 0.4
+        canonicalizationStatus = try c.decodeIfPresent(VocabularyCanonicalizationStatus.self, forKey: .canonicalizationStatus) ?? .needsReview
+        canonicalizationTraceID = try c.decodeIfPresent(String.self, forKey: .canonicalizationTraceID)
+        captureSource = try c.decodeIfPresent(VocabularyCaptureSource.self, forKey: .captureSource)
+            ?? Self.defaultCaptureSource(for: category, reviewed: reviewCount > 0, saved: isInLearnList)
+        reviewEligible = reviewCount > 0
+            ? true
+            : (try c.decodeIfPresent(Bool.self, forKey: .reviewEligible) ?? captureSource.defaultReviewEligibility)
         definition = try c.decodeIfPresent(String.self, forKey: .definition)
         dictionaryName = try c.decodeIfPresent(String.self, forKey: .dictionaryName)
         dictionaryHTML = try c.decodeIfPresent(String.self, forKey: .dictionaryHTML)
@@ -519,14 +716,35 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
         wordID = try c.decodeIfPresent(String.self, forKey: .wordID)
         timestamp = try c.decode(TimeInterval.self, forKey: .timestamp)
         addedAt = try c.decode(Date.self, forKey: .addedAt)
-        reviewCount = try c.decodeIfPresent(Int.self, forKey: .reviewCount) ?? 0
         nextReview = try c.decodeIfPresent(Date.self, forKey: .nextReview)
         lastReviewedAt = try c.decodeIfPresent(Date.self, forKey: .lastReviewedAt)
         lastReviewQuality = try c.decodeIfPresent(VocabReviewQuality.self, forKey: .lastReviewQuality)
         reviewIntervalDays = try c.decodeIfPresent(Double.self, forKey: .reviewIntervalDays) ?? 0
         reviewEaseFactor = try c.decodeIfPresent(Double.self, forKey: .reviewEaseFactor) ?? 2.5
-        isInLearnList = try c.decodeIfPresent(Bool.self, forKey: .isInLearnList) ?? false
         sanitizeDictionaryFields()
+    }
+
+    private static func defaultCaptureSource(for category: VocabCategory) -> VocabularyCaptureSource {
+        switch category {
+        case .word: .explicitWord
+        case .phrase: .explicitPhrase
+        case .sentence: .explicitSentence
+        }
+    }
+
+    private static func defaultCaptureSource(
+        for category: VocabCategory,
+        reviewed: Bool,
+        saved: Bool
+    ) -> VocabularyCaptureSource {
+        guard reviewed || saved else {
+            switch category {
+            case .word: return .explicitWord
+            case .phrase: return .automaticPhraseSuggestion
+            case .sentence: return .acceptedSentenceTranslation
+            }
+        }
+        return defaultCaptureSource(for: category)
     }
 
     mutating func sanitizeDictionaryFields() {
@@ -549,6 +767,15 @@ struct VocabEntry: Identifiable, Hashable, Codable, Sendable {
     }
 }
 
+extension VocabularyCaptureSource {
+    var defaultReviewEligibility: Bool {
+        switch self {
+        case .explicitWord, .explicitPhrase, .explicitSentence: true
+        case .acceptedSentenceTranslation, .automaticPhraseSuggestion: false
+        }
+    }
+}
+
 enum TextRevealKind: String, Equatable, Sendable {
     case word
     case sentence
@@ -563,6 +790,9 @@ enum GlossStatus: String, Codable, Sendable {
     case pending
     case accepted
     case rejected
+    case stale
+    case edited
+    case replaced
 }
 
 struct GlossEntry: Identifiable, Hashable, Codable, Sendable {
@@ -574,6 +804,9 @@ struct GlossEntry: Identifiable, Hashable, Codable, Sendable {
     var text: String
     var status: GlossStatus
     var model: String
+    var promptVersion: String = "local"
+    var modelPolicyHash: String = "local"
+    var sharedCacheEntryID: String? = nil
     var bookID: String?
     var bookTitle: String?
     var chapterID: String?
@@ -594,6 +827,26 @@ struct GlossEntry: Identifiable, Hashable, Codable, Sendable {
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    /// Accepted text derived from a replaced base sentence remains stored for
+    /// provenance, but `stale` keeps it out of normal accepted-result queries.
+    static func stalingAcceptedSentenceTranslations(
+        _ entries: [GlossEntry],
+        chapterID: String,
+        source: String
+    ) -> [GlossEntry] {
+        let normalizedSource = normalize(source)
+        return entries.map { entry in
+            guard entry.kind == .sentence,
+                  entry.status == .accepted,
+                  entry.chapterID == chapterID,
+                  normalize(entry.source) == normalizedSource
+            else { return entry }
+            var stale = entry
+            stale.status = .stale
+            return stale
+        }
+    }
 }
 
 enum GlossBatch {
@@ -608,7 +861,10 @@ enum GlossBatch {
     ) -> [GlossEntry] {
         let normalizedSources = Set(currentSentenceSources.map(GlossEntry.normalize))
         return entries.filter {
-            guard $0.kind == .sentence, $0.language == language, $0.status == .pending else { return false }
+            guard $0.kind == .sentence,
+                  $0.language == language,
+                  $0.status == .pending || $0.status == .edited || $0.status == .replaced
+            else { return false }
             if $0.bookID == bookID, $0.chapterID == chapterID { return true }
             return $0.bookID == legacyBookID
                 && $0.chapterID == legacyChapterID
@@ -698,12 +954,42 @@ struct ChapterTranslationResult: Decodable, Equatable, Sendable {
     var id: String
     var translation: String
     var notes: [Note]
+    var assistantResultID: String?
+    var model: String?
+    var promptVersion: String?
+    var modelPolicyHash: String?
+    var sharedCacheEntryID: String?
+
+    init(
+        id: String,
+        translation: String,
+        notes: [Note] = [],
+        assistantResultID: String? = nil,
+        model: String? = nil,
+        promptVersion: String? = nil,
+        modelPolicyHash: String? = nil,
+        sharedCacheEntryID: String? = nil
+    ) {
+        self.id = id
+        self.translation = translation
+        self.notes = notes
+        self.assistantResultID = assistantResultID
+        self.model = model
+        self.promptVersion = promptVersion
+        self.modelPolicyHash = modelPolicyHash
+        self.sharedCacheEntryID = sharedCacheEntryID
+    }
 
     private enum CodingKeys: String, CodingKey {
         case id
         case translation
         case notes
         case phrases
+        case assistantResultID
+        case model
+        case promptVersion
+        case modelPolicyHash
+        case sharedCacheEntryID
     }
 
     private struct LegacyPhrase: Decodable {
@@ -715,6 +1001,11 @@ struct ChapterTranslationResult: Decodable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         translation = try container.decode(String.self, forKey: .translation)
+        assistantResultID = try container.decodeIfPresent(String.self, forKey: .assistantResultID)
+        model = try container.decodeIfPresent(String.self, forKey: .model)
+        promptVersion = try container.decodeIfPresent(String.self, forKey: .promptVersion)
+        modelPolicyHash = try container.decodeIfPresent(String.self, forKey: .modelPolicyHash)
+        sharedCacheEntryID = try container.decodeIfPresent(String.self, forKey: .sharedCacheEntryID)
         if let decodedNotes = try container.decodeIfPresent([Note].self, forKey: .notes) {
             notes = decodedNotes
         } else {
@@ -855,6 +1146,17 @@ enum ChapterTranslationBatch {
         }
     }
 
+    /// Same grouping as `blocks`, so tapping one sentence reuses the chapter-translation chunk.
+    static func alignedBlock(
+        containing target: TranscriptSegment,
+        in segments: [TranscriptSegment],
+        size: Int
+    ) -> [TranscriptSegment] {
+        blocks(segments, size: size).first { block in
+            block.contains { $0.id == target.id }
+        } ?? [target]
+    }
+
     static func parse(_ raw: String, expectedIDs: [String]) throws -> [ChapterTranslationResult] {
         let parsed = try parseAvailable(raw, expectedIDs: expectedIDs)
         guard parsed.missingIDs.isEmpty else {
@@ -918,6 +1220,7 @@ enum AppTab: String, CaseIterable, Identifiable {
     case library = "Library"
     case player = "Player"
     case vocab = "Words"
+    case settings = "Settings"
 
     var id: String { rawValue }
     var symbol: String {
@@ -925,6 +1228,7 @@ enum AppTab: String, CaseIterable, Identifiable {
         case .library: "books.vertical"
         case .player: "text.alignleft"
         case .vocab: "bookmark"
+        case .settings: "gearshape"
         }
     }
 }

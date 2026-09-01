@@ -7,88 +7,63 @@ struct RootView: View {
     @State private var showMacAppleBooks = false
     @State private var macAppleBooks = MacAppleBooksLibrary()
     @State private var importingAppleBookID: String?
+    @State private var appleBooksCompanionTargetID: String?
+    @State private var appleBooksCompanionRequirement: MacAppleBooksCompanionRequirement?
+    @State private var pendingAppleBooksDuplicate: MacAppleBookItem?
     @State private var pendingMacBookDelete: Book?
     @State private var macBookDeleteError: String?
 #endif
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 300)
-        } detail: {
-            switch state.tab {
-            case .library:
-                LibraryView(state: state)
-            case .player:
-                PlayerView(state: state)
-            case .vocab:
-                VocabularyView(state: state)
+        VStack(spacing: 0) {
+            WorkStatusBanner(
+                library: state.libraryScanProgress,
+                accountMessage: state.account.activityMessage
+            )
+
+            NavigationSplitView {
+                sidebar
+                    .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 300)
+            } detail: {
+                switch state.tab {
+                case .library:
+#if os(macOS)
+                    LibraryView(state: state) { book in
+                        guard let requirement = MacAppleBooksCompanionRequirement(
+                            mediaAvailability: book.mediaAvailability
+                        ) else { return }
+                        pendingAppleBooksDuplicate = nil
+                        appleBooksCompanionTargetID = book.id
+                        appleBooksCompanionRequirement = requirement
+                        showMacAppleBooks = true
+                    }
+#else
+                    LibraryView(state: state)
+#endif
+                case .player:
+                    PlayerView(state: state)
+                case .vocab:
+                    VocabularyView(state: state)
+                case .settings:
+                    SettingsView(state: state)
+                }
             }
+            // The explicit fill keeps a tall detail from pushing the split view above the window,
+            // without reintroducing the macOS safe-area/split-resize constraint feedback crash.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .layoutPriority(1)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Palette.bg)
         .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Picker("Section", selection: $state.tab) {
-                    ForEach(AppTab.allCases) { tab in
-                        Label(tab.rawValue, systemImage: tab.symbol).tag(tab)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 280)
-            }
-            ToolbarItem(placement: .automatic) {
-                Button {
-                    state.chooseLibrary()
-                } label: {
-                    Label("Library folder", systemImage: "folder")
-                }
-            }
-#if os(macOS)
-            ToolbarItem(placement: .automatic) {
-                Menu {
-                    Button(action: importFiles) {
-                        Label("Audiobook Files…", systemImage: "doc.badge.plus")
-                    }
-                    Button(action: importFolder) {
-                        Label("Audiobook Folder…", systemImage: "folder.badge.plus")
-                    }
-                    Divider()
-                    Button {
-                        showMacAppleBooks = true
-                    } label: {
-                        Label("Apple Books…", systemImage: "books.vertical")
-                    }
-                } label: {
-                    Label("Import", systemImage: "square.and.arrow.down")
-                }
-            }
-#endif
-            ToolbarItem(placement: .automatic) {
-                Picker("Theme", selection: $state.settings.appearance) {
-                    ForEach(AppAppearance.allCases) { mode in
-                        Text(mode.menuLabel).tag(mode.rawValue)
-                    }
-                }
-                .onChange(of: state.settings.appearance) { _, _ in state.persistSettings() }
-            }
             if !state.backgroundJobs.isEmpty {
                 ToolbarItem(placement: .automatic) {
                     BackgroundJobsButton(state: state)
                 }
             }
-            ToolbarItem(placement: .automatic) {
-                Button {
-                    state.showSettings = true
-                } label: {
-                    Label("Settings", systemImage: "gear")
-                }
-            }
         }
         .sheet(item: $state.chapterStudyPresentation) { _ in
             ChapterStudyListView(state: state)
-        }
-        .sheet(isPresented: $state.showSettings) {
-            SettingsView(state: state)
         }
         .alert("Could Not Open Background Job", isPresented: Binding(
             get: { state.backgroundJobNavigationError != nil },
@@ -99,11 +74,20 @@ struct RootView: View {
             Text(state.backgroundJobNavigationError ?? "The original chapter is no longer available.")
         }
 #if os(macOS)
-        .sheet(isPresented: $showMacAppleBooks) {
+        .sheet(isPresented: $showMacAppleBooks, onDismiss: {
+            appleBooksCompanionTargetID = nil
+            appleBooksCompanionRequirement = nil
+        }) {
             MacAppleBooksView(
                 library: macAppleBooks,
+                pendingDuplicateImport: $pendingAppleBooksDuplicate,
                 importingID: importingAppleBookID,
-                onImport: importAppleBook
+                companionBookTitle: appleBooksCompanionTargetID.flatMap { targetID in
+                    state.books.first(where: { $0.id == targetID })?.title
+                },
+                companionRequirement: appleBooksCompanionRequirement,
+                onImport: importAppleBook,
+                onConfirmDuplicate: confirmAppleBooksDuplicateImport
             )
         }
         .alert("Import Result", isPresented: Binding(
@@ -135,12 +119,29 @@ struct RootView: View {
             Text(macBookDeleteError ?? "Unknown error")
         }
 #endif
-        .task { await state.boot() }
+        .task {
+#if DEBUG
+            if UITestLaunchScenario.isRequested {
+                UITestLaunchScenario.applyIfRequested(to: state)
+            } else {
+                await state.boot()
+            }
+#else
+            await state.boot()
+#endif
+        }
     }
 
     private var sidebar: some View {
         List(selection: sidebarSelection) {
 #if os(macOS)
+            Section {
+                destinationRow(.library, title: "Library", identifier: "sidebar.library")
+                destinationRow(.player, title: "Now Reading", identifier: "sidebar.nowReading")
+                destinationRow(.vocab, title: "Words", identifier: "sidebar.words")
+                destinationRow(.settings, title: "Settings", identifier: "sidebar.settings")
+            }
+
             Section("Sources") {
                 Button {
                     showMacAppleBooks = true
@@ -148,73 +149,64 @@ struct RootView: View {
                     Label("Apple Books", systemImage: "books.vertical")
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("source.appleBooks")
 
                 Button(action: importFiles) {
                     Label("Files", systemImage: "doc.badge.plus")
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Import Audio or EPUB Files")
+                .accessibilityIdentifier("source.files")
 
                 Button(action: importFolder) {
                     Label("Folders", systemImage: "folder.badge.plus")
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Import Book Folder")
+                .accessibilityIdentifier("source.folders")
+            }
+
+            Section("Cloud") {
+                syncStatus
             }
 #endif
-            Section("Books") {
-                ForEach(state.books) { book in
-                    HStack(spacing: 12) {
-                        if let path = book.coverPath, let img = CoverImageCache.shared.image(for: path) {
-                            Image(platformImage: img)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: 32, height: 32)
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                        } else {
-                            Image(systemName: "book.closed")
-                                .frame(width: 32, height: 32)
-                                .foregroundStyle(Palette.gold)
-                        }
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(book.title)
-                                .font(.system(size: 12, weight: .medium))
-                                .lineLimit(2)
-                            Text("\(state.transcribedChapterCount(in: book))/\(book.chapters.count) transcribed")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .tag(book.id)
-                    .padding(.vertical, 4)
-#if os(macOS)
-                    .contextMenu {
-                        Button(role: .destructive) {
-                            pendingMacBookDelete = book
-                        } label: {
-                            Label("Delete Book", systemImage: "trash")
-                        }
-                    }
-#endif
-                }
-            }
         }
         .listStyle(.sidebar)
     }
 
     private var sidebarSelection: Binding<String?> {
         Binding(
-            get: { state.selectedBookID },
-            set: { id in
-                state.selectedBookID = id
-                guard let id,
-                      let book = state.books.first(where: { $0.id == id })
+            get: { "destination.\(state.tab.rawValue)" },
+            set: { value in
+                guard let raw = value?.replacingOccurrences(of: "destination.", with: ""),
+                      let tab = AppTab(rawValue: raw)
                 else { return }
-                state.selectedChapterID = book.chapters.first?.id
-                state.tab = .library
+                state.tab = tab
             }
         )
     }
 
 #if os(macOS)
+    private func destinationRow(_ tab: AppTab, title: String, identifier: String) -> some View {
+        Label(title, systemImage: tab.symbol)
+            .tag("destination.\(tab.rawValue)")
+            .accessibilityIdentifier(identifier)
+    }
+
+    private var syncStatus: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            AccountSyncStatusView(session: state.account, compact: true)
+            Button {
+                Task { await state.account.synchronize() }
+            } label: {
+                Label("Sync now", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .disabled(state.account.isBusy || !state.account.mode.isSyncEnabled)
+            .accessibilityIdentifier("sync.now")
+        }
+        .padding(.vertical, 4)
+    }
+
     private var libraryRoot: URL {
         URL(fileURLWithPath: state.settings.libraryPath, isDirectory: true)
     }
@@ -269,9 +261,59 @@ struct RootView: View {
         Task {
             defer { importingAppleBookID = nil }
             do {
+                guard let location = item.location else {
+                    throw AudiobookImportError.protectedOrUnavailable
+                }
+                if let targetID = appleBooksCompanionTargetID,
+                   let requirement = appleBooksCompanionRequirement {
+                    guard let book = state.books.first(where: { $0.id == targetID }) else {
+                        throw AudiobookImportError.protectedOrUnavailable
+                    }
+                    let added = try macAppleBooks.addCompanion(
+                        item,
+                        to: URL(fileURLWithPath: book.folderPath, isDirectory: true),
+                        required: requirement
+                    )
+                    macAppleBooks.message = added.isEmpty
+                        ? "That Apple Books file is already attached to \(book.title)."
+                        : "Added \(item.title) to \(book.title)."
+                    importResult = macAppleBooks.message
+                    await state.rescan()
+                    state.selectedBookID = targetID
+                    if !added.isEmpty { showMacAppleBooks = false }
+                    return
+                }
+                let destinationRoot = libraryRoot
+                let preflight = try await Task.detached(priority: .userInitiated) {
+                    try AudiobookImportService.preflightFiles([location], into: destinationRoot)
+                }.value
+                if preflight.requiresConfirmation {
+                    pendingAppleBooksDuplicate = item
+                    return
+                }
                 try macAppleBooks.importAudiobook(item, into: libraryRoot)
                 macAppleBooks.message = "Imported \(item.title) into AudioReader."
                 importResult = "Imported \(item.title) from Apple Books."
+                await state.rescan()
+            } catch {
+                importResult = error.localizedDescription
+            }
+        }
+    }
+
+    private func confirmAppleBooksDuplicateImport(_ item: MacAppleBookItem) {
+        pendingAppleBooksDuplicate = nil
+        importingAppleBookID = item.id
+        Task {
+            defer { importingAppleBookID = nil }
+            do {
+                try macAppleBooks.importAudiobook(
+                    item,
+                    into: libraryRoot,
+                    duplicatePolicy: .confirmedReimport
+                )
+                macAppleBooks.message = "Imported another copy of \(item.title) into AudioReader."
+                importResult = "Imported another copy of \(item.title) from Apple Books."
                 await state.rescan()
             } catch {
                 importResult = error.localizedDescription
@@ -302,7 +344,7 @@ struct BackgroundJobsButton: View {
             }
             .padding(.trailing, 5)
         }
-        .accessibilityLabel("Background jobs, \(state.backgroundJobs.count) queued or running")
+        .accessibilityLabel("Background jobs, \(state.backgroundJobs.count) active or recent")
         .help("Show background jobs")
         .popover(isPresented: $isPresented) {
             BackgroundJobsView(state: state) { job in
@@ -329,9 +371,9 @@ private struct BackgroundJobsView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Label(job.stage, systemImage: job.symbol)
                             .font(.subheadline.weight(.semibold))
-                        Text(job.state == .queued ? "Queued" : "Running")
+                        Text(statusLabel(for: job.state))
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(job.state == .queued ? Palette.mute : Palette.gold)
+                            .foregroundStyle(job.state == .running ? Palette.gold : Palette.mute)
                         Text(job.bookTitle)
                             .font(.subheadline)
                             .lineLimit(2)
@@ -341,9 +383,9 @@ private struct BackgroundJobsView: View {
                             .lineLimit(2)
                         if job.state == .queued {
                             ProgressView(value: 0)
-                        } else if let fraction = job.fraction {
+                        } else if job.state == .running, let fraction = job.fraction {
                             ProgressView(value: fraction)
-                        } else {
+                        } else if job.state == .running {
                             ProgressView()
                         }
                         Text(job.detail)
@@ -355,7 +397,8 @@ private struct BackgroundJobsView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel("\(job.state == .queued ? "Queued" : "Running") \(job.stage), \(job.bookTitle), \(job.chapterTitle)")
+                .accessibilityLabel("\(statusLabel(for: job.state)) \(job.stage), \(job.bookTitle), \(job.chapterTitle)")
+                .accessibilityValue(job.detail)
                 .accessibilityHint("Open this chapter in the player")
                 if job.id != state.backgroundJobs.last?.id {
                     Divider()
@@ -364,5 +407,15 @@ private struct BackgroundJobsView: View {
         }
         .padding(18)
         .frame(width: 320, alignment: .leading)
+    }
+
+    private func statusLabel(for state: BackgroundJob.State) -> String {
+        switch state {
+        case .queued: "Queued"
+        case .running: "Running"
+        case .completed: "Completed"
+        case .failed: "Failed"
+        case .cancelled: "Cancelled"
+        }
     }
 }

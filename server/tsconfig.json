@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["tests/**/*.ts", "e2e/**/*.ts", "vitest.config.ts", "playwright.config.ts"]
+}

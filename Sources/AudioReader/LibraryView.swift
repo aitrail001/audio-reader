@@ -2,30 +2,32 @@ import SwiftUI
 
 struct LibraryView: View {
     @Bindable var state: AppState
+    var onChooseAppleBooksCompanion: (Book) -> Void = { _ in }
     @State private var pendingBookDelete: Book?
+    @State private var companionSourceBook: Book?
     @State private var deleteError: String?
     @State private var bookUpdateResult: String?
+    @State private var query = ""
 
     var body: some View {
-        ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 180, maximum: 220), spacing: 16)], spacing: 24) {
-                ForEach(state.books) { book in
+        VStack(spacing: 0) {
+            libraryHeader
+            if state.books.isEmpty, state.libraryScanProgress == nil {
+                emptyLibrary
+            } else if filteredBooks.isEmpty, state.libraryScanProgress == nil {
+                ContentUnavailableView.search(text: query)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 180, maximum: 230), spacing: 16)], spacing: 20) {
+                        ForEach(filteredBooks) { book in
                     BookCard(
                         book: book,
                         selected: book.id == state.selectedBookID,
-                        transcribedCount: state.transcribedChapterCount(in: book)
+                        transcribedCount: state.transcribedChapterCount(in: book),
+                        onSelect: { select(book) },
+                        onContinue: { continueReading(book) },
+                        onRepair: { chooseCompanionSource(for: book) }
                     )
-                        .onTapGesture {
-                            state.selectedBookID = book.id
-                            state.selectedChapterID = book.chapters.first?.id
-                        }
-#if os(macOS)
-                        .onTapGesture(count: 2) {
-                            if let chapter = book.chapters.first(where: { $0.id == state.selectedChapterID }) ?? book.chapters.first {
-                                state.open(chapter: chapter, in: book, autoplay: false)
-                            }
-                        }
-#endif
                         .contextMenu {
                             Button(role: .destructive) {
                                 pendingBookDelete = book
@@ -33,22 +35,21 @@ struct LibraryView: View {
                                 Label("Delete Book", systemImage: "trash")
                             }
                         }
+                        }
+                    }
+                    .padding(24)
                 }
             }
-            .padding(24)
         }
         .background(Palette.bg)
-        .safeAreaInset(edge: .top, spacing: 0) {
-            if let progress = state.libraryScanProgress, !state.books.isEmpty {
-                LibraryProgressBanner(progress: progress)
-            }
-        }
+        .searchable(text: $query, placement: .toolbar, prompt: "Search title or author")
+        .accessibilityIdentifier("library.search")
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if let book = state.selectedBook {
                 ChapterStrip(
                     state: state,
                     book: book,
-                    onAddEbook: { addCompanionFiles(to: book) },
+                    onAddEbook: { chooseCompanionSource(for: book) },
                     onDelete: { pendingBookDelete = book }
                 )
             }
@@ -97,28 +98,159 @@ struct LibraryView: View {
         } message: {
             Text(bookUpdateResult ?? "")
         }
+#if os(macOS)
+        .confirmationDialog("Add Companion Media", isPresented: Binding(
+            get: { companionSourceBook != nil },
+            set: { if !$0 { companionSourceBook = nil } }
+        )) {
+            Button("Choose Files…") {
+                guard let book = companionSourceBook else { return }
+                companionSourceBook = nil
+                addCompanionFiles(to: book)
+            }
+            if let book = companionSourceBook,
+               MacAppleBooksCompanionRequirement(mediaAvailability: book.mediaAvailability) != nil {
+                Button("Apple Books…") {
+                    companionSourceBook = nil
+                    onChooseAppleBooksCompanion(book)
+                }
+            }
+            Button("Cancel", role: .cancel) { companionSourceBook = nil }
+        } message: {
+            Text(MacAppleBooksCompanionRequirement(
+                mediaAvailability: companionSourceBook?.mediaAvailability ?? .audioAndEbook
+            )?.prompt ?? "Choose ordinary files to update this book.")
+        }
+#endif
     }
+
+    private var filteredBooks: [Book] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return state.books }
+        return state.books.filter {
+            $0.title.localizedCaseInsensitiveContains(trimmed)
+                || ($0.author?.localizedCaseInsensitiveContains(trimmed) ?? false)
+        }
+    }
+
+    private var libraryHeader: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) {
+                libraryTitle
+                Spacer()
+                libraryActions
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                libraryTitle
+                libraryActions
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+        .background(Palette.panel)
+        .overlay(alignment: .bottom) { Divider().overlay(Palette.line) }
+    }
+
+    private var libraryTitle: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Library")
+                .font(.system(.title2, design: .serif, weight: .semibold))
+                .foregroundStyle(Palette.ink)
+            Text("\(state.books.count) book\(state.books.count == 1 ? "" : "s")")
+                .font(.subheadline)
+                .foregroundStyle(Palette.dim)
+        }
+    }
+
+    @ViewBuilder
+    private var libraryActions: some View {
+#if os(macOS)
+        HStack(spacing: 8) {
+            Button(action: importPairedBook) {
+                Label("Import Audio or EPUB", systemImage: "books.vertical.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Palette.terracotta)
+            .accessibilityIdentifier("library.importPaired.toolbar")
+
+            Menu {
+                Button(action: importFolder) {
+                    Label("Import Folder…", systemImage: "folder.badge.plus")
+                }
+                Button { state.chooseLibrary() } label: {
+                    Label("Choose Library Folder…", systemImage: "folder")
+                }
+            } label: {
+                Label("More import options", systemImage: "ellipsis.circle")
+            }
+        }
+#else
+        EmptyView()
+#endif
+    }
+
+    private var emptyLibrary: some View {
+        ContentUnavailableView {
+            Label("Build your reading library", systemImage: "books.vertical")
+        } description: {
+            Text(Persistence.localMediaReimportNotice + " You can attach audio and EPUB files to the same book later.")
+        } actions: {
+#if os(macOS)
+            Button(action: importPairedBook) {
+                Label("Import Audio or EPUB", systemImage: "square.and.arrow.down")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Palette.terracotta)
+            .accessibilityIdentifier("library.importPaired")
+            Button(action: importFolder) {
+                Label("Import a folder", systemImage: "folder.badge.plus")
+            }
+#endif
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func select(_ book: Book) {
+        state.selectedBookID = book.id
+        if !book.chapters.contains(where: { $0.id == state.selectedChapterID }) {
+            state.selectedChapterID = book.chapters.first?.id
+        }
+    }
+
+    private func continueReading(_ book: Book) {
+        _ = state.continueReading(book)
+    }
+
+#if os(macOS)
+    private var libraryRoot: URL {
+        URL(fileURLWithPath: state.settings.libraryPath, isDirectory: true)
+    }
+
+    private func importPairedBook() {
+        do {
+            guard let count = try MacAudiobookImporter.chooseFiles(libraryRoot: libraryRoot) else { return }
+            bookUpdateResult = "Imported \(count) selected file\(count == 1 ? "" : "s")."
+            Task { await state.rescan() }
+        } catch {
+            bookUpdateResult = error.localizedDescription
+        }
+    }
+
+    private func importFolder() {
+        do {
+            guard let name = try MacAudiobookImporter.chooseFolder(libraryRoot: libraryRoot) else { return }
+            bookUpdateResult = "Imported \(name)."
+            Task { await state.rescan() }
+        } catch {
+            bookUpdateResult = error.localizedDescription
+        }
+    }
+#endif
 
     private func deleteBook(_ book: Book) {
 #if os(macOS)
         do {
-            if state.selectedBookID == book.id {
-                state.cancelTranscription()
-                state.player.tearDown()
-                state.selectedBookID = nil
-                state.selectedChapterID = nil
-                state.transcript = nil
-                state.tab = .library
-            }
-            try AudiobookImportService.trashBookFolder(
-                URL(fileURLWithPath: book.folderPath, isDirectory: true),
-                in: URL(fileURLWithPath: state.settings.libraryPath, isDirectory: true)
-            )
-            Task {
-                await state.rescan()
-                state.selectedBookID = state.books.first?.id
-                state.selectedChapterID = state.books.first?.chapters.first?.id
-            }
+            try state.deleteBookFromLibrary(book)
         } catch {
             deleteError = error.localizedDescription
         }
@@ -134,11 +266,19 @@ struct LibraryView: View {
                 : "Added \(added.joined(separator: ", ")) to \(book.title)."
             Task {
                 await state.rescan()
-                state.selectedBookID = state.books.first(where: { $0.title == book.title })?.id
+                state.selectedBookID = book.id
             }
         } catch {
             bookUpdateResult = error.localizedDescription
         }
+#endif
+    }
+
+    private func chooseCompanionSource(for book: Book) {
+#if os(macOS)
+        companionSourceBook = book
+#else
+        addCompanionFiles(to: book)
 #endif
     }
 }
@@ -147,56 +287,106 @@ private struct BookCard: View {
     let book: Book
     let selected: Bool
     let transcribedCount: Int
+    let onSelect: () -> Void
+    let onContinue: () -> Void
+    let onRepair: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Palette.panel2)
-                .aspectRatio(2.0 / 3.0, contentMode: .fit)
-                .overlay {
-                    if let path = book.coverPath, let img = CoverImageCache.shared.image(for: path) {
-                        Image(platformImage: img)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .clipped()
-                    } else {
-                        VStack(spacing: 8) {
-                            Image(systemName: "book.closed")
-                                .font(.system(size: 28, weight: .light))
-                                .foregroundStyle(Palette.gold)
-                            Text(book.title)
-                                .font(.system(.caption, design: .serif))
-                                .foregroundStyle(Palette.dim)
-                                .multilineTextAlignment(.center)
-                                .padding(.horizontal, 12)
+            Button(action: onSelect) {
+                VStack(alignment: .leading, spacing: 8) {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Palette.panel2)
+                        .aspectRatio(2.0 / 3.0, contentMode: .fit)
+                        .overlay {
+                            if let path = book.coverPath, let img = CoverImageCache.shared.image(for: path) {
+                                Image(platformImage: img)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                    .clipped()
+                            } else {
+                                VStack(spacing: 8) {
+                                    Image(systemName: "book.closed")
+                                        .font(.system(size: 28, weight: .light))
+                                        .foregroundStyle(Palette.gold)
+                                    Text(book.title)
+                                        .font(.system(.caption, design: .serif))
+                                        .foregroundStyle(Palette.dim)
+                                        .multilineTextAlignment(.center)
+                                        .padding(.horizontal, 12)
+                                }
+                            }
                         }
-                    }
-                }
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(selected ? Palette.gold : Palette.line, lineWidth: selected ? 2 : 1)
-            )
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(selected ? Palette.gold : Palette.line, lineWidth: selected ? 2 : 1)
+                        )
 
-            Text(book.title)
-                .font(.system(size: 14, weight: .semibold, design: .serif))
-                .foregroundStyle(Palette.ink)
-                .lineLimit(2)
-                .frame(minHeight: 34, alignment: .topLeading)
+                    Text(book.title)
+                        .font(.system(.headline, design: .serif))
+                        .foregroundStyle(Palette.ink)
+                        .lineLimit(2)
+                        .frame(minHeight: 34, alignment: .topLeading)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Select \(book.title)")
+
             HStack {
                 Text(book.author ?? "Unknown author")
                     .foregroundStyle(Palette.dim)
                 Spacer()
-                Text("\(transcribedCount)/\(book.chapters.count) transcribed")
-                    .foregroundStyle(Palette.mute)
+                Text(book.mediaAvailability == .metadataOnly
+                    ? "Local media unavailable — re-import required"
+                    : book.mediaAvailability == .ebookOnly
+                        ? "\(book.chapters.count) readable sections"
+                        : "\(transcribedCount)/\(book.chapters.count) transcribed")
+                    .foregroundStyle(Palette.dim)
             }
-            .font(.system(size: 11))
+            .font(.caption)
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) { cardActions }
+                VStack(alignment: .leading, spacing: 6) { cardActions }
+            }
         }
         .padding(12)
         .background(Palette.panel)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Palette.line, lineWidth: 1)
+        }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(named: "Continue reading") { onContinue() }
+        .accessibilityAction(named: "Repair book pairing") { onRepair() }
+    }
+
+    @ViewBuilder
+    private var cardActions: some View {
+        Button(action: onContinue) {
+            Label("Continue", systemImage: "play.fill")
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(Palette.terracotta)
+        .disabled(book.mediaAvailability == .metadataOnly)
+        .accessibilityIdentifier("library.continue.\(book.id)")
+        Button(action: onRepair) {
+            Label(
+                book.mediaAvailability == .metadataOnly
+                    ? "Re-import Media"
+                    : book.mediaAvailability == .ebookOnly
+                    ? "Add Audio"
+                    : (book.ebookPath == nil ? "Add EPUB" : "Add Files"),
+                systemImage: "wrench.and.screwdriver"
+            )
+        }
+        .buttonStyle(.bordered)
+        .accessibilityIdentifier("library.repair.\(book.id)")
     }
 }
 
@@ -213,23 +403,35 @@ private struct ChapterStrip: View {
                     Text(book.title)
                         .font(.system(size: 15, weight: .semibold, design: .serif))
                         .foregroundStyle(Palette.ink)
-                    Text("\(book.chapters.count) chapters · \(state.transcribedChapterCount(in: book)) transcribed" + (book.ebookPath == nil ? " · audio only" : " · ebook found"))
+                    Text(book.mediaAvailability == .metadataOnly
+                        ? "Local media unavailable — re-import required"
+                        : book.mediaAvailability == .ebookOnly
+                            ? "\(book.chapters.count) readable EPUB sections"
+                            : "\(book.chapters.count) chapters · \(state.transcribedChapterCount(in: book)) transcribed" + (book.ebookPath == nil ? " · audio only" : " · EPUB found"))
                         .font(.system(size: 11))
                         .foregroundStyle(Palette.dim)
                     AudiobookLanguagePicker(state: state, book: book)
                 }
                 Spacer()
                 Button("Open player") {
-                    if let ch = book.chapters.first(where: { $0.id == state.selectedChapterID }) ?? book.chapters.first {
-                        state.open(chapter: ch, in: book, autoplay: false)
-                    }
+                    _ = state.continueReading(book)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Palette.terracotta)
+                .disabled(book.mediaAvailability == .metadataOnly)
+                .accessibilityIdentifier("library.continue")
                 Button(action: onAddEbook) {
-                    Label(book.ebookPath == nil ? "Add EPUB" : "Add Another EPUB", systemImage: "book.pages")
+                    Label(
+                        book.mediaAvailability == .metadataOnly
+                            ? "Re-import Media"
+                            : book.mediaAvailability == .ebookOnly
+                            ? "Add Audio"
+                            : (book.ebookPath == nil ? "Add EPUB" : "Add Files"),
+                        systemImage: "book.pages"
+                    )
                 }
                 .buttonStyle(.bordered)
+                .accessibilityIdentifier("library.repair")
                 Button(role: .destructive, action: onDelete) {
                     Label("Delete", systemImage: "trash")
                 }
@@ -265,30 +467,58 @@ private struct ChapterStrip: View {
             }
         }
         .padding(16)
-        .background(.ultraThinMaterial)
+        .background(Palette.panel)
     }
 }
 
-private struct LibraryProgressBanner: View {
-    let progress: LibraryScanProgress
+/// Slim status strip for library scan and account cloud work. Must not cover the
+/// rest of the window — Settings and reading stay interactive while this is visible.
+struct WorkStatusBanner: View {
+    var library: LibraryScanProgress?
+    var accountMessage: String?
 
     var body: some View {
-        HStack(spacing: 12) {
-            ProgressView(value: progress.fraction)
-                .progressViewStyle(.linear)
-                .frame(width: 180)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(progress.stage)
-                    .font(.system(size: 12, weight: .semibold))
-                Text(progress.detail)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+        if library == nil && (accountMessage == nil || accountMessage?.isEmpty == true) {
+            EmptyView()
+        } else {
+            HStack(spacing: 12) {
+                if let library, let fraction = library.fraction {
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
+                        .frame(width: 160)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    if let library {
+                        Text(library.stage)
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(library.detail)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    if let accountMessage, !accountMessage.isEmpty {
+                        Text(accountMessage)
+                            .font(.system(size: 12, weight: library == nil ? .semibold : .regular))
+                            .foregroundStyle(library == nil ? Palette.ink : Palette.dim)
+                    }
+                }
+                Spacer()
             }
-            Spacer()
+            .padding(.horizontal, 24)
+            .padding(.vertical, 12)
+            .background(.regularMaterial)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("AudioReader activity")
+            .accessibilityValue(statusValue)
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 12)
-        .background(.regularMaterial)
-        .accessibilityElement(children: .combine)
+    }
+
+    private var statusValue: String {
+        [library.map { "\($0.stage). \($0.detail)" }, accountMessage]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: ". ")
     }
 }

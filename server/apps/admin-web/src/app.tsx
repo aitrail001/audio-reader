@@ -1,0 +1,5120 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  API_BASE,
+  AdminApiError,
+  AdminSessionError,
+  fetchAuthConfig,
+  getJson,
+  getJsonOrNull,
+  loadStoredSession,
+  logoutSession,
+  requestOtp,
+  sendJson,
+  storeSession,
+  subscribeSession,
+  verifyOtp,
+  type StoredSession,
+} from "./api";
+import {
+  destinationQuery,
+  initialOperatorLocation,
+  isCurrentAdminLoad,
+  mutationSummary,
+  policyDraftErrors,
+  quotaReductionNeedsConfirmation,
+  canToggleAccountSync,
+} from "./operator-state";
+import {
+  extractAccessToken,
+  extractSession,
+  formatBytes,
+  formatJson,
+  formatWhen,
+  hrefCarriesSessionTokens,
+  nextCursorOf,
+  pageItems,
+  pipClass,
+  reasonReady,
+  shortId,
+  statusTone,
+} from "./format";
+import { OperatorTable } from "./operator-table";
+import {
+  PREVIEW_AUDIT,
+  PREVIEW_ANALYTICS,
+  PREVIEW_BLOCKED,
+  PREVIEW_CACHE,
+  PREVIEW_DIAGNOSTICS,
+  PREVIEW_EVENTS,
+  PREVIEW_FLAGS,
+  PREVIEW_ACCOUNT_SYNC_READINESS,
+  PREVIEW_JOBS,
+  PREVIEW_METRICS,
+  PREVIEW_POLICIES,
+  PREVIEW_PRIVACY,
+  PREVIEW_QUOTAS,
+  PREVIEW_RUNTIME,
+  PREVIEW_USAGE,
+  PREVIEW_USERS,
+  isPreviewMode,
+} from "./preview-data";
+import type {
+  AdminCapabilities,
+  AdminUser,
+  AdminUserProgress,
+  AuditEvent,
+  BlockedAttempt,
+  CacheAction,
+  CacheEntry,
+  FeatureFlag,
+  HealthPayload,
+  Job,
+  MetricsSnapshot,
+  ManagedPromptPreview,
+  ProductAnalytics,
+  OperatorDiagnostics,
+  OperatorEvent,
+  Policy,
+  PolicyDraft,
+  PrivacyRequest,
+  ProductEvent,
+  Quota,
+  RuntimeConfig,
+  AccountSyncReadiness,
+  Section,
+} from "./types";
+
+const RAIL: ({ type: "label"; label: string } | { type: "item"; id: Section; label: string })[] = [
+  { type: "item", id: "overview", label: "Desk" },
+  { type: "label", label: "People" },
+  { type: "item", id: "users", label: "Users" },
+  { type: "item", id: "access", label: "Access" },
+  { type: "item", id: "privacy", label: "Privacy" },
+  { type: "label", label: "AI" },
+  { type: "item", id: "policies", label: "Policies" },
+  { type: "item", id: "cache", label: "Shared AI cache" },
+  { type: "label", label: "Delivery" },
+  { type: "item", id: "jobs", label: "Jobs" },
+  { type: "item", id: "flags", label: "Flags" },
+  { type: "item", id: "quotas", label: "Quotas" },
+  { type: "label", label: "Observe" },
+  { type: "item", id: "metrics", label: "Metrics" },
+  { type: "item", id: "usage", label: "Activity" },
+  { type: "item", id: "trace", label: "Trace" },
+  { type: "item", id: "audit", label: "Audit" },
+];
+
+const BOOTSTRAP_LABELS: Record<string, string> = {
+  supabaseUrlConfigured: "Supabase URL",
+  supabaseAnonKeyConfigured: "Supabase anon key",
+  supabaseServiceRoleConfigured: "Supabase service role",
+  cacheHmacConfigured: "Cache HMAC",
+  operatorConfigKeyConfigured: "Operator wrapping key",
+  adminBootstrapEmailConfigured: "Bootstrap admin email",
+  resendConfigured: "Resend mail",
+  otpFromConfigured: "OTP from address",
+  qwenEnvKeyConfigured: "Worker QWEN_API_KEY",
+};
+
+function cacheActionsFor(state: string): CacheAction[] {
+  switch (state) {
+    case "active":
+      return ["quarantine", "expire", "purge", "regenerate"];
+    case "quarantined":
+      return ["activate", "expire", "purge", "regenerate"];
+    case "expired":
+    case "superseded":
+      return ["activate", "purge", "regenerate"];
+    case "purged":
+      return ["regenerate"];
+    default:
+      return ["quarantine", "activate", "expire", "purge", "regenerate"];
+  }
+}
+
+function stringPayload(payload: Record<string, unknown> | undefined, key: string): string {
+  if (payload === undefined) {
+    return "";
+  }
+  const value = payload[key];
+  return typeof value === "string" ? value : "";
+}
+
+function cacheResult(entry: CacheEntry): string {
+  const payload = entry.payload;
+  return stringPayload(payload, "translation") || stringPayload(payload, "overview") || "";
+}
+
+function cacheKind(entry: CacheEntry): string {
+  const kind = stringPayload(entry.payload, "task") || entry.task;
+  if (kind === "word" || kind === "word_context") {
+    return "word";
+  }
+  if (kind === "sentence" || kind === "chapter_batch") {
+    return "sentence";
+  }
+  return kind.replaceAll("_", " ");
+}
+
+function clipText(value: string, limit = 140): string {
+  const trimmed = value.replace(/\s+/g, " ").trim();
+  if (trimmed.length <= limit) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, limit - 1)}…`;
+}
+
+function describeAdminError(cause: unknown): string {
+  if (!(cause instanceof AdminApiError)) {
+    return cause instanceof Error ? cause.message : "Operator request failed.";
+  }
+  const retry =
+    cause.retryAfterSeconds === null ? "" : ` Retry in ${String(cause.retryAfterSeconds)}s.`;
+  const trace = cause.traceId === "" ? "" : ` Trace ${cause.traceId}.`;
+  return `${cause.message}${retry}${trace}`;
+}
+
+function draftsFrom(policies: Policy[]): Record<string, PolicyDraft> {
+  const next: Record<string, PolicyDraft> = {};
+  for (const policy of policies) {
+    next[policy.id] = {
+      model: policy.model,
+      promptVersion: policy.promptVersion,
+      systemPrompt: policy.systemPrompt ?? "",
+      userPrompt: policy.userPrompt ?? "",
+      canaryPercent: String(policy.canaryPercent ?? 0),
+      schemaVersion: policy.schemaVersion ?? "1",
+      maxInputTokens: String(policy.maxInputTokens ?? 8_000),
+      maxOutputTokens: String(policy.maxOutputTokens ?? 2_000),
+      timeoutMs: String(policy.timeoutMs ?? 30_000),
+    };
+  }
+  return next;
+}
+
+export function App() {
+  const preview = isPreviewMode();
+  const initialLocation = useRef(initialOperatorLocation(window.location.search));
+  const [section, setSection] = useState<Section>(initialLocation.current.section);
+  const [health, setHealth] = useState<HealthPayload | null>(null);
+  const [healthError, setHealthError] = useState<string | null>(null);
+  const [token, setToken] = useState(() =>
+    preview ? "preview" : (loadStoredSession()?.accessToken ?? ""),
+  );
+  const [email, setEmail] = useState("audio.reader.service@gmail.com");
+  const [code, setCode] = useState("");
+  const [tokenDraft, setTokenDraft] = useState("");
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState("");
+  const [turnstileToken, setTurnstileToken] = useState("");
+  const [showChallenge, setShowChallenge] = useState(false);
+  const [reason, setReason] = useState("");
+  const [mutationPreview, setMutationPreview] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [adminError, setAdminError] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const [panelErrors, setPanelErrors] = useState<Partial<Record<Section, string>>>({});
+  const panelLoadCounts = useRef<Partial<Record<Section, number>>>({});
+  const [loadingPanels, setLoadingPanels] = useState<Partial<Record<Section, boolean>>>({});
+  const [adminCapabilities, setAdminCapabilities] = useState<AdminCapabilities>({
+    roles: [],
+    capabilities: [],
+  });
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [userQuery, setUserQuery] = useState(initialLocation.current.filters.userQuery ?? "");
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [jobStatus, setJobStatus] = useState(initialLocation.current.filters.jobStatus ?? "");
+  const [policies, setPolicies] = useState<Policy[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, PolicyDraft>>({});
+  const [cache, setCache] = useState<CacheEntry[]>([]);
+  const [cacheState, setCacheState] = useState(initialLocation.current.filters.cacheState ?? "");
+  const [cacheTask, setCacheTask] = useState(initialLocation.current.filters.cacheTask ?? "");
+  const [cacheFingerprint, setCacheFingerprint] = useState(
+    initialLocation.current.filters.cacheFingerprint ?? "",
+  );
+  const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null);
+  const [analytics, setAnalytics] = useState<ProductAnalytics | null>(null);
+  const [audit, setAudit] = useState<AuditEvent[]>([]);
+  const [auditActor, setAuditActor] = useState(initialLocation.current.filters.auditActor ?? "");
+  const [auditAction, setAuditAction] = useState(initialLocation.current.filters.auditAction ?? "");
+  const [auditRequestId, setAuditRequestId] = useState(
+    initialLocation.current.filters.auditRequestId ?? "",
+  );
+  const [openAuditId, setOpenAuditId] = useState<string | null>(null);
+  const [events, setEvents] = useState<OperatorEvent[]>([]);
+  const [eventRequestId, setEventRequestId] = useState(
+    initialLocation.current.filters.eventRequestId ?? "",
+  );
+  const [eventKind, setEventKind] = useState(initialLocation.current.filters.eventKind ?? "");
+  const [eventTask, setEventTask] = useState(initialLocation.current.filters.eventTask ?? "");
+  const [usageEvents, setUsageEvents] = useState<ProductEvent[]>([]);
+  const [usageName, setUsageName] = useState(initialLocation.current.filters.usageName ?? "");
+  const [usageAccountId, setUsageAccountId] = useState(
+    initialLocation.current.filters.usageAccountId ?? "",
+  );
+  const [usageRequestId, setUsageRequestId] = useState(
+    initialLocation.current.filters.usageRequestId ?? "",
+  );
+  const [blocked, setBlocked] = useState<BlockedAttempt[]>([]);
+  const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
+  const [flags, setFlags] = useState<FeatureFlag[]>([]);
+  const [accountSyncReadiness, setAccountSyncReadiness] = useState<AccountSyncReadiness | null>(
+    null,
+  );
+  const [quotas, setQuotas] = useState<Quota[]>([]);
+  const [privacy, setPrivacy] = useState<PrivacyRequest[]>([]);
+  const [privacyStatus, setPrivacyStatus] = useState(
+    initialLocation.current.filters.privacyStatus ?? "",
+  );
+  const [quotaDrafts, setQuotaDrafts] = useState<Record<string, string>>({});
+  const [diagnostics, setDiagnostics] = useState<OperatorDiagnostics | null>(null);
+  const [qwenKey, setQwenKey] = useState("");
+  const [qwenBaseUrl, setQwenBaseUrl] = useState("");
+  const [qwenModel, setQwenModel] = useState("");
+  const [sentenceContextCount, setSentenceContextCount] = useState("1");
+  const [gcsBucket, setGcsBucket] = useState("");
+  const [gcsJson, setGcsJson] = useState("");
+  const [turnstileSecret, setTurnstileSecret] = useState("");
+  const [openUserId, setOpenUserId] = useState<string | null>(null);
+  const [openCacheId, setOpenCacheId] = useState<string | null>(null);
+  const [userDetail, setUserDetail] = useState<AdminUser | null>(null);
+  const [userProgress, setUserProgress] = useState<AdminUserProgress | null>(null);
+  const [userProgressStatus, setUserProgressStatus] = useState<"idle" | "loading" | "unavailable">(
+    "idle",
+  );
+  const [cacheDetail, setCacheDetail] = useState<CacheEntry | null>(null);
+  const [armed, setArmed] = useState<string | null>(null);
+  const [cursors, setCursors] = useState<{
+    users: string | null;
+    jobs: string | null;
+    cache: string | null;
+    audit: string | null;
+    usage: string | null;
+    privacy: string | null;
+  }>({ users: null, jobs: null, cache: null, audit: null, usage: null, privacy: null });
+  const [metricsFrom, setMetricsFrom] = useState(
+    () =>
+      initialLocation.current.filters.metricsFrom ??
+      (preview ? "2026-08-22T10:00" : new Date(Date.now() - 86_400_000).toISOString().slice(0, 16)),
+  );
+  const [metricsTo, setMetricsTo] = useState(
+    () =>
+      initialLocation.current.filters.metricsTo ??
+      (preview ? "2026-08-29T10:00" : new Date().toISOString().slice(0, 16)),
+  );
+  const [metricsCountry, setMetricsCountry] = useState(
+    initialLocation.current.filters.metricsCountry ?? "",
+  );
+  const [metricsLanguage, setMetricsLanguage] = useState(
+    initialLocation.current.filters.metricsLanguage ?? "",
+  );
+  const [metricsReaderLevel, setMetricsReaderLevel] = useState(
+    initialLocation.current.filters.metricsReaderLevel ?? "",
+  );
+  const [metricsPlatform, setMetricsPlatform] = useState(
+    initialLocation.current.filters.metricsPlatform ?? "",
+  );
+  const [metricsFeature, setMetricsFeature] = useState(
+    initialLocation.current.filters.metricsFeature ?? "",
+  );
+  const [metricsContentCategory, setMetricsContentCategory] = useState(
+    initialLocation.current.filters.metricsContentCategory ?? "",
+  );
+  const activeAccessToken = useRef(token);
+  const adminLoadGeneration = useRef(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadHealth = () => {
+      void fetch(`${API_BASE}/v1/health`)
+        .then(async (response) => {
+          const payload = (await response.json()) as HealthPayload;
+          if (!cancelled) {
+            setHealth(payload);
+            setHealthError(null);
+          }
+        })
+        .catch((cause: unknown) => {
+          if (!cancelled) {
+            setHealthError(cause instanceof Error ? cause.message : "health request failed");
+          }
+        });
+    };
+    loadHealth();
+    const timer = window.setInterval(loadHealth, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    const filters = {
+      userQuery,
+      jobStatus,
+      cacheState,
+      cacheTask,
+      cacheFingerprint,
+      auditActor,
+      auditAction,
+      auditRequestId,
+      eventRequestId,
+      eventKind,
+      eventTask,
+      usageName,
+      usageAccountId,
+      usageRequestId,
+      privacyStatus,
+      metricsCountry,
+      metricsFrom,
+      metricsTo,
+      metricsLanguage,
+      metricsReaderLevel,
+      metricsPlatform,
+      metricsFeature,
+      metricsContentCategory,
+    };
+    const query = destinationQuery(section, filters).toString();
+    window.history.replaceState({}, document.title, `${window.location.pathname}?${query}`);
+  }, [
+    auditAction,
+    auditActor,
+    auditRequestId,
+    cacheFingerprint,
+    cacheState,
+    cacheTask,
+    eventKind,
+    eventRequestId,
+    eventTask,
+    jobStatus,
+    metricsContentCategory,
+    metricsCountry,
+    metricsFrom,
+    metricsTo,
+    metricsFeature,
+    metricsLanguage,
+    metricsPlatform,
+    metricsReaderLevel,
+    section,
+    usageAccountId,
+    usageName,
+    usageRequestId,
+    privacyStatus,
+    userQuery,
+  ]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchAuthConfig()
+      .then((config) => {
+        if (!cancelled && typeof config.turnstileSiteKey === "string") {
+          setTurnstileSiteKey(config.turnstileSiteKey);
+        }
+      })
+      .catch(() => {
+        /* Gate still works with a pasted token. */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function clearSessionScopedState(): void {
+    adminLoadGeneration.current += 1;
+    panelLoadCounts.current = {};
+    setBusy(false);
+    setLoadingPanels({});
+    setAdminCapabilities({ roles: [], capabilities: [] });
+    setUsers([]);
+    setJobs([]);
+    setPolicies([]);
+    setDrafts({});
+    setCache([]);
+    setRuntime(null);
+    setMetrics(null);
+    setAnalytics(null);
+    setAudit([]);
+    setBlocked([]);
+    setFlags([]);
+    setAccountSyncReadiness(null);
+    setQuotas([]);
+    setQuotaDrafts({});
+    setPrivacy([]);
+    setDiagnostics(null);
+    setEvents([]);
+    setUsageEvents([]);
+    setUserDetail(null);
+    setUserProgress(null);
+    setCacheDetail(null);
+    setOpenUserId(null);
+    setOpenCacheId(null);
+    setQwenKey("");
+    setGcsJson("");
+    setTurnstileSecret("");
+    setQwenBaseUrl("");
+    setQwenModel("");
+    setGcsBucket("");
+    setSentenceContextCount("1");
+    setReason("");
+    setMutationPreview("");
+    setArmed(null);
+    setCode("");
+    setTokenDraft("");
+    setTurnstileToken("");
+    setPanelErrors({});
+    setCursors({ users: null, jobs: null, cache: null, audit: null, usage: null, privacy: null });
+  }
+
+  const rememberSession = (session: StoredSession | string | null) => {
+    if (preview) {
+      setToken(session === null || session === "" ? "" : "preview");
+      return;
+    }
+    if (session === null || session === "") {
+      clearSessionScopedState();
+      activeAccessToken.current = "";
+      storeSession(null);
+      setToken("");
+      return;
+    }
+    const next = typeof session === "string" ? { accessToken: session } : session;
+    if (activeAccessToken.current !== next.accessToken) {
+      clearSessionScopedState();
+      activeAccessToken.current = next.accessToken;
+    }
+    storeSession(next);
+    setToken(next.accessToken);
+  };
+
+  useEffect(() => {
+    if (preview) {
+      return;
+    }
+    // Storage is source of truth after silent refresh or a wipe; React token must follow.
+    return subscribeSession((session) => {
+      const nextAccess = session?.accessToken ?? "";
+      if (activeAccessToken.current !== nextAccess) {
+        clearSessionScopedState();
+        activeAccessToken.current = nextAccess;
+      }
+      setToken(nextAccess);
+    });
+  }, [preview]);
+
+  const applyRuntime = (config: RuntimeConfig) => {
+    setRuntime(config);
+    setQwenBaseUrl(config.qwen.baseUrl);
+    setQwenModel(config.qwen.model);
+    setGcsBucket(config.storage.bucket ?? "");
+    setSentenceContextCount(String(config.assistant.sentenceContextCount));
+  };
+
+  const loadAdmin = useCallback(
+    async (access = token) => {
+      if (preview) {
+        setAdminCapabilities({ roles: ["superadmin"], capabilities: ["*"] });
+        setUsers(PREVIEW_USERS);
+        setJobs(PREVIEW_JOBS);
+        setPolicies(PREVIEW_POLICIES);
+        setDrafts(draftsFrom(PREVIEW_POLICIES));
+        setCache(PREVIEW_CACHE);
+        applyRuntime(PREVIEW_RUNTIME);
+        setMetrics(PREVIEW_METRICS);
+        setAnalytics(PREVIEW_ANALYTICS);
+        setAudit(PREVIEW_AUDIT);
+        setBlocked(PREVIEW_BLOCKED);
+        setFlags(PREVIEW_FLAGS);
+        setAccountSyncReadiness(PREVIEW_ACCOUNT_SYNC_READINESS);
+        setQuotas(PREVIEW_QUOTAS);
+        setQuotaDrafts(
+          Object.fromEntries(PREVIEW_QUOTAS.map((item) => [item.key, String(item.limit)])),
+        );
+        setPrivacy(PREVIEW_PRIVACY);
+        setDiagnostics(PREVIEW_DIAGNOSTICS);
+        setEvents(PREVIEW_EVENTS);
+        setUsageEvents(PREVIEW_USAGE);
+        setAdminError(null);
+        setStatus(null);
+        return;
+      }
+      if (access.trim() === "") {
+        setAdminError("Sign in or paste an admin access token.");
+        return;
+      }
+      const loadIdentity = {
+        accessToken: access,
+        generation: adminLoadGeneration.current + 1,
+      };
+      adminLoadGeneration.current = loadIdentity.generation;
+      const isCurrentLoad = () =>
+        isCurrentAdminLoad(loadIdentity, {
+          accessToken: activeAccessToken.current,
+          generation: adminLoadGeneration.current,
+        });
+      if (!isCurrentLoad()) {
+        return;
+      }
+      setBusy(true);
+      try {
+        const capabilitiesPayload = await getJson<AdminCapabilities>(
+          "/v1/admin/capabilities",
+          access,
+        );
+        if (!isCurrentLoad()) return;
+        setAdminCapabilities(capabilitiesPayload);
+        const permits = (capability: string) =>
+          capabilitiesPayload.capabilities.includes(capability);
+        if (!permits("runtime.manage")) {
+          setQwenKey("");
+          setGcsJson("");
+          setTurnstileSecret("");
+        }
+        const authorized = <T,>(
+          capability: string,
+          request: () => Promise<T>,
+          empty: T,
+        ): Promise<T> => (permits(capability) ? request() : Promise.resolve(empty));
+        const from = new Date(metricsFrom).toISOString();
+        const to = new Date(metricsTo).toISOString();
+        const usersQuery = new URLSearchParams();
+        if (userQuery.trim() !== "") {
+          usersQuery.set("query", userQuery.trim());
+        }
+        const jobQuery = new URLSearchParams();
+        if (jobStatus !== "") {
+          jobQuery.set("status", jobStatus);
+        }
+        const cacheQuery = new URLSearchParams();
+        if (cacheState !== "") {
+          cacheQuery.set("state", cacheState);
+        }
+        if (cacheTask.trim() !== "") {
+          cacheQuery.set("task", cacheTask.trim());
+        }
+        if (cacheFingerprint.trim() !== "") {
+          cacheQuery.set("editionFingerprint", cacheFingerprint.trim());
+        }
+        const auditQuery = new URLSearchParams();
+        if (auditActor.trim() !== "") {
+          auditQuery.set("actorId", auditActor.trim());
+        }
+        if (auditAction.trim() !== "") {
+          auditQuery.set("action", auditAction.trim());
+        }
+        if (auditRequestId.trim() !== "") {
+          auditQuery.set("requestId", auditRequestId.trim());
+        }
+        const eventsQuery = new URLSearchParams();
+        if (eventRequestId.trim() !== "") {
+          eventsQuery.set("requestId", eventRequestId.trim());
+        }
+        if (eventKind.trim() !== "") {
+          eventsQuery.set("kind", eventKind.trim());
+        }
+        const usageQuery = new URLSearchParams();
+        if (usageName.trim() !== "") {
+          usageQuery.set("name", usageName.trim());
+        }
+        if (usageAccountId.trim() !== "") {
+          usageQuery.set("accountId", usageAccountId.trim());
+        }
+        if (usageRequestId.trim() !== "") {
+          usageQuery.set("requestId", usageRequestId.trim());
+        }
+        if (eventTask.trim() !== "") {
+          eventsQuery.set("task", eventTask.trim());
+        }
+        const privacyQuery = new URLSearchParams();
+        if (privacyStatus !== "") privacyQuery.set("status", privacyStatus);
+        const analyticsQuery = new URLSearchParams({ from, to, interval: "day" });
+        const analyticsFilters: Array<[string, string]> = [
+          ["country", metricsCountry],
+          ["language", metricsLanguage],
+          ["readerLevel", metricsReaderLevel],
+          ["platform", metricsPlatform],
+          ["feature", metricsFeature],
+          ["contentCategory", metricsContentCategory],
+        ];
+        for (const [key, value] of analyticsFilters) {
+          if (value.trim() !== "") analyticsQuery.set(key, value.trim());
+        }
+        setPanelErrors({});
+        const independent = async <T,>(
+          panel: Section,
+          request: Promise<T>,
+          stale: T | null,
+        ): Promise<T | null> => {
+          const pending = (panelLoadCounts.current[panel] ?? 0) + 1;
+          panelLoadCounts.current[panel] = pending;
+          if (isCurrentLoad()) {
+            setLoadingPanels((current) => ({ ...current, [panel]: true }));
+          }
+          try {
+            return await request;
+          } catch (cause: unknown) {
+            if (!isCurrentLoad()) return null;
+            if (cause instanceof AdminSessionError) throw cause;
+            if (cause instanceof AdminApiError && (cause.status === 401 || cause.status === 403)) {
+              clearSessionScopedState();
+              throw cause;
+            }
+            const message = describeAdminError(cause);
+            setPanelErrors((current) => ({ ...current, [panel]: message }));
+            return stale;
+          } finally {
+            if (isCurrentLoad()) {
+              const remaining = Math.max(0, (panelLoadCounts.current[panel] ?? 1) - 1);
+              panelLoadCounts.current[panel] = remaining;
+              setLoadingPanels((current) => ({ ...current, [panel]: remaining > 0 }));
+            }
+          }
+        };
+        const [
+          usersPayload,
+          jobsPayload,
+          policiesPayload,
+          cachePayload,
+          runtimePayload,
+          metricsPayload,
+          analyticsPayload,
+          auditPayload,
+          blockedPayload,
+          flagsPayload,
+          accountSyncReadinessPayload,
+          quotasPayload,
+          privacyPayload,
+          diagnosticsPayload,
+          eventsPayload,
+          usagePayload,
+        ] = await Promise.all([
+          authorized(
+            "users.read",
+            () =>
+              independent(
+                "users",
+                getJson<unknown>(`/v1/admin/users?${usersQuery.toString()}`, access),
+                { items: users, nextCursor: cursors.users },
+              ),
+            { items: [], nextCursor: null },
+          ),
+          authorized(
+            "jobs.read",
+            () =>
+              independent(
+                "jobs",
+                getJson<unknown>(`/v1/admin/jobs?${jobQuery.toString()}`, access),
+                {
+                  items: jobs,
+                  nextCursor: cursors.jobs,
+                },
+              ),
+            { items: [], nextCursor: null },
+          ),
+          authorized(
+            "policies.read",
+            () =>
+              independent(
+                "policies",
+                getJson<Policy[] | { items?: Policy[] }>("/v1/admin/llm/policies", access),
+                policies,
+              ),
+            [],
+          ),
+          authorized(
+            "cache.read",
+            () =>
+              independent(
+                "cache",
+                getJson<unknown>(`/v1/admin/cache?${cacheQuery.toString()}`, access),
+                { items: cache, nextCursor: cursors.cache },
+              ),
+            { items: [], nextCursor: null },
+          ),
+          authorized(
+            "runtime.read",
+            () =>
+              independent(
+                "overview",
+                getJson<RuntimeConfig>("/v1/admin/runtime-config", access),
+                runtime,
+              ),
+            null,
+          ),
+          authorized(
+            "metrics.read",
+            () =>
+              independent(
+                "metrics",
+                getJson<MetricsSnapshot>(
+                  `/v1/admin/metrics?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+                  access,
+                ),
+                metrics,
+              ),
+            null,
+          ),
+          authorized(
+            "metrics.read",
+            () =>
+              independent(
+                "metrics",
+                getJson<ProductAnalytics>(
+                  `/v1/admin/product-analytics?${analyticsQuery.toString()}`,
+                  access,
+                ),
+                analytics,
+              ),
+            null,
+          ),
+          authorized(
+            "activity.read",
+            () =>
+              independent(
+                "audit",
+                getJson<unknown>(`/v1/admin/audit-events?${auditQuery.toString()}`, access),
+                { items: audit, nextCursor: cursors.audit },
+              ),
+            { items: [], nextCursor: null },
+          ),
+          authorized(
+            "access.read",
+            () =>
+              independent("access", getJson<unknown>("/v1/admin/auth/blocked-attempts", access), {
+                items: blocked,
+              }),
+            { items: [] },
+          ),
+          authorized(
+            "flags.read",
+            () =>
+              independent(
+                "flags",
+                getJsonOrNull<FeatureFlag[]>("/v1/admin/feature-flags", access),
+                flags,
+              ),
+            [],
+          ),
+          authorized(
+            "flags.read",
+            () =>
+              independent(
+                "flags",
+                getJsonOrNull<AccountSyncReadiness>("/v1/admin/account-sync-readiness", access),
+                accountSyncReadiness,
+              ),
+            null,
+          ),
+          authorized(
+            "quotas.read",
+            () => independent("quotas", getJsonOrNull<Quota[]>("/v1/admin/quotas", access), quotas),
+            [],
+          ),
+          authorized(
+            "privacy.read",
+            () =>
+              independent(
+                "privacy",
+                getJsonOrNull<unknown>(
+                  `/v1/admin/privacy-requests?${privacyQuery.toString()}`,
+                  access,
+                ),
+                { items: privacy, nextCursor: cursors.privacy },
+              ),
+            { items: [], nextCursor: null },
+          ),
+          authorized(
+            "diagnostics.read",
+            () =>
+              independent(
+                "overview",
+                getJsonOrNull<OperatorDiagnostics>("/v1/admin/diagnostics", access),
+                diagnostics,
+              ),
+            null,
+          ),
+          authorized(
+            "activity.read",
+            () =>
+              independent(
+                "trace",
+                getJsonOrNull<OperatorEvent[]>(
+                  `/v1/admin/events${eventsQuery.toString() === "" ? "" : `?${eventsQuery.toString()}`}`,
+                  access,
+                ),
+                events,
+              ),
+            [],
+          ),
+          authorized(
+            "activity.read",
+            () =>
+              independent(
+                "usage",
+                getJsonOrNull<unknown>(`/v1/admin/product-events?${usageQuery.toString()}`, access),
+                { items: usageEvents, nextCursor: cursors.usage },
+              ),
+            { items: [], nextCursor: null },
+          ),
+        ]);
+        if (!isCurrentLoad()) return;
+        const nextPolicies = pageItems<Policy>(policiesPayload);
+        setUsers(pageItems<AdminUser>(usersPayload));
+        setJobs(pageItems<Job>(jobsPayload));
+        setPolicies(nextPolicies);
+        setDrafts(draftsFrom(nextPolicies));
+        setCache(pageItems<CacheEntry>(cachePayload));
+        if (runtimePayload !== null) {
+          applyRuntime(runtimePayload);
+        } else {
+          setRuntime(null);
+          setQwenBaseUrl("");
+          setQwenModel("");
+          setGcsBucket("");
+          setSentenceContextCount("1");
+        }
+        setMetrics(metricsPayload);
+        setAnalytics(analyticsPayload);
+        setAudit(pageItems<AuditEvent>(auditPayload));
+        setBlocked(pageItems<BlockedAttempt>(blockedPayload));
+        const nextFlags = Array.isArray(flagsPayload) ? flagsPayload : [];
+        const nextQuotas = Array.isArray(quotasPayload) ? quotasPayload : [];
+        setFlags(nextFlags);
+        setAccountSyncReadiness(accountSyncReadinessPayload);
+        setQuotas(nextQuotas);
+        setQuotaDrafts(
+          Object.fromEntries(nextQuotas.map((item) => [item.key, String(item.limit)])),
+        );
+        setPrivacy(pageItems<PrivacyRequest>(privacyPayload ?? { items: [] }));
+        setDiagnostics(diagnosticsPayload);
+        setEvents(
+          Array.isArray(eventsPayload) ? eventsPayload : (diagnosticsPayload?.recentEvents ?? []),
+        );
+        setUsageEvents(pageItems<ProductEvent>(usagePayload ?? { items: [] }));
+        setCursors({
+          users: nextCursorOf(usersPayload),
+          jobs: nextCursorOf(jobsPayload),
+          cache: nextCursorOf(cachePayload),
+          audit: nextCursorOf(auditPayload),
+          usage: nextCursorOf(usagePayload),
+          privacy: nextCursorOf(privacyPayload),
+        });
+        setAdminError(null);
+        setStatus("Operator data loaded.");
+      } catch (cause: unknown) {
+        if (!isCurrentLoad()) return;
+        const message = cause instanceof Error ? cause.message : "admin request failed";
+        if (cause instanceof AdminApiError && (cause.status === 401 || cause.status === 403)) {
+          clearSessionScopedState();
+        }
+        if (cause instanceof AdminSessionError) {
+          if (cause.outcome === "invalid") {
+            rememberSession(null);
+          }
+        } else if (loadStoredSession() === null) {
+          rememberSession(null);
+        }
+        setAdminError(message);
+      } finally {
+        if (isCurrentLoad()) {
+          setBusy(false);
+        }
+      }
+    },
+    [
+      analytics,
+      auditAction,
+      auditActor,
+      auditRequestId,
+      cacheFingerprint,
+      cacheState,
+      cacheTask,
+      eventKind,
+      eventRequestId,
+      eventTask,
+      jobStatus,
+      usageAccountId,
+      usageName,
+      usageRequestId,
+      metricsFrom,
+      metrics,
+      metricsTo,
+      metricsContentCategory,
+      metricsCountry,
+      metricsFeature,
+      metricsLanguage,
+      metricsPlatform,
+      metricsReaderLevel,
+      preview,
+      privacyStatus,
+      token,
+      userQuery,
+    ],
+  );
+
+  useEffect(() => {
+    const href = window.location.href;
+    const fromLink = extractSession(href);
+    // Strip query and hash even when parse fails so tokens cannot linger in history.
+    if (hrefCarriesSessionTokens(href)) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+    if (fromLink !== null) {
+      rememberSession(fromLink);
+      void loadAdmin(fromLink.accessToken);
+      return;
+    }
+    if (token.trim() !== "") {
+      void loadAdmin(token);
+    }
+  }, []);
+
+  async function onRequestCode(): Promise<void> {
+    setBusy(true);
+    try {
+      await requestOtp(email.trim(), turnstileToken === "" ? undefined : turnstileToken);
+      setAdminError(null);
+      setStatus("A sign-in code was sent if that mailbox is known.");
+    } catch (cause: unknown) {
+      const message = cause instanceof Error ? cause.message : "could not request a code";
+      if (
+        message.toLowerCase().includes("turnstile") ||
+        message.toLowerCase().includes("challenge")
+      ) {
+        setShowChallenge(true);
+      }
+      setAdminError(message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onVerifyCode(): Promise<void> {
+    setBusy(true);
+    try {
+      const session = await verifyOtp(
+        email.trim(),
+        code.trim(),
+        turnstileToken === "" ? undefined : turnstileToken,
+      );
+      rememberSession(session);
+      await loadAdmin(session.accessToken);
+    } catch (cause: unknown) {
+      const message = cause instanceof Error ? cause.message : "sign-in failed";
+      if (
+        message.toLowerCase().includes("turnstile") ||
+        message.toLowerCase().includes("challenge")
+      ) {
+        setShowChallenge(true);
+      }
+      setAdminError(message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveRuntime(
+    extra: Record<string, unknown> = {},
+    summary = mutationSummary("Runtime configuration", "current settings", "draft settings"),
+  ): Promise<void> {
+    if (mutationPreview !== summary) {
+      setMutationPreview(summary);
+      setReason("");
+      setAdminError(null);
+      return;
+    }
+    if (preview) {
+      setStatus("Synthetic sample cannot change live configuration.");
+      return;
+    }
+    if (!reasonReady(reason)) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const payload: Record<string, unknown> = {
+        reason: reason.trim(),
+        qwen: {
+          baseUrl: qwenBaseUrl,
+          model: qwenModel,
+          ...(qwenKey.trim() === "" ? {} : { apiKey: qwenKey.trim() }),
+        },
+        storage: {
+          bucket: gcsBucket,
+          ...(gcsJson.trim() === "" ? {} : { serviceAccountJson: gcsJson.trim() }),
+        },
+        ...(turnstileSecret.trim() === ""
+          ? {}
+          : { turnstile: { secretKey: turnstileSecret.trim() } }),
+        assistant: {
+          sentenceContextCount: Number.parseInt(sentenceContextCount, 10) || 1,
+        },
+        ...extra,
+      };
+      const config = await sendJson<RuntimeConfig>(
+        "/v1/admin/runtime-config",
+        token,
+        "PUT",
+        payload,
+      );
+      applyRuntime(config);
+      setQwenKey("");
+      setGcsJson("");
+      setTurnstileSecret("");
+      setReason("");
+      setMutationPreview("");
+      setAdminError(null);
+      setStatus("Runtime configuration saved. Workers pick it up without a redeploy.");
+      await loadAdmin();
+    } catch (cause: unknown) {
+      setAdminError(cause instanceof Error ? cause.message : "save failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function probeQwen(): Promise<void> {
+    if (preview) {
+      setStatus("Synthetic sample cannot probe live Qwen.");
+      return;
+    }
+    if (token.trim() === "") {
+      setAdminError("Sign in or paste an admin access token.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const snapshot = await getJson<OperatorDiagnostics>(
+        "/v1/admin/diagnostics?probe=complete",
+        token,
+      );
+      setDiagnostics(snapshot);
+      applyRuntime(snapshot.runtime);
+      setAdminError(null);
+      setStatus(
+        snapshot.qwenComplete?.status === "ok"
+          ? `Qwen completion probe succeeded with ${snapshot.qwenComplete.model ?? "the configured model"}.`
+          : `Qwen completion probe: ${snapshot.qwenComplete?.status ?? "unknown"}. See Diagnostics.`,
+      );
+    } catch (cause: unknown) {
+      setAdminError(cause instanceof Error ? cause.message : "Qwen probe failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function mutate(
+    path: string,
+    method: string,
+    body: unknown,
+    okMessage: string,
+    summary: string,
+  ): Promise<void> {
+    if (mutationPreview !== summary) {
+      setMutationPreview(summary);
+      setReason("");
+      setAdminError(null);
+      return;
+    }
+    if (preview) {
+      setStatus("Synthetic sample cannot change live configuration.");
+      return;
+    }
+    if (!reasonReady(reason)) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await sendJson(path, token, method, body);
+      setArmed(null);
+      setStatus(okMessage);
+      setReason("");
+      setMutationPreview("");
+      await loadAdmin();
+    } catch (cause: unknown) {
+      setAdminError(cause instanceof Error ? cause.message : "request failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadMore(
+    kind: "users" | "jobs" | "cache" | "audit" | "usage" | "privacy",
+  ): Promise<void> {
+    const cursor = cursors[kind];
+    if (cursor === null || preview) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const params = new URLSearchParams({ cursor });
+      let path = `/v1/admin/${kind}`;
+      if (kind === "users" && userQuery.trim() !== "") {
+        params.set("query", userQuery.trim());
+      }
+      if (kind === "jobs" && jobStatus !== "") {
+        params.set("status", jobStatus);
+      }
+      if (kind === "cache") {
+        path = "/v1/admin/cache";
+        if (cacheState !== "") {
+          params.set("state", cacheState);
+        }
+        if (cacheTask.trim() !== "") {
+          params.set("task", cacheTask.trim());
+        }
+        if (cacheFingerprint.trim() !== "") {
+          params.set("editionFingerprint", cacheFingerprint.trim());
+        }
+      }
+      if (kind === "audit") {
+        path = "/v1/admin/audit-events";
+        if (auditActor.trim() !== "") {
+          params.set("actorId", auditActor.trim());
+        }
+        if (auditAction.trim() !== "") params.set("action", auditAction.trim());
+        if (auditRequestId.trim() !== "") params.set("requestId", auditRequestId.trim());
+      }
+      if (kind === "usage") {
+        path = "/v1/admin/product-events";
+        if (usageName.trim() !== "") params.set("name", usageName.trim());
+        if (usageAccountId.trim() !== "") params.set("accountId", usageAccountId.trim());
+        if (usageRequestId.trim() !== "") params.set("requestId", usageRequestId.trim());
+      }
+      if (kind === "privacy") {
+        path = "/v1/admin/privacy-requests";
+        if (privacyStatus !== "") params.set("status", privacyStatus);
+      }
+      const payload = await getJson<unknown>(`${path}?${params.toString()}`, token);
+      const extraUsers = pageItems<AdminUser>(payload);
+      if (kind === "users") {
+        setUsers((current) => [...current, ...extraUsers]);
+      }
+      if (kind === "jobs") {
+        setJobs((current) => [...current, ...pageItems<Job>(payload)]);
+      }
+      if (kind === "cache") {
+        setCache((current) => [...current, ...pageItems<CacheEntry>(payload)]);
+      }
+      if (kind === "audit") {
+        setAudit((current) => [...current, ...pageItems<AuditEvent>(payload)]);
+      }
+      if (kind === "usage") {
+        setUsageEvents((current) => [...current, ...pageItems<ProductEvent>(payload)]);
+      }
+      if (kind === "privacy") {
+        setPrivacy((current) => [...current, ...pageItems<PrivacyRequest>(payload)]);
+      }
+      setCursors((current) => ({ ...current, [kind]: nextCursorOf(payload) }));
+    } catch (cause: unknown) {
+      setAdminError(cause instanceof Error ? cause.message : "could not load more");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleUser(user: AdminUser): Promise<void> {
+    if (openUserId === user.accountId) {
+      setOpenUserId(null);
+      setUserDetail(null);
+      setUserProgress(null);
+      setUserProgressStatus("idle");
+      return;
+    }
+    setOpenUserId(user.accountId);
+    setUserDetail(user);
+    setUserProgress(null);
+    setUserProgressStatus(preview ? "idle" : "loading");
+    if (preview) {
+      return;
+    }
+    try {
+      const [detail, progress] = await Promise.allSettled([
+        getJson<AdminUser>(`/v1/admin/users/${user.accountId}`, token),
+        getJson<AdminUserProgress>(`/v1/admin/users/${user.accountId}/progress`, token),
+      ]);
+      if (detail.status === "fulfilled") {
+        setUserDetail(detail.value);
+      }
+      if (progress.status === "fulfilled") {
+        setUserProgress(progress.value);
+        setUserProgressStatus("idle");
+      } else {
+        setUserProgressStatus("unavailable");
+      }
+      if (detail.status === "rejected") {
+        throw detail.reason;
+      }
+    } catch (cause: unknown) {
+      setUserDetail(user);
+      setAdminError(cause instanceof Error ? cause.message : "could not load user");
+    }
+  }
+
+  async function toggleCache(entry: CacheEntry): Promise<void> {
+    if (openCacheId === entry.id) {
+      setOpenCacheId(null);
+      setCacheDetail(null);
+      return;
+    }
+    setOpenCacheId(entry.id);
+    if (preview) {
+      setCacheDetail(entry);
+      return;
+    }
+    try {
+      setCacheDetail(await getJson<CacheEntry>(`/v1/admin/cache/${entry.id}`, token));
+    } catch (cause: unknown) {
+      setCacheDetail(entry);
+      setAdminError(cause instanceof Error ? cause.message : "could not load cache entry");
+    }
+  }
+
+  const hasCapability = (capability: string) =>
+    adminCapabilities.capabilities.includes("*") ||
+    adminCapabilities.capabilities.includes(capability);
+  const canManageUsers = !busy && hasCapability("users.manage");
+  const canManageRoles = !busy && hasCapability("roles.manage");
+  const canManagePolicies = !busy && hasCapability("policies.manage");
+  const canProbeAI = !busy && hasCapability("ai.probe");
+  const canManageRuntime = !busy && hasCapability("runtime.manage");
+  const canManageJobs = !busy && hasCapability("jobs.manage");
+  const canManageCache = !busy && hasCapability("cache.manage");
+  const canManageFlags = !busy && hasCapability("flags.manage");
+  const canManageQuotas = !busy && hasCapability("quotas.manage");
+  const canManagePrivacy = !busy && hasCapability("privacy.manage");
+  const signedIn = token.trim() !== "";
+  const activePanelBusy = loadingPanels[section] === true;
+
+  if (!signedIn) {
+    return (
+      <div className="shell">
+        <TopBar
+          health={health}
+          busy={busy}
+          signedIn={false}
+          onRefresh={() => undefined}
+          onSignOut={() => undefined}
+        />
+        <main className="gate">
+          <h1>Sign in to operate</h1>
+          <p className="lede">
+            Use the product account that holds the operator role. You should get a numeric sign-in
+            code. If the mail is still a link, paste that URL below.
+          </p>
+          <label>
+            Email
+            <input
+              type="email"
+              autoComplete="username"
+              value={email}
+              onChange={(event) => {
+                setEmail(event.target.value);
+              }}
+            />
+          </label>
+          {showChallenge && turnstileSiteKey !== "" ? (
+            <Turnstile siteKey={turnstileSiteKey} onToken={setTurnstileToken} />
+          ) : null}
+          <div className="actions">
+            <button
+              type="button"
+              className="primary"
+              disabled={busy}
+              onClick={() => void onRequestCode()}
+            >
+              Send sign-in code
+            </button>
+          </div>
+          <label>
+            Sign-in code
+            <input
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              value={code}
+              onChange={(event) => {
+                setCode(event.target.value);
+              }}
+            />
+          </label>
+          <div className="actions">
+            <button
+              type="button"
+              className="primary"
+              disabled={busy}
+              onClick={() => void onVerifyCode()}
+            >
+              Sign in
+            </button>
+          </div>
+          <label>
+            Or paste a magic link or access token
+            <input
+              type="password"
+              autoComplete="off"
+              value={tokenDraft}
+              onChange={(event) => {
+                setTokenDraft(event.target.value);
+              }}
+            />
+          </label>
+          <div className="actions">
+            <button
+              type="button"
+              className="ghost"
+              disabled={busy || extractAccessToken(tokenDraft) === ""}
+              onClick={() => {
+                const session = extractSession(tokenDraft);
+                if (session === null) {
+                  return;
+                }
+                rememberSession(session);
+                void loadAdmin(session.accessToken);
+              }}
+            >
+              Use token
+            </button>
+          </div>
+          {adminError !== null ? <p role="alert">{adminError}</p> : null}
+          {status !== null ? <p className="status-line">{status}</p> : null}
+        </main>
+      </div>
+    );
+  }
+
+  return (
+    <div className="shell">
+      <TopBar
+        health={health}
+        busy={busy}
+        signedIn
+        onRefresh={() => {
+          void loadAdmin();
+        }}
+        onSignOut={() => {
+          void logoutSession();
+          setStatus(null);
+        }}
+      />
+      <div className="layout">
+        <nav className="rail" aria-label="Operator sections">
+          {RAIL.map((item) =>
+            item.type === "label" ? (
+              <p key={item.label} className="rail-label">
+                {item.label}
+              </p>
+            ) : (
+              <button
+                key={item.id}
+                type="button"
+                className="dest"
+                aria-current={section === item.id ? "page" : undefined}
+                onClick={() => {
+                  setSection(item.id);
+                }}
+              >
+                {item.label}
+              </button>
+            ),
+          )}
+        </nav>
+        <main className="stage" aria-busy={activePanelBusy}>
+          {preview ? (
+            <p className="banner">
+              Synthetic operator sample — labeled for layout review, not live data.
+            </p>
+          ) : null}
+          {healthError !== null ? <p role="alert">{healthError}</p> : null}
+          {adminError !== null ? <p role="alert">{adminError}</p> : null}
+          {panelErrors[section] !== undefined ? (
+            <div className="panel-error" role="alert">
+              <span>{panelErrors[section]}</span>
+              <button
+                type="button"
+                className="ghost"
+                disabled={busy}
+                onClick={() => void loadAdmin()}
+              >
+                Retry this view
+              </button>
+            </div>
+          ) : null}
+          <p className="status-line" role="status" aria-live="polite">
+            {activePanelBusy ? "Loading this view…" : busy ? "Applying change…" : (status ?? "")}
+          </p>
+          {mutationPreview !== "" ? (
+            <section className="mutation-bar" aria-label="Change review">
+              <div>
+                <strong>Review change</strong>
+                <span>{mutationPreview}</span>
+              </div>
+              <label>
+                Reason (5+ characters)
+                <input
+                  value={reason}
+                  placeholder="Why is this change needed?"
+                  aria-invalid={reason !== "" && !reasonReady(reason)}
+                  onChange={(event) => {
+                    setReason(event.target.value);
+                  }}
+                />
+              </label>
+            </section>
+          ) : null}
+          {busy && users.length === 0 && runtime === null ? (
+            <div className="skeleton" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+            </div>
+          ) : null}
+
+          {section === "overview" ? (
+            <DeskPanel
+              health={health}
+              runtime={runtime}
+              diagnostics={diagnostics}
+              jobs={jobs}
+              quotas={quotas}
+              events={events}
+              reasonReady={canManageRuntime}
+              canProbe={canProbeAI}
+              busy={busy}
+              onProbe={() => {
+                void probeQwen();
+              }}
+              qwenBaseUrl={qwenBaseUrl}
+              qwenModel={qwenModel}
+              sentenceContextCount={sentenceContextCount}
+              qwenKey={qwenKey}
+              gcsBucket={gcsBucket}
+              gcsJson={gcsJson}
+              turnstileSecret={turnstileSecret}
+              onQwenBaseUrl={setQwenBaseUrl}
+              onQwenModel={setQwenModel}
+              onSentenceContextCount={setSentenceContextCount}
+              onQwenKey={setQwenKey}
+              onGcsBucket={setGcsBucket}
+              onGcsJson={setGcsJson}
+              onTurnstileSecret={setTurnstileSecret}
+              onSave={() => {
+                void saveRuntime();
+              }}
+              onClearQwen={() => {
+                if (
+                  window.confirm(
+                    "Remove the stored Managed Qwen secret? Existing requests may fail.",
+                  )
+                ) {
+                  const summary = mutationSummary("Managed Qwen secret", "stored", "removed");
+                  void saveRuntime(
+                    { qwen: { apiKey: null, baseUrl: qwenBaseUrl, model: qwenModel } },
+                    summary,
+                  );
+                }
+              }}
+              onClearStorage={() => {
+                if (window.confirm("Remove the stored GCS service-account secret?")) {
+                  const summary = mutationSummary("GCS secret", "stored", "removed");
+                  void saveRuntime(
+                    { storage: { bucket: gcsBucket, serviceAccountJson: null } },
+                    summary,
+                  );
+                }
+              }}
+              onClearTurnstile={() => {
+                if (window.confirm("Remove the stored Turnstile secret?")) {
+                  const summary = mutationSummary("Turnstile secret", "stored", "removed");
+                  void saveRuntime({ turnstile: { secretKey: null } }, summary);
+                }
+              }}
+            />
+          ) : null}
+
+          {section === "users" ? (
+            <UsersPanel
+              users={users}
+              userQuery={userQuery}
+              busy={busy}
+              canMutate={canManageUsers}
+              canManageRoles={canManageRoles}
+              armed={armed}
+              openUserId={openUserId}
+              userDetail={userDetail}
+              userProgress={userProgress}
+              userProgressStatus={userProgressStatus}
+              nextCursor={cursors.users}
+              onQuery={setUserQuery}
+              onApply={() => {
+                void loadAdmin();
+              }}
+              onLoadMore={() => {
+                void loadMore("users");
+              }}
+              onToggle={(user) => {
+                void toggleUser(user);
+              }}
+              onArm={setArmed}
+              onMutate={(path, message) => {
+                const summary = mutationSummary("User access", "current state", message);
+                void mutate(path, "POST", { reason: reason.trim() }, message, summary);
+              }}
+            />
+          ) : null}
+
+          {section === "policies" ? (
+            <PoliciesPanel
+              policies={policies}
+              drafts={drafts}
+              busy={busy}
+              canMutate={canManagePolicies}
+              onDraft={(id, patch) => {
+                setDrafts((current) => {
+                  const existing = current[id];
+                  if (existing === undefined) {
+                    return current;
+                  }
+                  return { ...current, [id]: { ...existing, ...patch } };
+                });
+              }}
+              onToggle={(policy) => {
+                const summary = mutationSummary(
+                  policy.task,
+                  policy.enabled ? "enabled" : "disabled",
+                  policy.enabled ? "disabled" : "enabled",
+                );
+                setMutationPreview(summary);
+                void mutate(
+                  `/v1/admin/llm/policies/${policy.id}`,
+                  "PATCH",
+                  { reason: reason.trim(), enabled: !policy.enabled },
+                  `${policy.task} ${policy.enabled ? "disabled" : "enabled"}.`,
+                  summary,
+                );
+              }}
+              onSave={(policy) => {
+                const draft = drafts[policy.id];
+                if (draft === undefined) {
+                  return;
+                }
+                const errors = policyDraftErrors(draft);
+                if (Object.keys(errors).length > 0) {
+                  setAdminError(Object.values(errors)[0] ?? "Policy fields are invalid.");
+                  return;
+                }
+                const canary = Number(draft.canaryPercent);
+                const summary = mutationSummary(
+                  policy.task,
+                  policy.policyVersion ?? "current policy",
+                  `${draft.model.trim()} / ${draft.promptVersion.trim()}`,
+                );
+                setMutationPreview(summary);
+                void mutate(
+                  `/v1/admin/llm/policies/${policy.id}`,
+                  "PATCH",
+                  {
+                    reason: reason.trim(),
+                    model: draft.model.trim(),
+                    promptVersion: draft.promptVersion.trim(),
+                    systemPrompt: draft.systemPrompt,
+                    userPrompt: draft.userPrompt,
+                    schemaVersion: draft.schemaVersion.trim(),
+                    maxInputTokens: Number(draft.maxInputTokens),
+                    maxOutputTokens: Number(draft.maxOutputTokens),
+                    timeoutMs: Number(draft.timeoutMs),
+                    ...(Number.isFinite(canary) ? { canaryPercent: canary } : {}),
+                  },
+                  `${policy.task} policy saved.`,
+                  summary,
+                );
+              }}
+              onPreview={async (policy, draft, subtask, probe) => {
+                if (preview) {
+                  throw new Error("Prompt validation requires a connected API.");
+                }
+                return sendJson<ManagedPromptPreview>(
+                  `/v1/admin/llm/policies/${policy.id}/${probe ? "probe" : "preview"}`,
+                  token,
+                  "POST",
+                  {
+                    subtask,
+                    draft: {
+                      systemPrompt: draft.systemPrompt,
+                      userPrompt: draft.userPrompt,
+                      schemaVersion: draft.schemaVersion,
+                    },
+                  },
+                );
+              }}
+            />
+          ) : null}
+
+          {section === "jobs" ? (
+            <JobsPanel
+              jobs={jobs}
+              jobStatus={jobStatus}
+              busy={busy}
+              canMutate={canManageJobs}
+              armed={armed}
+              nextCursor={cursors.jobs}
+              onStatus={setJobStatus}
+              onApply={() => {
+                void loadAdmin();
+              }}
+              onLoadMore={() => {
+                void loadMore("jobs");
+              }}
+              onArm={setArmed}
+              onMutate={(path, message) => {
+                const summary = mutationSummary("Job", "current state", message);
+                void mutate(path, "POST", { reason: reason.trim() }, message, summary);
+              }}
+            />
+          ) : null}
+
+          {section === "cache" ? (
+            <CachePanel
+              entries={cache}
+              cacheState={cacheState}
+              cacheTask={cacheTask}
+              cacheFingerprint={cacheFingerprint}
+              busy={busy}
+              canMutate={canManageCache}
+              armed={armed}
+              openCacheId={openCacheId}
+              cacheDetail={cacheDetail}
+              nextCursor={cursors.cache}
+              onState={setCacheState}
+              onTask={setCacheTask}
+              onFingerprint={setCacheFingerprint}
+              onApply={() => {
+                void loadAdmin();
+              }}
+              onLoadMore={() => {
+                void loadMore("cache");
+              }}
+              onToggle={(entry) => {
+                void toggleCache(entry);
+              }}
+              onArm={setArmed}
+              onAction={(entry, action) => {
+                const summary = mutationSummary("Cache entry", entry.state, action);
+                void mutate(
+                  `/v1/admin/cache/${entry.id}/actions`,
+                  "POST",
+                  { action, reason: reason.trim() },
+                  `Cache ${action} queued.`,
+                  summary,
+                );
+              }}
+            />
+          ) : null}
+
+          {section === "access" ? <AccessPanel attempts={blocked} /> : null}
+
+          {section === "metrics" ? (
+            <MetricsPanel
+              metrics={metrics}
+              analytics={analytics}
+              from={metricsFrom}
+              to={metricsTo}
+              busy={busy}
+              country={metricsCountry}
+              language={metricsLanguage}
+              readerLevel={metricsReaderLevel}
+              platform={metricsPlatform}
+              feature={metricsFeature}
+              contentCategory={metricsContentCategory}
+              onFrom={setMetricsFrom}
+              onTo={setMetricsTo}
+              onCountry={setMetricsCountry}
+              onLanguage={setMetricsLanguage}
+              onReaderLevel={setMetricsReaderLevel}
+              onPlatform={setMetricsPlatform}
+              onFeature={setMetricsFeature}
+              onContentCategory={setMetricsContentCategory}
+              onApply={() => {
+                void loadAdmin();
+              }}
+            />
+          ) : null}
+
+          {section === "usage" ? (
+            <UsagePanel
+              events={usageEvents}
+              name={usageName}
+              accountId={usageAccountId}
+              requestId={usageRequestId}
+              busy={busy}
+              nextCursor={cursors.usage}
+              onName={setUsageName}
+              onAccountId={setUsageAccountId}
+              onRequestId={setUsageRequestId}
+              onApply={() => {
+                void loadAdmin();
+              }}
+              onLoadMore={() => void loadMore("usage")}
+            />
+          ) : null}
+
+          {section === "trace" ? (
+            <TracePanel
+              events={events}
+              requestId={eventRequestId}
+              kind={eventKind}
+              task={eventTask}
+              busy={busy}
+              onRequestId={setEventRequestId}
+              onKind={setEventKind}
+              onTask={setEventTask}
+              onApply={() => {
+                void loadAdmin();
+              }}
+            />
+          ) : null}
+
+          {section === "audit" ? (
+            <AuditPanel
+              events={audit}
+              actor={auditActor}
+              action={auditAction}
+              requestId={auditRequestId}
+              openId={openAuditId}
+              busy={busy}
+              nextCursor={cursors.audit}
+              onActor={setAuditActor}
+              onAction={setAuditAction}
+              onRequestId={setAuditRequestId}
+              onOpen={setOpenAuditId}
+              onApply={() => {
+                void loadAdmin();
+              }}
+              onLoadMore={() => {
+                void loadMore("audit");
+              }}
+            />
+          ) : null}
+
+          {section === "flags" ? (
+            <FlagsPanel
+              flags={flags}
+              accountSyncReadiness={accountSyncReadiness}
+              busy={busy}
+              canMutate={canManageFlags}
+              onToggle={(flag) => {
+                if (
+                  flag.key === "managed_qwen" &&
+                  flag.enabled &&
+                  !window.confirm("Disable Managed Qwen for eligible users?")
+                )
+                  return;
+                const summary = mutationSummary(
+                  flag.key,
+                  flag.enabled ? "enabled" : "disabled",
+                  flag.enabled ? "disabled" : "enabled",
+                );
+                setMutationPreview(summary);
+                void mutate(
+                  `/v1/admin/feature-flags/${flag.key}`,
+                  "PATCH",
+                  { reason: reason.trim(), enabled: !flag.enabled },
+                  `${flag.key} ${flag.enabled ? "disabled" : "enabled"}.`,
+                  summary,
+                );
+              }}
+              onSave={(flag, patch) => {
+                const summary = mutationSummary(flag.key, "current targeting", "updated targeting");
+                setMutationPreview(summary);
+                void mutate(
+                  `/v1/admin/feature-flags/${flag.key}`,
+                  "PATCH",
+                  { reason: reason.trim(), ...patch },
+                  `${flag.key} targeting saved.`,
+                  summary,
+                );
+              }}
+            />
+          ) : null}
+
+          {section === "quotas" ? (
+            <QuotasPanel
+              quotas={quotas}
+              drafts={quotaDrafts}
+              busy={busy}
+              canMutate={canManageQuotas}
+              onDraft={(key, value) => {
+                setQuotaDrafts((current) => ({ ...current, [key]: value }));
+              }}
+              onSave={(quota) => {
+                const draft = Number(quotaDrafts[quota.key]);
+                if (!Number.isFinite(draft)) {
+                  return;
+                }
+                if (
+                  quotaReductionNeedsConfirmation(quota.limit, draft) &&
+                  !window.confirm(
+                    `Reduce ${quota.key} from ${String(quota.limit)} to ${String(draft)}?`,
+                  )
+                )
+                  return;
+                const summary = mutationSummary(quota.key, String(quota.limit), String(draft));
+                setMutationPreview(summary);
+                void mutate(
+                  `/v1/admin/quotas/${quota.key}`,
+                  "PATCH",
+                  { reason: reason.trim(), limit: draft },
+                  `${quota.key} limit saved.`,
+                  summary,
+                );
+              }}
+            />
+          ) : null}
+
+          {section === "privacy" ? (
+            <PrivacyPanel
+              requests={privacy}
+              status={privacyStatus}
+              busy={busy}
+              canMutate={canManagePrivacy}
+              armed={armed}
+              onArm={setArmed}
+              onMutate={(path, action, message) => {
+                const summary = mutationSummary("Privacy request", "pending", action);
+                setMutationPreview(summary);
+                void mutate(path, "POST", { reason: reason.trim(), action }, message, summary);
+              }}
+              nextCursor={cursors.privacy}
+              onLoadMore={() => void loadMore("privacy")}
+              onStatus={setPrivacyStatus}
+              onApply={() => void loadAdmin()}
+            />
+          ) : null}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+const ADMIN_VERSION = import.meta.env.VITE_ADMIN_VERSION ?? "0.0.0";
+
+function TopBar(props: {
+  health: HealthPayload | null;
+  busy: boolean;
+  signedIn: boolean;
+  onRefresh: () => void;
+  onSignOut: () => void;
+}) {
+  return (
+    <header className="topbar">
+      <h1 className="brand">
+        AudioReader
+        <span>
+          Operator console {ADMIN_VERSION}
+          {props.health?.version !== undefined && props.health.version !== ""
+            ? ` · api ${props.health.version}`
+            : ""}
+        </span>
+      </h1>
+      <div className="health-pips" aria-label="API health">
+        <span className={`pip ${pipClass(props.health?.status)}`}>
+          <i />
+          api {props.health?.status ?? "loading"}
+        </span>
+        {props.health?.dependencies !== undefined
+          ? Object.entries(props.health.dependencies).map(([name, value]) => (
+              <span key={name} className={`pip ${pipClass(value)}`}>
+                <i />
+                {name} {value}
+              </span>
+            ))
+          : null}
+      </div>
+      {props.signedIn ? (
+        <div className="session">
+          <button type="button" className="ghost" disabled={props.busy} onClick={props.onRefresh}>
+            Refresh
+          </button>
+          <button type="button" className="signout" onClick={props.onSignOut}>
+            Sign out
+          </button>
+        </div>
+      ) : null}
+    </header>
+  );
+}
+
+function Turnstile(props: { siteKey: string; onToken: (token: string) => void }) {
+  const host = useRef<HTMLDivElement | null>(null);
+  const widgetId = useRef<string | null>(null);
+  const onToken = useRef(props.onToken);
+  onToken.current = props.onToken;
+
+  useEffect(() => {
+    let cancelled = false;
+    const render = () => {
+      if (cancelled || window.turnstile === undefined || host.current === null) {
+        return;
+      }
+      if (widgetId.current !== null) {
+        window.turnstile.reset(widgetId.current);
+        return;
+      }
+      widgetId.current = window.turnstile.render(host.current, {
+        sitekey: props.siteKey,
+        theme: "auto",
+        callback: (token) => {
+          onToken.current(token);
+        },
+        "expired-callback": () => {
+          onToken.current("");
+        },
+        "error-callback": () => {
+          onToken.current("");
+        },
+      });
+    };
+    if (window.turnstile !== undefined) {
+      render();
+    } else {
+      const existing = document.querySelector("script[data-turnstile]");
+      if (existing === null) {
+        const script = document.createElement("script");
+        script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+        script.async = true;
+        script.dataset.turnstile = "true";
+        script.addEventListener("load", render);
+        document.head.append(script);
+      } else {
+        existing.addEventListener("load", render);
+      }
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [props.siteKey]);
+
+  return <div className="turnstile-slot" ref={host} />;
+}
+
+function DeskPanel(props: {
+  health: HealthPayload | null;
+  runtime: RuntimeConfig | null;
+  diagnostics: OperatorDiagnostics | null;
+  jobs: Job[];
+  quotas: Quota[];
+  events: OperatorEvent[];
+  reasonReady: boolean;
+  canProbe: boolean;
+  busy: boolean;
+  onProbe: () => void;
+  qwenBaseUrl: string;
+  qwenModel: string;
+  sentenceContextCount: string;
+  qwenKey: string;
+  gcsBucket: string;
+  gcsJson: string;
+  turnstileSecret: string;
+  onQwenBaseUrl: (value: string) => void;
+  onQwenModel: (value: string) => void;
+  onSentenceContextCount: (value: string) => void;
+  onQwenKey: (value: string) => void;
+  onGcsBucket: (value: string) => void;
+  onGcsJson: (value: string) => void;
+  onTurnstileSecret: (value: string) => void;
+  onSave: () => void;
+  onClearQwen: () => void;
+  onClearStorage: () => void;
+  onClearTurnstile: () => void;
+}) {
+  const dependencies = props.health?.dependencies;
+  const degraded = Object.entries(dependencies ?? {}).filter(([, value]) => value !== "ok");
+  const failedJobs = props.jobs.filter(
+    (job) => job.status === "failed" || job.status === "dead_letter",
+  );
+  const pressuredQuotas = props.quotas.filter(
+    (quota) => quota.limit > 0 && quota.used / quota.limit >= 0.8,
+  );
+  const recentErrors = props.events
+    .filter((event) => statusTone(event.status ?? event.kind) === "bad")
+    .slice(0, 5);
+  const drift = props.diagnostics?.notes ?? [];
+  return (
+    <>
+      <h2>Desk</h2>
+      <p className="lede">
+        Start with what needs attention, then follow its request id through Activity, Trace, and
+        Audit.
+      </p>
+      <section className="incident-desk" aria-label="Current incidents">
+        <h3>Needs attention</h3>
+        {degraded.length +
+          failedJobs.length +
+          pressuredQuotas.length +
+          drift.length +
+          recentErrors.length ===
+        0 ? (
+          <p className="status-line">No active incidents in this snapshot.</p>
+        ) : (
+          <ul>
+            {degraded.map(([name, value]) => (
+              <li key={`dependency-${name}`}>
+                <strong>{name}</strong> is {value}.
+              </li>
+            ))}
+            {failedJobs.slice(0, 5).map((job) => (
+              <li key={job.id}>
+                <strong>Failed job:</strong> {job.kind}{" "}
+                <span className="mono">{shortId(job.id)}</span>
+              </li>
+            ))}
+            {pressuredQuotas.map((quota) => (
+              <li key={quota.key}>
+                <strong>Quota pressure:</strong> {quota.key} {String(quota.used)}/
+                {String(quota.limit)}
+              </li>
+            ))}
+            {drift.map((note) => (
+              <li key={note}>
+                <strong>Configuration drift:</strong> {note}
+              </li>
+            ))}
+            {recentErrors.map((event) => (
+              <li key={event.id}>
+                <strong>Recent error:</strong> {event.summary}{" "}
+                <CopyValue value={event.requestId} label="request id" />
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      {props.diagnostics !== null ? (
+        <section className="ledger">
+          <h3>Diagnostics</h3>
+          <p className="lede tight">
+            What the Worker currently uses for Managed Qwen, without secrets. Probe completion to
+            exercise the same path the app uses.
+          </p>
+          {props.diagnostics.notes.length > 0 ? (
+            <div role="alert">
+              <ul className="diag-notes">
+                {props.diagnostics.notes.map((note) => (
+                  <li key={note}>{note}</li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <p className="status-line">No configuration warnings from this snapshot.</p>
+          )}
+          <table className="service-table">
+            <caption>Live Worker snapshot</caption>
+            <tbody>
+              <tr>
+                <td>Qwen key</td>
+                <td>
+                  {props.diagnostics.runtime.qwen.apiKeyConfigured
+                    ? `yes (${props.diagnostics.runtime.qwen.source}${props.diagnostics.runtime.qwen.apiKeyLast4 !== undefined ? ` · …${props.diagnostics.runtime.qwen.apiKeyLast4}` : ""})`
+                    : "no"}
+                </td>
+              </tr>
+              <tr>
+                <td>Qwen model (Desk)</td>
+                <td>{props.diagnostics.runtime.qwen.model || "(empty)"}</td>
+              </tr>
+              <tr>
+                <td>Qwen base URL</td>
+                <td className="mono">
+                  {props.diagnostics.runtime.qwen.baseUrl || "(package default)"}
+                </td>
+              </tr>
+              <tr>
+                <td>Qwen /models probe</td>
+                <td>{props.diagnostics.qwenProbe}</td>
+              </tr>
+              <tr>
+                <td>Qwen completion probe</td>
+                <td>
+                  {props.diagnostics.qwenComplete === undefined
+                    ? "not run"
+                    : `${props.diagnostics.qwenComplete.status}${props.diagnostics.qwenComplete.model !== undefined ? ` · ${props.diagnostics.qwenComplete.model}` : ""}${props.diagnostics.qwenComplete.httpStatus !== undefined ? ` · HTTP ${String(props.diagnostics.qwenComplete.httpStatus)}` : ""}${props.diagnostics.qwenComplete.detail !== undefined && props.diagnostics.qwenComplete.detail !== "" ? ` · ${props.diagnostics.qwenComplete.detail}` : ""}`}
+                </td>
+              </tr>
+              {props.diagnostics.qwenComplete !== undefined &&
+              props.diagnostics.qwenComplete.status !== "skipped" ? (
+                <tr>
+                  <td>Probe request id</td>
+                  <td>
+                    <CopyValue value={props.diagnostics.requestId} label="probe request id" />
+                  </td>
+                </tr>
+              ) : null}
+              <tr>
+                <td>Secrets decryptable</td>
+                <td>
+                  {props.diagnostics.runtime.qwen.secretsDecryptable === false ? "no" : "yes"}
+                  {props.diagnostics.runtime.qwen.ciphertextPresent === true
+                    ? " · ciphertext present"
+                    : ""}
+                </td>
+              </tr>
+              <tr>
+                <td>Operator wrapping key</td>
+                <td>
+                  {props.diagnostics.runtime.qwen.wrappingSecretSource ??
+                    (props.diagnostics.runtime.bootstrap.operatorConfigKeyConfigured
+                      ? "operator_config_key"
+                      : "unknown")}
+                  {props.diagnostics.runtime.qwen.wrappingSecretConfigured === false
+                    ? " · missing"
+                    : ""}
+                </td>
+              </tr>
+              <tr>
+                <td>Flags</td>
+                <td>
+                  {props.diagnostics.flags
+                    .map((flag) => `${flag.key}:${flag.enabled ? "on" : "off"}`)
+                    .join(" · ") || "none"}
+                </td>
+              </tr>
+              <tr>
+                <td>Quotas</td>
+                <td>
+                  {props.diagnostics.quotas
+                    .map((quota) => `${quota.key} ${String(quota.used)}/${String(quota.limit)}`)
+                    .join(" · ") || "none"}
+                </td>
+              </tr>
+              <tr>
+                <td>Policies</td>
+                <td>
+                  {props.diagnostics.policies
+                    .map(
+                      (policy) =>
+                        `${policy.task}:${policy.enabled ? "on" : "off"}:${policy.model}:${policy.promptVersion}`,
+                    )
+                    .join(" · ") || "none"}
+                </td>
+              </tr>
+              <tr>
+                <td>Sentence context</td>
+                <td>
+                  {String(props.runtime?.assistant.sentenceContextCount ?? 1)} before and after
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <div className="actions">
+            <button
+              type="button"
+              className="ghost"
+              disabled={props.busy || !props.canProbe}
+              onClick={props.onProbe}
+            >
+              Probe Qwen completion
+            </button>
+          </div>
+          {(props.diagnostics.recentEvents ?? []).length > 0 ? (
+            <table className="service-table">
+              <caption>Recent Worker events</caption>
+              <tbody>
+                {(props.diagnostics.recentEvents ?? []).slice(0, 8).map((event) => (
+                  <tr key={event.id}>
+                    <td>
+                      <span className={`pill ${statusTone(event.status ?? event.kind)}`}>
+                        {event.kind}
+                      </span>
+                    </td>
+                    <td>
+                      {event.summary}
+                      <div className="mono">{formatWhen(event.at)}</div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : null}
+        </section>
+      ) : null}
+      <p className="lede tight">
+        Endpoint <code className="mono">{API_BASE === "" ? window.location.origin : API_BASE}</code>
+      </p>
+      <section className="ledger">
+        <h3>Service</h3>
+        {dependencies === undefined ? (
+          <p className="empty">Waiting for health from the API.</p>
+        ) : (
+          <table className="service-table">
+            <thead>
+              <tr>
+                <th>Dependency</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(dependencies).map(([name, value]) => (
+                <tr key={name}>
+                  <td>{name}</td>
+                  <td>
+                    <span className={`pill ${statusTone(value)}`}>{value}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <p className="lede tight">
+          Version {props.health?.version ?? "unknown"}
+          {props.health?.time !== undefined ? ` · ${formatWhen(props.health.time)}` : ""}
+        </p>
+      </section>
+      <section className="ledger">
+        <h3>Runtime configuration</h3>
+        {props.runtime !== null ? (
+          <p className="lede">
+            Qwen {props.runtime.qwen.source}
+            {props.runtime.qwen.apiKeyConfigured
+              ? ` · …${props.runtime.qwen.apiKeyLast4 ?? ""}`
+              : " · no key"}
+            . Storage {props.runtime.storage.provider} ({props.runtime.storage.source}
+            {props.runtime.storage.bucket !== undefined ? ` · ${props.runtime.storage.bucket}` : ""}
+            {props.runtime.storage.clientEmail !== undefined
+              ? ` · ${props.runtime.storage.clientEmail}`
+              : ""}
+            ). Turnstile {props.runtime.turnstile.configured ? "configured" : "not configured"} (
+            {props.runtime.turnstile.source}).
+            {props.runtime.updatedAt !== undefined
+              ? ` Updated ${formatWhen(props.runtime.updatedAt)}.`
+              : ""}
+          </p>
+        ) : (
+          <p className="empty">Load operator data to edit live config.</p>
+        )}
+        <div className="grid-2">
+          <label>
+            Qwen base URL
+            <input
+              disabled={!props.reasonReady}
+              value={props.qwenBaseUrl}
+              onChange={(event) => {
+                props.onQwenBaseUrl(event.target.value);
+              }}
+            />
+          </label>
+          <label>
+            Qwen model
+            <input
+              disabled={!props.reasonReady}
+              value={props.qwenModel}
+              onChange={(event) => {
+                props.onQwenModel(event.target.value);
+              }}
+            />
+          </label>
+        </div>
+        <label>
+          Sentence context
+          <input
+            inputMode="numeric"
+            disabled={!props.reasonReady}
+            value={props.sentenceContextCount}
+            onChange={(event) => {
+              props.onSentenceContextCount(event.target.value);
+            }}
+          />
+        </label>
+        <p className="lede tight">
+          Previous and next sentences included for Managed Qwen translation. Translate into still
+          comes from the app.
+        </p>
+        <label>
+          Qwen API key (leave blank to keep)
+          <input
+            type="password"
+            autoComplete="off"
+            disabled={!props.reasonReady}
+            value={props.qwenKey}
+            onChange={(event) => {
+              props.onQwenKey(event.target.value);
+            }}
+          />
+        </label>
+        <label>
+          Object-store bucket
+          <input
+            disabled={!props.reasonReady}
+            value={props.gcsBucket}
+            onChange={(event) => {
+              props.onGcsBucket(event.target.value);
+            }}
+          />
+        </label>
+        <label>
+          GCS service account JSON (leave blank to keep)
+          <textarea
+            disabled={!props.reasonReady}
+            value={props.gcsJson}
+            spellCheck={false}
+            onChange={(event) => {
+              props.onGcsJson(event.target.value);
+            }}
+          />
+        </label>
+        <label>
+          Turnstile secret (leave blank to keep)
+          <input
+            type="password"
+            autoComplete="off"
+            disabled={!props.reasonReady}
+            value={props.turnstileSecret}
+            onChange={(event) => {
+              props.onTurnstileSecret(event.target.value);
+            }}
+          />
+        </label>
+        <div className="actions">
+          <button
+            type="button"
+            className="primary"
+            disabled={!props.reasonReady}
+            onClick={props.onSave}
+          >
+            Save runtime config
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            disabled={!props.reasonReady}
+            onClick={props.onClearQwen}
+          >
+            Clear stored Qwen key
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            disabled={!props.reasonReady}
+            onClick={props.onClearStorage}
+          >
+            Clear stored GCS key
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            disabled={!props.reasonReady}
+            onClick={props.onClearTurnstile}
+          >
+            Clear stored Turnstile secret
+          </button>
+        </div>
+        {props.runtime !== null ? (
+          <table className="service-table follow">
+            <thead>
+              <tr>
+                <th>Bootstrap secret</th>
+                <th>Worker env</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(props.runtime.bootstrap).map(([name, on]) => (
+                <tr key={name}>
+                  <td>{BOOTSTRAP_LABELS[name] ?? name}</td>
+                  <td>
+                    <span className={`pill ${on ? "ok" : "warn"}`}>{on ? "set" : "missing"}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
+      </section>
+    </>
+  );
+}
+
+function ConfirmButton(props: {
+  id: string;
+  armed: string | null;
+  disabled: boolean;
+  kind?: "danger" | "ghost";
+  label: string;
+  confirm: string;
+  onArm: (id: string | null) => void;
+  onConfirm: () => void;
+}) {
+  const isArmed = props.armed === props.id;
+  return (
+    <button
+      type="button"
+      className={isArmed ? "danger" : (props.kind ?? "ghost")}
+      disabled={props.disabled}
+      onClick={() => {
+        if (isArmed) {
+          props.onConfirm();
+        } else {
+          props.onArm(props.id);
+        }
+      }}
+    >
+      {isArmed ? props.confirm : props.label}
+    </button>
+  );
+}
+
+function RowOpen(props: { open: boolean; label: string; hint?: string; onToggle: () => void }) {
+  return (
+    <button type="button" className="row-open" aria-expanded={props.open} onClick={props.onToggle}>
+      <svg
+        className={props.open ? "chevron open" : "chevron"}
+        viewBox="0 0 16 16"
+        width="12"
+        height="12"
+        aria-hidden="true"
+      >
+        <path
+          d="M6 3.5 11 8l-5 4.5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+      <span>
+        {props.label}
+        {props.hint !== undefined && props.hint !== "" ? (
+          <small className="mono">{props.hint}</small>
+        ) : null}
+      </span>
+    </button>
+  );
+}
+
+function CopyValue(props: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <span className="copy-value">
+      <code className="mono">{props.value}</code>
+      <button
+        type="button"
+        className="ghost"
+        onClick={() => {
+          void navigator.clipboard.writeText(props.value).then(
+            () => {
+              setCopied(true);
+              window.setTimeout(() => {
+                setCopied(false);
+              }, 1200);
+            },
+            () => undefined,
+          );
+        }}
+      >
+        {copied ? "Copied" : `Copy ${props.label}`}
+      </button>
+    </span>
+  );
+}
+
+function UsersPanel(props: {
+  users: AdminUser[];
+  userQuery: string;
+  busy: boolean;
+  canMutate: boolean;
+  canManageRoles: boolean;
+  armed: string | null;
+  openUserId: string | null;
+  userDetail: AdminUser | null;
+  userProgress: AdminUserProgress | null;
+  userProgressStatus: "idle" | "loading" | "unavailable";
+  nextCursor: string | null;
+  onQuery: (value: string) => void;
+  onApply: () => void;
+  onLoadMore: () => void;
+  onToggle: (user: AdminUser) => void;
+  onArm: (id: string | null) => void;
+  onMutate: (path: string, message: string) => void;
+}) {
+  return (
+    <>
+      <h2>Users</h2>
+      <p className="lede">
+        Search by email or account id. Open a row for the full account id, devices, books, and
+        quotas. Suspend, restore, revoke devices, or grant operator from the row actions.
+      </p>
+      <OperatorTable
+        caption="Support-safe account metadata"
+        noun="user"
+        plural="users"
+        leading={
+          <>
+            <label>
+              Search
+              <input
+                value={props.userQuery}
+                placeholder="Email or account id"
+                onChange={(event) => {
+                  props.onQuery(event.target.value);
+                }}
+              />
+            </label>
+            <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
+              Apply
+            </button>
+          </>
+        }
+        rows={props.users}
+        rowKey={(user) => user.accountId}
+        empty="No users match this view. Try a different search or refresh."
+        expandedId={props.openUserId}
+        columns={[
+          {
+            id: "account",
+            header: "Account",
+            sortValue: (user) => user.displayName?.trim() || user.email,
+            searchValue: (user) => `${user.displayName ?? ""} ${user.email}`,
+            render: (user) => (
+              <RowOpen
+                open={props.openUserId === user.accountId}
+                label={user.displayName?.trim() || user.email}
+                {...(user.displayName?.trim() ? { hint: user.email } : {})}
+                onToggle={() => {
+                  props.onToggle(user);
+                }}
+              />
+            ),
+          },
+          {
+            id: "accountId",
+            header: "Account id",
+            sortValue: (user) => user.accountId,
+            searchValue: (user) => user.accountId,
+            render: (user) => (
+              <span className="mono cell-now" title={user.accountId}>
+                {user.accountId}
+              </span>
+            ),
+          },
+          {
+            id: "status",
+            header: "Status",
+            sortValue: (user) => user.status,
+            searchValue: (user) => user.status,
+            render: (user) => (
+              <span className={`pill ${statusTone(user.status)}`}>{user.status}</span>
+            ),
+          },
+          {
+            id: "devices",
+            header: "Devices",
+            numeric: true,
+            sortValue: (user) => user.deviceCount,
+            render: (user) => user.deviceCount,
+          },
+          {
+            id: "books",
+            header: "Books",
+            numeric: true,
+            sortValue: (user) => user.bookCount,
+            render: (user) => user.bookCount,
+          },
+          {
+            id: "storage",
+            header: "Storage",
+            numeric: true,
+            sortValue: (user) => user.storageBytes,
+            searchValue: (user) => formatBytes(user.storageBytes),
+            render: (user) => formatBytes(user.storageBytes),
+          },
+          {
+            id: "created",
+            header: "Created",
+            sortValue: (user) => Date.parse(user.createdAt) || 0,
+            searchValue: (user) => user.createdAt,
+            render: (user) => formatWhen(user.createdAt),
+          },
+          {
+            id: "lastSeen",
+            header: "Last seen",
+            sortValue: (user) => Date.parse(user.lastSeenAt ?? "") || 0,
+            searchValue: (user) => user.lastSeenAt ?? "",
+            render: (user) => formatWhen(user.lastSeenAt),
+          },
+          {
+            id: "actions",
+            header: "Actions",
+            render: (user) => (
+              <UserActions
+                user={user}
+                canMutate={props.canMutate}
+                canManageRoles={props.canManageRoles}
+                armed={props.armed}
+                onArm={props.onArm}
+                onMutate={props.onMutate}
+              />
+            ),
+          },
+        ]}
+        renderExpand={(user) => {
+          const detail = props.openUserId === user.accountId ? (props.userDetail ?? user) : user;
+          return (
+            <UserDetail
+              user={detail}
+              progress={props.openUserId === user.accountId ? props.userProgress : null}
+              progressStatus={props.userProgressStatus}
+              loaded={
+                detail.devices !== undefined ||
+                detail.books !== undefined ||
+                detail.quotas !== undefined
+              }
+            />
+          );
+        }}
+      />
+      {props.nextCursor !== null ? (
+        <div className="actions">
+          <button type="button" className="ghost" disabled={props.busy} onClick={props.onLoadMore}>
+            Load more
+          </button>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function UserActions(props: {
+  user: AdminUser;
+  canMutate: boolean;
+  canManageRoles: boolean;
+  armed: string | null;
+  onArm: (id: string | null) => void;
+  onMutate: (path: string, message: string) => void;
+}) {
+  const user = props.user;
+  return (
+    <div className="row-actions">
+      {user.status === "active" ? (
+        <ConfirmButton
+          id={`suspend:${user.accountId}`}
+          armed={props.armed}
+          disabled={!props.canMutate}
+          kind="danger"
+          label="Suspend"
+          confirm="Confirm suspend"
+          onArm={props.onArm}
+          onConfirm={() => {
+            props.onMutate(`/v1/admin/users/${user.accountId}/suspend`, `Suspended ${user.email}.`);
+          }}
+        />
+      ) : null}
+      {user.status === "suspended" ? (
+        <button
+          type="button"
+          className="ghost"
+          disabled={!props.canMutate}
+          onClick={() => {
+            props.onMutate(
+              `/v1/admin/users/${user.accountId}/unsuspend`,
+              `Restored ${user.email}.`,
+            );
+          }}
+        >
+          Restore
+        </button>
+      ) : null}
+      <ConfirmButton
+        id={`revoke:${user.accountId}`}
+        armed={props.armed}
+        disabled={!props.canMutate}
+        label="Revoke sessions"
+        confirm="Confirm revoke"
+        onArm={props.onArm}
+        onConfirm={() => {
+          props.onMutate(
+            `/v1/admin/users/${user.accountId}/revoke-sessions`,
+            `Revoked sessions for ${user.email}.`,
+          );
+        }}
+      />
+      <ConfirmButton
+        id={`grant:${user.accountId}`}
+        armed={props.armed}
+        disabled={!props.canManageRoles}
+        label="Grant admin"
+        confirm="Confirm grant"
+        onArm={props.onArm}
+        onConfirm={() => {
+          props.onMutate(
+            `/v1/admin/users/${user.accountId}/grant-admin`,
+            `Granted operator to ${user.email}.`,
+          );
+        }}
+      />
+    </div>
+  );
+}
+
+function UserDetail(props: {
+  user: AdminUser;
+  loaded: boolean;
+  progress: AdminUserProgress | null;
+  progressStatus: "idle" | "loading" | "unavailable";
+}) {
+  const user = props.user;
+  const devices = user.devices ?? [];
+  const books = user.books ?? [];
+  const quotas = user.quotas ?? [];
+  return (
+    <>
+      <dl className="detail-grid wide">
+        <dt>Email</dt>
+        <dd>{user.email}</dd>
+        <dt>Display name</dt>
+        <dd>{user.displayName ?? "—"}</dd>
+        <dt>Account id</dt>
+        <dd>
+          <CopyValue value={user.accountId} label="account id" />
+        </dd>
+        <dt>User id</dt>
+        <dd>
+          <CopyValue value={user.id} label="user id" />
+        </dd>
+        <dt>Created</dt>
+        <dd>{formatWhen(user.createdAt)}</dd>
+        <dt>Last seen</dt>
+        <dd>{formatWhen(user.lastSeenAt)}</dd>
+        <dt>Storage</dt>
+        <dd>{formatBytes(user.storageBytes)}</dd>
+        <dt>Status</dt>
+        <dd>
+          <span className={`pill ${statusTone(user.status)}`}>{user.status}</span>
+        </dd>
+      </dl>
+      <UserProgressSummary
+        accountId={user.accountId}
+        progress={props.progress}
+        status={props.progressStatus}
+      />
+      <div className="prose-pair">
+        <figure>
+          <figcaption>Devices ({String(devices.length || user.deviceCount)})</figcaption>
+          {devices.length === 0 ? (
+            <p className="empty">
+              {props.loaded ? "No devices registered." : "Open this row to load live devices."}
+            </p>
+          ) : (
+            <table className="service-table">
+              <thead>
+                <tr>
+                  <th>Device id</th>
+                  <th>Platform</th>
+                  <th>Name</th>
+                  <th>App</th>
+                  <th>Last seen</th>
+                  <th>State</th>
+                </tr>
+              </thead>
+              <tbody>
+                {devices.map((device) => (
+                  <tr key={device.id}>
+                    <td className="mono">{device.id}</td>
+                    <td>{device.platform}</td>
+                    <td>{device.name ?? "—"}</td>
+                    <td>{device.appVersion ?? "—"}</td>
+                    <td>{formatWhen(device.lastSeenAt)}</td>
+                    <td>
+                      <span className={`pill ${device.revoked ? "bad" : "ok"}`}>
+                        {device.revoked ? "revoked" : "active"}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </figure>
+        <figure>
+          <figcaption>Books ({String(books.length || user.bookCount)})</figcaption>
+          {books.length === 0 ? (
+            <p className="empty">
+              {props.loaded ? "No cloud books." : "Open this row to load live books."}
+            </p>
+          ) : (
+            <table className="service-table">
+              <thead>
+                <tr>
+                  <th>Book id</th>
+                  <th>Title</th>
+                  <th className="num">Chapters</th>
+                </tr>
+              </thead>
+              <tbody>
+                {books.map((book) => (
+                  <tr key={book.id}>
+                    <td className="mono">{book.id}</td>
+                    <td>{book.title}</td>
+                    <td className="num">{book.chapterCount ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </figure>
+      </div>
+      <figure className="prose-field">
+        <figcaption>Quotas</figcaption>
+        {quotas.length === 0 ? (
+          <p className="empty">Open this row to load live usage, or apply quota_limits SQL.</p>
+        ) : (
+          <table className="service-table">
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th>Used</th>
+                <th>Limit</th>
+                <th>Period</th>
+              </tr>
+            </thead>
+            <tbody>
+              {quotas.map((quota) => (
+                <tr key={quota.key}>
+                  <td className="mono">{quota.key}</td>
+                  <td>
+                    {quota.key === "cloud_media_bytes" ? formatBytes(quota.used) : quota.used}
+                  </td>
+                  <td>
+                    {quota.key === "cloud_media_bytes" ? formatBytes(quota.limit) : quota.limit}
+                  </td>
+                  <td>{formatWhen(quota.periodEndsAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </figure>
+    </>
+  );
+}
+
+function UserProgressSummary(props: {
+  accountId: string;
+  progress: AdminUserProgress | null;
+  status: "idle" | "loading" | "unavailable";
+}) {
+  if (props.status === "loading") {
+    return (
+      <div className="progress-summary" aria-live="polite" aria-busy="true">
+        <p className="empty">Loading privacy-safe sync and learning progress…</p>
+      </div>
+    );
+  }
+  if (props.progress === null) {
+    return props.status === "unavailable" ? (
+      <div className="progress-summary" role="status">
+        <p className="empty">
+          Progress is unavailable. This account may require a scoped support role or a fresh sync.
+        </p>
+      </div>
+    ) : null;
+  }
+  const progress = props.progress;
+  const consented = progress.consent.operatorLearningAnalyticsEnabled;
+  const activityHref = `?${destinationQuery("usage", {
+    usageAccountId: props.accountId,
+  }).toString()}`;
+  return (
+    <section className="progress-summary" aria-labelledby={`progress-${props.accountId}`}>
+      <div className="progress-heading">
+        <div>
+          <h3 id={`progress-${props.accountId}`}>Progress and activity</h3>
+          <p>
+            Counts and timestamps only. Reading text, transcripts, definitions, translations, and
+            notes are never shown here.
+          </p>
+        </div>
+        <a className="button-link ghost" href={activityHref}>
+          Open filtered activity
+        </a>
+      </div>
+      <dl className="detail-grid wide">
+        <dt>Last successful sync</dt>
+        <dd>{formatWhen(progress.sync.lastSuccessfulAt)}</dd>
+        <dt>Last device</dt>
+        <dd>
+          {progress.sync.lastDevice === null || progress.sync.lastDevice === undefined
+            ? "—"
+            : `${progress.sync.lastDevice.name ?? progress.sync.lastDevice.platform} · ${progress.sync.lastDevice.platform}`}
+        </dd>
+        <dt>Pending</dt>
+        <dd>{progress.sync.pendingCount ?? "Reported on device"}</dd>
+        <dt>Conflicts recorded</dt>
+        <dd>{progress.sync.conflictCount}</dd>
+        <dt>Entity counts</dt>
+        <dd>
+          {progress.sync.entityCounts.length === 0
+            ? "No synced entities"
+            : progress.sync.entityCounts
+                .map((item) => `${item.entityType.replaceAll("_", " ")} ${String(item.count)}`)
+                .join(" · ")}
+        </dd>
+        <dt>Learning analytics</dt>
+        <dd>
+          <span className={`pill ${consented ? "ok" : "warn"}`}>
+            {consented ? "user enabled" : "consent required"}
+          </span>
+        </dd>
+      </dl>
+      {!consented ? (
+        <p className="empty" role="status">
+          Reading, review, learning, and AI-use summaries remain hidden until the user explicitly
+          enables Operator learning analytics.
+        </p>
+      ) : progress.reading !== null &&
+        progress.reading !== undefined &&
+        progress.review !== null &&
+        progress.review !== undefined &&
+        progress.learning !== null &&
+        progress.learning !== undefined ? (
+        <div className="progress-columns">
+          <dl>
+            <dt>Reading</dt>
+            <dd>{progress.reading.activeBooks} active books</dd>
+            <dd>{progress.reading.completedBooks} completed books</dd>
+            <dd>
+              {progress.reading.completionPercent === null ||
+              progress.reading.completionPercent === undefined
+                ? "No current completion"
+                : `${String(progress.reading.completionPercent)}% current completion`}
+            </dd>
+            <dd>Last active {formatWhen(progress.reading.lastActivityAt)}</dd>
+          </dl>
+          <dl>
+            <dt>Review</dt>
+            <dd>
+              {progress.review.due} due · {progress.review.new} new
+            </dd>
+            <dd>{progress.review.learning} learning</dd>
+            <dd>{progress.review.reviewsLast30Days} reviews in 30 days</dd>
+            <dd>
+              {progress.review.retentionRate === null || progress.review.retentionRate === undefined
+                ? "No retention sample"
+                : `${String(Math.round(progress.review.retentionRate * 100))}% retention`}
+              {` · ${String(progress.review.streakDays)} day streak`}
+            </dd>
+          </dl>
+          <dl>
+            <dt>Learning</dt>
+            <dd>{progress.learning.vocabulary} vocabulary items</dd>
+            <dd>
+              {progress.learning.learning} learning · {progress.learning.known} known
+            </dd>
+            <dd>{progress.learning.aiUsesLast30Days} AI uses in 30 days</dd>
+            <dd>
+              {progress.learning.aiUsesByFeature.length === 0
+                ? "No AI feature activity"
+                : progress.learning.aiUsesByFeature
+                    .map((item) => `${item.feature} ${String(item.count)}`)
+                    .join(" · ")}
+            </dd>
+          </dl>
+        </div>
+      ) : (
+        <p className="empty">No learning summary has been materialized from a successful sync.</p>
+      )}
+    </section>
+  );
+}
+
+function PoliciesPanel(props: {
+  policies: Policy[];
+  drafts: Record<string, PolicyDraft>;
+  busy: boolean;
+  canMutate: boolean;
+  onDraft: (id: string, patch: Partial<PolicyDraft>) => void;
+  onToggle: (policy: Policy) => void;
+  onSave: (policy: Policy) => void;
+  onPreview: (
+    policy: Policy,
+    draft: PolicyDraft,
+    subtask: ManagedPromptPreview["subtask"],
+    probe: boolean,
+  ) => Promise<ManagedPromptPreview>;
+}) {
+  const [subtasks, setSubtasks] = useState<Record<string, ManagedPromptPreview["subtask"]>>({});
+  const [previews, setPreviews] = useState<
+    Record<string, { draftHash: string; value: ManagedPromptPreview }>
+  >({});
+  const [previewBusy, setPreviewBusy] = useState<string | null>(null);
+  const [previewErrors, setPreviewErrors] = useState<Record<string, string>>({});
+
+  const availableSubtasks = (task: string): ManagedPromptPreview["subtask"][] => {
+    if (task === "translation") return ["sentence", "word", "chapter_batch"];
+    if (task === "chapter_summary") return ["chapter_summary"];
+    return ["chat", "heard_quiz"];
+  };
+  const draftHash = (draft: PolicyDraft, subtask: ManagedPromptPreview["subtask"]): string =>
+    JSON.stringify({ draft, subtask });
+
+  const validate = async (policy: Policy, draft: PolicyDraft, probe: boolean) => {
+    const subtask = subtasks[policy.id] ?? availableSubtasks(policy.task)[0] ?? "chat";
+    setPreviewBusy(policy.id);
+    setPreviewErrors((current) => ({ ...current, [policy.id]: "" }));
+    try {
+      const value = await props.onPreview(policy, draft, subtask, probe);
+      setPreviews((current) => ({
+        ...current,
+        [policy.id]: { draftHash: draftHash(draft, subtask), value },
+      }));
+    } catch (cause: unknown) {
+      setPreviewErrors((current) => ({
+        ...current,
+        [policy.id]: describeAdminError(cause),
+      }));
+    } finally {
+      setPreviewBusy(null);
+    }
+  };
+
+  return (
+    <>
+      <h2>Policies</h2>
+      <p className="lede">
+        Inspect exactly what Managed Qwen receives. Editable policy text is combined with a
+        read-only task contract, required book context, and a server-owned output schema. Validate
+        the current draft before saving; prompt-affecting changes invalidate shared cache entries.
+      </p>
+      {props.policies.length === 0 ? (
+        <p className="empty">No Qwen policies loaded.</p>
+      ) : (
+        props.policies.map((policy) => {
+          const draft = props.drafts[policy.id];
+          if (draft === undefined) return null;
+          const choices = availableSubtasks(policy.task);
+          const subtask = subtasks[policy.id] ?? choices[0] ?? "chat";
+          const preview = previews[policy.id];
+          const currentHash = draftHash(draft, subtask);
+          const previewCurrent = preview?.draftHash === currentHash;
+          const errors = policyDraftErrors(draft);
+          const changes = [
+            ["Model", policy.model, draft.model],
+            ["Prompt version", policy.promptVersion, draft.promptVersion],
+            ["Schema version", policy.schemaVersion ?? "1", draft.schemaVersion],
+            ["System instructions", policy.systemPrompt ?? "", draft.systemPrompt],
+            ["User template", policy.userPrompt ?? "", draft.userPrompt],
+          ].filter(([, before, after]) => before !== after);
+          return (
+            <section className="ledger" key={policy.id}>
+              <h3>
+                {policy.task.replaceAll("_", " ")}
+                <span className={`pill ${policy.enabled ? "ok" : "warn"}`}>
+                  {policy.enabled ? "enabled" : "disabled"}
+                </span>
+              </h3>
+              <p className="lede tight mono">
+                {policy.region} · policy {policy.policyVersion ?? "v?"}
+              </p>
+              <div className="grid-3">
+                <label>
+                  Model
+                  <input
+                    disabled={!props.canMutate}
+                    value={draft.model}
+                    onChange={(event) => {
+                      props.onDraft(policy.id, { model: event.target.value });
+                    }}
+                  />
+                </label>
+                <label>
+                  Prompt version
+                  <input
+                    disabled={!props.canMutate}
+                    value={draft.promptVersion}
+                    onChange={(event) => {
+                      props.onDraft(policy.id, { promptVersion: event.target.value });
+                    }}
+                  />
+                </label>
+                <label>
+                  Canary %
+                  <input
+                    inputMode="numeric"
+                    disabled={!props.canMutate}
+                    value={draft.canaryPercent}
+                    onChange={(event) => {
+                      props.onDraft(policy.id, { canaryPercent: event.target.value });
+                    }}
+                  />
+                </label>
+              </div>
+              <div className="grid-4">
+                <label>
+                  Schema version
+                  <input
+                    disabled={!props.canMutate}
+                    value={draft.schemaVersion}
+                    onChange={(event) => {
+                      props.onDraft(policy.id, { schemaVersion: event.target.value });
+                    }}
+                  />
+                </label>
+                <label>
+                  Input token limit
+                  <input
+                    inputMode="numeric"
+                    disabled={!props.canMutate}
+                    value={draft.maxInputTokens}
+                    onChange={(event) => {
+                      props.onDraft(policy.id, { maxInputTokens: event.target.value });
+                    }}
+                  />
+                </label>
+                <label>
+                  Output token limit
+                  <input
+                    inputMode="numeric"
+                    disabled={!props.canMutate}
+                    value={draft.maxOutputTokens}
+                    onChange={(event) => {
+                      props.onDraft(policy.id, { maxOutputTokens: event.target.value });
+                    }}
+                  />
+                </label>
+                <label>
+                  Timeout (ms)
+                  <input
+                    inputMode="numeric"
+                    disabled={!props.canMutate}
+                    value={draft.timeoutMs}
+                    onChange={(event) => {
+                      props.onDraft(policy.id, { timeoutMs: event.target.value });
+                    }}
+                  />
+                </label>
+              </div>
+              <label>
+                Editable policy system instructions
+                <textarea
+                  className="prompt-editor"
+                  disabled={!props.canMutate}
+                  spellCheck={false}
+                  value={draft.systemPrompt}
+                  onChange={(event) => {
+                    props.onDraft(policy.id, { systemPrompt: event.target.value });
+                  }}
+                />
+              </label>
+              <label>
+                Editable user-message template
+                <textarea
+                  className="prompt-editor"
+                  disabled={!props.canMutate}
+                  spellCheck={false}
+                  value={draft.userPrompt}
+                  onChange={(event) => {
+                    props.onDraft(policy.id, { userPrompt: event.target.value });
+                  }}
+                />
+              </label>
+              <div className="grid-3 prompt-preview-controls">
+                <label>
+                  Preview task
+                  <select
+                    aria-label={`Preview task for ${policy.task}`}
+                    disabled={!props.canMutate}
+                    value={subtask}
+                    onChange={(event) => {
+                      setSubtasks((current) => ({
+                        ...current,
+                        [policy.id]: event.target.value as ManagedPromptPreview["subtask"],
+                      }));
+                    }}
+                  >
+                    {choices.map((choice) => (
+                      <option value={choice} key={choice}>
+                        {choice.replaceAll("_", " ")}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={
+                    !props.canMutate || previewBusy === policy.id || Object.keys(errors).length > 0
+                  }
+                  onClick={() => void validate(policy, draft, false)}
+                >
+                  Validate &amp; preview
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={!props.canMutate || previewBusy === policy.id || !previewCurrent}
+                  onClick={() => void validate(policy, draft, true)}
+                >
+                  Run staging probe
+                </button>
+              </div>
+              {Object.entries(errors).map(([field, message]) => (
+                <p className="field-error" role="alert" key={field}>
+                  {field}: {message}
+                </p>
+              ))}
+              {previewErrors[policy.id] ? (
+                <p className="field-error" role="alert">
+                  {previewErrors[policy.id]}
+                </p>
+              ) : null}
+              {preview !== undefined && !previewCurrent ? (
+                <p className="pill warn" role="status">
+                  Preview out of date
+                </p>
+              ) : null}
+              {previewCurrent ? (
+                <div className="prompt-contract" aria-live="polite">
+                  <p>
+                    <span className="pill ok">contract valid</span>{" "}
+                    <span className="mono">{preview.value.contractFingerprint.slice(0, 12)}</span>
+                  </p>
+                  <details open>
+                    <summary>Enforced task contract</summary>
+                    <pre>{preview.value.enforced.taskContract}</pre>
+                  </details>
+                  <details>
+                    <summary>Effective system message</summary>
+                    <pre>{preview.value.effective.system}</pre>
+                  </details>
+                  <details>
+                    <summary>Effective user message</summary>
+                    <pre>{preview.value.effective.user}</pre>
+                  </details>
+                  <details>
+                    <summary>Output contract</summary>
+                    <pre>{formatJson(preview.value.outputSchema)}</pre>
+                  </details>
+                  {preview.value.requestId ? (
+                    <p>
+                      Probe {preview.value.outputValidation?.valid === true ? "passed" : "failed"}
+                      {" · "}
+                      <span className="mono">request {preview.value.requestId}</span>
+                    </p>
+                  ) : null}
+                  {preview.value.parsedResult ? (
+                    <details>
+                      <summary>Parsed probe result</summary>
+                      <pre>{formatJson(preview.value.parsedResult)}</pre>
+                    </details>
+                  ) : null}
+                </div>
+              ) : null}
+              {changes.length > 0 ? (
+                <div className="change-summary">
+                  <h4>Before / after</h4>
+                  {changes.map(([label, before, after]) => (
+                    <p key={label}>
+                      <strong>{label}:</strong> <span className="mono">{before || "(blank)"}</span>
+                      {" → "}
+                      <span className="mono">{after || "(blank)"}</span>
+                    </p>
+                  ))}
+                  <p className="lede tight">
+                    Saving changes to model, prompt text, prompt version, schema, or enforced
+                    contracts changes the cache fingerprint; earlier generated entries will miss and
+                    regenerate on demand.
+                  </p>
+                </div>
+              ) : null}
+              <div className="actions">
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={!props.canMutate || props.busy}
+                  onClick={() => {
+                    props.onToggle(policy);
+                  }}
+                >
+                  {policy.enabled ? "Disable" : "Enable"}
+                </button>
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={!props.canMutate || props.busy || !previewCurrent}
+                  onClick={() => {
+                    props.onSave(policy);
+                  }}
+                >
+                  Save policy
+                </button>
+              </div>
+            </section>
+          );
+        })
+      )}
+    </>
+  );
+}
+
+function JobsPanel(props: {
+  jobs: Job[];
+  jobStatus: string;
+  busy: boolean;
+  canMutate: boolean;
+  armed: string | null;
+  nextCursor: string | null;
+  onStatus: (value: string) => void;
+  onApply: () => void;
+  onLoadMore: () => void;
+  onArm: (id: string | null) => void;
+  onMutate: (path: string, message: string) => void;
+}) {
+  const [openId, setOpenId] = useState<string | null>(null);
+  return (
+    <>
+      <h2>Jobs</h2>
+      <p className="lede">Retry a failed run or cancel work still in the queue.</p>
+      <OperatorTable
+        caption="Background jobs"
+        noun="job"
+        leading={
+          <>
+            <label>
+              Status
+              <select
+                value={props.jobStatus}
+                onChange={(event) => {
+                  props.onStatus(event.target.value);
+                }}
+              >
+                <option value="">Any</option>
+                <option value="queued">queued</option>
+                <option value="running">running</option>
+                <option value="failed">failed</option>
+                <option value="succeeded">succeeded</option>
+                <option value="cancelled">cancelled</option>
+                <option value="dead_letter">dead_letter</option>
+              </select>
+            </label>
+            <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
+              Apply
+            </button>
+          </>
+        }
+        rows={props.jobs}
+        rowKey={(job) => job.id}
+        empty="No jobs in this filter."
+        expandedId={openId}
+        columns={[
+          {
+            id: "kind",
+            header: "Kind",
+            sortValue: (job) => job.kind,
+            searchValue: (job) => `${job.kind} ${job.id}`,
+            render: (job) => (
+              <RowOpen
+                open={openId === job.id}
+                label={job.kind.replaceAll("_", " ")}
+                hint={shortId(job.id)}
+                onToggle={() => {
+                  setOpenId(openId === job.id ? null : job.id);
+                }}
+              />
+            ),
+          },
+          {
+            id: "status",
+            header: "Status",
+            sortValue: (job) => job.status,
+            searchValue: (job) => job.status,
+            render: (job) => <span className={`pill ${statusTone(job.status)}`}>{job.status}</span>,
+          },
+          {
+            id: "account",
+            header: "Account",
+            sortValue: (job) => job.accountId ?? "",
+            searchValue: (job) => job.accountId ?? "",
+            render: (job) => (
+              <span className="mono">{job.accountId ? shortId(job.accountId) : "—"}</span>
+            ),
+          },
+          {
+            id: "attempts",
+            header: "Attempts",
+            numeric: true,
+            sortValue: (job) => job.attempts ?? 0,
+            render: (job) => `${String(job.attempts ?? 0)}/${String(job.maxAttempts ?? "—")}`,
+          },
+          {
+            id: "error",
+            header: "Error",
+            sortValue: (job) => job.lastError ?? "",
+            searchValue: (job) => job.lastError ?? "",
+            render: (job) => (
+              <div className="cell-clip" title={job.lastError ?? undefined}>
+                {job.lastError ?? "—"}
+              </div>
+            ),
+          },
+          {
+            id: "updated",
+            header: "Updated",
+            sortValue: (job) => Date.parse(job.updatedAt) || 0,
+            render: (job) => formatWhen(job.updatedAt),
+          },
+          {
+            id: "actions",
+            header: "Actions",
+            render: (job) => (
+              <div className="row-actions">
+                {job.status === "failed" || job.status === "dead_letter" ? (
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={!props.canMutate}
+                    onClick={() => {
+                      props.onMutate(`/v1/admin/jobs/${job.id}/retry`, "Job queued again.");
+                    }}
+                  >
+                    Retry
+                  </button>
+                ) : null}
+                {job.status === "queued" || job.status === "running" ? (
+                  <ConfirmButton
+                    id={`cancel:${job.id}`}
+                    armed={props.armed}
+                    disabled={!props.canMutate}
+                    kind="danger"
+                    label="Cancel"
+                    confirm="Confirm cancel"
+                    onArm={props.onArm}
+                    onConfirm={() => {
+                      props.onMutate(`/v1/admin/jobs/${job.id}/cancel`, "Job cancelled.");
+                    }}
+                  />
+                ) : null}
+              </div>
+            ),
+          },
+        ]}
+        renderExpand={(job) => (
+          <>
+            <dl className="detail-grid wide">
+              <dt>Id</dt>
+              <dd className="mono">{job.id}</dd>
+              <dt>Account</dt>
+              <dd className="mono">{job.accountId ?? "—"}</dd>
+              <dt>Created</dt>
+              <dd>{formatWhen(job.createdAt)}</dd>
+              <dt>Started</dt>
+              <dd>{formatWhen(job.startedAt)}</dd>
+              <dt>Finished</dt>
+              <dd>{formatWhen(job.finishedAt)}</dd>
+              <dt>Updated</dt>
+              <dd>{formatWhen(job.updatedAt)}</dd>
+            </dl>
+            {job.lastError ? (
+              <figure className="prose-field">
+                <figcaption>Last error</figcaption>
+                <pre className="prose-block">{job.lastError}</pre>
+              </figure>
+            ) : null}
+          </>
+        )}
+      />
+      {props.nextCursor !== null ? (
+        <div className="actions">
+          <button type="button" className="ghost" disabled={props.busy} onClick={props.onLoadMore}>
+            Load more
+          </button>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function CachePanel(props: {
+  entries: CacheEntry[];
+  cacheState: string;
+  cacheTask: string;
+  cacheFingerprint: string;
+  busy: boolean;
+  canMutate: boolean;
+  armed: string | null;
+  openCacheId: string | null;
+  cacheDetail: CacheEntry | null;
+  nextCursor: string | null;
+  onState: (value: string) => void;
+  onTask: (value: string) => void;
+  onFingerprint: (value: string) => void;
+  onApply: () => void;
+  onLoadMore: () => void;
+  onToggle: (entry: CacheEntry) => void;
+  onArm: (id: string | null) => void;
+  onAction: (entry: CacheEntry, action: CacheAction) => void;
+}) {
+  return (
+    <>
+      <h2>Shared AI cache</h2>
+      <p className="lede">
+        HMAC-addressed reusable translations and summaries. Source passages, private notes, chat,
+        and durable user decisions are not stored in this table.
+      </p>
+      <OperatorTable
+        caption="Shared derived cache"
+        noun="entry"
+        plural="entries"
+        leading={
+          <>
+            <label>
+              State
+              <select
+                value={props.cacheState}
+                onChange={(event) => {
+                  props.onState(event.target.value);
+                }}
+              >
+                <option value="">Any</option>
+                <option value="active">active</option>
+                <option value="quarantined">quarantined</option>
+                <option value="expired">expired</option>
+                <option value="superseded">superseded</option>
+                <option value="purged">purged</option>
+              </select>
+            </label>
+            <label>
+              Task
+              <input
+                value={props.cacheTask}
+                onChange={(event) => {
+                  props.onTask(event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              Edition fingerprint
+              <input
+                value={props.cacheFingerprint}
+                onChange={(event) => {
+                  props.onFingerprint(event.target.value);
+                }}
+              />
+            </label>
+            <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
+              Apply
+            </button>
+          </>
+        }
+        rows={props.entries}
+        rowKey={(entry) => entry.id}
+        empty="No cache entries in this filter."
+        expandedId={props.openCacheId}
+        columns={[
+          {
+            id: "kind",
+            header: "Kind",
+            sortValue: (entry) => cacheKind(entry),
+            searchValue: (entry) =>
+              `${cacheKind(entry)} ${entry.id} ${entry.sourceLanguage} ${entry.targetLanguage}`,
+            render: (entry) => (
+              <RowOpen
+                open={props.openCacheId === entry.id}
+                label={cacheKind(entry)}
+                hint={`${entry.sourceLanguage} → ${entry.targetLanguage}`}
+                onToggle={() => {
+                  props.onToggle(entry);
+                }}
+              />
+            ),
+          },
+          {
+            id: "translation",
+            header: "Translation",
+            sortValue: (entry) => cacheResult(entry),
+            searchValue: (entry) => cacheResult(entry),
+            render: (entry) => {
+              const result = cacheResult(entry);
+              return (
+                <div className="cell-clip" title={result || undefined}>
+                  {result === "" ? "—" : clipText(result, 160)}
+                </div>
+              );
+            },
+          },
+          {
+            id: "edition",
+            header: "Edition fingerprint",
+            sortValue: (entry) => entry.editionFingerprint ?? "",
+            searchValue: (entry) => entry.editionFingerprint ?? "",
+            render: (entry) => <span className="mono">{entry.editionFingerprint || "—"}</span>,
+          },
+          {
+            id: "hits",
+            header: "Hits",
+            numeric: true,
+            sortValue: (entry) => entry.hitCount,
+            render: (entry) => entry.hitCount,
+          },
+          {
+            id: "state",
+            header: "State",
+            sortValue: (entry) => entry.state,
+            searchValue: (entry) => entry.state,
+            render: (entry) => (
+              <span className={`pill ${statusTone(entry.state)}`}>{entry.state}</span>
+            ),
+          },
+          {
+            id: "lastHit",
+            header: "Last hit",
+            sortValue: (entry) => Date.parse(entry.lastHitAt ?? entry.createdAt) || 0,
+            render: (entry) => formatWhen(entry.lastHitAt ?? entry.createdAt),
+          },
+          {
+            id: "actions",
+            header: "Actions",
+            render: (entry) => (
+              <div className="row-actions">
+                {cacheActionsFor(entry.state).map((action) =>
+                  action === "purge" ? (
+                    <ConfirmButton
+                      key={action}
+                      id={`purge:${entry.id}`}
+                      armed={props.armed}
+                      disabled={!props.canMutate}
+                      kind="danger"
+                      label="purge"
+                      confirm="Confirm purge"
+                      onArm={props.onArm}
+                      onConfirm={() => {
+                        props.onAction(entry, action);
+                      }}
+                    />
+                  ) : (
+                    <button
+                      key={action}
+                      type="button"
+                      className="ghost"
+                      disabled={!props.canMutate}
+                      onClick={() => {
+                        props.onAction(entry, action);
+                      }}
+                    >
+                      {action}
+                    </button>
+                  ),
+                )}
+              </div>
+            ),
+          },
+        ]}
+        renderExpand={(entry) => (
+          <CacheDetail
+            entry={props.openCacheId === entry.id ? (props.cacheDetail ?? entry) : entry}
+          />
+        )}
+      />
+      {props.nextCursor !== null ? (
+        <div className="actions">
+          <button type="button" className="ghost" disabled={props.busy} onClick={props.onLoadMore}>
+            Load more
+          </button>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function CacheDetail(props: { entry: CacheEntry }) {
+  const entry = props.entry;
+  const result = cacheResult(entry);
+  const notes = Array.isArray(entry.payload?.notes) ? entry.payload.notes : [];
+  const kind = cacheKind(entry);
+  return (
+    <>
+      <dl className="detail-grid wide">
+        <dt>Id</dt>
+        <dd className="mono">{entry.id}</dd>
+        <dt>Cache key</dt>
+        <dd className="mono">{entry.cacheKey ?? "—"}</dd>
+        <dt>Edition id</dt>
+        <dd className="mono">{entry.editionFingerprint || "—"}</dd>
+        <dt>Languages</dt>
+        <dd>
+          {entry.sourceLanguage} → {entry.targetLanguage}
+        </dd>
+        <dt>Task</dt>
+        <dd>
+          {kind}
+          {entry.task !== kind ? ` · ${entry.task}` : ""}
+        </dd>
+        <dt>Policy</dt>
+        <dd>{entry.policyVersion ?? "—"}</dd>
+        <dt>Hits</dt>
+        <dd>
+          {entry.hitCount} · last {formatWhen(entry.lastHitAt)}
+        </dd>
+        <dt>Accept / reject</dt>
+        <dd>
+          {entry.acceptCount ?? 0} / {entry.rejectCount ?? 0}
+        </dd>
+        <dt>Created</dt>
+        <dd>{formatWhen(entry.createdAt)}</dd>
+      </dl>
+      <div className="prose-pair">
+        <figure>
+          <figcaption>Translation</figcaption>
+          <pre className="prose-block">{result || "—"}</pre>
+        </figure>
+        <figure>
+          <figcaption>Notes</figcaption>
+          <pre className="prose-block">{notes.length === 0 ? "—" : formatJson(notes)}</pre>
+        </figure>
+      </div>
+    </>
+  );
+}
+
+function AccessPanel(props: { attempts: BlockedAttempt[] }) {
+  return (
+    <>
+      <h2>Access</h2>
+      <p className="lede">
+        Passwordless attempts this Worker process blocked for rate or a missing Turnstile challenge.
+        Hashed identifiers only.
+      </p>
+      <OperatorTable
+        caption="Blocked passwordless attempts"
+        noun="attempt"
+        rows={props.attempts}
+        rowKey={(attempt) => attempt.id}
+        empty="No blocked attempts in this Worker isolate."
+        columns={[
+          {
+            id: "when",
+            header: "When",
+            sortValue: (attempt) => Date.parse(attempt.at) || 0,
+            render: (attempt) => formatWhen(attempt.at),
+          },
+          {
+            id: "action",
+            header: "Action",
+            sortValue: (attempt) => attempt.action,
+            searchValue: (attempt) => attempt.action,
+            render: (attempt) => attempt.action.replaceAll("_", " "),
+          },
+          {
+            id: "reason",
+            header: "Reason",
+            sortValue: (attempt) => attempt.reason,
+            searchValue: (attempt) => attempt.reason,
+            render: (attempt) => (
+              <span className={`pill ${statusTone(attempt.reason)}`}>{attempt.reason}</span>
+            ),
+          },
+          {
+            id: "email",
+            header: "Email hash",
+            sortValue: (attempt) => attempt.emailHash,
+            searchValue: (attempt) => attempt.emailHash,
+            render: (attempt) => (
+              <span className="mono" title={attempt.emailHash}>
+                {shortId(attempt.emailHash, 12)}
+              </span>
+            ),
+          },
+          {
+            id: "ip",
+            header: "IP hash",
+            sortValue: (attempt) => attempt.ipHash,
+            searchValue: (attempt) => attempt.ipHash,
+            render: (attempt) => (
+              <span className="mono" title={attempt.ipHash}>
+                {shortId(attempt.ipHash, 12)}
+              </span>
+            ),
+          },
+          {
+            id: "device",
+            header: "Device",
+            sortValue: (attempt) => attempt.deviceId ?? "",
+            render: (attempt) => (
+              <span className="mono">{attempt.deviceId ? shortId(attempt.deviceId) : "—"}</span>
+            ),
+          },
+          {
+            id: "request",
+            header: "Request",
+            sortValue: (attempt) => attempt.requestId ?? "",
+            searchValue: (attempt) => attempt.requestId ?? "",
+            render: (attempt) => (
+              <span className="mono">
+                {attempt.requestId ? shortId(attempt.requestId, 12) : "—"}
+              </span>
+            ),
+          },
+        ]}
+      />
+    </>
+  );
+}
+
+function metricNumber(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : "—";
+}
+
+function formatEventProperties(value: Record<string, unknown> | undefined): string {
+  if (value === undefined) {
+    return "—";
+  }
+  const parts = Object.entries(value).map(([key, item]) => `${key}=${String(item)}`);
+  return parts.length === 0 ? "—" : parts.join(" · ");
+}
+
+function UsagePanel(props: {
+  events: ProductEvent[];
+  name: string;
+  accountId: string;
+  requestId: string;
+  busy: boolean;
+  nextCursor: string | null;
+  onName: (value: string) => void;
+  onAccountId: (value: string) => void;
+  onRequestId: (value: string) => void;
+  onApply: () => void;
+  onLoadMore: () => void;
+}) {
+  const [openId, setOpenId] = useState<string | null>(null);
+  return (
+    <>
+      <h2>Activity</h2>
+      <p className="lede">
+        Latest persisted product events, not clipped to the Metrics date window. Filter by exact
+        name, a prefix such as <span className="mono">ai.</span>, or account id. After a Managed
+        Qwen translate you should see <span className="mono">ai.translation.started</span> then
+        <span className="mono">ai.translation.cached</span> or
+        <span className="mono">ai.translation.cache_failed</span>. Chat-only traffic shows
+        <span className="mono">ai.chat.*</span>.
+      </p>
+      <OperatorTable
+        leading={
+          <>
+            <label>
+              Event name
+              <input
+                value={props.name}
+                placeholder="ai. or account.signed_in"
+                onChange={(event) => {
+                  props.onName(event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              Account id
+              <input
+                value={props.accountId}
+                onChange={(event) => {
+                  props.onAccountId(event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              Request id
+              <input
+                value={props.requestId}
+                onChange={(event) => {
+                  props.onRequestId(event.target.value);
+                }}
+              />
+            </label>
+            <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
+              Apply
+            </button>
+          </>
+        }
+        caption="User activity"
+        noun="event"
+        rows={props.events}
+        rowKey={(event) => event.id}
+        empty="No activity in this window yet."
+        expandedId={openId}
+        columns={[
+          {
+            id: "when",
+            header: "When",
+            sortValue: (event) => Date.parse(event.createdAt) || 0,
+            render: (event) => (
+              <RowOpen
+                open={openId === event.id}
+                label={formatWhen(event.createdAt)}
+                onToggle={() => {
+                  setOpenId(openId === event.id ? null : event.id);
+                }}
+              />
+            ),
+          },
+          {
+            id: "name",
+            header: "Name",
+            sortValue: (event) => event.name,
+            searchValue: (event) => event.name,
+            render: (event) => (
+              <span className="mono" title={event.id}>
+                {event.name}
+              </span>
+            ),
+          },
+          {
+            id: "outcome",
+            header: "Outcome",
+            sortValue: (event) => event.outcome,
+            searchValue: (event) => event.outcome,
+            render: (event) => (
+              <span className={`pill ${statusTone(event.outcome)}`}>{event.outcome}</span>
+            ),
+          },
+          {
+            id: "account",
+            header: "Subject",
+            sortValue: (event) => event.subjectId,
+            searchValue: (event) => event.subjectId,
+            render: (event) => <span className="mono">{event.subjectId}</span>,
+          },
+          {
+            id: "device",
+            header: "Device",
+            sortValue: (event) => event.deviceSubjectId ?? "",
+            render: (event) => <span className="mono">{event.deviceSubjectId ?? "—"}</span>,
+          },
+          {
+            id: "detail",
+            header: "Detail",
+            searchValue: (event) => formatEventProperties(event.properties),
+            render: (event) => (
+              <div className="cell-clip" title={formatEventProperties(event.properties)}>
+                {formatEventProperties(event.properties)}
+              </div>
+            ),
+          },
+        ]}
+        renderExpand={(event) => (
+          <>
+            <dl className="detail-grid wide">
+              <dt>Event id</dt>
+              <dd className="mono">{event.id}</dd>
+              <dt>Request id</dt>
+              <dd className="mono">{event.requestId ?? "—"}</dd>
+              <dt>Subject</dt>
+              <dd className="mono">{event.subjectId}</dd>
+              <dt>Device</dt>
+              <dd className="mono">{event.deviceSubjectId ?? "—"}</dd>
+            </dl>
+            <figure className="prose-field">
+              <figcaption>Properties</figcaption>
+              <pre className="prose-block">{formatJson(event.properties ?? {})}</pre>
+            </figure>
+          </>
+        )}
+      />
+      {props.nextCursor !== null ? (
+        <div className="actions">
+          <button type="button" className="ghost" disabled={props.busy} onClick={props.onLoadMore}>
+            Load more
+          </button>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function MetricsPanel(props: {
+  metrics: MetricsSnapshot | null;
+  analytics: ProductAnalytics | null;
+  from: string;
+  to: string;
+  busy: boolean;
+  country: string;
+  language: string;
+  readerLevel: string;
+  platform: string;
+  feature: string;
+  contentCategory: string;
+  onFrom: (value: string) => void;
+  onTo: (value: string) => void;
+  onCountry: (value: string) => void;
+  onLanguage: (value: string) => void;
+  onReaderLevel: (value: string) => void;
+  onPlatform: (value: string) => void;
+  onFeature: (value: string) => void;
+  onContentCategory: (value: string) => void;
+  onApply: () => void;
+}) {
+  const rows =
+    props.metrics === null
+      ? []
+      : [
+          ["Users", String(props.metrics.users?.count ?? 0)],
+          ["Jobs", String(props.metrics.sync?.jobs ?? 0)],
+          ["Jobs queued", metricNumber(props.metrics.sync?.queued)],
+          ["Jobs failed", metricNumber(props.metrics.sync?.failed)],
+          ["Cache entries", String(props.metrics.llm?.cacheEntries ?? 0)],
+          ["Qwen requests", String(props.metrics.llm?.qwenRequests ?? 0)],
+          ["Qwen ok", String(props.metrics.llm?.qwenOk ?? 0)],
+          ["Qwen failed", String(props.metrics.llm?.qwenFailed ?? 0)],
+          ["Flags on", String(props.metrics.flags?.enabled ?? "—")],
+          ["Quota keys", String(props.metrics.quotas?.count ?? "—")],
+          ["Usage events", metricNumber(props.metrics.usage?.events)],
+          ["Stored bytes", formatBytes(props.metrics.storage?.bytes)],
+        ];
+  return (
+    <>
+      <h2>Metrics</h2>
+      <p className="lede">
+        Product behavior, learning patterns, and service health for the selected window. Counts use
+        pseudonymous users and devices. New events reject precise location and reading text;
+        ownership keys remain until an explicit purge or physical profile deletion.
+      </p>
+      <div className="toolbar analytics-filters" aria-label="Analytics filters">
+        <label>
+          From
+          <input
+            type="datetime-local"
+            value={props.from}
+            onChange={(event) => {
+              props.onFrom(event.target.value);
+            }}
+          />
+        </label>
+        <label>
+          To
+          <input
+            type="datetime-local"
+            value={props.to}
+            onChange={(event) => {
+              props.onTo(event.target.value);
+            }}
+          />
+        </label>
+        <label>
+          Country
+          <input
+            value={props.country}
+            placeholder="AU"
+            inputMode="text"
+            onChange={(event) => {
+              props.onCountry(event.target.value);
+            }}
+          />
+        </label>
+        <label>
+          Language
+          <input
+            value={props.language}
+            placeholder="en-US or zh-Hans"
+            onChange={(event) => {
+              props.onLanguage(event.target.value);
+            }}
+          />
+        </label>
+        <label>
+          Reader level
+          <select
+            value={props.readerLevel}
+            onChange={(event) => {
+              props.onReaderLevel(event.target.value);
+            }}
+          >
+            <option value="">All levels</option>
+            <option value="beginner">Beginner</option>
+            <option value="intermediate">Intermediate</option>
+            <option value="advanced">Advanced</option>
+          </select>
+        </label>
+        <label>
+          Platform
+          <select
+            value={props.platform}
+            onChange={(event) => {
+              props.onPlatform(event.target.value);
+            }}
+          >
+            <option value="">All platforms</option>
+            <option value="macos">macOS</option>
+            <option value="ipados">iPadOS</option>
+            <option value="ios">iOS</option>
+          </select>
+        </label>
+        <label>
+          Feature
+          <input
+            value={props.feature}
+            placeholder="reader, review, sync"
+            onChange={(event) => {
+              props.onFeature(event.target.value);
+            }}
+          />
+        </label>
+        <label>
+          Content category
+          <input
+            value={props.contentCategory}
+            placeholder="fiction"
+            onChange={(event) => {
+              props.onContentCategory(event.target.value);
+            }}
+          />
+        </label>
+        <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
+          Apply
+        </button>
+      </div>
+      {props.analytics === null ? (
+        <p className="empty">
+          No product analytics yet. Activity appears after opted-in signed-in clients send events.
+        </p>
+      ) : (
+        <>
+          <section className="analytics-summary" aria-label="Analytics summary">
+            <div>
+              <span>Events</span>
+              <strong>{props.analytics.summary.events}</strong>
+            </div>
+            <div>
+              <span>Active learners</span>
+              <strong>{props.analytics.summary.activeUsers}</strong>
+            </div>
+            <div>
+              <span>Active devices</span>
+              <strong>{props.analytics.summary.activeDevices}</strong>
+            </div>
+            <div>
+              <span>Successful outcomes</span>
+              <strong>{Math.round(props.analytics.summary.successRate * 100)}%</strong>
+            </div>
+          </section>
+          <section className="trend-panel" aria-labelledby="learning-trends-title">
+            <div className="section-heading">
+              <div>
+                <h3 id="learning-trends-title">Learning and reading trends</h3>
+                <p>
+                  {formatWhen(props.analytics.from)} – {formatWhen(props.analytics.to)} ·{" "}
+                  {props.analytics.interval} buckets
+                </p>
+              </div>
+              {props.analytics.sampled ? <span className="pill warn">Sampled</span> : null}
+            </div>
+            <AnalyticsTrend analytics={props.analytics} />
+          </section>
+          <section className="anomaly-watch" aria-label="Anomaly watch">
+            <h3>Anomaly watch</h3>
+            {props.analytics.anomalies.length === 0 ? (
+              <p className="empty">
+                No simple volume or failure-rate anomaly crossed its threshold.
+              </p>
+            ) : (
+              <ul>
+                {props.analytics.anomalies.map((item) => (
+                  <li key={item.kind}>
+                    <span className={`pill ${item.severity === "critical" ? "bad" : "warn"}`}>
+                      {item.severity}
+                    </span>
+                    <span>{item.message}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+          <div className="distribution-grid">
+            <DistributionTable
+              title="Country distribution"
+              items={props.analytics.distributions.country}
+              unit="Learners"
+            />
+            <DistributionTable
+              title="Target language distribution"
+              items={props.analytics.distributions.targetLanguage}
+              unit="Learners"
+            />
+            <DistributionTable
+              title="Reader level distribution"
+              items={props.analytics.distributions.readerLevel}
+              unit="Learners"
+            />
+            <DistributionTable
+              title="Platform distribution"
+              items={props.analytics.distributions.platform}
+              unit="Devices"
+            />
+            <DistributionTable
+              title="Feature distribution"
+              items={props.analytics.distributions.feature}
+              unit="Events"
+            />
+            <DistributionTable
+              title="Content category distribution"
+              items={props.analytics.distributions.contentCategory}
+              unit="Learners"
+            />
+            <DistributionTable
+              title="Top content distribution"
+              items={props.analytics.distributions.content}
+              unit="Learners"
+            />
+          </div>
+          <p className="privacy-note">
+            Small geographic and learning cohorts are grouped into Other at fewer than{" "}
+            {props.analytics.privacy.minimumBucketSize} learners. Content is shown only as
+            categories or pseudonymous identifiers.
+          </p>
+        </>
+      )}
+      {props.metrics !== null ? (
+        <details className="ledger operational-ledger">
+          <summary>Operational totals</summary>
+          <table className="service-table">
+            <caption>
+              {formatWhen(props.metrics.from)} – {formatWhen(props.metrics.to)}
+            </caption>
+            <thead>
+              <tr>
+                <th>Measure</th>
+                <th>Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(([label, value]) => (
+                <tr key={label}>
+                  <td>{label}</td>
+                  <td>{value}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      ) : null}
+    </>
+  );
+}
+
+function AnalyticsTrend({ analytics }: { analytics: ProductAnalytics }) {
+  const width = 760;
+  const height = 180;
+  const inset = 24;
+  const max = Math.max(1, ...analytics.series.map((point) => point.events));
+  const step =
+    analytics.series.length <= 1 ? 0 : (width - inset * 2) / (analytics.series.length - 1);
+  const points = analytics.series.map((point, index) => ({
+    ...point,
+    x: inset + index * step,
+    y: height - inset - (point.events / max) * (height - inset * 2),
+  }));
+  return (
+    <svg
+      className="analytics-chart"
+      viewBox={`0 0 ${String(width)} ${String(height)}`}
+      role="img"
+      aria-label={`Event trend with ${String(analytics.summary.events)} events across ${String(analytics.series.length)} ${analytics.interval} buckets`}
+      tabIndex={0}
+    >
+      <line x1={inset} y1={height - inset} x2={width - inset} y2={height - inset} />
+      <polyline points={points.map((point) => `${String(point.x)},${String(point.y)}`).join(" ")} />
+      {points.map((point) => (
+        <circle key={point.start} cx={point.x} cy={point.y} r="4">
+          <title>{`${formatWhen(point.start)}: ${String(point.events)} events, ${String(point.activeUsers)} active learners, ${String(point.failed)} failed`}</title>
+        </circle>
+      ))}
+    </svg>
+  );
+}
+
+function DistributionTable(props: {
+  title: string;
+  items: ProductAnalytics["distributions"]["country"];
+  unit: "Learners" | "Devices" | "Events";
+}) {
+  return (
+    <section className="distribution-panel">
+      <h3>{props.title}</h3>
+      {props.items.length === 0 ? (
+        <p className="empty">No data for this filter.</p>
+      ) : (
+        <table className="distribution-table" aria-label={props.title}>
+          <thead>
+            <tr>
+              <th>Group</th>
+              <th>{props.unit}</th>
+              <th>Share</th>
+            </tr>
+          </thead>
+          <tbody>
+            {props.items.slice(0, 8).map((item) => (
+              <tr key={item.key}>
+                <td>{item.key}</td>
+                <td>{item.count}</td>
+                <td>{Math.round(item.share * 100)}%</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
+function AuditPanel(props: {
+  events: AuditEvent[];
+  actor: string;
+  action: string;
+  requestId: string;
+  openId: string | null;
+  busy: boolean;
+  nextCursor: string | null;
+  onActor: (value: string) => void;
+  onAction: (value: string) => void;
+  onRequestId: (value: string) => void;
+  onOpen: (id: string | null) => void;
+  onApply: () => void;
+  onLoadMore: () => void;
+}) {
+  return (
+    <>
+      <h2>Audit</h2>
+      <p className="lede">
+        Immutable operator actions and persisted Qwen failures. Open a row for before/after metadata
+        and the request id.
+      </p>
+      <OperatorTable
+        caption="Operator audit log"
+        noun="event"
+        leading={
+          <>
+            <label>
+              Actor id
+              <input
+                value={props.actor}
+                onChange={(event) => {
+                  props.onActor(event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              Action
+              <input
+                value={props.action}
+                onChange={(event) => {
+                  props.onAction(event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              Request id
+              <input
+                value={props.requestId}
+                onChange={(event) => {
+                  props.onRequestId(event.target.value);
+                }}
+              />
+            </label>
+            <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
+              Apply
+            </button>
+          </>
+        }
+        rows={props.events}
+        rowKey={(event) => event.id}
+        empty="No audit events loaded."
+        expandedId={props.openId}
+        columns={[
+          {
+            id: "when",
+            header: "When",
+            sortValue: (event) => Date.parse(event.createdAt) || 0,
+            render: (event) => (
+              <RowOpen
+                open={props.openId === event.id}
+                label={formatWhen(event.createdAt)}
+                onToggle={() => {
+                  props.onOpen(props.openId === event.id ? null : event.id);
+                }}
+              />
+            ),
+          },
+          {
+            id: "action",
+            header: "Action",
+            sortValue: (event) => event.action,
+            searchValue: (event) => event.action,
+            render: (event) => event.action.replaceAll("_", " "),
+          },
+          {
+            id: "actor",
+            header: "Actor",
+            sortValue: (event) => event.actorId,
+            searchValue: (event) => event.actorId,
+            render: (event) => (
+              <span className="mono" title={event.actorId}>
+                {shortId(event.actorId)}
+              </span>
+            ),
+          },
+          {
+            id: "resource",
+            header: "Resource",
+            sortValue: (event) => event.resourceType,
+            searchValue: (event) => `${event.resourceType} ${event.resourceId}`,
+            render: (event) => (
+              <>
+                {event.resourceType}
+                <div className="mono">{shortId(event.resourceId)}</div>
+              </>
+            ),
+          },
+          {
+            id: "reason",
+            header: "Reason",
+            searchValue: (event) => event.reason,
+            render: (event) => (
+              <div className="cell-clip" title={event.reason}>
+                {event.reason}
+              </div>
+            ),
+          },
+        ]}
+        renderExpand={(event) => (
+          <>
+            <dl className="detail-grid wide">
+              <dt>Event id</dt>
+              <dd className="mono">{event.id}</dd>
+              <dt>Actor</dt>
+              <dd className="mono">{event.actorId}</dd>
+              <dt>Resource id</dt>
+              <dd className="mono">{event.resourceId}</dd>
+              <dt>Request id</dt>
+              <dd className="mono">{event.traceId ?? "—"}</dd>
+            </dl>
+            <figure className="prose-field">
+              <figcaption>Metadata</figcaption>
+              <pre className="prose-block">{formatJson(event.metadata ?? {})}</pre>
+            </figure>
+          </>
+        )}
+      />
+      {props.nextCursor !== null ? (
+        <div className="actions">
+          <button type="button" className="ghost" disabled={props.busy} onClick={props.onLoadMore}>
+            Load more
+          </button>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function TracePanel(props: {
+  events: OperatorEvent[];
+  requestId: string;
+  kind: string;
+  task: string;
+  busy: boolean;
+  onRequestId: (value: string) => void;
+  onKind: (value: string) => void;
+  onTask: (value: string) => void;
+  onApply: () => void;
+}) {
+  const [openId, setOpenId] = useState<string | null>(null);
+  return (
+    <>
+      <h2>Trace</h2>
+      <p className="lede">
+        Live Worker events for Managed Qwen and operator changes. Paste an app request id to see
+        what that call did. Failures are also written to Audit so they survive a new isolate.
+      </p>
+      <OperatorTable
+        caption="Operator event log"
+        noun="event"
+        leading={
+          <>
+            <label>
+              Request id
+              <input
+                value={props.requestId}
+                onChange={(event) => {
+                  props.onRequestId(event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              Kind
+              <input
+                value={props.kind}
+                onChange={(event) => {
+                  props.onKind(event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              Task
+              <input
+                value={props.task}
+                onChange={(event) => {
+                  props.onTask(event.target.value);
+                }}
+              />
+            </label>
+            <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
+              Apply
+            </button>
+          </>
+        }
+        rows={props.events}
+        rowKey={(event) => event.id}
+        empty="No events in this isolate yet. Probe Qwen on Desk or use the app."
+        expandedId={openId}
+        columns={[
+          {
+            id: "when",
+            header: "When",
+            sortValue: (event) => Date.parse(event.at) || 0,
+            render: (event) => (
+              <RowOpen
+                open={openId === event.id}
+                label={formatWhen(event.at)}
+                onToggle={() => {
+                  setOpenId(openId === event.id ? null : event.id);
+                }}
+              />
+            ),
+          },
+          {
+            id: "kind",
+            header: "Kind",
+            sortValue: (event) => event.kind,
+            searchValue: (event) => event.kind,
+            render: (event) => (
+              <span className={`pill ${statusTone(event.status ?? event.kind)}`}>
+                {event.kind.replaceAll("_", " ")}
+              </span>
+            ),
+          },
+          {
+            id: "task",
+            header: "Task",
+            sortValue: (event) => event.task ?? "",
+            render: (event) => event.task ?? "—",
+          },
+          {
+            id: "request",
+            header: "Request",
+            sortValue: (event) => event.requestId,
+            searchValue: (event) => event.requestId,
+            render: (event) => (
+              <span className="mono" title={event.requestId}>
+                {shortId(event.requestId, 12)}
+              </span>
+            ),
+          },
+          {
+            id: "summary",
+            header: "Summary",
+            searchValue: (event) => event.summary,
+            render: (event) => (
+              <div className="cell-clip" title={event.summary}>
+                {event.summary}
+              </div>
+            ),
+          },
+        ]}
+        renderExpand={(event) => (
+          <>
+            <dl className="detail-grid wide">
+              <dt>Event id</dt>
+              <dd className="mono">{event.id}</dd>
+              <dt>Request id</dt>
+              <dd className="mono">{event.requestId}</dd>
+              <dt>Status</dt>
+              <dd>{event.status ?? "—"}</dd>
+              <dt>Task</dt>
+              <dd>{event.task ?? "—"}</dd>
+            </dl>
+            {event.detail !== undefined && event.detail !== "" ? (
+              <figure className="prose-field">
+                <figcaption>Detail</figcaption>
+                <pre className="prose-block">{event.detail}</pre>
+              </figure>
+            ) : null}
+            {event.metadata !== undefined ? (
+              <figure className="prose-field">
+                <figcaption>Metadata</figcaption>
+                <pre className="prose-block">{formatJson(event.metadata)}</pre>
+              </figure>
+            ) : null}
+          </>
+        )}
+      />
+    </>
+  );
+}
+
+function FlagTargeting(props: {
+  flag: FeatureFlag;
+  disabled: boolean;
+  onSave: (patch: Partial<FeatureFlag>) => void;
+}) {
+  const [rollout, setRollout] = useState(String(props.flag.rolloutPercent ?? 100));
+  const [variant, setVariant] = useState(props.flag.variant ?? "");
+  const [minimum, setMinimum] = useState(props.flag.minAppVersion ?? "");
+  const [platforms, setPlatforms] = useState((props.flag.platforms ?? []).join(", "));
+  return (
+    <div className="flag-targeting">
+      <input
+        inputMode="numeric"
+        aria-label={`${props.flag.key} rollout percent`}
+        value={rollout}
+        disabled={props.disabled}
+        onChange={(event) => {
+          setRollout(event.target.value);
+        }}
+      />
+      <input
+        aria-label={`${props.flag.key} variant`}
+        placeholder="variant"
+        value={variant}
+        disabled={props.disabled}
+        onChange={(event) => {
+          setVariant(event.target.value);
+        }}
+      />
+      <input
+        aria-label={`${props.flag.key} minimum app version`}
+        placeholder="min version"
+        value={minimum}
+        disabled={props.disabled}
+        onChange={(event) => {
+          setMinimum(event.target.value);
+        }}
+      />
+      <input
+        aria-label={`${props.flag.key} platforms`}
+        placeholder="macos, ipados"
+        value={platforms}
+        disabled={props.disabled}
+        onChange={(event) => {
+          setPlatforms(event.target.value);
+        }}
+      />
+      <button
+        type="button"
+        className="ghost"
+        disabled={props.disabled}
+        onClick={() => {
+          const next = Number(rollout);
+          if (Number.isFinite(next) && next >= 0 && next <= 100) {
+            props.onSave({
+              rolloutPercent: next,
+              variant: variant.trim() === "" ? null : variant.trim(),
+              minAppVersion: minimum.trim() === "" ? null : minimum.trim(),
+              platforms: platforms
+                .split(",")
+                .map((item) => item.trim())
+                .filter(Boolean),
+            });
+          }
+        }}
+      >
+        Save
+      </button>
+    </div>
+  );
+}
+
+function FlagsPanel(props: {
+  flags: FeatureFlag[];
+  accountSyncReadiness: AccountSyncReadiness | null;
+  busy: boolean;
+  canMutate: boolean;
+  onToggle: (flag: FeatureFlag) => void;
+  onSave: (flag: FeatureFlag, patch: Partial<FeatureFlag>) => void;
+}) {
+  return (
+    <>
+      <h2>Flags</h2>
+      <p className="lede">
+        Kill switches for managed Qwen, account sync, optional cloud media, and maintenance. Rollout
+        is the percent of signed-in sessions that should see the flag.
+      </p>
+      <h3>Cross-device Sync readiness</h3>
+      {props.accountSyncReadiness === null ? (
+        <p className="lede">Readiness has not been checked.</p>
+      ) : (
+        <dl className="detail-grid wide">
+          <div>
+            <dt>Required schema</dt>
+            <dd>
+              {props.accountSyncReadiness.requiredSchemaVersion} ·{" "}
+              {props.accountSyncReadiness.schemaReady ? "ready" : "unavailable"}
+            </dd>
+          </div>
+          <div>
+            <dt>Provider</dt>
+            <dd>{props.accountSyncReadiness.provider}</dd>
+          </div>
+          <div>
+            <dt>Bucket</dt>
+            <dd>{props.accountSyncReadiness.bucket ?? "not configured"}</dd>
+          </div>
+          <div>
+            <dt>Credential</dt>
+            <dd>{props.accountSyncReadiness.credentialStatus}</dd>
+          </div>
+          <div>
+            <dt>Private access</dt>
+            <dd>{props.accountSyncReadiness.privacyStatus}</dd>
+          </div>
+          <div>
+            <dt>Upload</dt>
+            <dd>{props.accountSyncReadiness.uploadStatus}</dd>
+          </div>
+          <div>
+            <dt>Download</dt>
+            <dd>{props.accountSyncReadiness.downloadStatus}</dd>
+          </div>
+          <div>
+            <dt>Checksum</dt>
+            <dd>{props.accountSyncReadiness.checksumStatus}</dd>
+          </div>
+          <div>
+            <dt>Delete</dt>
+            <dd>{props.accountSyncReadiness.deleteStatus}</dd>
+          </div>
+          <div>
+            <dt>Not found</dt>
+            <dd>{props.accountSyncReadiness.notFoundStatus}</dd>
+          </div>
+          <div>
+            <dt>Last success</dt>
+            <dd>{formatWhen(props.accountSyncReadiness.lastSuccessAt)}</dd>
+          </div>
+          <div>
+            <dt>Requested</dt>
+            <dd>{props.accountSyncReadiness.requested ? "enabled" : "disabled"}</dd>
+          </div>
+          <div>
+            <dt>Effective</dt>
+            <dd>
+              {props.accountSyncReadiness.effective
+                ? "enabled"
+                : `disabled · ${props.accountSyncReadiness.reason ?? "not ready"}`}
+            </dd>
+          </div>
+        </dl>
+      )}
+      <OperatorTable
+        caption="Product feature flags"
+        noun="flag"
+        rows={props.flags}
+        rowKey={(flag) => flag.key}
+        empty="No flags loaded."
+        columns={[
+          {
+            id: "key",
+            header: "Key",
+            sortValue: (flag) => flag.key,
+            searchValue: (flag) => flag.key,
+            render: (flag) => (
+              <>
+                <div>{flag.key.replaceAll("_", " ")}</div>
+                <div className="mono">{flag.key}</div>
+              </>
+            ),
+          },
+          {
+            id: "state",
+            header: "State",
+            sortValue: (flag) => (flag.enabled ? 1 : 0),
+            render: (flag) => (
+              <span className={`pill ${flag.enabled ? "ok" : "warn"}`}>
+                {flag.enabled ? "on" : "off"}
+              </span>
+            ),
+          },
+          {
+            id: "rollout",
+            header: "Targeting",
+            sortValue: (flag) => flag.rolloutPercent ?? 100,
+            render: (flag) => (
+              <FlagTargeting
+                flag={flag}
+                disabled={!props.canMutate || props.busy}
+                onSave={(patch) => {
+                  props.onSave(flag, patch);
+                }}
+              />
+            ),
+          },
+          {
+            id: "actions",
+            header: "Actions",
+            render: (flag) => (
+              <div className="row-actions">
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={
+                    !props.canMutate ||
+                    props.busy ||
+                    (flag.key === "account_sync" &&
+                      !canToggleAccountSync(flag, props.accountSyncReadiness))
+                  }
+                  onClick={() => {
+                    props.onToggle(flag);
+                  }}
+                >
+                  {flag.enabled ? "Disable" : "Enable"}
+                </button>
+              </div>
+            ),
+          },
+        ]}
+      />
+    </>
+  );
+}
+
+function QuotasPanel(props: {
+  quotas: Quota[];
+  drafts: Record<string, string>;
+  busy: boolean;
+  canMutate: boolean;
+  onDraft: (key: string, value: string) => void;
+  onSave: (quota: Quota) => void;
+}) {
+  return (
+    <>
+      <h2>Quotas</h2>
+      <p className="lede">
+        Starter limits from the product plan: 50 managed Qwen tasks a day, 250 MB cloud media, three
+        cloud books, and two devices.
+      </p>
+      <OperatorTable
+        caption="Account starter quotas"
+        noun="quota"
+        rows={props.quotas}
+        rowKey={(quota) => quota.key}
+        empty="No quotas loaded."
+        columns={[
+          {
+            id: "key",
+            header: "Key",
+            sortValue: (quota) => quota.key,
+            searchValue: (quota) => quota.key,
+            render: (quota) => (
+              <>
+                <div>{quota.key.replaceAll("_", " ")}</div>
+                <div className="mono">{quota.key}</div>
+              </>
+            ),
+          },
+          {
+            id: "used",
+            header: "Used",
+            numeric: true,
+            sortValue: (quota) => quota.used,
+            render: (quota) =>
+              quota.key === "cloud_media_bytes" ? formatBytes(quota.used) : quota.used,
+          },
+          {
+            id: "limit",
+            header: "Limit",
+            numeric: true,
+            sortValue: (quota) => quota.limit,
+            render: (quota) => (
+              <input
+                value={props.drafts[quota.key] ?? String(quota.limit)}
+                inputMode="decimal"
+                disabled={!props.canMutate}
+                onChange={(event) => {
+                  props.onDraft(quota.key, event.target.value);
+                }}
+              />
+            ),
+          },
+          {
+            id: "period",
+            header: "Period",
+            sortValue: (quota) => Date.parse(quota.periodEndsAt) || 0,
+            render: (quota) => formatWhen(quota.periodEndsAt),
+          },
+          {
+            id: "actions",
+            header: "Actions",
+            render: (quota) => (
+              <div className="row-actions">
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={!props.canMutate || props.busy}
+                  onClick={() => {
+                    props.onSave(quota);
+                  }}
+                >
+                  Save limit
+                </button>
+              </div>
+            ),
+          },
+        ]}
+      />
+    </>
+  );
+}
+
+function PrivacyPanel(props: {
+  requests: PrivacyRequest[];
+  status: string;
+  busy: boolean;
+  canMutate: boolean;
+  armed: string | null;
+  onArm: (id: string | null) => void;
+  onMutate: (path: string, action: "complete" | "cancel", message: string) => void;
+  nextCursor: string | null;
+  onLoadMore: () => void;
+  onStatus: (value: string) => void;
+  onApply: () => void;
+}) {
+  return (
+    <>
+      <h2>Privacy</h2>
+      <p className="lede">Export and deletion requests. Completing a deletion revokes sessions.</p>
+      <OperatorTable
+        leading={
+          <>
+            <label>
+              Status
+              <select
+                value={props.status}
+                onChange={(event) => {
+                  props.onStatus(event.target.value);
+                }}
+              >
+                <option value="">Any</option>
+                <option value="queued">queued</option>
+                <option value="running">running</option>
+                <option value="ready">ready</option>
+                <option value="failed">failed</option>
+                <option value="cancelled">cancelled</option>
+              </select>
+            </label>
+            <button type="button" className="ghost" disabled={props.busy} onClick={props.onApply}>
+              Apply
+            </button>
+          </>
+        }
+        caption="Privacy requests"
+        noun="request"
+        rows={props.requests}
+        rowKey={(request) => request.id}
+        empty="No privacy requests in this window."
+        columns={[
+          {
+            id: "id",
+            header: "Id",
+            sortValue: (request) => request.id,
+            searchValue: (request) => request.id,
+            render: (request) => (
+              <span className="mono" title={request.id}>
+                {shortId(request.id)}
+              </span>
+            ),
+          },
+          {
+            id: "account",
+            header: "Account",
+            sortValue: (request) => request.accountId,
+            searchValue: (request) => request.accountId,
+            render: (request) => (
+              <span className="mono" title={request.accountId}>
+                {shortId(request.accountId)}
+              </span>
+            ),
+          },
+          {
+            id: "kind",
+            header: "Kind",
+            sortValue: (request) => request.kind,
+            render: (request) => request.kind,
+          },
+          {
+            id: "status",
+            header: "Status",
+            sortValue: (request) => request.status,
+            render: (request) => (
+              <span className={`pill ${statusTone(request.status)}`}>{request.status}</span>
+            ),
+          },
+          {
+            id: "error",
+            header: "Error",
+            searchValue: (request) => request.error ?? "",
+            render: (request) => (
+              <div className="cell-clip" title={request.error ?? undefined}>
+                {request.error ?? "—"}
+              </div>
+            ),
+          },
+          {
+            id: "opened",
+            header: "Opened",
+            sortValue: (request) => Date.parse(request.createdAt) || 0,
+            render: (request) => formatWhen(request.createdAt),
+          },
+          {
+            id: "actions",
+            header: "Actions",
+            render: (request) => (
+              <div className="row-actions">
+                {request.status === "queued" || request.status === "running" ? (
+                  <>
+                    <ConfirmButton
+                      id={`privacy-complete:${request.id}`}
+                      armed={props.armed}
+                      disabled={!props.canMutate || props.busy}
+                      label="Complete"
+                      confirm="Confirm complete"
+                      onArm={props.onArm}
+                      onConfirm={() => {
+                        props.onMutate(
+                          `/v1/admin/privacy-requests/${request.id}/actions`,
+                          "complete",
+                          "Privacy request completed.",
+                        );
+                      }}
+                    />
+                    <ConfirmButton
+                      id={`privacy-cancel:${request.id}`}
+                      armed={props.armed}
+                      disabled={!props.canMutate || props.busy}
+                      kind="danger"
+                      label="Cancel"
+                      confirm="Confirm cancel"
+                      onArm={props.onArm}
+                      onConfirm={() => {
+                        props.onMutate(
+                          `/v1/admin/privacy-requests/${request.id}/actions`,
+                          "cancel",
+                          "Privacy request cancelled.",
+                        );
+                      }}
+                    />
+                  </>
+                ) : (
+                  <span className="mute">No action</span>
+                )}
+              </div>
+            ),
+          },
+        ]}
+      />
+      {props.nextCursor !== null ? (
+        <div className="actions">
+          <button type="button" className="ghost" disabled={props.busy} onClick={props.onLoadMore}>
+            Load more
+          </button>
+        </div>
+      ) : null}
+    </>
+  );
+}

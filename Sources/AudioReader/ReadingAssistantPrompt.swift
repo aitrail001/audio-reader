@@ -45,6 +45,9 @@ struct ChapterSummaryRecord: Codable, Equatable, Identifiable, Sendable {
     var language: String
     var status: GlossStatus
     var model: String
+    var promptVersion: String = "local"
+    var modelPolicyHash: String = "local"
+    var sharedCacheEntryID: String? = nil
     var bookID: String?
     var bookTitle: String
     var chapterID: String
@@ -63,6 +66,10 @@ struct ChapterSummaryRecord: Codable, Equatable, Identifiable, Sendable {
         chapterID: String,
         chapterTitle: String,
         replacing existing: ChapterSummaryRecord?,
+        assistantResultID: String? = nil,
+        promptVersion: String = "local",
+        modelPolicyHash: String = "local",
+        sharedCacheEntryID: String? = nil,
         createdAt: Date = Date()
     ) -> Self {
         let previousSummary = existing?.status == .accepted
@@ -72,11 +79,14 @@ struct ChapterSummaryRecord: Codable, Equatable, Identifiable, Sendable {
             ? existing?.model
             : existing?.replacedModel
         return Self(
-            id: makeID(chapterID: chapterID, language: language),
+            id: assistantResultID ?? existing?.id ?? UUID().uuidString.lowercased(),
             summary: summary,
             language: language,
-            status: .pending,
+            status: existing == nil ? .pending : .replaced,
             model: model,
+            promptVersion: promptVersion,
+            modelPolicyHash: modelPolicyHash,
+            sharedCacheEntryID: sharedCacheEntryID,
             bookID: bookID,
             bookTitle: bookTitle,
             chapterID: chapterID,
@@ -130,6 +140,7 @@ struct PromptTemplateCatalog: Codable, Equatable, Sendable {
     let wordSystem: String
     let chapterSummarySystem: String
     let chapterChatSystem: String
+    let heardQuizSystem: String
 
     static func load() throws -> PromptTemplateCatalog {
         let fileName = "ReadingAssistantPrompts.json"
@@ -207,6 +218,24 @@ enum SentenceTranslationContract {
 }
 
 enum ReadingAssistantPrompt {
+    static func neighbors(
+        around target: TranscriptSegment,
+        in transcript: Transcript?,
+        limit: Int = 10
+    ) -> (previous: [String], next: [String]) {
+        guard let segments = transcript?.segments,
+              let index = segments.firstIndex(where: { $0.id == target.id })
+        else {
+            return ([], [])
+        }
+        let start = max(segments.startIndex, index - limit)
+        let previous = Array(segments[start..<index].map(\.displayText))
+        let nextStart = index + 1
+        let end = min(segments.endIndex, nextStart + limit)
+        let next = nextStart < end ? Array(segments[nextStart..<end].map(\.displayText)) : []
+        return (previous, next)
+    }
+
     static func sentenceContext(
         around targets: [TranscriptSegment],
         in transcript: Transcript?,
@@ -300,6 +329,29 @@ enum ReadingAssistantPrompt {
             language: language,
             sourceLanguage: sourceLanguage,
             readerLevel: readerLevel
+        )
+    }
+
+    /// Builds a retrieval-first quiz from only the resolved sentences the learner has completed.
+    static func heardQuiz(
+        passage: HeardPassage,
+        language: StudyLanguage,
+        sourceLanguage: TranscriptionLanguage = .englishUS,
+        readerLevel: ReaderLanguageLevel = .intermediate
+    ) -> LLMTaskPrompt {
+        LLMTaskPrompt(
+            system: render(
+                PromptTemplateCatalog.shared.heardQuizSystem,
+                language: language,
+                sourceLanguage: sourceLanguage,
+                readerLevel: readerLevel
+            ),
+            user: """
+            Create a short Quick Quiz from this already-heard passage only:
+            \(passage.promptInput)
+
+            Do not reveal the answer outside the JSON. Use only supplied HEARD ids as segmentID values.
+            """
         )
     }
 

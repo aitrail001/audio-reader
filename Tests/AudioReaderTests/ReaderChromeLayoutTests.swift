@@ -132,6 +132,11 @@ struct ReaderChromeLayoutTests {
         )
 
         #expect(playerView.contains("private var iPadReaderToolbar"))
+        #expect(playerView.contains("EbookNavigationSheet"))
+        #expect(playerView.contains("reader.bookNavigation"))
+        #expect(playerView.contains("reader.epubCover"))
+        #expect(playerView.contains("Search Book"))
+        #expect(playerView.contains("Contents"))
         #expect(playerView.contains("SplitterPanHandle"))
         #expect(playerView.contains("ReaderSplitGeometry("))
         #expect(playerView.contains(".accessibilityLabel(\"Resize lookup panel\")"))
@@ -142,7 +147,7 @@ struct ReaderChromeLayoutTests {
         #expect(!iPadControls.contains("VStack(spacing: 6)"))
         #expect(!iPadControls.contains(".fixedSize(horizontal: true, vertical: false)"))
         #expect(!iPadControls.contains(".controlSize(.large)"))
-        #expect(!iPadControls.contains(".frame(width: 44, height: 44)"))
+        #expect(iPadControls.contains("minHeight: 44"))
         #expect(iPadControls.contains("iPadCompactPlaybackBar"))
         #expect(iPadControls.contains(".accessibilityLabel(\"Previous chapter\")"))
         #expect(iPadControls.contains(".accessibilityLabel(\"Next chapter\")"))
@@ -162,18 +167,18 @@ struct ReaderChromeLayoutTests {
         #expect(playerView.contains("Label(\"Sentence meaning\", systemImage: \"globe\")"))
         #expect(playerView.contains(".accessibilityLabel(\"This-sentence meaning"))
         #expect(playerView.contains("Toggle(\"Study overlay\""))
-        #expect(playerView.components(separatedBy: "Toggle(\"Study overlay\"").count - 1 == 3)
-        #expect(playerView.contains("desktopExpandedHeaderControls"))
-        let expandedHeader = try section(
+        #expect(playerView.components(separatedBy: "Toggle(\"Study overlay\"").count - 1 == 1)
+        #expect(playerView.contains("ToolbarItemGroup(placement: .automatic)"))
+        #expect(playerView.contains("desktopCompactHeaderControls"))
+        let toolbarControls = try section(
             in: playerView,
-            from: "    private var desktopExpandedHeaderControls",
-            to: "    private var desktopCompactHeaderControls"
+            from: "    private var desktopCompactHeaderControls",
+            to: "    @ViewBuilder\n    private var desktopProviderControls"
         )
-        #expect(expandedHeader.contains("Toggle(\"Study overlay\""))
-        #expect(expandedHeader.contains("Button(\"Chapter words\")"))
-        #expect(!expandedHeader.contains("chapterCoverageCaption"))
-        #expect(!expandedHeader.contains("This chapter"))
-        #expect(expandedHeader.contains("readingAppearanceMenuContent"))
+        #expect(toolbarControls.contains("sharedReadingMenu"))
+        #expect(toolbarControls.contains("sharedLLMMenu"))
+        #expect(!toolbarControls.contains("desktopProviderControls"))
+        #expect(playerView.contains("readingAppearanceMenuContent"))
         #expect(playerView.contains("Chapter words"))
         #expect(playerView.contains("Mark known"))
         #expect(playerView.contains("ReaderWindowTitle.make("))

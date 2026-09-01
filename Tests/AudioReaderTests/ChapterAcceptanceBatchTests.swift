@@ -16,7 +16,7 @@ struct ChapterAcceptanceBatchTests {
             duration: 2,
             startTime: nil
         )
-        let state = AppState()
+        let state = AppState(composition: .inMemory())
         state.settings.targetLanguage = "zh-Hans"
         state.books = [Book(
             id: "book",
@@ -60,13 +60,17 @@ struct ChapterAcceptanceBatchTests {
         state.acceptAllChapterTranslations()
 
         #expect(state.chapterAcceptanceProgress != nil)
-        #expect(state.glosses.first?.status == .accepted)
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        #expect(state.glosses.first?.status == .pending)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
         while state.chapterAcceptanceProgress != nil, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(state.chapterAcceptanceProgress == nil)
-        #expect(state.vocab.contains { $0.category == .sentence && $0.translation == "译文" })
+        #expect(state.glosses.first?.status == .accepted)
+        let sentence = state.vocab.first { $0.category == .sentence && $0.translation == "译文" }
+        #expect(sentence?.captureSource == .acceptedSentenceTranslation)
+        #expect(sentence?.reviewEligible == false)
+        #expect(VocabularyLearningAnalytics.queue(entries: state.vocab, at: .now).new.isEmpty)
     }
 
     @Test("Accepted sentences update vocabulary and capture phrases without duplicates")
@@ -75,6 +79,8 @@ struct ChapterAcceptanceBatchTests {
         let existing = VocabEntry(
             id: "sentence-entry",
             word: source,
+            captureSource: .acceptedSentenceTranslation,
+            reviewEligible: false,
             category: .sentence,
             translation: "Old translation",
             context: source,
@@ -101,10 +107,15 @@ struct ChapterAcceptanceBatchTests {
         let sentence = result.vocab.first { $0.id == existing.id }
         #expect(sentence?.translation == gloss.text)
         #expect(sentence?.translationModel == gloss.model)
+        #expect(sentence?.captureSource == .acceptedSentenceTranslation)
+        #expect(sentence?.reviewEligible == false)
         let phrases = result.vocab.filter { $0.category == .phrase && $0.word == "useful phrase" }
         #expect(phrases.count == 1)
         #expect(phrases.first?.translation == "有用的短语")
         #expect(phrases.first?.segmentID == "segment")
+        #expect(phrases.first?.captureSource == .automaticPhraseSuggestion)
+        #expect(phrases.first?.reviewEligible == false)
+        #expect(VocabularyLearningAnalytics.queue(entries: result.vocab, at: .now).new.isEmpty)
         #expect(result.upserts.count == 2)
     }
 
@@ -146,12 +157,98 @@ struct ChapterAcceptanceBatchTests {
         #expect(result.vocab.allSatisfy { $0.translation?.hasPrefix("Translation ") == true })
     }
 
+    @Test("Accepting one hundred sentence translations creates zero New cards")
+    func acceptedSentenceTranslationsAreReferenceOnly() {
+        let glosses = (0..<100).map { index in
+            acceptedGloss(
+                id: "gloss-\(index)",
+                source: "Sentence \(index)",
+                text: "译文：Translation \(index)"
+            )
+        }
+
+        let result = ChapterAcceptanceBatch.prepare(
+            glosses: glosses,
+            vocab: [],
+            segments: [],
+            defaults: .empty
+        )
+
+        #expect(result.vocab.count == 100)
+        #expect(result.vocab.allSatisfy { $0.captureSource == .acceptedSentenceTranslation })
+        #expect(result.vocab.allSatisfy { !$0.reviewEligible })
+        #expect(VocabularyLearningAnalytics.queue(entries: result.vocab, at: .now).new.isEmpty)
+    }
+
+    @Test("Acceptance corrects one hundred legacy automatic sentences and phrases")
+    func correctsLegacyAutomaticCaptureClassification() {
+        let glosses = (0..<100).map { index in
+            acceptedGloss(
+                id: "gloss-\(index)",
+                source: "Sentence \(index)",
+                text: "译文：Translation \(index)\n短语：\n- phrase \(index) — meaning \(index)"
+            )
+        }
+        let sentences = (0..<100).map { index in
+            VocabEntry(
+                id: "sentence-\(index)",
+                word: "Sentence \(index)",
+                category: .sentence,
+                translation: "old",
+                context: "Sentence \(index)",
+                bookID: "book",
+                bookTitle: "Book",
+                chapterID: "chapter",
+                chapterTitle: "Chapter",
+                timestamp: 1,
+                addedAt: Date(timeIntervalSince1970: 1)
+            )
+        }
+        let phrases = (0..<100).map { index in
+            VocabEntry(
+                id: "phrase-\(index)",
+                word: "phrase \(index)",
+                category: .phrase,
+                translation: "meaning \(index)",
+                context: "Sentence \(index)",
+                bookID: "book",
+                bookTitle: "Book",
+                chapterID: "chapter",
+                chapterTitle: "Chapter",
+                timestamp: 1,
+                addedAt: Date(timeIntervalSince1970: 1)
+            )
+        }
+
+        let result = ChapterAcceptanceBatch.prepare(
+            glosses: glosses,
+            vocab: sentences + phrases,
+            segments: [],
+            defaults: .empty
+        )
+
+        let migratedSentences = result.vocab.filter { $0.category == .sentence }
+        let migratedPhrases = result.vocab.filter { $0.category == .phrase }
+        #expect(migratedSentences.count == 100)
+        #expect(migratedPhrases.count == 100)
+        #expect(migratedSentences.allSatisfy {
+            $0.captureSource == .acceptedSentenceTranslation && !$0.reviewEligible
+        })
+        #expect(migratedPhrases.allSatisfy {
+            $0.captureSource == .automaticPhraseSuggestion && !$0.reviewEligible
+        })
+        #expect(result.upserts.count == 200)
+        #expect(VocabularyLearningAnalytics.queue(entries: result.vocab, at: .now).new.isEmpty)
+    }
+
     @Test("Already imported accepted glosses do not trigger another persistence batch")
     func skipsUnchangedVocabulary() {
         let gloss = acceptedGloss(id: "accepted", source: "Sentence", text: "Translation")
         let existing = VocabEntry(
             id: "existing",
             word: "Sentence",
+            captureSource: .acceptedSentenceTranslation,
+            reviewEligible: false,
             category: .sentence,
             translation: gloss.text,
             translationLanguage: gloss.language,

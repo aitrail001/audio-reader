@@ -8,10 +8,29 @@ struct PlaybackCursor: Equatable, Sendable {
 
     static let empty = PlaybackCursor()
 
+    /// Transcript segments are time ordered, so playback ticks locate the active sentence logarithmically.
     static func resolve(segments: [TranscriptSegment], time: TimeInterval) -> PlaybackCursor {
-        guard let segment = segments.last(where: { time >= $0.start - 0.05 && time < $0.end + 0.12 })
-            ?? segments.last(where: { time >= $0.start })
-        else { return .empty }
+        guard !segments.isEmpty else { return .empty }
+        var lower = 0
+        var upper = segments.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if segments[middle].start <= time + 0.05 {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        let candidateIndex = max(0, lower - 1)
+        let candidate = segments[candidateIndex]
+        let segment: TranscriptSegment
+        if time >= candidate.start - 0.05, time < candidate.end + 0.12 {
+            segment = candidate
+        } else if candidate.start <= time {
+            segment = candidate
+        } else {
+            return .empty
+        }
         let tokens = StudyTokenIndex.tokens(in: segment)
         let word = tokens.last(where: { time >= $0.start && time < $0.end + 0.02 })
             ?? tokens.last(where: { time >= $0.start })
@@ -196,6 +215,85 @@ struct ChapterQuizSession: Identifiable, Equatable, Sendable {
 
     func result() -> ChapterQuizResult {
         quiz.scored(selections: selections.map { $0 ?? -1 })
+    }
+
+    /// Rationale is feedback after retrieval, never an answer cue before scoring.
+    func visibleRationale(for questionIndex: Int) -> String? {
+        guard isRevealed, quiz.questions.indices.contains(questionIndex) else { return nil }
+        return quiz.questions[questionIndex].rationale
+    }
+}
+
+enum ListenFirstVisibility: Equatable, Sendable {
+    case revealed
+    case currentHidden
+    case futureHidden
+
+    /// Keeps completed text available while withholding the active and future passage.
+    static func resolve(
+        segmentID: String,
+        orderedSegmentIDs: [String],
+        currentSegmentID: String?,
+        pausedSegmentID: String?,
+        replayRevealedSegmentID: String?
+    ) -> Self {
+        guard let segmentIndex = orderedSegmentIDs.firstIndex(of: segmentID) else { return .revealed }
+        guard let currentSegmentID,
+              let currentIndex = orderedSegmentIDs.firstIndex(of: currentSegmentID)
+        else { return .futureHidden }
+        if segmentIndex < currentIndex { return .revealed }
+        if segmentID == pausedSegmentID || segmentID == replayRevealedSegmentID { return .revealed }
+        return segmentIndex == currentIndex ? .currentHidden : .futureHidden
+    }
+}
+
+struct HeardPassage: Equatable, Sendable {
+    var segments: [TranscriptSegment]
+
+    /// Selects only resolved transcript sentences completed through the paused boundary.
+    static func recent(
+        in transcript: Transcript,
+        throughSegmentID: String,
+        limit: Int = 6
+    ) -> HeardPassage? {
+        guard let boundary = transcript.segments.firstIndex(where: { $0.id == throughSegmentID }) else {
+            return nil
+        }
+        let count = max(1, limit)
+        let lower = max(transcript.segments.startIndex, boundary - count + 1)
+        return HeardPassage(segments: Array(transcript.segments[lower...boundary]))
+    }
+
+    var promptInput: String {
+        segments.enumerated().map { offset, segment in
+            "HEARD id=\(segment.id) time=\(Self.clock(segment.start)) order=\(offset + 1): \(segment.displayText)"
+        }.joined(separator: "\n")
+    }
+
+    private static func clock(_ seconds: TimeInterval) -> String {
+        let value = max(0, Int(seconds.rounded(.down)))
+        return String(format: "%d:%02d", value / 60, value % 60)
+    }
+}
+
+enum HeardQuizResolver {
+    /// Invalid model output degrades to the deterministic local quiz over the same bounded passage.
+    static func resolve(response: String, passage: HeardPassage, language: String) -> ChapterQuiz {
+        if let parsed = try? ChapterQuizParser.parse(response), !parsed.questions.isEmpty {
+            let allowedIDs = Set(passage.segments.map(\.id))
+            let grounded = parsed.questions.filter { question in
+                guard let segmentID = question.segmentID,
+                      allowedIDs.contains(segmentID),
+                      question.choices.count == 4
+                else { return false }
+                let normalizedChoices = Set(question.choices.map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                })
+                return normalizedChoices.count == 4 && !normalizedChoices.contains("")
+            }
+            if !grounded.isEmpty { return ChapterQuiz(questions: grounded) }
+        }
+        return ChapterQuizBuilder.build(segments: passage.segments, language: language)
     }
 }
 

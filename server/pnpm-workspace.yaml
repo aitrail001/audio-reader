@@ -1,0 +1,18 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+catalog:
+  "@cloudflare/workers-types": 5.20260826.1
+  "@types/node": 24.3.0
+  typescript: 6.0.3
+  vitest: 4.1.11
+  wrangler: 4.126.0
+
+allowBuilds:
+  esbuild: true
+  workerd: true
+
+engineStrict: true
+
+minimumReleaseAge: 0

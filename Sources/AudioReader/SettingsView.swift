@@ -1,6 +1,12 @@
 import Foundation
 import SwiftUI
 
+// THESIS: Settings is a first-class destination beside Library and Words, not a modal interruption of reading.
+// OWN-WORLD: Paper-and-terracotta Palette, native grouped Form, system text styles, SF Symbols status.
+// STORY: Open Settings like any other page, scan Account through LLM, save, return to the book.
+// FIRST VIEWPORT: Large title, Account at top, Save in the trailing toolbar, version as the last row.
+// FORM: Native grouped settings page (user-locked). FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance.
+
 struct SettingsView: View {
     @Bindable var state: AppState
     @State private var draft: AppSettings
@@ -11,8 +17,8 @@ struct SettingsView: View {
     @State private var removeQwenKey = false
     @State private var removeOpenAIKey = false
     @State private var saveFeedback: SaveFeedback?
-
-    private let labelWidth: CGFloat = 156
+    @State private var dictionaryNames: [String] = []
+    @State private var dictionariesLoading = false
 
     init(state: AppState) {
         self.state = state
@@ -23,80 +29,97 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Settings")
-                        .font(.system(size: 22, weight: .semibold))
-                    Text("Reader, dictionary, and language-model preferences")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Palette.dim)
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 16)
-
-            Divider().overlay(Palette.line)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    appearanceSection
-                    dictionarySection
-                    languageSection
-                    providerSection
-                }
-                .padding(24)
-            }
-
-            Divider().overlay(Palette.line)
-
-            VStack(alignment: .leading, spacing: 8) {
+        Form {
+            accountSection
+            appearanceSection
+            dictionarySection
+            languageSection
+            providerSection
+            Section {
+                LabeledContent("Version", value: AppVersion.displayName)
                 if let saveFeedback {
                     Label(saveFeedback.message, systemImage: saveFeedback.succeeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(saveFeedback.succeeded ? Palette.gold : Color.red.opacity(0.9))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                HStack(spacing: 8) {
-                    Text(AppVersion.displayName)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(Palette.dim)
-                    Spacer()
-                    Button("Cancel") { state.showSettings = false }
-                        .keyboardShortcut(.cancelAction)
-                    Button("Save Settings", action: save)
-                        .buttonStyle(.borderedProminent)
-                        .tint(Palette.terracotta)
-                        .keyboardShortcut(.defaultAction)
+                        .foregroundStyle(saveFeedback.succeeded ? Palette.gold : Palette.dim)
+                        .accessibilityLabel(saveFeedback.succeeded ? "Settings saved" : "Settings could not be saved")
+                        .accessibilityValue(saveFeedback.message)
                 }
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 16)
-            .background(Palette.panel)
+            .listRowBackground(Palette.panel)
         }
-        .frame(width: settingsWidth, height: settingsHeight)
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .background(Palette.bg)
+        .navigationTitle("Settings")
+#if os(iOS)
+        .navigationBarTitleDisplayMode(.large)
+        .navigationBarBackButtonHidden(true)
+#endif
+        .toolbar {
+#if os(iOS)
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Revert", action: revert)
+                    .disabled(!isDirty)
+                    .accessibilityLabel("Revert unsaved settings")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Save Settings", action: save)
+                    .disabled(!isDirty)
+                    .accessibilityLabel("Save settings")
+            }
+#else
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Revert", action: revert)
+                    .disabled(!isDirty)
+                    .accessibilityLabel("Revert unsaved settings")
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save Settings", action: save)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!isDirty)
+                    .accessibilityLabel("Save settings")
+            }
+#endif
+        }
+        .tint(Palette.terracotta)
+        .task {
+#if os(macOS)
+            dictionariesLoading = true
+            dictionaryNames = await DictionaryLookup.installedNamesOffMain()
+            dictionariesLoading = false
+#endif
+        }
     }
 
-    private var settingsWidth: CGFloat? {
-#if os(macOS)
-        700
-#else
-        nil
-#endif
+    private var isDirty: Bool {
+        draft != state.settings
+            || !xAIKey.isEmpty
+            || !qwenKey.isEmpty
+            || !openAIKey.isEmpty
+            || removeXAIKey
+            || removeQwenKey
+            || removeOpenAIKey
     }
 
-    private var settingsHeight: CGFloat? {
-#if os(macOS)
-        700
-#else
-        nil
-#endif
+    private func revert() {
+        draft = state.settings
+        xAIKey = ""
+        qwenKey = ""
+        openAIKey = ""
+        removeXAIKey = false
+        removeQwenKey = false
+        removeOpenAIKey = false
+        saveFeedback = nil
+    }
+
+    private var accountSection: some View {
+        Section("Account") {
+            AccountSessionView(session: state.account)
+        }
+        .listRowBackground(Palette.panel)
     }
 
     private var appearanceSection: some View {
-        GroupBox("Appearance") {
+        Section("Appearance") {
             VStack(alignment: .leading, spacing: 12) {
                 settingRow("Theme") {
                     Picker("Theme", selection: $draft.appearance) {
@@ -106,10 +129,12 @@ struct SettingsView: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.segmented)
+                    .tint(Palette.terracotta)
                 }
                 settingRow("Text size") {
                     HStack(spacing: 12) {
                         Slider(value: $draft.readerFontScale, in: 0.65...1.6, step: 0.05)
+                            .tint(Palette.terracotta)
                         Text(String(format: "%.0f%%", draft.readerFontScale * 100))
                             .font(.system(size: 11, design: .monospaced))
                             .frame(width: 44, alignment: .trailing)
@@ -127,6 +152,7 @@ struct SettingsView: View {
                 settingRow("Line spacing") {
                     HStack(spacing: 12) {
                         Slider(value: $draft.readerLineSpacing, in: 0.7...2.0, step: 0.1)
+                            .tint(Palette.terracotta)
                         Text(String(format: "%.1fx", draft.readerLineSpacing))
                             .font(.system(size: 11, design: .monospaced))
                             .frame(width: 44, alignment: .trailing)
@@ -135,6 +161,7 @@ struct SettingsView: View {
                 settingRow("Word spacing") {
                     HStack(spacing: 12) {
                         Slider(value: $draft.readerWordSpacing, in: 0...12, step: 1)
+                            .tint(Palette.terracotta)
                         Text("\(Int(draft.readerWordSpacing)) pt")
                             .font(.system(size: 11, design: .monospaced))
                             .frame(width: 44, alignment: .trailing)
@@ -143,6 +170,7 @@ struct SettingsView: View {
                 settingRow("Margins") {
                     HStack(spacing: 12) {
                         Slider(value: $draft.readerMargin, in: 16...96, step: 4)
+                            .tint(Palette.terracotta)
                         Text("\(Int(draft.readerMargin)) pt")
                             .font(.system(size: 11, design: .monospaced))
                             .frame(width: 44, alignment: .trailing)
@@ -150,37 +178,45 @@ struct SettingsView: View {
                 }
                 helper("These reading controls are shared by the macOS and iPad readers.")
             }
-            .padding(12)
+            .tint(Palette.terracotta)
         }
+        .listRowBackground(Palette.panel)
     }
 
     private var dictionarySection: some View {
-        GroupBox("Apple Dictionary") {
+        Section("Apple Dictionary") {
             VStack(alignment: .leading, spacing: 12) {
 #if os(iOS)
                 helper("Word definitions use the dictionaries installed in iPadOS. Use Look Up in the reader to view all available entries.")
 #else
                 settingRow("Preferred dictionary") {
-                    Picker("Preferred dictionary", selection: $draft.preferredDictionary) {
-                        ForEach(DictionaryLookup.installedNames(), id: \.self) { name in
-                            Text(name).tag(name)
+                    if dictionariesLoading && dictionaryNames.isEmpty {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Loading installed dictionaries…")
+                                .foregroundStyle(Palette.dim)
                         }
+                        .accessibilityLabel("Loading installed dictionaries")
+                    } else {
+                        Picker("Preferred dictionary", selection: $draft.preferredDictionary) {
+                            ForEach(dictionaryNames, id: \.self) { name in
+                                Text(name).tag(name)
+                            }
+                        }
+                        .labelsHidden()
                     }
-                    .labelsHidden()
                 }
                 helper("Changing Translate into automatically selects a matching installed dictionary when available. English definitions are used as the fallback.")
-                HStack {
-                    Spacer().frame(width: labelWidth + 16)
-                    Button("Open Dictionary.app") { DictionaryLookup.openDictionaryApp() }
-                }
+                Button("Open Dictionary.app") { DictionaryLookup.openDictionaryApp() }
+                    .frame(minHeight: 44, alignment: .leading)
 #endif
             }
-            .padding(12)
         }
+        .listRowBackground(Palette.panel)
     }
 
     private var languageSection: some View {
-        GroupBox("Languages") {
+        Section("Languages") {
             VStack(alignment: .leading, spacing: 12) {
                 settingRow("Default audiobook language") {
                     Picker("Default audiobook language", selection: $draft.transcriptionLanguage) {
@@ -209,7 +245,7 @@ struct SettingsView: View {
                         guard let language = StudyLanguage(rawValue: rawLanguage),
                               let name = DictionaryLookup.recommendedName(
                                 language: language,
-                                installedNames: DictionaryLookup.installedNames()
+                                installedNames: dictionaryNames
                               )
                         else { return }
                         draft.preferredDictionary = name
@@ -223,7 +259,15 @@ struct SettingsView: View {
                     Toggle("Play audio when tapping a sentence or word", isOn: $draft.playOnSelect)
                 }
                 settingRow("Sentence context") {
-                    countStepper(value: $draft.sentenceContextCount, range: 0...10, suffix: "before and after")
+                    countStepper(
+                        value: $draft.sentenceContextCount,
+                        range: 0...10,
+                        suffix: "before and after"
+                    )
+                    .disabled(draft.llmProvider == LLMProvider.managedQwen.rawValue)
+                }
+                if draft.llmProvider == LLMProvider.managedQwen.rawValue {
+                    helper("Managed Qwen uses the operator Desk sentence context. Translate into on this page still chooses the language.")
                 }
                 settingRow("Chapter block") {
                     countStepper(value: $draft.chapterTranslationBlockSize, range: 1...20, suffix: "sentences per request")
@@ -232,12 +276,12 @@ struct SettingsView: View {
                     countStepper(value: $draft.chatContextCount, range: 0...20, suffix: "before and after")
                 }
             }
-            .padding(12)
         }
+        .listRowBackground(Palette.panel)
     }
 
     private var providerSection: some View {
-        GroupBox("LLM provider") {
+        Section("LLM provider") {
             VStack(alignment: .leading, spacing: 12) {
                 if let warning = state.credentialMigrationWarning {
                     migrationWarning(warning)
@@ -255,6 +299,8 @@ struct SettingsView: View {
                 Divider().overlay(Palette.line)
 
                 switch draftProvider {
+                case .managedQwen:
+                    managedQwenSettings
                 case .grok:
                     grokSettings
                 case .qwenCloud:
@@ -265,7 +311,27 @@ struct SettingsView: View {
                     appleFoundationSettings
                 }
             }
-            .padding(12)
+        }
+        .listRowBackground(Palette.panel)
+    }
+
+    private var managedQwenSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            helper("Uses the signed-in AudioReader account. The Worker holds the Qwen key and policy. No local API key or endpoint.")
+            settingRow("Connection") {
+                connectionStatus(
+                    state.account.mode.isSignedIn ? "Ready — signed-in account" : "Sign in required",
+                    ready: state.account.mode.isSignedIn
+                )
+            }
+            alignedHelper(
+                !state.account.flagEnabled("managed_qwen")
+                    ? "Managed Qwen is turned off for this product right now."
+                    : state.account.mode.isSignedIn
+                    ? "Translations, summaries, and chapter chat go to the product API. The operator console chooses the model per task. This device does not pick a model."
+                    : "Open Account above, sign in, then save Managed Qwen.",
+                muted: true
+            )
         }
     }
 
@@ -338,7 +404,6 @@ struct SettingsView: View {
                     alignedHelper(message)
                 }
                 HStack {
-                    Spacer().frame(width: labelWidth + 16)
                     Button {
                         Task {
                             if let models = await state.retrieveGrokModels(baseURL: draft.grokEndpoint, apiKey: xAIKey) {
@@ -426,18 +491,15 @@ struct SettingsView: View {
             alignedHelper("QwenCloud Responses exposes none, minimal, low, medium, high, xhigh, and max. If a model or plan rejects an effort, AudioReader retries with that model's documented Chat mapping.", muted: true)
             if state.isLoadingQwenModels {
                 HStack(spacing: 8) {
-                    Spacer().frame(width: labelWidth + 16)
                     ProgressView().controlSize(.small)
                     Text("Refreshing the QwenCloud model list…")
-                        .font(.system(size: 11))
+                        .font(.footnote)
                         .foregroundStyle(Palette.dim)
                 }
             } else if let message = state.qwenModelsMessage {
                 alignedHelper(message)
             }
-            HStack {
-                Spacer().frame(width: labelWidth + 16)
-                Button {
+            Button {
                     Task {
                         if let models = await state.retrieveQwenModels(baseURL: draft.qwenEndpoint, apiKey: qwenKey) {
                             let selectable = models.filter(\.supportsText)
@@ -451,7 +513,6 @@ struct SettingsView: View {
                     Label("Retrieve Models Again", systemImage: "arrow.clockwise")
                 }
                 .disabled(state.isLoadingQwenModels)
-            }
             alignedHelper("\(state.qwenModels.count) catalog models. Only text-generation models appear in this picker.", muted: true)
         }
     }
@@ -488,8 +549,7 @@ struct SettingsView: View {
                     )
                 }
                 alignedHelper("Codex: \(CodexCLIClient.executableLabel)", muted: true)
-                HStack {
-                    Spacer().frame(width: labelWidth + 16)
+                HStack(spacing: 8) {
                     if state.isCheckingCodexLogin {
                         ProgressView().controlSize(.small)
                     }
@@ -500,6 +560,7 @@ struct SettingsView: View {
                     }
                     .disabled(state.isCheckingCodexLogin)
                 }
+                .frame(minHeight: 44, alignment: .leading)
                 alignedHelper("If needed, run `codex login` in Terminal and choose Sign in with ChatGPT. AudioReader prefers Codex's native executable and never reads or displays the cached OAuth tokens.", muted: true)
             } else {
                 settingRow("Connection") {
@@ -525,7 +586,6 @@ struct SettingsView: View {
                     alignedHelper(message)
                 }
                 HStack {
-                    Spacer().frame(width: labelWidth + 16)
                     Button {
                         Task {
                             if let models = await state.retrieveOpenAIModels(baseURL: draft.openAIEndpoint, apiKey: openAIKey) {
@@ -647,47 +707,46 @@ struct SettingsView: View {
 
     private func modelLoadingRow(_ text: String) -> some View {
         HStack(spacing: 8) {
-            Spacer().frame(width: labelWidth + 16)
             ProgressView().controlSize(.small)
             Text(text)
-                .font(.system(size: 11))
+                .font(.footnote)
                 .foregroundStyle(Palette.dim)
         }
+        .frame(minHeight: 44, alignment: .leading)
     }
 
     private func settingRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 16) {
+        VStack(alignment: .leading, spacing: 6) {
             Text(label)
-                .font(.system(size: 12, weight: .medium))
+                .font(.subheadline.weight(.medium))
                 .foregroundStyle(Palette.ink)
-                .frame(width: labelWidth, alignment: .trailing)
             content()
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: 44, alignment: .leading)
         }
+        .accessibilityElement(children: .contain)
     }
 
     private func helper(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 12))
+            .font(.footnote)
             .foregroundStyle(Palette.dim)
             .fixedSize(horizontal: false, vertical: true)
     }
 
     private func alignedHelper(_ text: String, muted: Bool = false) -> some View {
-        HStack(alignment: .top, spacing: 16) {
-            Spacer().frame(width: labelWidth)
-            Text(text)
-                .font(.system(size: 11))
-                .foregroundStyle(muted ? Palette.mute : Palette.dim)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(muted ? Palette.mute : Palette.dim)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func connectionStatus(_ text: String, ready: Bool) -> some View {
         Label(text, systemImage: ready ? "checkmark.circle.fill" : "exclamationmark.circle")
-            .font(.system(size: 12, weight: .medium))
+            .font(.subheadline.weight(.medium))
             .foregroundStyle(ready ? Palette.gold : Palette.dim)
+            .frame(minHeight: 44, alignment: .leading)
     }
 
     private func endpointField(
@@ -719,8 +778,8 @@ struct SettingsView: View {
                     Text(hasSavedKey
                          ? (removeSavedKey.wrappedValue ? "Saved key will be removed." : "Leave blank to keep the encrypted key.")
                          : "Encrypted locally when you save settings.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Palette.mute)
+                        .font(.footnote)
+                        .foregroundStyle(Palette.dim)
                     Spacer(minLength: 0)
                     if hasSavedKey {
                         Button(removeSavedKey.wrappedValue ? "Keep key" : "Remove key") {
@@ -740,11 +799,11 @@ struct SettingsView: View {
                 .foregroundStyle(Palette.gold)
             VStack(alignment: .leading, spacing: 6) {
                 Text(text)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.subheadline.weight(.medium))
                     .foregroundStyle(Palette.ink)
                     .fixedSize(horizontal: false, vertical: true)
                 Link(linkLabel, destination: url)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.footnote.weight(.medium))
             }
         }
         .padding(10)
@@ -755,7 +814,7 @@ struct SettingsView: View {
 
     private func migrationWarning(_ text: String) -> some View {
         Label(text, systemImage: "lock.trianglebadge.exclamationmark")
-            .font(.system(size: 12, weight: .medium))
+            .font(.subheadline.weight(.medium))
             .foregroundStyle(Palette.ink)
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -785,6 +844,7 @@ struct SettingsView: View {
         }
 
         state.settings = draft
+        state.account.recordUsage(name: "settings.saved")
         state.selectedDictionaryName = draft.preferredDictionary
         xAIKey = ""
         qwenKey = ""
@@ -805,6 +865,8 @@ struct SettingsView: View {
 
         Task {
             switch draftProvider {
+            case .managedQwen:
+                break
             case .grok where draftGrokAuthentication == .apiKey && xAIKeySaved:
                 await state.refreshGrokModels()
                 draft.grokModel = state.settings.grokModel

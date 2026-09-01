@@ -1,0 +1,38 @@
+{
+  "name": "@audio-reader/api-worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/packageId.ts",
+      "default": "./src/packageId.ts"
+    },
+    "./object-store": {
+      "types": "./src/object-store.ts",
+      "default": "./src/object-store.ts"
+    },
+    "./env": {
+      "types": "./src/env.ts",
+      "default": "./src/env.ts"
+    }
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@audio-reader/auth": "workspace:*",
+    "@audio-reader/contract": "workspace:*",
+    "@audio-reader/database": "workspace:*",
+    "@audio-reader/domain": "workspace:*",
+    "@audio-reader/observability": "workspace:*",
+    "@audio-reader/qwen": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

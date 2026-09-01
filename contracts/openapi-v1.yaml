@@ -1,0 +1,6625 @@
+openapi: 3.1.0
+info:
+  title: AudioReader API
+  version: 1.0.0-draft.1
+  summary: Cross-device, multi-user API for AudioReader native clients and the admin console.
+  description:
+    Local-first synchronization, server-managed Qwen assistance, privacy-safe exact cache reuse, optional asset
+    backup, and administration. Ordinary users never provide model credentials.
+  contact:
+    name: AudioReader project
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+servers:
+  - url: https://api.example.com
+    description: Production placeholder
+  - url: http://localhost:8787
+    description: Local development
+security:
+  - bearerAuth: []
+tags:
+  - name: System
+  - name: Auth
+  - name: Profile
+  - name: Settings
+  - name: Devices
+  - name: Library
+  - name: Assets
+  - name: Progress
+  - name: Study
+  - name: Transcripts
+  - name: Assistant
+  - name: Sync
+  - name: Privacy
+  - name: Admin Users
+  - name: Admin AI
+  - name: Admin Cache
+  - name: Admin Jobs
+  - name: Admin Operations
+  - name: Admin Flags
+  - name: Admin Privacy
+paths:
+  /v1/health:
+    get:
+      operationId: getHealth
+      summary: Check API health
+      tags:
+        - System
+      responses:
+        "200":
+          description: Health status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "400": &id001
+          $ref: "#/components/responses/BadRequest"
+        "401": &id002
+          $ref: "#/components/responses/Unauthorized"
+        "403": &id003
+          $ref: "#/components/responses/Forbidden"
+        "404": &id004
+          $ref: "#/components/responses/NotFound"
+        "409": &id005
+          $ref: "#/components/responses/Conflict"
+        "422": &id006
+          $ref: "#/components/responses/Unprocessable"
+        "429": &id007
+          $ref: "#/components/responses/RateLimited"
+        "500": &id008
+          $ref: "#/components/responses/InternalError"
+      security: []
+  /v1/auth/bootstrap:
+    post:
+      operationId: bootstrapSession
+      summary: Bootstrap profile and device after authentication
+      tags:
+        - Auth
+      responses:
+        "200":
+          description: Bootstrap state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapResponse"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthBootstrapRequest"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/auth/email-otp/request:
+    post:
+      operationId: requestEmailOtp
+      summary: Request an email one-time code
+      tags:
+        - Auth
+      responses:
+        "202":
+          description: Code accepted for delivery
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailOtpRequest"
+  /v1/auth/email-otp/verify:
+    post:
+      operationId: verifyEmailOtp
+      summary: Verify an email one-time code
+      tags:
+        - Auth
+      responses:
+        "200":
+          description: Tokens
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailOtpVerifyRequest"
+  /v1/auth/config:
+    get:
+      operationId: getAuthConfig
+      summary: List authentication providers
+      tags:
+        - Auth
+      responses:
+        "200":
+          description: Auth configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthConfig"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      security: []
+  /v1/auth/oauth/authorize:
+    post:
+      operationId: authorizeOAuth
+      summary: Start Google or Microsoft OAuth with PKCE
+      tags:
+        - Auth
+      responses:
+        "200":
+          description: Authorization URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthOAuthAuthorizeResponse"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthOAuthAuthorizeRequest"
+  /v1/auth/oauth/exchange:
+    post:
+      operationId: exchangeOAuth
+      summary: Exchange an OAuth authorization code
+      tags:
+        - Auth
+      responses:
+        "200":
+          description: Tokens
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthOAuthExchangeRequest"
+  /v1/auth/token/refresh:
+    post:
+      operationId: refreshSession
+      summary: Refresh an access token
+      tags:
+        - Auth
+      responses:
+        "200":
+          description: Tokens
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthRefreshRequest"
+  /v1/auth/logout:
+    post:
+      operationId: logout
+      summary: Revoke a refresh token
+      tags:
+        - Auth
+      responses:
+        "204":
+          description: Logged out
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthLogoutRequest"
+  /v1/me:
+    get:
+      operationId: getProfile
+      summary: Get current profile
+      tags:
+        - Profile
+      responses:
+        "200":
+          description: Profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Profile"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+    patch:
+      operationId: patchProfile
+      summary: Update current profile
+      tags:
+        - Profile
+      responses:
+        "200":
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Profile"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProfilePatch"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/me/settings:
+    get:
+      operationId: getUserSettings
+      summary: Get portable user settings
+      tags:
+        - Settings
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserSettings"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+    put:
+      operationId: putUserSettings
+      summary: Replace portable user settings
+      tags:
+        - Settings
+      responses:
+        "200":
+          description: Updated settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserSettings"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserSettingsPatch"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/me/events:
+    post:
+      operationId: recordProductEvents
+      summary: Record product usage events from a signed-in device
+      tags:
+        - Analytics
+      responses:
+        "202":
+          description: Events accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - accepted
+                properties:
+                  accepted:
+                    type: integer
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProductEventBatch"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+  /v1/me/devices:
+    get:
+      operationId: listDevices
+      summary: List signed-in devices
+      tags:
+        - Devices
+      responses:
+        "200":
+          description: Devices
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Device"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+  /v1/me/devices/{deviceId}:
+    delete:
+      operationId: revokeDevice
+      summary: Revoke a device
+      tags:
+        - Devices
+      responses:
+        "204":
+          description: Device revoked
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - &id020
+          name: deviceId
+          in: path
+          required: true
+          schema: &id009
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/books:
+    get:
+      operationId: listBooks
+      summary: List user books
+      tags:
+        - Library
+      responses:
+        "200":
+          description: Book page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPageBooks"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - &id012
+          name: cursor
+          in: query
+          required: false
+          description: Opaque continuation token returned by the previous page; clients must not interpret it.
+          schema:
+            type: string
+        - &id013
+          name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+    post:
+      operationId: createBook
+      summary: Register a local book and chapters
+      tags:
+        - Library
+      responses:
+        "201":
+          description: Created book
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Book"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookCreate"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/books/{bookId}:
+    get:
+      operationId: getBook
+      summary: Get a book
+      tags:
+        - Library
+      responses:
+        "200":
+          description: Book
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Book"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - &id010
+          name: bookId
+          in: path
+          required: true
+          schema: *id009
+    patch:
+      operationId: patchBook
+      summary: Update book metadata
+      tags:
+        - Library
+      responses:
+        "200":
+          description: Updated book
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Book"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookPatch"
+      parameters:
+        - *id010
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+    delete:
+      operationId: deleteBook
+      summary: Delete a user book
+      tags:
+        - Library
+      responses:
+        "204":
+          description: Book deleted
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - *id010
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/books/{bookId}/chapters:
+    get:
+      operationId: listBookChapters
+      summary: List chapters for a book
+      tags:
+        - Library
+      responses:
+        "200":
+          description: Chapters
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Chapter"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - *id010
+  /v1/chapters/{chapterId}:
+    get:
+      operationId: getChapter
+      summary: Get a chapter
+      tags:
+        - Library
+      responses:
+        "200":
+          description: Chapter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Chapter"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - &id011
+          name: chapterId
+          in: path
+          required: true
+          schema: *id009
+  /v2/assets:
+    get:
+      operationId: listV2Assets
+      summary: Discover ready private immutable manifests owned by the account
+      tags:
+        - Assets
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - name: kind
+          in: query
+          schema:
+            $ref: "#/components/schemas/AssetKind"
+        - name: bookId
+          in: query
+          schema: *id009
+        - name: chapterId
+          in: query
+          schema: *id009
+      responses:
+        "200":
+          description: Ready private manifests
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [assets]
+                properties:
+                  assets:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Asset"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "500": *id008
+  /v2/assets/uploads:
+    post:
+      operationId: createV2AssetUpload
+      summary: Create a pending private upload for a large immutable asset
+      tags:
+        - Assets
+      responses:
+        "201":
+          description: Pending private upload ticket
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadTicket"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssetManifestCreate"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v2/assets/uploads/{uploadId}/body:
+    put:
+      operationId: putV2AssetUploadBody
+      summary: Stream a bounded immutable object to the authenticated Worker upload fallback
+      tags:
+        - Assets
+      parameters:
+        - name: uploadId
+          in: path
+          required: true
+          schema: *id009
+        - name: Content-Length
+          in: header
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 8388608
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+              maxLength: 8388608
+      responses:
+        "200":
+          description: Bounded upload body accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [ok]
+                properties:
+                  ok: { type: boolean, const: true }
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "411":
+          description: Content-Length is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "422": *id006
+        "500": *id008
+  /v2/assets/uploads/{uploadId}/complete:
+    post:
+      operationId: completeV2AssetUpload
+      summary: Verify a pending object and atomically publish its ready manifest
+      tags:
+        - Assets
+      responses:
+        "200":
+          description: Ready immutable asset manifest
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "500": *id008
+      parameters:
+        - name: uploadId
+          in: path
+          required: true
+          schema: *id009
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v2/assets/{assetId}/download:
+    post:
+      operationId: createV2AssetDownload
+      summary: Create an owner-authorized short-lived private download
+      tags:
+        - Assets
+      responses:
+        "200":
+          description: Short-lived private download ticket
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignedDownload"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "500": *id008
+      parameters:
+        - name: assetId
+          in: path
+          required: true
+          schema: *id009
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v2/assets/{assetId}:
+    get:
+      operationId: getV2Asset
+      summary: Resolve one announced ready manifest by its owner-scoped identifier
+      tags:
+        - Assets
+      responses:
+        "200":
+          description: Ready immutable asset manifest
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "500": *id008
+      parameters:
+        - name: assetId
+          in: path
+          required: true
+          schema: *id009
+        - $ref: "#/components/parameters/DeviceId"
+  /v2/assets/{assetId}/content:
+    get:
+      operationId: getV2AssetContent
+      summary: Stream owner-authorized immutable object content
+      tags:
+        - Assets
+      responses:
+        "200":
+          description: Immutable object bytes
+          headers:
+            Content-Length:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "500": *id008
+    head:
+      operationId: headV2AssetContent
+      summary: Read owner-authorized immutable object metadata without content
+      tags:
+        - Assets
+      responses:
+        "200":
+          description: Immutable object metadata
+          headers:
+            Content-Length:
+              schema: { type: integer, minimum: 1 }
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "500": *id008
+  /v1/progress/{chapterId}:
+    get:
+      operationId: getReadingProgress
+      summary: Get chapter reading progress
+      tags:
+        - Progress
+      responses:
+        "200":
+          description: Reading progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadingProgress"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - *id011
+    put:
+      operationId: putReadingProgress
+      summary: Upsert chapter reading progress
+      tags:
+        - Progress
+      responses:
+        "200":
+          description: Updated progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadingProgress"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReadingProgressUpsert"
+      parameters:
+        - *id011
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/vocabulary:
+    get:
+      operationId: listVocabulary
+      summary: List vocabulary occurrences
+      tags:
+        - Study
+      responses:
+        "200":
+          description: Vocabulary page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPageVocabulary"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - *id012
+        - *id013
+        - name: bookId
+          in: query
+          required: false
+          schema: *id009
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+    post:
+      operationId: createVocabulary
+      summary: Create a contextual vocabulary occurrence
+      tags:
+        - Study
+      responses:
+        "201":
+          description: Created vocabulary occurrence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VocabularyOccurrence"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VocabularyCreate"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/vocabulary/{vocabularyId}:
+    get:
+      operationId: getVocabulary
+      summary: Get a vocabulary occurrence
+      tags:
+        - Study
+      responses:
+        "200":
+          description: Vocabulary occurrence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VocabularyOccurrence"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - &id014
+          name: vocabularyId
+          in: path
+          required: true
+          schema: *id009
+    patch:
+      operationId: patchVocabulary
+      summary: Update a vocabulary occurrence
+      tags:
+        - Study
+      responses:
+        "200":
+          description: Updated vocabulary occurrence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VocabularyOccurrence"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VocabularyPatch"
+      parameters:
+        - *id014
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+    delete:
+      operationId: deleteVocabulary
+      summary: Delete a vocabulary occurrence
+      tags:
+        - Study
+      responses:
+        "204":
+          description: Vocabulary occurrence deleted
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - *id014
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/reviews/due:
+    get:
+      operationId: listDueReviews
+      summary: List due review schedules
+      tags:
+        - Study
+      responses:
+        "200":
+          description: Due review page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPageReviews"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - *id012
+        - *id013
+  /v1/reviews:
+    post:
+      operationId: submitReviews
+      summary: Submit append-only review events
+      tags:
+        - Study
+      responses:
+        "200":
+          description: Updated schedules
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewSubmitResponse"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReviewSubmitRequest"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/ai/translations:
+    post:
+      operationId: createTranslation
+      summary: Get a cached or generated contextual translation
+      tags:
+        - Assistant
+      responses:
+        "200":
+          description: Translation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TranslationResult"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      description: The server owns Qwen credentials and policy. Shared cache is eligible only for non-personal exact requests. Cache hits do not consume quota or call Qwen. lookupOnly returns 404 when the exact cache row is missing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TranslationRequest"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/ai/translation-batches:
+    post:
+      operationId: createTranslationBatch
+      summary: Translate a sentence block with per-sentence shared cache
+      tags:
+        - Assistant
+      responses:
+        "200":
+          description: Cached and generated translations for the requested sentence block
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TranslationBatchResult"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      description: One Qwen call covers every cache miss in the block. Each sentence is stored under its own exact-content cache key so later lookups skip Qwen. lookupOnly returns hits without generating.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TranslationBatchRequest"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/ai/chapter-summaries:
+    post:
+      operationId: createChapterSummary
+      summary: Get a cached or generated chapter summary
+      description: Cache hits do not consume quota or call Qwen. lookupOnly returns 404 when the exact cache row is missing.
+      tags:
+        - Assistant
+      responses:
+        "200":
+          description: Chapter summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChapterSummary"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChapterSummaryRequest"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/ai/chat:
+    post:
+      operationId: createChapterChatMessage
+      summary: Create a private chapter chat message
+      tags:
+        - Assistant
+      responses:
+        "202":
+          description: Chat accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatAccepted"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatRequest"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/ai/heard-quizzes:
+    post:
+      operationId: createHeardQuiz
+      summary: Generate a retrieval quiz from an explicitly bounded heard passage
+      description: The Worker uses only the supplied completed segments and validates every question against the server-owned quiz contract before returning the raw JSON.
+      tags:
+        - Assistant
+      responses:
+        "200":
+          description: Validated raw heard-quiz JSON
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeardQuizResponse"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+        "502": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HeardQuizRequest"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/sync/capabilities:
+    get:
+      operationId: getRetiredSyncProtocol
+      summary: Return the required-upgrade response for retired sync clients
+      tags:
+        - Sync
+      responses:
+        "426":
+          description: The v1 sync generation is retired
+          headers:
+            X-Min-App-Version:
+              schema: { type: string, example: 2.0.0 }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "401": *id002
+        "403": *id003
+        "500": *id008
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+  /v1/sync/push:
+    post:
+      operationId: pushRetiredSyncMutations
+      summary: Return the required-upgrade response for retired sync clients
+      tags:
+        - Sync
+      responses:
+        "426":
+          description: The v1 sync generation is retired
+          headers:
+            X-Min-App-Version:
+              schema: { type: string, example: 2.0.0 }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "401": *id002
+        "403": *id003
+        "500": *id008
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+  /v1/sync/pull:
+    get:
+      operationId: pullRetiredSyncChanges
+      summary: Return the required-upgrade response for retired sync clients
+      tags:
+        - Sync
+      responses:
+        "426":
+          description: The v1 sync generation is retired
+          headers:
+            X-Min-App-Version:
+              schema: { type: string, example: 2.0.0 }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "401": *id002
+        "403": *id003
+        "500": *id008
+      parameters:
+        - &id019
+          name: X-Device-Id
+          in: header
+          required: true
+          schema: *id009
+          description: Stable device UUID stored in Keychain.
+  /v1/sync/bootstrap:
+    get:
+      operationId: bootstrapRetiredSyncState
+      summary: Return the required-upgrade response for retired sync clients
+      tags:
+        - Sync
+      responses:
+        "426":
+          description: The v1 sync generation is retired
+          headers:
+            X-Min-App-Version:
+              schema: { type: string, example: 2.0.0 }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "401": *id002
+        "403": *id003
+        "500": *id008
+      parameters:
+        - *id019
+  /v2/sync/protocol:
+    get:
+      operationId: getSyncV2Protocol
+      summary: Read the required object-backed sync protocol generation
+      tags:
+        - Sync
+      responses:
+        "200":
+          description: Object-backed sync protocol identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncV2Protocol"
+        "401": *id002
+        "403": *id003
+        "409": *id005
+        "500": *id008
+      parameters:
+        - *id019
+  /v2/sync/push:
+    post:
+      operationId: pushSyncV2Mutations
+      summary: Push structured mutations without large immutable bytes
+      tags:
+        - Sync
+      responses:
+        "200":
+          description: Push result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncPushResponse"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyncPushRequest"
+      parameters:
+        - *id019
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v2/sync/pull:
+    get:
+      operationId: pullSyncV2Changes
+      summary: Pull ordered v2 account changes
+      tags:
+        - Sync
+      responses:
+        "200":
+          description: Change page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncPullResponse"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "409": *id005
+        "500": *id008
+      parameters:
+        - *id012
+        - *id013
+        - *id019
+  /v2/sync/bootstrap:
+    get:
+      operationId: bootstrapSyncV2State
+      summary: Read a fixed high-water v2 latest-state page
+      tags:
+        - Sync
+      responses:
+        "200":
+          description: Latest v2 entity state and revision/hash page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncBootstrapResponse"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "409": *id005
+        "500": *id008
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          description: Fixed snapshot high-water cursor returned by the first bootstrap page.
+          schema:
+            type: string
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - *id013
+        - *id019
+  /v1/exports:
+    post:
+      operationId: createAccountExport
+      summary: Create an account export job
+      tags:
+        - Privacy
+      responses:
+        "202":
+          description: Export queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportJob"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExportCreate"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/exports/{exportId}:
+    get:
+      operationId: getAccountExport
+      summary: Get account export status
+      tags:
+        - Privacy
+      responses:
+        "200":
+          description: Export status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportJob"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - &id023
+          name: exportId
+          in: path
+          required: true
+          schema: *id009
+  /v1/me/deletion:
+    post:
+      operationId: requestAccountDeletion
+      summary: Request account deletion
+      tags:
+        - Privacy
+      responses:
+        "202":
+          description: Deletion queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeletionRequest"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/me/analytics-preferences:
+    get:
+      operationId: getAnalyticsPreferences
+      summary: Get explicit analytics sharing preferences
+      tags:
+        - Privacy
+      responses:
+        "200":
+          description: Current analytics preferences
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsPreference"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+    put:
+      operationId: putAnalyticsPreferences
+      summary: Set explicit analytics sharing preferences
+      tags:
+        - Privacy
+      responses:
+        "200":
+          description: Updated analytics preferences
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsPreference"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - operatorLearningAnalyticsEnabled
+              properties:
+                operatorLearningAnalyticsEnabled:
+                  type: boolean
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/admin/auth/blocked-attempts:
+    get:
+      operationId: adminListBlockedAttempts
+      security:
+        - AdminBearer: []
+      summary: List privacy-bounded blocked passwordless attempts
+      description: Requires access.read; raw email and IP values are never returned.
+      tags:
+        - Admin Users
+      responses:
+        "200":
+          description: Blocked attempts
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - items
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - id
+                        - action
+                        - reason
+                        - emailHash
+                        - ipHash
+                        - deviceId
+                        - at
+                      properties:
+                        id:
+                          type: string
+                        action:
+                          type: string
+                        reason:
+                          type: string
+                        emailHash:
+                          type: string
+                        ipHash:
+                          type: string
+                        deviceId:
+                          oneOf:
+                            - type: string
+                            - type: "null"
+                        at:
+                          type: string
+                          format: date-time
+                        requestId:
+                          type: string
+        "401": *id002
+        "403": *id003
+        "500": *id008
+  /v1/admin/capabilities:
+    get:
+      operationId: adminGetCapabilities
+      security:
+        - AdminBearer: []
+      summary: Get the signed-in administrator's effective roles and capabilities
+      tags:
+        - Admin Users
+      responses:
+        "200":
+          description: Effective role and capability set
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminCapabilities"
+        "401": *id002
+        "403": *id003
+        "500": *id008
+  /v1/admin/users:
+    get:
+      operationId: adminListUsers
+      security:
+        - AdminBearer: []
+      summary: List users for support and operations
+      tags:
+        - Admin Users
+      responses:
+        "200":
+          description: User page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPageAdminUsers"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      description: Requires an admin capability; ordinary JWTs receive 403.
+      parameters:
+        - *id012
+        - *id013
+        - name: query
+          in: query
+          required: false
+          schema:
+            type: string
+  /v1/admin/users/{userId}:
+    get:
+      operationId: adminGetUser
+      security:
+        - AdminBearer: []
+      summary: Get support-safe user metadata
+      tags:
+        - Admin Users
+      responses:
+        "200":
+          description: User metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUser"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - &id015
+          name: userId
+          in: path
+          required: true
+          schema: *id009
+  /v1/admin/users/{userId}/progress:
+    get:
+      operationId: adminGetUserProgress
+      security:
+        - AdminBearer: []
+      summary: Get an audited privacy-safe user progress summary
+      description: >-
+        Requires support_readonly, operator, privacy_officer, or superadmin. Sync health is
+        operational metadata; reading and learning aggregates are returned only after explicit
+        user consent. Raw sync payloads and reading content are never returned.
+      tags:
+        - Admin Users
+      responses:
+        "200":
+          description: Privacy-safe progress summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUserProgress"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: *id009
+  /v1/admin/users/{userId}/suspend:
+    post:
+      operationId: adminSuspendUser
+      security:
+        - AdminBearer: []
+      summary: Suspend a user account
+      tags:
+        - Admin Users
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUser"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminAction"
+      parameters:
+        - *id015
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/admin/users/{userId}/unsuspend:
+    post:
+      operationId: adminUnsuspendUser
+      security:
+        - AdminBearer: []
+      summary: Unsuspend a user account
+      tags:
+        - Admin Users
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUser"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminAction"
+      parameters:
+        - *id015
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/admin/users/{userId}/revoke-sessions:
+    post:
+      operationId: adminRevokeUserSessions
+      security:
+        - AdminBearer: []
+      summary: Revoke all user sessions
+      tags:
+        - Admin Users
+      responses:
+        "202":
+          description: Revocation job queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminAction"
+      parameters:
+        - *id015
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/admin/users/{userId}/grant-admin:
+    post:
+      operationId: adminGrantUserAdmin
+      security:
+        - AdminBearer: []
+      summary: Grant the operator role so the user's JWT is treated as admin
+      tags:
+        - Admin Users
+      responses:
+        "200":
+          description: User with operator role
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUser"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminAction"
+      parameters:
+        - *id015
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/admin/llm/policies:
+    get:
+      operationId: adminListLlmPolicies
+      security:
+        - AdminBearer: []
+      summary: List Qwen task policies
+      tags:
+        - Admin AI
+      responses:
+        "200":
+          description: Policies
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LlmPolicy"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+  /v1/admin/llm/policies/{policyId}:
+    patch:
+      operationId: adminPatchLlmPolicy
+      security:
+        - AdminBearer: []
+      summary: Update or roll out a Qwen task policy
+      tags:
+        - Admin AI
+      responses:
+        "200":
+          description: Updated policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LlmPolicy"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LlmPolicyPatch"
+      parameters:
+        - &id024
+          name: policyId
+          in: path
+          required: true
+          schema: *id009
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/admin/llm/policies/{policyId}/preview:
+    post:
+      operationId: adminPreviewLlmPolicy
+      security:
+        - AdminBearer: []
+      summary: Validate and render every layer of a Managed Qwen prompt
+      tags:
+        - Admin AI
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManagedPromptPreviewRequest"
+      responses:
+        "200":
+          description: Effective prompt preview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedPromptPreview"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "422": *id006
+        "500": *id008
+      parameters:
+        - *id024
+  /v1/admin/llm/policies/{policyId}/probe:
+    post:
+      operationId: adminProbeLlmPolicy
+      security:
+        - AdminBearer: []
+      summary: Run a correlated Managed Qwen prompt probe
+      tags:
+        - Admin AI
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManagedPromptPreviewRequest"
+      responses:
+        "200":
+          description: Rendered prompt and parsed probe result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedPromptProbe"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "422": *id006
+        "500": *id008
+      parameters:
+        - *id024
+  /v1/admin/cache:
+    get:
+      operationId: adminListCacheEntries
+      security:
+        - AdminBearer: []
+      summary: List derived cache metadata
+      tags:
+        - Admin Cache
+      responses:
+        "200":
+          description: Cache page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPageCache"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - *id012
+        - *id013
+        - name: task
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: editionFingerprint
+          in: query
+          required: false
+          schema:
+            type: string
+  /v1/admin/cache/{cacheId}:
+    get:
+      operationId: adminGetCacheEntry
+      security:
+        - AdminBearer: []
+      summary: Get derived cache metadata
+      tags:
+        - Admin Cache
+      responses:
+        "200":
+          description: Cache entry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CacheEntry"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - &id016
+          name: cacheId
+          in: path
+          required: true
+          schema: *id009
+  /v1/admin/cache/{cacheId}/actions:
+    post:
+      operationId: adminActOnCacheEntry
+      security:
+        - AdminBearer: []
+      summary: Quarantine, activate, expire, purge, or regenerate a cache entry
+      tags:
+        - Admin Cache
+      responses:
+        "202":
+          description: Cache action accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CacheAction"
+      parameters:
+        - *id016
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/admin/legacy-cleanup:
+    post:
+      operationId: adminCleanupObsoleteV1Data
+      security:
+        - AdminBearer: []
+      summary: Inspect or explicitly queue deletion of one account's obsolete v1 data
+      description: |
+        Dry-run is read-only. Execution is idempotently queued and deletes owned legacy objects
+        before deleting v1 sync, transcript, and asset rows. This operation is never automatic.
+      tags:
+        - Admin Operations
+      responses:
+        "200":
+          description: Obsolete v1 data inspection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyCleanupInspection"
+        "202":
+          description: Cleanup job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyCleanupAccepted"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LegacyCleanupRequest"
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Required when dryRun is false.
+          schema:
+            type: string
+            minLength: 16
+            maxLength: 128
+  /v1/admin/jobs:
+    get:
+      operationId: adminListJobs
+      security:
+        - AdminBearer: []
+      summary: List background jobs
+      tags:
+        - Admin Jobs
+      responses:
+        "200":
+          description: Job page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPageJobs"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - *id012
+        - *id013
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+  /v1/admin/jobs/{jobId}/retry:
+    post:
+      operationId: adminRetryJob
+      security:
+        - AdminBearer: []
+      summary: Retry a failed job
+      tags:
+        - Admin Jobs
+      responses:
+        "202":
+          description: Retry queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminAction"
+      parameters:
+        - &id017
+          name: jobId
+          in: path
+          required: true
+          schema: *id009
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/admin/jobs/{jobId}/cancel:
+    post:
+      operationId: adminCancelJob
+      security:
+        - AdminBearer: []
+      summary: Cancel a queued or running job
+      tags:
+        - Admin Jobs
+      responses:
+        "202":
+          description: Cancellation accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminAction"
+      parameters:
+        - *id017
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/admin/metrics:
+    get:
+      operationId: adminGetMetrics
+      security:
+        - AdminBearer: []
+      summary: Get operational metrics snapshot
+      tags:
+        - Admin Operations
+      responses:
+        "200":
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetricsSnapshot"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: &id018
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: true
+          schema: *id018
+  /v1/admin/product-analytics:
+    get:
+      operationId: adminGetProductAnalytics
+      security:
+        - AdminBearer: []
+      summary: Get privacy-preserving product analytics
+      description: Aggregates pseudonymous product events. Geographic and learning dimensions use minimum-size buckets; raw IP, precise location, and reading text are never returned.
+      tags:
+        - Admin Operations
+      responses:
+        "200":
+          description: Product analytics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductAnalytics"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: *id018
+        - name: to
+          in: query
+          required: true
+          schema: *id018
+        - name: interval
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [hour, day, week]
+            default: day
+        - name: country
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: language
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: readerLevel
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: platform
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: contentCategory
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: feature
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: outcome
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [ok, failed, cancelled, started]
+  /v1/admin/audit-events:
+    get:
+      operationId: adminListAuditEvents
+      security:
+        - AdminBearer: []
+      summary: List immutable admin audit events
+      tags:
+        - Admin Operations
+      responses:
+        "200":
+          description: Audit page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPageAudit"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - *id012
+        - *id013
+        - name: actorId
+          in: query
+          required: false
+          schema: *id009
+        - name: action
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: requestId
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: resourceType
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: resourceId
+          in: query
+          required: false
+          schema:
+            type: string
+  /v1/admin/runtime-config:
+    get:
+      operationId: adminGetRuntimeConfig
+      security:
+        - AdminBearer: []
+      summary: Get operator-managed runtime configuration
+      tags:
+        - Admin Operations
+      responses:
+        "200":
+          description: Runtime configuration with secrets masked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeConfig"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+    put:
+      operationId: adminPutRuntimeConfig
+      security:
+        - AdminBearer: []
+      summary: Update Qwen, GCS, and Turnstile configuration without a Worker redeploy
+      tags:
+        - Admin Operations
+      responses:
+        "200":
+          description: Updated runtime configuration with secrets masked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeConfig"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeConfigPut"
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/admin/diagnostics:
+    get:
+      operationId: adminGetDiagnostics
+      security:
+        - AdminBearer: []
+      summary: Operator diagnostics for Qwen, flags, quotas, and policies
+      tags:
+        - Admin Operations
+      parameters:
+        - name: probe
+          in: query
+          required: false
+          description: models pings /models; complete also runs a tiny chat completion
+          schema:
+            type: string
+            enum:
+              - models
+              - complete
+      responses:
+        "200":
+          description: Diagnostic snapshot without secrets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorDiagnostics"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+  /v1/admin/events:
+    get:
+      operationId: adminListOperatorEvents
+      security:
+        - AdminBearer: []
+      summary: Recent operator-visible events for Qwen, config, and probes
+      tags:
+        - Admin Operations
+      parameters:
+        - name: requestId
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: kind
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: task
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Recent events without secrets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OperatorEvent"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+  /v1/admin/product-events:
+    get:
+      operationId: adminListProductEvents
+      security:
+        - AdminBearer: []
+      summary: List persisted product usage events for analysis
+      tags:
+        - Admin Operations
+      parameters:
+        - name: name
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: accountId
+          in: query
+          required: false
+          schema: *id009
+        - name: requestId
+          in: query
+          required: false
+          description: Exact request ID used to correlate Activity with Trace and Audit.
+          schema:
+            type: string
+        - name: from
+          in: query
+          required: false
+          schema: *id018
+        - name: to
+          in: query
+          required: false
+          schema: *id018
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque continuation token returned by the previous page; clients must not interpret it.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Usage event page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPageProductEvents"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+  /v1/admin/account-sync-readiness:
+    get:
+      operationId: adminGetAccountSyncReadiness
+      security:
+        - AdminBearer: []
+      summary: Read requested and effective account sync dependency readiness
+      tags:
+        - Admin Flags
+      parameters:
+        - name: probe
+          in: query
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Account sync readiness
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountSyncReadiness"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+  /v1/admin/feature-flags:
+    get:
+      operationId: adminListFeatureFlags
+      security:
+        - AdminBearer: []
+      summary: List product feature flags and kill switches
+      tags:
+        - Admin Flags
+      responses:
+        "200":
+          description: Feature flags
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FeatureFlag"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+  /v1/admin/feature-flags/{flagKey}:
+    patch:
+      operationId: adminPatchFeatureFlag
+      security:
+        - AdminBearer: []
+      summary: Enable, disable, or retarget a feature flag
+      tags:
+        - Admin Flags
+      responses:
+        "200":
+          description: Updated feature flag
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeatureFlag"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeatureFlagPatch"
+      parameters:
+        - name: flagKey
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/admin/quotas:
+    get:
+      operationId: adminListQuotas
+      security:
+        - AdminBearer: []
+      summary: List starter product quotas
+      tags:
+        - Admin Operations
+      responses:
+        "200":
+          description: Quotas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Quota"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+  /v1/admin/quotas/{quotaKey}:
+    patch:
+      operationId: adminPatchQuota
+      security:
+        - AdminBearer: []
+      summary: Change a product quota limit
+      tags:
+        - Admin Operations
+      responses:
+        "200":
+          description: Updated quota
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Quota"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QuotaPatch"
+      parameters:
+        - name: quotaKey
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+  /v1/admin/privacy-requests:
+    get:
+      operationId: adminListPrivacyRequests
+      security:
+        - AdminBearer: []
+      summary: List account export and deletion requests
+      tags:
+        - Admin Privacy
+      responses:
+        "200":
+          description: Privacy request page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPagePrivacyRequests"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      parameters:
+        - *id012
+        - *id013
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+  /v1/admin/privacy-requests/{requestId}/actions:
+    post:
+      operationId: adminActOnPrivacyRequest
+      security:
+        - AdminBearer: []
+      summary: Complete or cancel a privacy request
+      tags:
+        - Admin Privacy
+      responses:
+        "200":
+          description: Updated privacy request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrivacyRequest"
+        "400": *id001
+        "401": *id002
+        "403": *id003
+        "404": *id004
+        "409": *id005
+        "422": *id006
+        "429": *id007
+        "500": *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrivacyRequestAction"
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema: *id009
+        - $ref: "#/components/parameters/DeviceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Supabase-issued access token.
+    AdminBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT for an authenticated administrator. Ordinary user sessions receive 403.
+  parameters:
+    DeviceId: *id019
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+      description: Unique key for a logical mutation; reuse with different content is rejected.
+    Cursor: *id012
+    Limit: *id013
+    BookId: *id010
+    ChapterId: *id011
+    DevicePathId: *id020
+    VocabularyId: *id014
+    UploadId:
+      name: uploadId
+      in: path
+      required: true
+      schema: *id009
+    AssetId:
+      name: assetId
+      in: path
+      required: true
+      schema: *id009
+    ExportId: *id023
+    UserId: *id015
+    PolicyId: *id024
+    CacheId: *id016
+    JobId: *id017
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        X-Request-Id:
+          schema:
+            type: string
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        X-Request-Id:
+          schema:
+            type: string
+    Forbidden:
+      description: Forbidden
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        X-Request-Id:
+          schema:
+            type: string
+    NotFound:
+      description: Not found
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        X-Request-Id:
+          schema:
+            type: string
+    Conflict:
+      description: Conflict
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        X-Request-Id:
+          schema:
+            type: string
+    Unprocessable:
+      description: Unprocessable entity
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        X-Request-Id:
+          schema:
+            type: string
+    RateLimited:
+      description: Rate limited
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        X-Request-Id:
+          schema:
+            type: string
+    InternalError:
+      description: Internal server error
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        X-Request-Id:
+          schema:
+            type: string
+  schemas:
+    Problem:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - title
+        - status
+        - code
+        - traceId
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        code:
+          type: string
+          pattern: ^[a-z0-9_.-]+$
+        detail: &id025
+          oneOf:
+            - type: string
+            - type: "null"
+        traceId:
+          type: string
+        retryAfterSeconds:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: "null"
+        fieldErrors:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - field
+              - message
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+    Health:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - version
+        - time
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+            - degraded
+        version:
+          type: string
+        time: *id018
+        dependencies:
+          type: object
+          additionalProperties:
+            type: string
+    AuthBootstrapRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - deviceId
+        - platform
+        - appVersion
+      properties:
+        deviceId: *id009
+        platform:
+          type: string
+          enum:
+            - macos
+            - ios
+            - ipados
+        deviceName: *id025
+        appVersion:
+          type: string
+        buildNumber:
+          type: string
+        locale:
+          type: string
+        timeZone:
+          type: string
+    EmailOtpRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - email
+      properties:
+        email:
+          type: string
+          format: email
+        redirectUri: *id025
+        turnstileToken:
+          type: string
+          minLength: 1
+    EmailOtpVerifyRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - email
+        - code
+        - deviceId
+      properties:
+        email:
+          type: string
+          format: email
+        code:
+          type: string
+          pattern: ^[0-9]{6}$
+        deviceId: *id009
+        turnstileToken:
+          type: string
+          minLength: 1
+    TokenPair:
+      type: object
+      additionalProperties: false
+      required:
+        - accessToken
+        - refreshToken
+        - expiresAt
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        expiresAt: *id018
+        tokenType:
+          type: string
+          const: Bearer
+    AuthConfig:
+      type: object
+      additionalProperties: false
+      required:
+        - providers
+      properties:
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuthProvider"
+        turnstileSiteKey:
+          type: string
+    AuthProvider:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+      properties:
+        id:
+          type: string
+          enum:
+            - google
+            - microsoft
+            - email_otp
+    AuthOAuthAuthorizeRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - provider
+        - redirectUri
+        - codeChallenge
+        - state
+      properties:
+        provider:
+          type: string
+          enum:
+            - google
+            - microsoft
+        redirectUri:
+          type: string
+          format: uri
+        codeChallenge:
+          type: string
+          minLength: 43
+          maxLength: 128
+        codeChallengeMethod:
+          type: string
+          const: S256
+        state:
+          type: string
+          minLength: 8
+          maxLength: 256
+    AuthOAuthAuthorizeResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - authorizationUrl
+        - state
+      properties:
+        authorizationUrl:
+          type: string
+          format: uri
+        state:
+          type: string
+    AuthOAuthExchangeRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - provider
+        - code
+        - codeVerifier
+        - redirectUri
+      properties:
+        provider:
+          type: string
+          enum:
+            - google
+            - microsoft
+        code:
+          type: string
+        codeVerifier:
+          type: string
+          minLength: 43
+          maxLength: 128
+        redirectUri:
+          type: string
+          format: uri
+        state:
+          type: string
+    AuthRefreshRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - refreshToken
+      properties:
+        refreshToken:
+          type: string
+          minLength: 16
+    AuthLogoutRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - refreshToken
+      properties:
+        refreshToken:
+          type: string
+          minLength: 16
+    Profile:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - accountId
+        - email
+        - createdAt
+        - updatedAt
+      properties:
+        id: *id009
+        sharedCacheEntryID: *id009
+        accountId: *id009
+        email:
+          type: string
+          format: email
+        displayName: *id025
+        avatarUrl:
+          oneOf:
+            - type: string
+              format: uri
+            - type: "null"
+        createdAt: *id018
+        updatedAt: *id018
+        deletionPendingAt: &id026
+          oneOf:
+            - *id018
+            - type: "null"
+    ProfilePatch:
+      type: object
+      additionalProperties: false
+      properties:
+        displayName: *id025
+        avatarUrl:
+          oneOf:
+            - type: string
+              format: uri
+            - type: "null"
+    Device:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - platform
+        - appVersion
+        - createdAt
+        - lastSeenAt
+        - revoked
+      properties:
+        id: *id009
+        platform:
+          type: string
+          enum:
+            - macos
+            - ios
+            - ipados
+        name: *id025
+        appVersion:
+          type: string
+        buildNumber:
+          type: string
+        createdAt: *id018
+        lastSeenAt: *id018
+        quotas:
+          type: array
+          items:
+            $ref: "#/components/schemas/Quota"
+        revoked:
+          type: boolean
+        revokedAt: *id026
+    FeatureFlag:
+      type: object
+      additionalProperties: false
+      required:
+        - key
+        - enabled
+      properties:
+        key:
+          type: string
+        enabled:
+          type: boolean
+        variant: *id025
+        rolloutPercent:
+          type: number
+          minimum: 0
+          maximum: 100
+        minAppVersion: *id025
+        platforms:
+          type: array
+          items:
+            type: string
+            enum:
+              - macos
+              - ios
+              - ipados
+    AccountSyncReadiness:
+      type: object
+      additionalProperties: false
+      required:
+        - minAppVersion
+        - requiredSchemaVersion
+        - schemaReady
+        - provider
+        - bucket
+        - credentialStatus
+        - privacyStatus
+        - uploadStatus
+        - downloadStatus
+        - checksumStatus
+        - deleteStatus
+        - notFoundStatus
+        - ready
+        - requested
+        - effective
+        - reason
+        - checkedAt
+        - cachedUntil
+        - retryAfterSeconds
+        - lastSuccessAt
+        - lastFailureAt
+        - lastFailureCode
+        - lastFailureDetail
+      properties:
+        minAppVersion:
+          type: string
+          pattern: "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        requiredSchemaVersion:
+          type: string
+        schemaReady:
+          type: boolean
+        provider:
+          type: string
+          enum:
+            - gcs
+            - supabase
+            - r2
+            - memory
+            - none
+        bucket: *id025
+        credentialStatus: &id027
+          type: string
+          enum:
+            - ok
+            - failed
+            - not_checked
+        privacyStatus: *id027
+        uploadStatus: *id027
+        downloadStatus: *id027
+        checksumStatus: *id027
+        deleteStatus: *id027
+        notFoundStatus: *id027
+        ready:
+          type: boolean
+        requested:
+          type: boolean
+        effective:
+          type: boolean
+        reason:
+          oneOf:
+            - type: string
+              enum:
+                - upgrade_required
+                - required_schema_unavailable
+                - storage_not_configured
+                - storage_bucket_missing
+                - storage_credentials_missing
+                - storage_credentials_invalid
+                - storage_direct_upload_unavailable
+                - storage_public_access_allowed
+                - storage_privacy_verification_failed
+                - storage_upload_failed
+                - storage_download_failed
+                - storage_checksum_mismatch
+                - storage_delete_failed
+                - storage_delete_verification_failed
+            - type: "null"
+        checkedAt: *id018
+        cachedUntil: *id018
+        retryAfterSeconds:
+          type: integer
+          minimum: 1
+          maximum: 300
+        lastSuccessAt: *id026
+        lastFailureAt: *id026
+        lastFailureCode:
+          oneOf:
+            - type: string
+            - type: "null"
+        lastFailureDetail: *id025
+    FeatureFlagPatch:
+      type: object
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 5
+        enabled:
+          type: boolean
+        variant: *id025
+        rolloutPercent:
+          type: number
+          minimum: 0
+          maximum: 100
+        minAppVersion: *id025
+        platforms:
+          type: array
+          items:
+            type: string
+    Quota:
+      type: object
+      additionalProperties: false
+      required:
+        - key
+        - used
+        - limit
+        - periodEndsAt
+      properties:
+        key:
+          type: string
+        used:
+          type: number
+          minimum: 0
+        limit:
+          type: number
+          minimum: 0
+        periodEndsAt: *id018
+    QuotaPatch:
+      type: object
+      additionalProperties: false
+      required:
+        - reason
+        - limit
+      properties:
+        reason:
+          type: string
+          minLength: 5
+        limit:
+          type: number
+          minimum: 0
+    PrivacyRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - accountId
+        - kind
+        - status
+        - createdAt
+      properties:
+        id: *id009
+        accountId: *id009
+        kind:
+          type: string
+          enum:
+            - export
+            - deletion
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - ready
+            - failed
+            - expired
+            - cancelled
+        format: *id025
+        assetId:
+          oneOf:
+            - *id009
+            - type: "null"
+        error: *id025
+        reason: *id025
+        createdAt: *id018
+        completedAt: *id026
+    PrivacyRequestAction:
+      type: object
+      additionalProperties: false
+      required:
+        - action
+        - reason
+      properties:
+        action:
+          type: string
+          enum:
+            - complete
+            - cancel
+        reason:
+          type: string
+          minLength: 5
+    BootstrapResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - profile
+        - device
+        - settings
+        - featureFlags
+        - quotas
+        - syncCursor
+        - accountSyncReadiness
+      properties:
+        profile:
+          $ref: "#/components/schemas/Profile"
+        device:
+          $ref: "#/components/schemas/Device"
+        settings:
+          $ref: "#/components/schemas/UserSettings"
+        featureFlags:
+          type: array
+          items:
+            $ref: "#/components/schemas/FeatureFlag"
+        quotas:
+          type: array
+          items:
+            $ref: "#/components/schemas/Quota"
+        syncCursor:
+          type: string
+        accountSyncReadiness:
+          $ref: "#/components/schemas/AccountSyncReadiness"
+    UserSettings:
+      type: object
+      additionalProperties: false
+      required:
+        - revision
+        - sourceLanguage
+        - targetLanguage
+        - readerLevel
+        - playbackRate
+        - skipSeconds
+        - appearance
+        - updatedAt
+      properties:
+        revision:
+          type: integer
+          minimum: 0
+        sourceLanguage:
+          type: string
+        targetLanguage:
+          type: string
+        readerLevel:
+          type: string
+          enum:
+            - beginner
+            - elementary
+            - intermediate
+            - upper_intermediate
+            - advanced
+        playbackRate:
+          type: number
+          minimum: 0.5
+          maximum: 3.0
+        skipSeconds:
+          type: number
+          minimum: 1
+          maximum: 60
+        appearance:
+          type: string
+          enum:
+            - system
+            - light
+            - dark
+        preferredDictionary: *id025
+        reader:
+          type: object
+          additionalProperties: false
+          properties:
+            font:
+              type: string
+            fontScale:
+              type: number
+              minimum: 0.7
+              maximum: 2.5
+            bold:
+              type: boolean
+            lineSpacing:
+              type: number
+              minimum: 0.5
+              maximum: 3
+            wordSpacing:
+              type: number
+              minimum: 0
+              maximum: 20
+            margin:
+              type: number
+              minimum: 0
+              maximum: 120
+        review:
+          type: object
+          additionalProperties: false
+          properties:
+            preferredFaces:
+              type: array
+              items:
+                type: string
+                enum:
+                  - recognition
+                  - cloze
+                  - reverse
+                  - listening
+                  - dictation
+                  - shadowing
+                  - sequencing
+            dailyLimit:
+              type: integer
+              minimum: 1
+              maximum: 1000
+        syncPolicy:
+          type: string
+          enum:
+            - learning_data_only
+            - learning_data_and_transcripts
+            - learning_data_transcripts_and_assets
+        updatedAt: *id018
+    UserSettingsPatch:
+      allOf:
+        - $ref: "#/components/schemas/UserSettings"
+      description: Full replacement payload; clients must send the latest revision.
+    Book:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - accountId
+        - title
+        - editionFingerprint
+        - fingerprintVersion
+        - source
+        - chapterCount
+        - revision
+        - createdAt
+        - updatedAt
+      properties:
+        id: *id009
+        accountId: *id009
+        workId:
+          oneOf:
+            - *id009
+            - type: "null"
+        editionId:
+          oneOf:
+            - *id009
+            - type: "null"
+        title:
+          type: string
+        author: *id025
+        coverAssetId:
+          oneOf:
+            - *id009
+            - type: "null"
+        editionFingerprint:
+          type: string
+        fingerprintVersion:
+          type: integer
+          minimum: 1
+        audioManifestHash: *id025
+        ebookTextHash: *id025
+        source:
+          type: string
+          enum:
+            - local_folder
+            - files
+            - device_audiobooks
+            - remote_backup
+        chapterCount:
+          type: integer
+          minimum: 0
+        revision:
+          type: integer
+          minimum: 0
+        deletedAt: *id026
+        createdAt: *id018
+        updatedAt: *id018
+    BookCreate:
+      type: object
+      additionalProperties: false
+      required:
+        - clientId
+        - title
+        - editionFingerprint
+        - fingerprintVersion
+        - source
+        - chapters
+      properties:
+        clientId: *id009
+        title:
+          type: string
+        author: *id025
+        editionFingerprint:
+          type: string
+        fingerprintVersion:
+          type: integer
+          minimum: 1
+        audioManifestHash: *id025
+        ebookTextHash: *id025
+        source:
+          type: string
+          enum:
+            - local_folder
+            - files
+            - device_audiobooks
+            - remote_backup
+        chapters:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChapterCreate"
+    BookPatch:
+      type: object
+      additionalProperties: false
+      required:
+        - baseRevision
+      properties:
+        baseRevision:
+          type: integer
+          minimum: 0
+        title:
+          type: string
+        author: *id025
+        coverAssetId:
+          oneOf:
+            - *id009
+            - type: "null"
+    Chapter:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - bookId
+        - index
+        - title
+        - chapterFingerprint
+        - durationSeconds
+        - revision
+        - createdAt
+        - updatedAt
+      properties:
+        id: *id009
+        bookId: *id009
+        index:
+          type: integer
+          minimum: 0
+        title:
+          type: string
+        chapterFingerprint:
+          type: string
+        durationSeconds:
+          type: number
+          minimum: 0
+        startSeconds:
+          type: number
+          minimum: 0
+        audioAssetId:
+          oneOf:
+            - *id009
+            - type: "null"
+        revision:
+          type: integer
+          minimum: 0
+        createdAt: *id018
+        updatedAt: *id018
+    ChapterCreate:
+      type: object
+      additionalProperties: false
+      required:
+        - clientId
+        - index
+        - title
+        - chapterFingerprint
+        - durationSeconds
+      properties:
+        clientId: *id009
+        index:
+          type: integer
+          minimum: 0
+        title:
+          type: string
+        chapterFingerprint:
+          type: string
+        durationSeconds:
+          type: number
+          minimum: 0
+        startSeconds:
+          type: number
+          minimum: 0
+    AssetKind:
+      type: string
+      enum:
+        - audio
+        - epub
+        - cover
+        - transcriptRevision
+        - epubReadingPackage
+        - alignmentPackage
+        - mediaAnalysis
+        - transcriptExport
+        - accountExport
+        - assistantArtifact
+        - otherLargeImmutable
+    Asset:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - kind
+        - contentType
+        - sizeBytes
+        - compressedBytes
+        - originalBytes
+        - sha256
+        - encoding
+        - status
+        - createdAt
+      properties:
+        id: *id009
+        kind:
+          type: string
+          enum:
+            - audio
+            - epub
+            - cover
+            - transcriptRevision
+            - epubReadingPackage
+            - alignmentPackage
+            - mediaAnalysis
+            - transcriptExport
+            - accountExport
+            - assistantArtifact
+            - otherLargeImmutable
+        contentType:
+          type: string
+        sizeBytes:
+          type: integer
+          minimum: 0
+        compressedBytes:
+          type: integer
+          minimum: 0
+        originalBytes:
+          type: integer
+          minimum: 0
+        sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        encoding:
+          type: string
+        revisionId:
+          oneOf:
+            - *id009
+            - type: "null"
+        bookId:
+          oneOf:
+            - *id009
+            - type: "null"
+        chapterId:
+          oneOf:
+            - *id009
+            - type: "null"
+        segmentCount:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: "null"
+        status:
+          type: string
+          enum:
+            - pending
+            - ready
+            - failed
+            - deleting
+        createdAt: *id018
+        deletedAt: *id026
+    AssetManifestCreate:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - contentType
+        - encoding
+        - compressedBytes
+        - originalBytes
+        - sha256
+        - fileName
+      properties:
+        kind:
+          type: string
+          enum:
+            - audio
+            - epub
+            - cover
+            - transcriptRevision
+            - epubReadingPackage
+            - alignmentPackage
+            - mediaAnalysis
+            - transcriptExport
+            - accountExport
+            - assistantArtifact
+            - otherLargeImmutable
+        contentType:
+          type: string
+          minLength: 1
+        encoding:
+          type: string
+          minLength: 1
+        compressedBytes:
+          type: integer
+          minimum: 1
+        originalBytes:
+          type: integer
+          minimum: 1
+        sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        revisionId: *id009
+        bookId: *id009
+        chapterId: *id009
+        segmentCount:
+          type: integer
+          minimum: 0
+        fileName:
+          type: string
+          minLength: 1
+    UploadCreate:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - contentType
+        - sizeBytes
+        - sha256
+        - fileName
+      properties:
+        kind:
+          type: string
+          enum:
+            - audio
+            - ebook
+            - cover
+        contentType:
+          type: string
+        sizeBytes:
+          type: integer
+          minimum: 1
+        sha256:
+          type: string
+        fileName:
+          type: string
+        bookId:
+          oneOf:
+            - *id009
+            - type: "null"
+    UploadTicket:
+      type: object
+      additionalProperties: false
+      required:
+        - uploadId
+        - assetId
+        - method
+        - url
+        - expiresAt
+        - headers
+      properties:
+        uploadId: *id009
+        assetId: *id009
+        method:
+          type: string
+          enum:
+            - PUT
+            - POST
+        url:
+          type: string
+          format: uri
+        expiresAt: *id018
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        multipart:
+          type: boolean
+        ready:
+          type: boolean
+    UploadComplete:
+      type: object
+      additionalProperties: false
+      required:
+        - parts
+      properties:
+        parts:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - partNumber
+              - etag
+            properties:
+              partNumber:
+                type: integer
+                minimum: 1
+              etag:
+                type: string
+    SignedDownload:
+      type: object
+      additionalProperties: false
+      required:
+        - url
+        - expiresAt
+      properties:
+        url:
+          type: string
+          format: uri
+        expiresAt: *id018
+    ReadingProgress:
+      type: object
+      additionalProperties: false
+      required:
+        - chapterId
+        - positionSeconds
+        - completed
+        - revision
+        - deviceId
+        - updatedAt
+      properties:
+        chapterId: *id009
+        positionSeconds:
+          type: number
+          minimum: 0
+        segmentId: *id025
+        wordId: *id025
+        completed:
+          type: boolean
+        explicitSeek:
+          type: boolean
+        revision:
+          type: integer
+          minimum: 0
+        deviceId: *id009
+        updatedAt: *id018
+    ReadingProgressUpsert:
+      type: object
+      additionalProperties: false
+      required:
+        - positionSeconds
+        - completed
+        - baseRevision
+        - explicitSeek
+        - occurredAt
+      properties:
+        positionSeconds:
+          type: number
+          minimum: 0
+        segmentId: *id025
+        wordId: *id025
+        completed:
+          type: boolean
+        baseRevision:
+          type: integer
+          minimum: 0
+        explicitSeek:
+          type: boolean
+        occurredAt: *id018
+    VocabularyOccurrence:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - bookId
+        - chapterId
+        - surface
+        - lemma
+        - category
+        - context
+        - timestampSeconds
+        - state
+        - revision
+        - createdAt
+        - updatedAt
+      properties:
+        id: *id009
+        bookId: *id009
+        chapterId: *id009
+        segmentId: *id025
+        wordId: *id025
+        surface:
+          type: string
+        lemma:
+          type: string
+        senseKey: *id025
+        category:
+          type: string
+          enum:
+            - word
+            - phrase
+            - sentence
+        context:
+          type: string
+        previousContext: *id025
+        nextContext: *id025
+        timestampSeconds:
+          type: number
+          minimum: 0
+        clipStartSeconds:
+          oneOf:
+            - type: number
+              minimum: 0
+            - type: "null"
+        clipEndSeconds:
+          oneOf:
+            - type: number
+              minimum: 0
+            - type: "null"
+        definition: *id025
+        translationId:
+          oneOf:
+            - *id009
+            - type: "null"
+        note: *id025
+        tags:
+          type: array
+          items:
+            type: string
+        state:
+          type: string
+          enum:
+            - unknown
+            - learning
+            - known
+            - ignored
+        revision:
+          type: integer
+          minimum: 0
+        deletedAt: *id026
+        createdAt: *id018
+        updatedAt: *id018
+    VocabularyCreate:
+      type: object
+      additionalProperties: false
+      required:
+        - clientId
+        - bookId
+        - chapterId
+        - surface
+        - lemma
+        - category
+        - context
+        - timestampSeconds
+        - state
+      properties:
+        clientId: *id009
+        bookId: *id009
+        chapterId: *id009
+        segmentId: *id025
+        wordId: *id025
+        surface:
+          type: string
+        lemma:
+          type: string
+        senseKey: *id025
+        category:
+          type: string
+          enum:
+            - word
+            - phrase
+            - sentence
+        context:
+          type: string
+        previousContext: *id025
+        nextContext: *id025
+        timestampSeconds:
+          type: number
+          minimum: 0
+        definition: *id025
+        translationId:
+          oneOf:
+            - *id009
+            - type: "null"
+        note: *id025
+        tags:
+          type: array
+          items:
+            type: string
+        state:
+          type: string
+          enum:
+            - unknown
+            - learning
+            - known
+            - ignored
+    VocabularyPatch:
+      type: object
+      additionalProperties: false
+      required:
+        - baseRevision
+      properties:
+        baseRevision:
+          type: integer
+          minimum: 0
+        definition: *id025
+        translationId:
+          oneOf:
+            - *id009
+            - type: "null"
+        note: *id025
+        tags:
+          type: array
+          items:
+            type: string
+        state:
+          type: string
+          enum:
+            - unknown
+            - learning
+            - known
+            - ignored
+    ReviewEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - vocabularyId
+        - face
+        - rating
+        - reviewedAt
+        - deviceId
+      properties:
+        id: *id009
+        vocabularyId: *id009
+        face:
+          type: string
+          enum:
+            - recognition
+            - cloze
+            - reverse
+            - listening
+            - dictation
+            - shadowing
+            - sequencing
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 4
+        responseTimeMs:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: "null"
+        reviewedAt: *id018
+        deviceId: *id009
+    ReviewSchedule:
+      type: object
+      additionalProperties: false
+      required:
+        - vocabularyId
+        - dueAt
+        - stability
+        - difficulty
+        - reviewCount
+        - updatedAt
+      properties:
+        vocabularyId: *id009
+        dueAt: *id018
+        stability:
+          type: number
+          minimum: 0
+        difficulty:
+          type: number
+          minimum: 0
+        reviewCount:
+          type: integer
+          minimum: 0
+        lastReviewedAt: *id026
+        updatedAt: *id018
+    ReviewSubmitRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - events
+      properties:
+        events:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/ReviewEvent"
+    ReviewSubmitResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - schedules
+      properties:
+        schedules:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReviewSchedule"
+    TranscriptWord:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - text
+        - startSeconds
+        - endSeconds
+      properties:
+        id:
+          type: string
+        text:
+          type: string
+        startSeconds:
+          type: number
+          minimum: 0
+        endSeconds:
+          type: number
+          minimum: 0
+        confidence:
+          oneOf:
+            - type: number
+              minimum: 0
+              maximum: 1
+            - type: "null"
+    TranscriptSegment:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - startSeconds
+        - endSeconds
+        - words
+        - spokenText
+      properties:
+        id:
+          type: string
+        startSeconds:
+          type: number
+          minimum: 0
+        endSeconds:
+          type: number
+          minimum: 0
+        words:
+          type: array
+          items:
+            $ref: "#/components/schemas/TranscriptWord"
+        spokenText:
+          type: string
+        ebookText: *id025
+        alignmentScore:
+          oneOf:
+            - type: number
+              minimum: 0
+              maximum: 1
+            - type: "null"
+        individualEbookMatchTrusted:
+          oneOf:
+            - type: boolean
+            - type: "null"
+    Transcript:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - chapterId
+        - version
+        - engine
+        - locale
+        - chapterFingerprint
+        - segments
+        - quality
+        - active
+        - createdAt
+      properties:
+        id: *id009
+        chapterId: *id009
+        version:
+          type: integer
+          minimum: 1
+        engine:
+          type: string
+        engineVersion: *id025
+        locale:
+          type: string
+        chapterFingerprint:
+          type: string
+        segments:
+          type: array
+          items:
+            $ref: "#/components/schemas/TranscriptSegment"
+        quality:
+          type: object
+          additionalProperties: true
+        ebookAlignment:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: "null"
+        active:
+          type: boolean
+        createdAt: *id018
+    TranscriptCreate:
+      type: object
+      additionalProperties: false
+      required:
+        - clientId
+        - chapterId
+        - engine
+        - locale
+        - chapterFingerprint
+        - segments
+        - quality
+      properties:
+        clientId: *id009
+        chapterId: *id009
+        engine:
+          type: string
+        engineVersion: *id025
+        locale:
+          type: string
+        chapterFingerprint:
+          type: string
+        segments:
+          type: array
+          maxItems: 20000
+          items:
+            $ref: "#/components/schemas/TranscriptSegment"
+        quality:
+          type: object
+          additionalProperties: true
+        ebookAlignment:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: "null"
+    TranslationRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - task
+        - sourceLanguage
+        - targetLanguage
+        - learnerLevel
+        - source
+        - editionFingerprint
+        - chapterFingerprint
+        - promptVersion
+      properties:
+        task:
+          type: string
+          enum:
+            - word
+            - word_context
+            - sentence
+            - chapter_batch
+        sourceLanguage:
+          type: string
+        targetLanguage:
+          type: string
+        learnerLevel:
+          type: string
+        source:
+          type: string
+          minLength: 1
+          maxLength: 50000
+        contextBefore: *id025
+        contextAfter: *id025
+        contextPrevious:
+          type: array
+          items:
+            type: string
+          maxItems: 10
+        contextNext:
+          type: array
+          items:
+            type: string
+          maxItems: 10
+        editionFingerprint:
+          type: string
+        chapterFingerprint:
+          type: string
+        bookTitle:
+          type: string
+        author:
+          type: string
+        chapterTitle:
+          type: string
+        targetId: *id025
+        promptVersion:
+          type: string
+        lookupOnly:
+          type: boolean
+          description: Return a cache hit without calling Qwen. Misses are 404.
+        refresh:
+          type: boolean
+          description: Skip cache reads and generate a fresh result for this request.
+        assistantResultId: *id009
+    TranslationSentence:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - text
+      properties:
+        id:
+          type: string
+          minLength: 1
+        assistantResultId: *id009
+        text:
+          type: string
+          minLength: 1
+          maxLength: 50000
+    TranslationBatchRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - task
+        - sourceLanguage
+        - targetLanguage
+        - learnerLevel
+        - sentences
+        - editionFingerprint
+        - chapterFingerprint
+      properties:
+        task:
+          type: string
+          enum:
+            - chapter_batch
+        sourceLanguage:
+          type: string
+        targetLanguage:
+          type: string
+        learnerLevel:
+          type: string
+        sentences:
+          type: array
+          minItems: 1
+          maxItems: 40
+          items:
+            $ref: "#/components/schemas/TranslationSentence"
+        contextBefore: *id025
+        contextPrevious:
+          type: array
+          items:
+            type: string
+          maxItems: 10
+        contextNext:
+          type: array
+          items:
+            type: string
+          maxItems: 10
+        editionFingerprint:
+          type: string
+        chapterFingerprint:
+          type: string
+        bookTitle:
+          type: string
+        author:
+          type: string
+        chapterTitle:
+          type: string
+        promptVersion:
+          type: string
+        lookupOnly:
+          type: boolean
+          description: Return cache hits without calling Qwen. Misses stay in missingIds with HTTP 200.
+        refreshIds:
+          type: array
+          items:
+            type: string
+          maxItems: 40
+    LearningNote:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+        - category
+        - explanation
+      properties:
+        source:
+          type: string
+        category:
+          type: string
+          enum:
+            - phrasal_verb
+            - phrase
+            - idiom
+            - challenging_word
+            - challenging_combination
+            - concept
+            - grammar
+            - example
+        explanation:
+          type: string
+    TranslationResult:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - translation
+        - notes
+        - provenance
+        - policyVersion
+        - model
+        - promptVersion
+        - modelPolicyHash
+        - createdAt
+      properties:
+        id: *id009
+        sharedCacheEntryID:
+          oneOf:
+            - *id009
+            - type: "null"
+        targetId: *id025
+        source:
+          type: string
+        translation:
+          type: string
+        notes:
+          type: array
+          items:
+            $ref: "#/components/schemas/LearningNote"
+        provenance:
+          type: string
+          enum:
+            - cache_shared_exact
+            - cache_account
+            - generated
+        cacheKeyVersion:
+          type: integer
+          minimum: 1
+        modelLabel:
+          type: string
+        model:
+          type: string
+        promptVersion:
+          type: string
+        modelPolicyHash:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        policyVersion:
+          type: string
+        createdAt: *id018
+    TranslationBatchResult:
+      type: object
+      additionalProperties: false
+      required:
+        - results
+        - missingIds
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/TranslationResult"
+        missingIds:
+          type: array
+          items:
+            type: string
+        generatedCount:
+          type: integer
+          minimum: 0
+        cacheHitCount:
+          type: integer
+          minimum: 0
+    ChapterSummaryRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - chapterId
+        - sourceLanguage
+        - targetLanguage
+        - learnerLevel
+        - editionFingerprint
+        - chapterFingerprint
+      properties:
+        chapterId: *id009
+        sourceLanguage:
+          type: string
+        targetLanguage:
+          type: string
+        learnerLevel:
+          type: string
+        editionFingerprint:
+          type: string
+        chapterFingerprint:
+          type: string
+        bookTitle:
+          type: string
+        author:
+          type: string
+        chapterTitle:
+          type: string
+        segments:
+          type: array
+          items:
+            type: string
+          maxItems: 20000
+        lookupOnly:
+          type: boolean
+          description: Return a cache hit without calling Qwen. Misses are 404.
+        refresh:
+          type: boolean
+          description: Skip cache reads and generate a fresh summary for this request.
+        assistantResultId: *id009
+    ChapterSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - overview
+        - keyPoints
+        - keyConcepts
+        - themes
+        - provenance
+        - model
+        - promptVersion
+        - modelPolicyHash
+        - policyVersion
+        - createdAt
+      properties:
+        id: *id009
+        sharedCacheEntryID:
+          oneOf:
+            - *id009
+            - type: "null"
+        overview:
+          type: string
+        keyPoints:
+          type: array
+          items:
+            type: string
+        charactersOrIdeas:
+          type: array
+          items:
+            type: string
+        keyConcepts:
+          type: array
+          items:
+            type: object
+            required:
+              - name
+              - explanation
+            properties:
+              name:
+                type: string
+              explanation:
+                type: string
+        themes:
+          type: array
+          items:
+            type: string
+        provenance:
+          type: string
+          enum:
+            - cache_shared_exact
+            - cache_account
+            - generated
+        model:
+          type: string
+        promptVersion:
+          type: string
+        modelPolicyHash:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        policyVersion:
+          type: string
+        createdAt: *id018
+    ChatMessage:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - role
+        - text
+        - createdAt
+      properties:
+        id: *id009
+        role:
+          type: string
+          enum:
+            - user
+            - assistant
+        text:
+          type: string
+        createdAt: *id018
+    ChatRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - chapterId
+        - question
+        - sourceLanguage
+        - targetLanguage
+        - learnerLevel
+      properties:
+        threadId:
+          oneOf:
+            - *id009
+            - type: "null"
+        chapterId: *id009
+        question:
+          type: string
+          minLength: 1
+          maxLength: 10000
+        sourceLanguage:
+          type: string
+        targetLanguage:
+          type: string
+        learnerLevel:
+          type: string
+        bookTitle:
+          type: string
+        author:
+          type: string
+        chapterTitle:
+          type: string
+        contextSegments:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+    ChatAccepted:
+      type: object
+      additionalProperties: false
+      required:
+        - threadId
+        - messageId
+        - streamUrl
+      properties:
+        threadId: *id009
+        messageId: *id009
+        streamUrl:
+          type: string
+          format: uri-reference
+    HeardSegment:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - text
+      properties:
+        id:
+          type: string
+          minLength: 1
+        text:
+          type: string
+          minLength: 1
+          maxLength: 2000
+    HeardQuizRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - task
+        - chapterId
+        - sourceLanguage
+        - targetLanguage
+        - learnerLevel
+        - segments
+      properties:
+        task:
+          type: string
+          enum:
+            - heard_quiz
+        chapterId: *id009
+        sourceLanguage:
+          type: string
+        targetLanguage:
+          type: string
+        learnerLevel:
+          type: string
+        bookTitle:
+          type: string
+        author:
+          type: string
+        chapterTitle:
+          type: string
+        segments:
+          type: array
+          minItems: 1
+          maxItems: 12
+          items:
+            $ref: "#/components/schemas/HeardSegment"
+    HeardQuizResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - raw
+      properties:
+        raw:
+          type: string
+          description: Server-validated structured quiz JSON returned unchanged from the provider.
+    SyncMutation:
+      type: object
+      additionalProperties: false
+      required:
+        - mutationId
+        - entityType
+        - entityId
+        - operation
+        - baseRevision
+        - occurredAt
+        - payload
+      properties:
+        mutationId: *id009
+        entityType:
+          type: string
+          enum:
+            - settings
+            - book
+            - chapter
+            - progress
+            - vocabulary
+            - lexeme_state
+            - review_event
+            - transcript
+            - transcript_overlay
+            - assistant_result
+            - chat_message
+            - study_activity
+        entityId:
+          type: string
+        operation:
+          type: string
+          enum:
+            - upsert
+            - delete
+            - append
+        baseRevision:
+          type: integer
+          minimum: 0
+        occurredAt: *id018
+        payload:
+          type: object
+          additionalProperties: true
+    SyncV2Protocol:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol
+        - transcriptRepresentation
+        - legacyBootstrap
+      properties:
+        protocol:
+          type: string
+          const: object-v2
+        transcriptRepresentation:
+          type: string
+          const: asset-manifest-only
+        legacyBootstrap:
+          type: boolean
+          const: false
+    SyncPushRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - deviceId
+        - batchId
+        - mutations
+      properties:
+        deviceId: *id009
+        batchId: *id009
+        baseCursor: *id025
+        mutations:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/SyncMutation"
+    SyncMutationResult:
+      type: object
+      additionalProperties: false
+      required:
+        - mutationId
+        - status
+      properties:
+        mutationId: *id009
+        status:
+          type: string
+          enum:
+            - applied
+            - duplicate
+            - conflict
+            - rejected
+        entityRevision:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: "null"
+        problem:
+          oneOf:
+            - $ref: "#/components/schemas/Problem"
+            - type: "null"
+    SyncPushResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - batchId
+        - results
+        - cursor
+      properties:
+        batchId: *id009
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncMutationResult"
+        cursor:
+          type: string
+    SyncChange:
+      type: object
+      additionalProperties: false
+      required:
+        - sequence
+        - entityType
+        - entityId
+        - operation
+        - revision
+        - changedAt
+        - payload
+      properties:
+        sequence:
+          type: integer
+          minimum: 1
+        entityType:
+          type: string
+        entityId:
+          type: string
+        operation:
+          type: string
+          enum:
+            - upsert
+            - delete
+            - append
+        revision:
+          type: integer
+          minimum: 0
+        changedAt: *id018
+        payload:
+          type: object
+          additionalProperties: true
+    SyncPullResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - changes
+        - cursor
+        - hasMore
+      properties:
+        changes:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncChange"
+        cursor:
+          type: string
+        hasMore:
+          type: boolean
+    SyncBootstrapEntity:
+      allOf:
+        - $ref: "#/components/schemas/SyncChange"
+        - type: object
+          required:
+            - payloadHash
+          properties:
+            payloadHash:
+              type: string
+              pattern: "^[0-9a-f]{64}$"
+    SyncBootstrapResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - entities
+        - cursor
+        - nextOffset
+        - hasMore
+      properties:
+        entities:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncBootstrapEntity"
+        cursor:
+          type: string
+        nextOffset:
+          type: integer
+          minimum: 0
+        hasMore:
+          type: boolean
+    ExportCreate:
+      type: object
+      additionalProperties: false
+      required:
+        - format
+        - include
+      properties:
+        format:
+          type: string
+          enum:
+            - zip_json
+            - csv
+            - anki_package
+        include:
+          type: array
+          items:
+            type: string
+            enum:
+              - profile
+              - settings
+              - books
+              - progress
+              - vocabulary
+              - reviews
+              - transcripts
+              - translations
+              - summaries
+              - chat
+              - study_activity
+    ExportJob:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - status
+        - format
+        - createdAt
+      properties:
+        id: *id009
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - ready
+            - failed
+            - expired
+        format:
+          type: string
+        assetId:
+          oneOf:
+            - *id009
+            - type: "null"
+        error: *id025
+        createdAt: *id018
+        completedAt: *id026
+        expiresAt: *id026
+    DeletionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - confirmation
+        - reason
+      properties:
+        confirmation:
+          type: string
+          const: DELETE MY ACCOUNT
+        reason:
+          type: string
+        exportFirst:
+          type: boolean
+          default: true
+    Job:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - kind
+        - status
+        - attempts
+        - createdAt
+        - updatedAt
+      properties:
+        id: *id009
+        accountId:
+          oneOf:
+            - *id009
+            - type: "null"
+        kind:
+          type: string
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - succeeded
+            - failed
+            - cancelled
+            - dead_letter
+        attempts:
+          type: integer
+          minimum: 0
+        maxAttempts:
+          type: integer
+          minimum: 1
+        lastError: *id025
+        createdAt: *id018
+        updatedAt: *id018
+        startedAt: *id026
+        finishedAt: *id026
+    LegacyCleanupRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - userId
+        - dryRun
+      properties:
+        userId: *id009
+        dryRun:
+          type: boolean
+    LegacyCleanupInspection:
+      type: object
+      additionalProperties: false
+      required:
+        - changes
+        - outcomes
+        - batches
+        - transcriptRevisions
+        - transcriptSegments
+        - assets
+        - objectKeys
+        - executed
+      properties:
+        changes: &id_legacy_cleanup_count
+          type: integer
+          minimum: 0
+        outcomes: *id_legacy_cleanup_count
+        batches: *id_legacy_cleanup_count
+        transcriptRevisions: *id_legacy_cleanup_count
+        transcriptSegments: *id_legacy_cleanup_count
+        assets: *id_legacy_cleanup_count
+        objectKeys:
+          type: array
+          items:
+            type: string
+        executed:
+          type: boolean
+    LegacyCleanupAccepted:
+      type: object
+      additionalProperties: false
+      required:
+        - jobId
+        - status
+        - inspected
+      properties:
+        jobId: *id009
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - succeeded
+            - failed
+            - cancelled
+            - dead_letter
+        inspected:
+          $ref: "#/components/schemas/LegacyCleanupInspection"
+    AdminCapabilities:
+      type: object
+      additionalProperties: false
+      required:
+        - roles
+        - capabilities
+      properties:
+        roles:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum:
+              - support_readonly
+              - operator
+              - privacy_officer
+              - billing_operator
+              - superadmin
+        capabilities:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum:
+              - users.read
+              - users.manage
+              - roles.manage
+              - policies.read
+              - policies.manage
+              - ai.probe
+              - runtime.read
+              - runtime.manage
+              - cache.read
+              - cache.manage
+              - jobs.read
+              - jobs.manage
+              - flags.read
+              - flags.manage
+              - quotas.read
+              - quotas.manage
+              - privacy.read
+              - privacy.manage
+              - metrics.read
+              - activity.read
+              - access.read
+              - diagnostics.read
+              - admin.full
+    AdminUser:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - accountId
+        - email
+        - status
+        - deviceCount
+        - bookCount
+        - storageBytes
+        - createdAt
+        - lastSeenAt
+      properties:
+        id: *id009
+        accountId: *id009
+        email:
+          type: string
+          format: email
+        displayName: *id025
+        status:
+          type: string
+          enum:
+            - active
+            - suspended
+            - deletion_pending
+            - deleted
+        deviceCount:
+          type: integer
+          minimum: 0
+        bookCount:
+          type: integer
+          minimum: 0
+        storageBytes:
+          type: integer
+          minimum: 0
+        createdAt: *id018
+        lastSeenAt: *id026
+        quotas:
+          type: array
+          items:
+            $ref: "#/components/schemas/Quota"
+        devices:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - id
+              - platform
+              - lastSeenAt
+              - revoked
+            properties:
+              id:
+                type: string
+              platform:
+                type: string
+              name:
+                type:
+                  - string
+                  - "null"
+              appVersion:
+                type: string
+              lastSeenAt: *id018
+              revoked:
+                type: boolean
+        books:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - id
+              - title
+            properties:
+              id:
+                type: string
+              title:
+                type: string
+              chapterCount:
+                type: integer
+                minimum: 0
+    AnalyticsPreference:
+      type: object
+      additionalProperties: false
+      required:
+        - operatorLearningAnalyticsEnabled
+        - updatedAt
+      properties:
+        operatorLearningAnalyticsEnabled:
+          type: boolean
+        updatedAt: *id018
+    AdminUserProgress:
+      type: object
+      additionalProperties: false
+      required:
+        - accountId
+        - generatedAt
+        - expiresAt
+        - consent
+        - sync
+        - reading
+        - review
+        - learning
+        - activity
+      properties:
+        accountId: *id009
+        generatedAt: *id018
+        expiresAt: *id026
+        consent:
+          $ref: "#/components/schemas/AnalyticsPreference"
+        sync:
+          $ref: "#/components/schemas/AdminUserSyncSummary"
+        reading:
+          oneOf:
+            - $ref: "#/components/schemas/AdminUserReadingSummary"
+            - type: "null"
+        review:
+          oneOf:
+            - $ref: "#/components/schemas/AdminUserReviewSummary"
+            - type: "null"
+        learning:
+          oneOf:
+            - $ref: "#/components/schemas/AdminUserLearningSummary"
+            - type: "null"
+        activity:
+          type: object
+          additionalProperties: false
+          required:
+            - eventsPath
+            - auditPath
+          properties:
+            eventsPath:
+              type: string
+            auditPath:
+              type: string
+    AdminUserSyncSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - lastSuccessfulAt
+        - lastDevice
+        - entityCounts
+        - pendingCount
+        - conflictCount
+      properties:
+        lastSuccessfulAt: *id026
+        lastDevice:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required:
+                - id
+                - platform
+                - name
+              properties:
+                id:
+                  type: string
+                platform:
+                  type: string
+                name:
+                  type:
+                    - string
+                    - "null"
+            - type: "null"
+        entityCounts:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - entityType
+              - count
+            properties:
+              entityType:
+                type: string
+              count:
+                type: integer
+                minimum: 0
+        pendingCount:
+          description: Null when device-local outbox state has not reached the server.
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        conflictCount:
+          type: integer
+          minimum: 0
+    AdminUserReadingSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - lastActivityAt
+        - activeBooks
+        - completedBooks
+        - currentChapter
+        - completionPercent
+      properties:
+        lastActivityAt: *id026
+        activeBooks:
+          type: integer
+          minimum: 0
+        completedBooks:
+          type: integer
+          minimum: 0
+        currentChapter:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        completionPercent:
+          type:
+            - number
+            - "null"
+          minimum: 0
+          maximum: 100
+    AdminUserReviewSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - due
+        - new
+        - learning
+        - reviewsLast30Days
+        - reviewsPerActiveDay
+        - retentionRate
+        - streakDays
+      properties:
+        due:
+          type: integer
+          minimum: 0
+        new:
+          type: integer
+          minimum: 0
+        learning:
+          type: integer
+          minimum: 0
+        reviewsLast30Days:
+          type: integer
+          minimum: 0
+        reviewsPerActiveDay:
+          type: number
+          minimum: 0
+        retentionRate:
+          type:
+            - number
+            - "null"
+          minimum: 0
+          maximum: 1
+        streakDays:
+          type: integer
+          minimum: 0
+    AdminUserLearningSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - vocabulary
+        - known
+        - learning
+        - aiUsesLast30Days
+        - aiUsesByFeature
+      properties:
+        vocabulary:
+          type: integer
+          minimum: 0
+        known:
+          type: integer
+          minimum: 0
+        learning:
+          type: integer
+          minimum: 0
+        aiUsesLast30Days:
+          type: integer
+          minimum: 0
+        aiUsesByFeature:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - feature
+              - count
+            properties:
+              feature:
+                type: string
+              count:
+                type: integer
+                minimum: 0
+    AdminAction:
+      type: object
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 5
+        until: *id026
+    LlmPolicy:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - task
+        - region
+        - model
+        - promptVersion
+        - systemPrompt
+        - userPrompt
+        - schemaVersion
+        - policyVersion
+        - enabled
+        - createdAt
+        - updatedAt
+      properties:
+        id: *id009
+        task:
+          type: string
+        region:
+          type: string
+        model:
+          type: string
+        promptVersion:
+          type: string
+        systemPrompt:
+          type: string
+        userPrompt:
+          type: string
+        schemaVersion:
+          type: string
+        policyVersion:
+          type: string
+        enabled:
+          type: boolean
+        canaryPercent:
+          type: number
+          minimum: 0
+          maximum: 100
+        maxInputTokens:
+          type: integer
+          minimum: 1
+        maxOutputTokens:
+          type: integer
+          minimum: 1
+        timeoutMs:
+          type: integer
+          minimum: 1000
+        createdAt: *id018
+        updatedAt: *id018
+    LlmPolicyPatch:
+      type: object
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 5
+        enabled:
+          type: boolean
+        canaryPercent:
+          type: number
+          minimum: 0
+          maximum: 100
+        model:
+          type: string
+        promptVersion:
+          type: string
+        systemPrompt:
+          type: string
+        userPrompt:
+          type: string
+        schemaVersion:
+          type: string
+        maxInputTokens:
+          type: integer
+          minimum: 1
+        maxOutputTokens:
+          type: integer
+          minimum: 1
+        timeoutMs:
+          type: integer
+          minimum: 1000
+    ManagedPromptPreviewRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - subtask
+      properties:
+        subtask:
+          type: string
+          enum:
+            - sentence
+            - word
+            - chapter_batch
+            - chapter_summary
+            - chat
+            - heard_quiz
+        draft:
+          type: object
+          additionalProperties: false
+          properties:
+            systemPrompt:
+              type: string
+            userPrompt:
+              type: string
+            schemaVersion:
+              type: string
+    ManagedPromptPreview:
+      type: object
+      additionalProperties: false
+      required:
+        - subtask
+        - editable
+        - enforced
+        - effective
+        - outputSchema
+        - validation
+        - contractFingerprint
+      properties:
+        subtask:
+          type: string
+          enum:
+            - sentence
+            - word
+            - chapter_batch
+            - chapter_summary
+            - chat
+            - heard_quiz
+        editable:
+          type: object
+          additionalProperties: false
+          required:
+            - system
+            - userTemplate
+            - renderedUser
+          properties:
+            system:
+              type: string
+            userTemplate:
+              type: string
+            renderedUser:
+              type: string
+        enforced:
+          type: object
+          additionalProperties: false
+          required:
+            - taskContract
+            - requestContext
+          properties:
+            taskContract:
+              type: string
+            requestContext:
+              type: string
+        effective:
+          type: object
+          additionalProperties: false
+          required:
+            - system
+            - user
+          properties:
+            system:
+              type: string
+            user:
+              type: string
+        outputSchema:
+          type: object
+          additionalProperties: true
+        validation:
+          type: object
+          additionalProperties: false
+          required:
+            - valid
+            - fieldErrors
+          properties:
+            valid:
+              type: boolean
+            fieldErrors:
+              type: object
+              additionalProperties:
+                type: string
+        contractFingerprint:
+          type: string
+    ManagedPromptProbe:
+      allOf:
+        - $ref: "#/components/schemas/ManagedPromptPreview"
+        - type: object
+          required:
+            - requestId
+            - model
+            - providerStatus
+            - outputValidation
+          properties:
+            requestId:
+              type: string
+            model:
+              type: string
+            providerStatus:
+              type: string
+            parsedResult:
+              oneOf:
+                - type: object
+                  additionalProperties: true
+                - type: "null"
+            outputValidation:
+              type: object
+              additionalProperties: false
+              required:
+                - valid
+              properties:
+                valid:
+                  type: boolean
+                errors:
+                  type: array
+                  items:
+                    type: string
+    RuntimeConfig:
+      type: object
+      additionalProperties: false
+      required:
+        - qwen
+        - storage
+        - turnstile
+        - bootstrap
+        - assistant
+      properties:
+        qwen:
+          type: object
+          additionalProperties: false
+          required:
+            - apiKeyConfigured
+            - baseUrl
+            - model
+            - source
+          properties:
+            apiKeyConfigured:
+              type: boolean
+            apiKeyLast4:
+              type: string
+            baseUrl:
+              type: string
+            model:
+              type: string
+            source:
+              type: string
+              enum:
+                - env
+                - admin
+                - none
+            ciphertextPresent:
+              type: boolean
+            secretsDecryptable:
+              type: boolean
+            wrappingSecretConfigured:
+              type: boolean
+            wrappingSecretSource:
+              type: string
+              enum:
+                - operator_config_key
+                - cache_hmac
+                - none
+        storage:
+          type: object
+          additionalProperties: false
+          required:
+            - provider
+            - credentialsConfigured
+            - serviceAccountConfigured
+            - source
+          properties:
+            provider:
+              type: string
+              enum:
+                - gcs
+                - supabase
+                - r2
+                - none
+            bucket:
+              type: string
+            credentialsConfigured:
+              type: boolean
+            serviceAccountConfigured:
+              type: boolean
+            clientEmail:
+              type: string
+            source:
+              type: string
+              enum:
+                - env
+                - admin
+                - none
+        turnstile:
+          type: object
+          additionalProperties: false
+          required:
+            - configured
+            - source
+          properties:
+            configured:
+              type: boolean
+            source:
+              type: string
+              enum:
+                - env
+                - admin
+                - none
+        bootstrap:
+          type: object
+          additionalProperties: false
+          required:
+            - supabaseUrlConfigured
+            - supabaseAnonKeyConfigured
+            - supabaseServiceRoleConfigured
+            - cacheHmacConfigured
+            - operatorConfigKeyConfigured
+            - adminBootstrapEmailConfigured
+          properties:
+            supabaseUrlConfigured:
+              type: boolean
+            supabaseAnonKeyConfigured:
+              type: boolean
+            supabaseServiceRoleConfigured:
+              type: boolean
+            cacheHmacConfigured:
+              type: boolean
+            operatorConfigKeyConfigured:
+              type: boolean
+            adminBootstrapEmailConfigured:
+              type: boolean
+            resendConfigured:
+              type: boolean
+            otpFromConfigured:
+              type: boolean
+            qwenEnvKeyConfigured:
+              type: boolean
+        assistant:
+          type: object
+          additionalProperties: false
+          required:
+            - sentenceContextCount
+          properties:
+            sentenceContextCount:
+              type: integer
+              minimum: 0
+              maximum: 10
+        updatedAt: *id018
+    OperatorEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - at
+        - kind
+        - requestId
+        - summary
+      properties:
+        id:
+          type: string
+        at: *id018
+        kind:
+          type: string
+        requestId:
+          type: string
+        task:
+          type: string
+        status:
+          type: string
+        summary:
+          type: string
+        detail:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+    OperatorDiagnostics:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - runtime
+        - flags
+        - quotas
+        - policies
+        - qwenProbe
+        - notes
+      properties:
+        requestId:
+          type: string
+        recentEvents:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperatorEvent"
+        runtime:
+          $ref: "#/components/schemas/RuntimeConfig"
+        flags:
+          type: array
+          items:
+            $ref: "#/components/schemas/FeatureFlag"
+        quotas:
+          type: array
+          items:
+            $ref: "#/components/schemas/Quota"
+        policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/LlmPolicy"
+        qwenProbe:
+          type: string
+        notes:
+          type: array
+          items:
+            type: string
+        qwenComplete:
+          $ref: "#/components/schemas/QwenCompleteProbe"
+    QwenCompleteProbe:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+            - rejected
+            - unavailable
+            - skipped
+            - no_key
+            - policy_disabled
+        httpStatus:
+          type: integer
+        model:
+          type: string
+        detail:
+          type: string
+    RuntimeConfigPut:
+      type: object
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 5
+        qwen:
+          type: object
+          additionalProperties: false
+          properties:
+            apiKey:
+              oneOf:
+                - type: string
+                - type: "null"
+            baseUrl:
+              type: string
+            model:
+              type: string
+        storage:
+          type: object
+          additionalProperties: false
+          properties:
+            bucket:
+              type: string
+            serviceAccountJson:
+              oneOf:
+                - type: string
+                - type: "null"
+        turnstile:
+          type: object
+          additionalProperties: false
+          properties:
+            secretKey:
+              oneOf:
+                - type: string
+                - type: "null"
+        assistant:
+          type: object
+          additionalProperties: false
+          properties:
+            sentenceContextCount:
+              type: integer
+              minimum: 0
+              maximum: 10
+    CacheEntry:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - task
+        - state
+        - sourceLanguage
+        - targetLanguage
+        - policyVersion
+        - hitCount
+        - createdAt
+      properties:
+        id: *id009
+        task:
+          type: string
+        state:
+          type: string
+          enum:
+            - active
+            - quarantined
+            - superseded
+            - expired
+            - purged
+        sourceLanguage:
+          type: string
+        targetLanguage:
+          type: string
+        editionFingerprint:
+          type: string
+        policyVersion:
+          type: string
+        hitCount:
+          type: integer
+          minimum: 0
+        acceptCount:
+          type: integer
+          minimum: 0
+        rejectCount:
+          type: integer
+          minimum: 0
+        createdAt: *id018
+        lastHitAt: *id026
+        cacheKey:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+    CacheAction:
+      type: object
+      additionalProperties: false
+      required:
+        - action
+        - reason
+      properties:
+        action:
+          type: string
+          enum:
+            - quarantine
+            - activate
+            - expire
+            - purge
+            - regenerate
+        reason:
+          type: string
+          minLength: 5
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - actorId
+        - action
+        - resourceType
+        - resourceId
+        - reason
+        - createdAt
+      properties:
+        id: *id009
+        actorId: *id009
+        action:
+          type: string
+        resourceType:
+          type: string
+        resourceId:
+          type: string
+        reason:
+          type: string
+        traceId:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        createdAt: *id018
+    MetricsSnapshot:
+      type: object
+      additionalProperties: true
+      required:
+        - from
+        - to
+        - users
+        - sync
+        - llm
+        - storage
+      properties:
+        from: *id018
+        to: *id018
+        users:
+          type: object
+          additionalProperties: true
+        sync:
+          type: object
+          additionalProperties: true
+        llm:
+          type: object
+          additionalProperties: true
+        storage:
+          type: object
+          additionalProperties: true
+        usage:
+          type: object
+          additionalProperties: true
+    ProductAnalyticsDistributionItem:
+      type: object
+      additionalProperties: false
+      required: [key, count, share]
+      properties:
+        key:
+          type: string
+        count:
+          type: integer
+          minimum: 0
+        share:
+          type: number
+          minimum: 0
+          maximum: 1
+    ProductAnalyticsPoint:
+      type: object
+      additionalProperties: false
+      required: [start, events, activeUsers, failed]
+      properties:
+        start: *id018
+        events:
+          type: integer
+          minimum: 0
+        activeUsers:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+    ProductAnalyticsAnomaly:
+      type: object
+      additionalProperties: false
+      required: [kind, severity, observed, baseline, message]
+      properties:
+        kind:
+          type: string
+          enum: [failure_rate, volume_spike]
+        severity:
+          type: string
+          enum: [warning, critical]
+        observed:
+          type: number
+        baseline:
+          type: number
+        message:
+          type: string
+    ProductAnalytics:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          from,
+          to,
+          interval,
+          filters,
+          summary,
+          series,
+          distributions,
+          anomalies,
+          privacy,
+          sampled,
+        ]
+      properties:
+        from: *id018
+        to: *id018
+        interval:
+          type: string
+          enum: [hour, day, week]
+        filters:
+          type: object
+          additionalProperties:
+            type: string
+        summary:
+          type: object
+          additionalProperties: false
+          required:
+            [
+              events,
+              activeUsers,
+              activeDevices,
+              failed,
+              cancelled,
+              started,
+              successRate,
+            ]
+          properties:
+            events:
+              type: integer
+              minimum: 0
+            activeUsers:
+              type: integer
+              minimum: 0
+            activeDevices:
+              type: integer
+              minimum: 0
+            failed:
+              type: integer
+              minimum: 0
+            cancelled:
+              type: integer
+              minimum: 0
+            started:
+              type: integer
+              minimum: 0
+            successRate:
+              type: number
+              minimum: 0
+              maximum: 1
+        series:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProductAnalyticsPoint"
+        distributions:
+          type: object
+          additionalProperties: false
+          required:
+            [
+              country,
+              region,
+              sourceLanguage,
+              targetLanguage,
+              readerLevel,
+              platform,
+              appVersion,
+              content,
+              contentCategory,
+              feature,
+              outcome,
+            ]
+          properties:
+            country: &id040
+              type: array
+              items:
+                $ref: "#/components/schemas/ProductAnalyticsDistributionItem"
+            region: *id040
+            sourceLanguage: *id040
+            targetLanguage: *id040
+            readerLevel: *id040
+            platform: *id040
+            appVersion: *id040
+            content: *id040
+            contentCategory: *id040
+            feature: *id040
+            outcome: *id040
+        anomalies:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProductAnalyticsAnomaly"
+        privacy:
+          type: object
+          additionalProperties: false
+          required:
+            [
+              minimumBucketSize,
+              preciseLocationCollected,
+              rawContentReturned,
+              identifiersReturned,
+              durableOwnershipKeysStored,
+              profileDeletionCascadesEvents,
+              completedDeletionRequestPurgesEvents,
+              automaticRetentionDays,
+            ]
+          properties:
+            minimumBucketSize:
+              type: integer
+              minimum: 1
+            preciseLocationCollected:
+              type: boolean
+              enum: [false]
+            rawContentReturned:
+              type: boolean
+              enum: [false]
+            identifiersReturned:
+              type: string
+              enum: [pseudonymous]
+            durableOwnershipKeysStored:
+              type: boolean
+              enum: [true]
+            profileDeletionCascadesEvents:
+              type: boolean
+              enum: [true]
+            completedDeletionRequestPurgesEvents:
+              type: boolean
+              enum: [true]
+            automaticRetentionDays:
+              type: integer
+              enum: [90]
+        sampled:
+          type: boolean
+    ProductEventDimensions:
+      type: object
+      description: Privacy-reviewed analytics dimensions. The service derives geography and registered-device fields and rejects raw IP, precise location, titles, authors, and reading text.
+      additionalProperties: true
+      properties:
+        country:
+          type: string
+          pattern: "^[A-Z]{2}$"
+        region:
+          type: string
+        platform:
+          type: string
+          enum: [macos, ios, ipados]
+        appVersion:
+          type: string
+        buildNumber:
+          type: string
+        sourceLanguage:
+          type: string
+        targetLanguage:
+          type: string
+        readerLevel:
+          type: string
+          enum: [beginner, intermediate, advanced]
+        contentId:
+          type: string
+          description: Client content identifier. The Worker replaces it with a deterministic opaque reference before persistence and Operator output; never send a title or reading text.
+        chapterId:
+          type: string
+          description: Client chapter identifier. The Worker replaces it with a deterministic opaque reference before persistence and Operator output; never send a title or reading text.
+        contentCategory:
+          type: string
+        feature:
+          type: string
+        useFlow:
+          type: string
+        syncEntity:
+          type: string
+        syncPhase:
+          type: string
+        reviewRating:
+          type: string
+    ProductEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - subjectId
+        - name
+        - outcome
+        - createdAt
+      properties:
+        id: *id009
+        subjectId:
+          type: string
+          description: Stable pseudonymous learner reference for operator correlation.
+        deviceSubjectId:
+          type: string
+        name:
+          type: string
+        outcome:
+          type: string
+          enum:
+            - ok
+            - failed
+            - cancelled
+            - started
+        requestId:
+          type: string
+        properties:
+          $ref: "#/components/schemas/ProductEventDimensions"
+        createdAt: *id018
+    ProductEventCreate:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        outcome:
+          type: string
+          enum:
+            - ok
+            - failed
+            - cancelled
+            - started
+        occurredAt: *id018
+        properties:
+          $ref: "#/components/schemas/ProductEventDimensions"
+    ProductEventBatch:
+      type: object
+      additionalProperties: false
+      required:
+        - events
+      properties:
+        events:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/ProductEventCreate"
+    CursorPageProductEvents:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProductEvent"
+        nextCursor: *id025
+    CursorPageBooks:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Book"
+        nextCursor: *id025
+    CursorPageVocabulary:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/VocabularyOccurrence"
+        nextCursor: *id025
+    CursorPageReviews:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReviewSchedule"
+        nextCursor: *id025
+    CursorPageAdminUsers:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminUser"
+        nextCursor: *id025
+    CursorPageJobs:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Job"
+        nextCursor: *id025
+    CursorPageCache:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CacheEntry"
+        nextCursor: *id025
+    CursorPageAudit:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEvent"
+        nextCursor: *id025
+    CursorPagePrivacyRequests:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PrivacyRequest"
+        nextCursor: *id025

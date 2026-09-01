@@ -25,6 +25,29 @@ struct IPadToolbarPlacementPolicyTests {
             isReaderActive: true,
             hasSelectedBook: true
         ) == .detail)
+        #expect(IPadBackgroundJobsToolbarPlacement.owner(
+            isVocabularySelected: false,
+            isReaderActive: false,
+            isSettingsSelected: true,
+            hasSelectedBook: false
+        ) == .detail)
+    }
+
+    @Test("Library media import remains owned by the visible content column")
+    func contentColumnOwnsMediaImportToolbar() {
+        #expect(IPadLibraryImportToolbarPlacement.owner == .content)
+    }
+
+    @Test("Anki export mode is owned only by the visible vocabulary detail column")
+    func vocabularyDetailOwnsAnkiExportToolbar() {
+        #expect(IPadAnkiExportToolbarPlacement.owner == .detail)
+    }
+
+    @Test("iPad EPUB parity uses supported user-provided document paths")
+    func ipadUsesDocumentPickerForEPUB() {
+        #expect(!IPadEPUBImportPolicy.appleBooksLibraryEnumerationSupported)
+        #expect(IPadEPUBImportPolicy.supportedEquivalent.contains("Files document picker"))
+        #expect(IPadEPUBImportPolicy.supportedEquivalent.contains("DRM-free EPUB"))
     }
 
     @Test("Opening the reader focuses the detail column instead of keeping three equal columns")
@@ -49,5 +72,16 @@ struct IPadToolbarPlacementPolicyTests {
             isVocabularySelected: true,
             showsLibraryAlongside: false
         ) == .vocabularyFocused)
+    }
+
+    @Test("Settings uses a sidebar-plus-detail page instead of a sheet")
+    func settingsUsesSidebarAndDetail() {
+        #expect(IPadSplitColumnPolicy.mode(
+            isReaderActive: false,
+            isVocabularySelected: false,
+            isSettingsSelected: true,
+            showsLibraryAlongside: false
+        ) == .settings)
+        #expect(AppTab.allCases.contains(.settings))
     }
 }

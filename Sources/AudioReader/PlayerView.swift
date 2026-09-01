@@ -26,6 +26,10 @@ struct PlayerView: View {
     @State private var lookupWidth: CGFloat = 0
     @State private var lookupDragStart: CGFloat?
     @State private var readerScrollTarget: ReaderScrollTarget?
+    @State private var editingTranscriptSegment: TranscriptSegment?
+    @State private var readerProgressError: String?
+    @State private var correctionPreviewTask: Task<Void, Never>?
+    @State private var showsBookNavigation = false
 #if os(iOS)
     @State private var showSpeedPicker = false
     @State private var showReplaceEbookImporter = false
@@ -33,10 +37,6 @@ struct PlayerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-#if os(macOS)
-            header
-            Divider().overlay(Palette.line)
-#endif
             if state.isTranscribing {
                 transcribeBanner
             }
@@ -74,25 +74,60 @@ struct PlayerView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Palette.goldSoft)
             }
-            lyricPane
-            VStack(spacing: playbackChromeSpacing) {
-                PlaybackChrome(state: state)
-#if os(iOS)
-                iPadCompactPlaybackBar
-#else
-                ViewThatFits(in: .horizontal) {
-                    desktopExpandedPlaybackControls
-                    desktopCompactPlaybackControls
-                }
-#endif
+            if state.readerProgressChoices.count > 1 {
+                readerProgressConflictBanner
             }
-            .padding(.horizontal, playbackChromeHorizontalPadding)
-            .padding(.top, playbackChromeTopPadding)
-            .padding(.bottom, playbackChromeBottomPadding)
-            .background(Palette.panel)
+            lyricPane
+            if state.selectedChapter?.hasAudio == true {
+                VStack(spacing: playbackChromeSpacing) {
+                    if state.isDeepReadingPaused, let segment = state.currentSegment {
+                        ListenFirstCoachView(state: state, segment: segment)
+                    }
+                    PlaybackChrome(state: state)
+#if os(iOS)
+                    iPadCompactPlaybackBar
+#else
+                    ViewThatFits(in: .horizontal) {
+                        desktopExpandedPlaybackControls
+                        desktopCompactPlaybackControls
+                    }
+#endif
+                }
+                .padding(.horizontal, playbackChromeHorizontalPadding)
+                .padding(.top, playbackChromeTopPadding)
+                .padding(.bottom, playbackChromeBottomPadding)
+                .background(Palette.panel)
+            }
         }
         .background(Palette.bg)
         .navigationTitle(readerNavigationTitle)
+#if os(macOS)
+        .toolbar {
+            ToolbarItemGroup(placement: .automatic) {
+                desktopCompactHeaderControls
+            }
+        }
+        .inspector(isPresented: inspectorPresentationBinding) {
+            Group {
+                if state.showChapterAssistant {
+                    ChapterAssistantView(state: state)
+                } else {
+                    WordInspector(
+                        state: state,
+                        type: .metrics(
+                            columnWidth: effectiveLookupWidth,
+                            scale: state.settings.readerFontScale,
+                            lineSpacing: state.settings.readerLineSpacing,
+                            wordSpacing: state.settings.readerWordSpacing,
+                            font: state.settings.readerFont,
+                            bold: state.settings.readerBold
+                        )
+                    )
+                }
+            }
+            .inspectorColumnWidth(min: 300, ideal: effectiveLookupWidth, max: 540)
+        }
+#endif
 #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -111,6 +146,116 @@ struct PlayerView: View {
         }
         .sheet(item: $state.chapterQuizSession) { _ in
             ChapterQuizView(state: state)
+        }
+        .sheet(isPresented: $showsBookNavigation) {
+            EbookNavigationSheet(state: state)
+        }
+        .sheet(item: $editingTranscriptSegment) { segment in
+            TranscriptCorrectionSheet(
+                segment: segment,
+                hasStoredCorrection: state.transcriptOverlay(for: segment.id) != nil,
+                conflictChoices: state.transcriptOverlayChoices(for: segment.id),
+                onPreview: previewTranscriptCorrection,
+                onSave: { text, start, end in
+                    try state.saveTranscriptCorrection(
+                        segmentID: segment.id,
+                        text: text,
+                        start: start,
+                        end: end
+                    )
+                },
+                onRestore: {
+                    try state.restoreTranscriptCorrection(segmentID: segment.id)
+                },
+                onResolveConflict: { candidateID in
+                    try state.resolveTranscriptOverlayConflict(
+                        segmentID: segment.id,
+                        choosing: candidateID
+                    )
+                }
+            )
+        }
+        .alert("Reader update failed", isPresented: Binding(
+            get: { readerProgressError != nil },
+            set: {
+                if !$0 { readerProgressError = nil }
+            }
+        )) {
+            Button("OK", role: .cancel) {
+                readerProgressError = nil
+            }
+        } message: {
+            Text(readerProgressError ?? "The reader could not be updated.")
+        }
+        .onDisappear {
+            correctionPreviewTask?.cancel()
+        }
+    }
+
+    private var readerProgressConflictBanner: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Choose where to continue", systemImage: "arrow.triangle.branch")
+                .font(.headline)
+            Text("Reading moved on more than one device. Pick the position you want to keep.")
+                .font(.subheadline)
+                .foregroundStyle(Palette.dim)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { readerProgressChoiceButtons }
+                VStack(alignment: .leading, spacing: 8) { readerProgressChoiceButtons }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.goldSoft)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("reader.progressConflict")
+    }
+
+    @ViewBuilder
+    private var readerProgressChoiceButtons: some View {
+        ForEach(state.readerProgressChoices) { choice in
+            Button {
+                resolveReaderProgress(choice.id)
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(readerProgressChapterTitle(choice.chapterID.rawValue))
+                        .font(.subheadline.weight(.semibold))
+                    Text("\(formatClock(choice.relativeSeconds)) · \(choice.deviceID) · \(choice.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption)
+                        .foregroundStyle(Palette.dim)
+                }
+                .frame(minHeight: 44, alignment: .leading)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("reader.progressChoice.\(choice.id)")
+        }
+    }
+
+    private func readerProgressChapterTitle(_ chapterID: String) -> String {
+        state.selectedBook?.chapters.first(where: { $0.id == chapterID })?.title ?? "Saved position"
+    }
+
+    private func resolveReaderProgress(_ candidateID: String) {
+        do {
+            try state.resolveReaderProgress(choosing: candidateID)
+        } catch {
+            readerProgressError = error.localizedDescription
+        }
+    }
+
+    private func previewTranscriptCorrection(start: TimeInterval, end: TimeInterval) {
+        correctionPreviewTask?.cancel()
+        state.seekPlayback(to: start)
+        if !state.player.isPlaying { state.player.play() }
+        correctionPreviewTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(max(0.25, end - start)))
+            } catch {
+                return
+            }
+            if state.player.currentTime >= start, state.player.currentTime <= end + 0.5 {
+                state.player.pause()
+            }
         }
     }
 
@@ -219,93 +364,13 @@ struct PlayerView: View {
     }
 
 #if os(macOS)
-    private var header: some View {
-        desktopHeader
-    }
-
-    private var desktopHeader: some View {
-        ViewThatFits(in: .horizontal) {
-            desktopExpandedHeaderControls
-            desktopCompactHeaderControls
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 8)
-        .background(Palette.panel)
-    }
-
-    private var desktopExpandedHeaderControls: some View {
-        HStack(spacing: 14) {
-            textSourcePicker
-                .labelsHidden()
-                .frame(width: 220)
-            desktopProviderControls
-
-            Toggle("Auto-scroll", isOn: $autoScroll)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .foregroundStyle(Palette.dim)
-
-            Toggle("Play on tap", isOn: $state.settings.playOnSelect)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .foregroundStyle(Palette.dim)
-                .onChange(of: state.settings.playOnSelect) { _, _ in state.persistSettings() }
-                .help("When on, clicking a sentence or word starts playback. When off, it only jumps to that spot.")
-
-            Toggle("Study overlay", isOn: $state.settings.showStudyOverlay)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .foregroundStyle(Palette.dim)
-                .onChange(of: state.settings.showStudyOverlay) { _, _ in state.persistSettings() }
-                .help("Underline unknown and learning words in the chapter.")
-                .accessibilityHint("Underlines unknown and learning words throughout the chapter.")
-
-            Button("Chapter words") {
-                state.presentChapterStudyList()
-            }
-            .disabled(state.transcript == nil)
-
-            Menu {
-                Toggle("Study overlay", isOn: $state.settings.showStudyOverlay)
-                    .onChange(of: state.settings.showStudyOverlay) { _, _ in state.persistSettings() }
-                Button("Shadow this sentence") {
-                    state.presentShadowing()
-                }
-                .disabled(state.transcript == nil)
-                Button("Chapter quiz") {
-                    state.presentChapterQuiz()
-                }
-                .disabled(state.transcript == nil)
-                Divider()
-                readingAppearanceMenuContent
-            } label: {
-                Label("Reading", systemImage: "textformat")
-            }
-
-            Button {
-                state.showChapterAssistant.toggle()
-            } label: {
-                Label("Chapter AI", systemImage: "sparkles")
-            }
-            .foregroundStyle(state.showChapterAssistant ? Palette.gold : Palette.ink)
-            .disabled(state.selectedChapter == nil)
-
-            Button {
-                state.transcribeSelected(force: state.transcript != nil)
-            } label: {
-                Label(state.transcript == nil ? "Transcribe" : "Re-transcribe", systemImage: "waveform")
-            }
-            .disabled(state.selectedChapter == nil || state.isTranscribing)
-        }
-        .fixedSize(horizontal: true, vertical: false)
-    }
-
     private var desktopCompactHeaderControls: some View {
         HStack(spacing: 10) {
             textSourcePicker
                 .labelsHidden()
                 .frame(width: 220)
             Spacer(minLength: 0)
+            bookNavigationButton
             sharedLLMMenu
             sharedReadingMenu
             Button {
@@ -318,14 +383,16 @@ struct PlayerView: View {
             .accessibilityLabel("Chapter AI")
             .help("Chapter AI")
 
-            Button {
-                state.transcribeSelected(force: state.transcript != nil)
-            } label: {
-                Image(systemName: "waveform")
+            if state.selectedChapter?.hasAudio == true {
+                Button {
+                    state.transcribeSelected(force: state.transcript != nil)
+                } label: {
+                    Image(systemName: "waveform")
+                }
+                .disabled(state.isTranscribing)
+                .accessibilityLabel(state.transcript == nil ? "Transcribe" : "Re-transcribe")
+                .help(state.transcript == nil ? "Transcribe chapter" : "Re-transcribe chapter")
             }
-            .disabled(state.selectedChapter == nil || state.isTranscribing)
-            .accessibilityLabel(state.transcript == nil ? "Transcribe" : "Re-transcribe")
-            .help(state.transcript == nil ? "Transcribe chapter" : "Re-transcribe chapter")
         }
         .fixedSize(horizontal: true, vertical: false)
     }
@@ -340,6 +407,9 @@ struct PlayerView: View {
         .frame(maxWidth: 210)
 
         switch state.llmProvider {
+        case .managedQwen:
+            Text(state.account.mode.isSignedIn ? "Managed Qwen" : "Sign in for Managed Qwen")
+                .foregroundStyle(state.account.mode.isSignedIn ? Palette.gold : Palette.dim)
         case .grok:
             Picker("Model", selection: $state.settings.grokModel) {
                 ForEach(state.grokTextModels) { model in
@@ -438,9 +508,30 @@ struct PlayerView: View {
         )
     }
 
+    private var bookNavigationButton: some View {
+        Button {
+            if let bookID = state.selectedBookID {
+                state.account.recordUsage(
+                    name: "reading.book_navigation_opened",
+                    properties: ["bookId": bookID]
+                )
+            }
+            showsBookNavigation = true
+        } label: {
+            Image(systemName: "list.bullet")
+        }
+        .disabled(state.selectedBook?.ebookPath == nil)
+        .accessibilityLabel("Contents and search")
+        .accessibilityIdentifier("reader.bookNavigation")
+        .help("Contents and Search Book")
+    }
+
 #if os(iOS)
     @ToolbarContentBuilder
     private var iPadReaderToolbar: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            bookNavigationButton
+        }
         ToolbarItem(placement: .primaryAction) {
             Menu {
                 Picker("Text", selection: $state.textSource) {
@@ -472,15 +563,17 @@ struct PlayerView: View {
             .accessibilityLabel("Chapter AI")
             .help("Chapter AI")
         }
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                state.transcribeSelected(force: state.transcript != nil)
-            } label: {
-                Image(systemName: "waveform")
+        if state.selectedChapter?.hasAudio == true {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    state.transcribeSelected(force: state.transcript != nil)
+                } label: {
+                    Image(systemName: "waveform")
+                }
+                .disabled(state.isTranscribing)
+                .accessibilityLabel(state.transcript == nil ? "Transcribe" : "Re-transcribe")
+                .help(state.transcript == nil ? "Transcribe chapter" : "Re-transcribe chapter")
             }
-            .disabled(state.selectedChapter == nil || state.isTranscribing)
-            .accessibilityLabel(state.transcript == nil ? "Transcribe" : "Re-transcribe")
-            .help(state.transcript == nil ? "Transcribe chapter" : "Re-transcribe chapter")
         }
     }
 #endif
@@ -506,6 +599,8 @@ struct PlayerView: View {
             }
 
             switch state.llmProvider {
+            case .managedQwen:
+                Text(state.account.mode.isSignedIn ? "Managed Qwen · server policy" : "Sign in to use Managed Qwen")
             case .grok:
                 Picker("Model", selection: $state.settings.grokModel) {
                     ForEach(state.grokTextModels) { model in
@@ -586,6 +681,8 @@ struct PlayerView: View {
     private var sharedReadingMenu: some View {
         Menu {
             Toggle("Auto-scroll", isOn: $autoScroll)
+            Toggle("Listen First", isOn: deepReadingBinding)
+                .accessibilityHint("Hides unfinished and future sentences, then pauses and reveals each completed sentence.")
             Toggle("Play on tap", isOn: $state.settings.playOnSelect)
                 .onChange(of: state.settings.playOnSelect) { _, _ in state.persistSettings() }
             Toggle("Study overlay", isOn: $state.settings.showStudyOverlay)
@@ -646,6 +743,10 @@ struct PlayerView: View {
     }
 
     private func didChangeLLMConnection(to connection: LLMConnectionChoice) {
+        state.account.recordUsage(
+            name: "llm.provider_changed",
+            properties: ["provider": connection.rawValue]
+        )
         state.persistSettings()
         if connection == .grokAPIKey {
             Task { await state.refreshGrokModels() }
@@ -733,8 +834,41 @@ struct PlayerView: View {
         lookupWidth > 0 ? lookupWidth : CGFloat(state.settings.lookupPanelWidth)
     }
 
+#if os(macOS)
+    private var inspectorPresentationBinding: Binding<Bool> {
+        Binding(
+            get: { state.selectedWord != nil || state.showChapterAssistant },
+            set: { presented in
+                guard !presented else { return }
+                state.showChapterAssistant = false
+                state.selectedWord = nil
+                state.definition = nil
+                state.dictionaryHits = []
+            }
+        )
+    }
+#endif
+
     private var lyricPane: some View {
         GeometryReader { geo in
+#if os(macOS)
+            let type = ReaderType.metrics(
+                columnWidth: geo.size.width,
+                scale: state.settings.readerFontScale,
+                lineSpacing: state.settings.readerLineSpacing,
+                wordSpacing: state.settings.readerWordSpacing,
+                font: state.settings.readerFont,
+                bold: state.settings.readerBold
+            )
+            TranscriptTextColumn(
+                state: state,
+                autoScroll: $autoScroll,
+                readerScrollTarget: $readerScrollTarget,
+                proxyWidth: geo.size.width,
+                type: type,
+                onEditSegment: { editingTranscriptSegment = $0 }
+            )
+#else
             let lookupOpen = state.selectedWord != nil || state.showChapterAssistant
             let split = ReaderSplitGeometry(
                 containerWidth: geo.size.width,
@@ -755,7 +889,8 @@ struct PlayerView: View {
                     autoScroll: $autoScroll,
                     readerScrollTarget: $readerScrollTarget,
                     proxyWidth: split.textWidth,
-                    type: type
+                    type: type,
+                    onEditSegment: { editingTranscriptSegment = $0 }
                 )
                     .frame(width: split.textWidth)
                 if lookupOpen {
@@ -778,6 +913,7 @@ struct PlayerView: View {
                     containerWidth: width
                 )
             }
+#endif
         }
         .onAppear {
             if lookupWidth <= 0 {
@@ -982,7 +1118,7 @@ struct PlayerView: View {
                 Image(systemName: "book.closed")
             }
             .toggleStyle(.button)
-            .help("Deep Reading: pause after each sentence")
+            .help("Listen First: hide text, then pause after each sentence")
             .foregroundStyle(state.settings.deepReadingMode ? Palette.gold : Palette.ink)
 
             Button { state.continueDeepReading() } label: {
@@ -1092,7 +1228,7 @@ struct PlayerView: View {
         .buttonStyle(.plain)
         .foregroundStyle(Palette.ink)
         .font(.system(size: 17, weight: .regular))
-        .frame(minHeight: 36)
+        .frame(minHeight: 44)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Playback controls")
     }
@@ -1101,14 +1237,14 @@ struct PlayerView: View {
         HStack(spacing: 2) {
             Button { state.skipPlayback(seconds: -state.settings.skipSeconds) } label: {
                 Image(systemName: "gobackward.5")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .accessibilityLabel("Back \(Int(state.settings.skipSeconds)) seconds")
 
             Button { state.skipSentence(direction: -1) } label: {
                 Image(systemName: "backward.end.fill")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .accessibilityLabel("Previous sentence")
@@ -1117,21 +1253,21 @@ struct PlayerView: View {
                 Image(systemName: state.player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
                     .font(.system(size: 26))
                     .foregroundStyle(Palette.gold)
-                    .frame(width: 36, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .accessibilityLabel(state.player.isPlaying ? "Pause" : "Play")
 
             Button { state.skipSentence(direction: 1) } label: {
                 Image(systemName: "forward.end.fill")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .accessibilityLabel("Next sentence")
 
             Button { state.skipPlayback(seconds: state.settings.skipSeconds) } label: {
                 Image(systemName: "goforward.5")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .accessibilityLabel("Forward \(Int(state.settings.skipSeconds)) seconds")
@@ -1142,14 +1278,14 @@ struct PlayerView: View {
         HStack(spacing: 2) {
             Button { state.replaySentence() } label: {
                 Image(systemName: "repeat.1")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .accessibilityLabel("Replay sentence")
 
             Toggle(isOn: sentenceLoopBinding) {
                 Image(systemName: "repeat")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .toggleStyle(.button)
@@ -1158,17 +1294,17 @@ struct PlayerView: View {
 
             Toggle(isOn: deepReadingBinding) {
                 Image(systemName: "book.closed")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .toggleStyle(.button)
             .foregroundStyle(state.settings.deepReadingMode ? Palette.gold : Palette.ink)
-            .accessibilityLabel("Deep Reading")
+            .accessibilityLabel("Listen First")
             .accessibilityValue(state.settings.deepReadingMode ? "On" : "Off")
 
             Button { state.continueDeepReading() } label: {
                 Image(systemName: "forward.end.circle")
-                    .frame(width: 32, height: 36)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .foregroundStyle(state.isDeepReadingPaused ? Palette.gold : Palette.ink)
@@ -1185,7 +1321,7 @@ struct PlayerView: View {
             Text(String(format: "%.2f×", state.player.rate))
                 .font(.system(size: 13, weight: .semibold, design: .monospaced))
                 .foregroundStyle(Palette.gold)
-                .frame(minHeight: 36)
+                .frame(minHeight: 44)
                 .padding(.horizontal, 4)
                 .contentShape(Rectangle())
         }
@@ -1206,7 +1342,7 @@ struct PlayerView: View {
             HStack(spacing: 0) {
                 Button { state.openPreviousChapter() } label: {
                     Image(systemName: "chevron.left")
-                        .frame(width: 32, height: 36)
+                        .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 .disabled(!state.canOpenPreviousChapter)
@@ -1222,7 +1358,7 @@ struct PlayerView: View {
                     Text(chapterCompactPositionLabel(in: chapters))
                         .font(.system(size: 13, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Palette.ink)
-                        .frame(minHeight: 36)
+                        .frame(minHeight: 44)
                         .padding(.horizontal, 2)
                         .contentShape(Rectangle())
                 }
@@ -1232,7 +1368,7 @@ struct PlayerView: View {
 
                 Button { state.openNextChapter() } label: {
                     Image(systemName: "chevron.right")
-                        .frame(width: 32, height: 36)
+                        .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 .disabled(!state.canOpenNextChapter)
@@ -1394,6 +1530,8 @@ private struct IPadPlaybackSpeedPicker: View {
 
 struct ChapterChatVoiceWaveform: View {
     let levels: [Double]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.uiTestReduceMotion) private var uiTestReduceMotion
 
     var body: some View {
         HStack(alignment: .center, spacing: 2) {
@@ -1404,7 +1542,7 @@ struct ChapterChatVoiceWaveform: View {
             }
         }
         .frame(width: 106, height: 22, alignment: .leading)
-        .animation(.easeOut(duration: 0.12), value: levels)
+        .animation(reduceMotion || uiTestReduceMotion ? nil : .easeOut(duration: 0.12), value: levels)
         .accessibilityHidden(true)
     }
 }
@@ -1426,12 +1564,10 @@ private struct ChapterAssistantView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Chapter AI")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Palette.mute)
-                        .textCase(.uppercase)
-                        .tracking(0.8)
+                        .font(.headline)
+                        .foregroundStyle(Palette.ink)
                     Text(state.selectedLLMModel)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(size: 11))
                         .foregroundStyle(Palette.gold)
                 }
                 Spacer()
@@ -1472,6 +1608,22 @@ private struct ChapterAssistantView: View {
                     .controlSize(.small)
                     .disabled(state.transcript == nil)
 
+                    if let job = state.selectedChapterSummaryJob {
+                        assistantCard(title: job.stage) {
+                            if !job.state.isTerminal {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                            Text(job.detail)
+                                .font(.system(size: 12))
+                                .foregroundStyle(Palette.dim)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Chapter summary progress")
+                        .accessibilityValue("\(job.stage). \(job.detail)")
+                    }
+
                     if let checkpoint = state.selectedChapterTranslationCheckpoint {
                         Label(chapterTranslationStatus(checkpoint), systemImage: "checkmark.circle")
                             .font(.system(size: 11))
@@ -1502,7 +1654,8 @@ private struct ChapterAssistantView: View {
                         }
                     }
 
-                    if state.isChapterAssistantWorking {
+                    if state.isChapterAssistantWorking,
+                       !state.isLLMJobActive(kind: .chapterSummary) {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small)
                             Text("Asking \(state.selectedLLMModel)…")
@@ -1550,7 +1703,7 @@ private struct ChapterAssistantView: View {
                     if let summary = state.chapterSummary {
                         assistantCard(title: "Chapter summary") {
                             ChapterSummaryView(summary: summary.summary)
-                            if summary.status == .pending {
+                    if summary.status == .pending || summary.status == .edited || summary.status == .replaced {
                                 Text("Draft saved locally · \(summary.model). Accept to keep it as this chapter's summary.")
                                     .font(.system(size: 12))
                                     .foregroundStyle(Palette.gold)
@@ -1702,7 +1855,7 @@ private struct ChapterAssistantView: View {
             titleVisibility: .visible
         ) {
             Button("Regenerate", role: .destructive) {
-                state.summarizeChapter()
+                state.summarizeChapter(force: true)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -1863,13 +2016,238 @@ private struct ChapterSummaryView: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(title)
                 .font(.system(size: labelSize, weight: .semibold))
-                .textCase(.uppercase)
-                .tracking(0.5)
             Rectangle()
                 .fill(Palette.line)
                 .frame(height: 1)
         }
         .foregroundStyle(Palette.gold)
+    }
+}
+
+private struct EbookNavigationSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var state: AppState
+    @State private var document: EPUBDocument?
+    @State private var query = ""
+    @State private var searchResults: [EPUBSearchResult] = []
+    @State private var isLoading = true
+    @State private var loadError: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(Palette.dim)
+                            .accessibilityHidden(true)
+                        TextField("Search Book", text: $query)
+                            .textFieldStyle(.plain)
+                            .accessibilityLabel("Search Book")
+                            .accessibilityIdentifier("reader.bookSearch")
+                        if !query.isEmpty {
+                            Button {
+                                query = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(Palette.dim)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Clear book search")
+                        }
+                    }
+                }
+                if isLoading {
+                    HStack {
+                        Spacer()
+                        ProgressView("Reading contents…")
+                        Spacer()
+                    }
+                } else if let loadError {
+                    ContentUnavailableView(
+                        "Contents Unavailable",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text(loadError)
+                    )
+                } else if let document {
+                    if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        contents(document)
+                    } else if searchResults.isEmpty {
+                        ContentUnavailableView.search(text: query)
+                    } else {
+                        searchMatches(searchResults)
+                    }
+                }
+            }
+            .navigationTitle(query.isEmpty ? "Contents" : "Search Book")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+        .frame(minWidth: 360, minHeight: 480)
+        .accessibilityIdentifier("reader.bookNavigation.sheet")
+        .task(id: state.selectedBook?.ebookPath) {
+            await loadDocument()
+        }
+        .task(id: searchTaskID) {
+            await updateSearchResults()
+        }
+    }
+
+    private var searchTaskID: String {
+        "\(document?.sections.count ?? -1)|\(query)"
+    }
+
+    @ViewBuilder
+    private func contents(_ document: EPUBDocument) -> some View {
+        Section("Contents") {
+            ForEach(document.sections.indices, id: \.self) { index in
+                let section = document.sections[index]
+                Button {
+                    open(sectionIndex: index, matching: nil)
+                } label: {
+                    HStack {
+                        Text(section.title)
+                            .foregroundStyle(Palette.ink)
+                        Spacer()
+                        if state.selectedChapter?.ebookSectionIndex == index {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(Palette.gold)
+                                .accessibilityLabel("Current chapter")
+                        }
+                    }
+                    .padding(.leading, CGFloat(section.navigationLevel) * 16)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(section.title)
+                .accessibilityAddTraits(state.selectedChapter?.ebookSectionIndex == index ? .isSelected : [])
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func searchMatches(_ results: [EPUBSearchResult]) -> some View {
+        Section("Search Results") {
+            ForEach(results) { result in
+                Button {
+                    open(sectionIndex: result.sectionIndex, matching: query)
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(result.sectionTitle)
+                            .font(.headline)
+                            .foregroundStyle(Palette.ink)
+                        Text(result.snippet)
+                            .font(.subheadline)
+                            .foregroundStyle(Palette.dim)
+                            .lineLimit(3)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(result.sectionTitle). \(result.snippet)")
+            }
+        }
+    }
+
+    private func loadDocument() async {
+        guard let path = state.selectedBook?.ebookPath else {
+            document = nil
+            isLoading = false
+            loadError = "This book does not have an EPUB file."
+            return
+        }
+        isLoading = true
+        loadError = nil
+        let parsed = await Task.detached(priority: .userInitiated) {
+            EPUBParser.document(from: path)
+        }.value
+        guard !Task.isCancelled, state.selectedBook?.ebookPath == path else { return }
+        document = parsed
+        isLoading = false
+        if parsed == nil { loadError = "The EPUB could not be read." }
+    }
+
+    private func updateSearchResults() async {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let document else {
+            searchResults = []
+            return
+        }
+        do {
+            try await Task.sleep(for: .milliseconds(150))
+        } catch {
+            return
+        }
+        let results = await Task.detached(priority: .userInitiated) {
+            EPUBParser.search(trimmed, in: document)
+        }.value
+        guard !Task.isCancelled,
+              query.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed
+        else { return }
+        searchResults = results
+    }
+
+    private func open(sectionIndex: Int, matching query: String?) {
+        guard let book = state.selectedBook,
+              state.openEbookSection(at: sectionIndex, in: book, matching: query)
+        else { return }
+        if query != nil {
+            state.account.recordUsage(
+                name: "reading.book_search_result_opened",
+                properties: ["bookId": book.id, "sectionIndex": "\(sectionIndex)"]
+            )
+        }
+        dismiss()
+    }
+}
+
+private struct EPUBReaderCoverPage: View {
+    let book: Book
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Group {
+                if let path = book.coverPath,
+                   let image = CoverImageCache.shared.image(for: path) {
+                    Image(platformImage: image)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Palette.panel2)
+                        .overlay {
+                            Image(systemName: "book.closed")
+                                .font(.system(size: 52, weight: .light))
+                                .foregroundStyle(Palette.gold)
+                        }
+                }
+            }
+            .frame(maxWidth: 320)
+            .aspectRatio(2.0 / 3.0, contentMode: .fit)
+            .compositingGroup()
+            .clipShape(.rect(cornerRadius: 12))
+            .shadow(color: .black.opacity(0.14), radius: 12, y: 6)
+
+            VStack(spacing: 5) {
+                Text(book.title)
+                    .font(.system(.title, design: .serif, weight: .semibold))
+                    .multilineTextAlignment(.center)
+                if let author = book.author, !author.isEmpty {
+                    Text(author)
+                        .font(.subheadline)
+                        .foregroundStyle(Palette.dim)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 32)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Cover of \(book.title)" + (book.author.map { ", by \($0)" } ?? ""))
+        .accessibilityIdentifier("reader.epubCover")
     }
 }
 
@@ -1896,9 +2274,6 @@ private struct PlaybackChrome: View {
                 .foregroundStyle(Palette.dim)
                 .frame(width: 54, alignment: .trailing)
         }
-        .onChange(of: state.player.currentTime) { _, _ in
-            state.tickPlaybackModes()
-        }
     }
 }
 
@@ -1908,27 +2283,44 @@ private struct TranscriptTextColumn: View {
     @Binding var readerScrollTarget: ReaderScrollTarget?
     let proxyWidth: CGFloat
     let type: ReaderType
+    let onEditSegment: (TranscriptSegment) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.uiTestReduceMotion) private var uiTestReduceMotion
 
     var body: some View {
         let cursor = PlaybackCursor.resolve(
-            segments: state.transcript?.segments ?? [],
+            segments: state.presentedTranscript?.segments ?? [],
             time: state.player.currentTime
         )
         let studyOverlayEnabled = state.settings.showStudyOverlay
         let studyLanguageKey = state.studyIndex.language
         let studyLearning = state.studyIndex.learning
         let studyKnown = state.studyIndex.known
+        let orderedSegmentIDs = state.presentedTranscript?.segments.map(\.id) ?? []
         ScrollView {
             LazyVStack(alignment: .leading, spacing: type.paragraph) {
-                if let transcript = state.transcript {
+                if let book = state.selectedBook,
+                   state.selectedChapter?.ebookSectionIndex == 0 {
+                    EPUBReaderCoverPage(book: book)
+                }
+                if let transcript = state.presentedTranscript {
                     ForEach(transcript.segments) { segment in
+                        let listenFirstVisibility = state.settings.deepReadingMode
+                            ? ListenFirstVisibility.resolve(
+                                segmentID: segment.id,
+                                orderedSegmentIDs: orderedSegmentIDs,
+                                currentSegmentID: cursor.segmentID,
+                                pausedSegmentID: state.deepReadingPausedSentenceID,
+                                replayRevealedSegmentID: state.listenFirstReplayRevealedSegmentID
+                            )
+                            : .revealed
                         SentenceRow(
                             segment: segment,
                             currentID: cursor.segmentID,
                             currentWordID: segment.id == cursor.segmentID ? cursor.wordID : nil,
                             focusedSegmentID: state.focusedSegmentID,
                             focusedWordID: state.focusedWordID,
-                            textSource: state.textSource,
+                            textSource: state.readerTextSource,
                             gloss: state.sentenceGloss(for: segment),
                             isTranslating: state.isLLMJobActive(kind: .sentenceTranslation, targetID: segment.id),
                             languageLabel: state.studyLanguage.menuLabel,
@@ -1954,14 +2346,31 @@ private struct TranscriptTextColumn: View {
                             onMarkKnown: { word in
                                 state.markKnown(word, known: !state.isMarkedKnown(word))
                             },
-                            onTranslate: { state.translateCurrentSentence() },
+                            hasStoredCorrection: state.transcriptOverlay(for: segment.id) != nil,
+                            listenFirstVisibility: listenFirstVisibility,
+                            onReveal: { state.revealListenFirstSentence(segment.id) },
+                            onEdit: { onEditSegment(segment) },
+                            onTranslate: { state.translateSentence(segment) },
                             onAccept: { if let g = state.sentenceGloss(for: segment) { state.acceptGloss(g) } },
                             onReject: { if let g = state.sentenceGloss(for: segment) { state.rejectGloss(g) } },
+                            onEditTranslation: { text in
+                                if let gloss = state.sentenceGloss(for: segment) {
+                                    state.editGloss(gloss, text: text)
+                                }
+                            },
                             onRetry: { state.retranslateSentence(segment) },
                             type: type
                         )
                         .equatable()
                         .id(segment.id)
+                    }
+                    if state.canLoadMoreTranscriptSegments {
+                        Button("Load next \(Persistence.transcriptPageSize) segments") {
+                            state.loadMoreTranscriptSegments()
+                        }
+                        .buttonStyle(.bordered)
+                        .frame(maxWidth: .infinity)
+                        .accessibilityIdentifier("reader.loadMoreSegments")
                     }
                 } else if state.selectedChapter != nil {
                     emptyTranscript
@@ -1984,7 +2393,7 @@ private struct TranscriptTextColumn: View {
                 return
             }
             if ReaderScrollTarget.shouldAnimate(from: oldTarget, to: newTarget) {
-                withAnimation(.easeInOut(duration: 0.25)) {
+                withAnimation(reduceMotion || uiTestReduceMotion ? nil : .easeOut(duration: 0.2)) {
                     readerScrollTarget = newTarget
                 }
             } else {
@@ -2000,7 +2409,7 @@ private struct TranscriptTextColumn: View {
             else { return }
             let target = ReaderScrollTarget(chapterID: chapterID, segmentID: segmentID)
             if ReaderScrollTarget.shouldAnimate(from: readerScrollTarget, to: target) {
-                withAnimation(.easeInOut(duration: 0.3)) {
+                withAnimation(reduceMotion || uiTestReduceMotion ? nil : .easeOut(duration: 0.2)) {
                     readerScrollTarget = target
                 }
             } else {
@@ -2012,7 +2421,7 @@ private struct TranscriptTextColumn: View {
     private var currentReaderScrollTarget: ReaderScrollTarget? {
         guard let chapterID = state.selectedChapterID else { return nil }
         let cursor = PlaybackCursor.resolve(
-            segments: state.transcript?.segments ?? [],
+            segments: state.presentedTranscript?.segments ?? [],
             time: state.player.currentTime
         )
         guard let segmentID = cursor.segmentID else { return nil }
@@ -2058,6 +2467,81 @@ private struct TranscriptTextColumn: View {
     }
 }
 
+struct SentenceTranslationPresentation: Equatable, Sendable {
+    enum Status: Equatable, Sendable {
+        case draft(model: String)
+        case saved(model: String)
+    }
+
+    struct Actions: OptionSet, Sendable {
+        let rawValue: UInt8
+
+        static let translate = Actions(rawValue: 1 << 0)
+        static let accept = Actions(rawValue: 1 << 1)
+        static let reject = Actions(rawValue: 1 << 2)
+        static let edit = Actions(rawValue: 1 << 3)
+        static let retranslate = Actions(rawValue: 1 << 4)
+    }
+
+    let showsBlock: Bool
+    let showsSpinner: Bool
+    let glossText: String?
+    let status: Status?
+    let actions: Actions
+
+    /// Listen First is a hard boundary: hidden sentences cannot disclose assistant output or activity.
+    static func resolve(
+        isRevealed: Bool,
+        isSelected: Bool,
+        isTranslating: Bool,
+        gloss: GlossEntry?
+    ) -> SentenceTranslationPresentation {
+        guard isRevealed else {
+            return SentenceTranslationPresentation(
+                showsBlock: false,
+                showsSpinner: false,
+                glossText: nil,
+                status: nil,
+                actions: []
+            )
+        }
+
+        let status: Status?
+        switch gloss?.status {
+        case .pending, .edited, .replaced:
+            status = gloss.map { .draft(model: $0.model) }
+        case .accepted:
+            status = gloss.map { .saved(model: $0.model) }
+        case .rejected, .stale, nil:
+            status = nil
+        }
+
+        let actions: Actions
+        if !isSelected || isTranslating {
+            actions = []
+        } else {
+            switch gloss?.status {
+            case .pending, .edited, .replaced:
+                actions = [.accept, .reject, .edit, .retranslate]
+            case .accepted:
+                actions = [.edit, .retranslate]
+            case .rejected, .stale:
+                actions = []
+            case nil:
+                actions = [.translate]
+            }
+        }
+
+        return SentenceTranslationPresentation(
+            showsBlock: isTranslating || gloss != nil || isSelected,
+            showsSpinner: isTranslating,
+            glossText: gloss?.text,
+            status: status,
+            actions: actions
+        )
+    }
+}
+
 private struct SentenceRow: View {
     let segment: TranscriptSegment
     let currentID: String?
@@ -2077,12 +2561,19 @@ private struct SentenceRow: View {
     let onInspect: (TranscriptWord) -> Void
     let onSave: (TranscriptWord) -> Void
     var onMarkKnown: (TranscriptWord) -> Void = { _ in }
+    let hasStoredCorrection: Bool
+    let listenFirstVisibility: ListenFirstVisibility
+    let onReveal: () -> Void
+    let onEdit: () -> Void
     let onTranslate: () -> Void
     let onAccept: () -> Void
     let onReject: () -> Void
+    let onEditTranslation: (String) -> Void
     let onRetry: () -> Void
     let type: ReaderType
     @State private var showRetranslateConfirmation = false
+    @State private var showTranslationEditor = false
+    @State private var editedTranslation = ""
 
     private var isCurrent: Bool { segment.id == currentID }
     private var isFocused: Bool { segment.id == focusedSegmentID }
@@ -2123,50 +2614,100 @@ private struct SentenceRow: View {
     }
 
     var body: some View {
+        let translationPresentation = SentenceTranslationPresentation.resolve(
+            isRevealed: listenFirstVisibility == .revealed,
+            isSelected: isSelected,
+            isTranslating: isTranslating,
+            gloss: gloss
+        )
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text(formatClock(segment.start))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(isSelected ? Palette.gold : Palette.mute)
+                Button { onSeek(segment.start) } label: {
+                    Text(formatClock(segment.start))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(isSelected ? Palette.gold : Palette.dim)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Seek to sentence at \(formatClock(segment.start))")
+                .accessibilityIdentifier("reader.sentence.\(segment.id)")
                 if let score = segment.alignmentScore, score >= 0.52 {
                     Text("ebook matched")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Palette.mute)
-                }
-            }
-
-            if textSource == .spoken || textSource == .dual {
-                if isSelected || studyOverlayEnabled {
-                    wordTokens(StudyTokenIndex.tokens(in: segment), dimmed: !isSelected)
-                } else {
-                    Text(segment.spokenText)
-                        .font(type.font.font(size: type.body, bold: type.bold))
+                        .font(.caption.weight(.medium))
                         .foregroundStyle(Palette.dim)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .lineSpacing(type.line)
+                }
+                if isSelected {
+                    Button {
+                        onEdit()
+                    } label: {
+                        Label(hasStoredCorrection ? "Edit correction" : "Edit", systemImage: "pencil")
+                    }
+                    .buttonStyle(.borderless)
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("transcript.edit")
+                    .accessibilityHint("Edit this sentence's text and timing.")
                 }
             }
 
-            if textSource == .original || textSource == .dual {
-                let original = segment.trustedEbookText ?? (textSource == .original ? segment.spokenText : nil)
-                if let original {
-                    if textSource == .original, studyOverlayEnabled {
-                        wordTokens(
-                            StudyTokenIndex.tokens(in: segment, source: .original),
-                            dimmed: !isSelected
-                        )
+            if listenFirstVisibility == .revealed {
+                if textSource == .spoken || textSource == .dual {
+                    if isSelected || studyOverlayEnabled {
+                        wordTokens(StudyTokenIndex.tokens(in: segment), dimmed: !isSelected)
                     } else {
-                        Text(original)
-                            .font(type.font.font(size: textSource == .dual ? type.dual : type.body, bold: type.bold))
-                            .foregroundStyle(isSelected ? Palette.ink : Palette.dim)
-                            .italic(textSource == .dual)
-                            .lineSpacing(type.line)
+                        Button { onSeek(segment.start) } label: {
+                            Text(segment.spokenText)
+                                .font(type.font.font(size: type.body, bold: type.bold))
+                                .foregroundStyle(Palette.dim)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .lineSpacing(type.line)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
-            }
 
-            if isSelected {
-                translationBlock
+                if textSource == .original || textSource == .dual {
+                    let original = segment.trustedEbookText ?? (textSource == .original ? segment.spokenText : nil)
+                    if let original {
+                        if textSource == .original, studyOverlayEnabled {
+                            wordTokens(
+                                StudyTokenIndex.tokens(in: segment, source: .original),
+                                dimmed: !isSelected
+                            )
+                        } else {
+                            Button { onSeek(segment.start) } label: {
+                                Text(original)
+                                    .font(type.font.font(size: textSource == .dual ? type.dual : type.body, bold: type.bold))
+                                    .foregroundStyle(isSelected ? Palette.ink : Palette.dim)
+                                    .italic(textSource == .dual)
+                                    .lineSpacing(type.line)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                if translationPresentation.showsBlock {
+                    translationBlock(translationPresentation)
+                }
+            } else {
+                HStack(spacing: 10) {
+                    Image(systemName: listenFirstVisibility == .currentHidden ? "ear" : "text.redaction")
+                        .foregroundStyle(Palette.gold)
+                    Text(listenFirstVisibility == .currentHidden
+                         ? "Listen before revealing this sentence."
+                         : "Future sentence hidden in Listen First.")
+                        .font(.subheadline)
+                        .foregroundStyle(Palette.dim)
+                    Spacer()
+                    if listenFirstVisibility == .currentHidden {
+                        Button("Reveal sentence", action: onReveal)
+                            .buttonStyle(.bordered)
+                            .frame(minHeight: 44)
+                            .accessibilityIdentifier("reader.listenFirstReveal")
+                    }
+                }
+                .accessibilityElement(children: .contain)
             }
         }
         .padding(14)
@@ -2179,44 +2720,59 @@ private struct SentenceRow: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(isFocused && !isCurrent ? Palette.gold.opacity(0.55) : Color.clear, lineWidth: 1.5)
         )
-        .onTapGesture { onSeek(segment.start) }
-        .opacity(isSelected ? 1 : 0.72)
+        .opacity(isSelected ? 1 : 0.88)
+        .accessibilityAction(named: "Play from sentence") { onPlayFrom(segment.start) }
+        .accessibilityAction(named: "Seek to sentence") { onSeek(segment.start) }
     }
 
-    @ViewBuilder
-    private var translationBlock: some View {
+    private func translationBlock(_ presentation: SentenceTranslationPresentation) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            if isTranslating {
+            if presentation.showsSpinner {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("The LLM is translating…")
                         .font(.system(size: 12))
                         .foregroundStyle(Palette.dim)
                 }
-            } else if let gloss {
-                GlossBody(text: gloss.text, size: type.gloss)
+            }
+            if let glossText = presentation.glossText {
+                GlossBody(text: glossText, size: type.gloss)
+            }
+            if let status = presentation.status {
                 HStack(spacing: 8) {
-                    if gloss.status == .pending {
-                        Text("Draft · Model: \(gloss.model)")
+                    switch status {
+                    case .draft(let model):
+                        Text("Draft · Model: \(model)")
                             .font(.system(size: 11))
                             .foregroundStyle(Palette.gold)
+                    case .saved(let model):
+                        Text("Saved · Model: \(model)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Palette.gold)
+                    }
+                    if presentation.actions.contains(.accept) {
                         Button("Accept", action: onAccept)
                             .buttonStyle(.borderedProminent)
                             .tint(Palette.terracotta)
                             .controlSize(.small)
+                    }
+                    if presentation.actions.contains(.reject) {
                         Button("Reject", action: onReject)
                             .controlSize(.small)
-                        Button("Retranslate") { showRetranslateConfirmation = true }
-                            .controlSize(.small)
-                    } else if gloss.status == .accepted {
-                        Text("Saved · Model: \(gloss.model)")
-                            .font(.system(size: 11))
-                            .foregroundStyle(Palette.gold)
+                    }
+                    if presentation.actions.contains(.edit) {
+                        Button("Edit") {
+                            editedTranslation = presentation.glossText ?? ""
+                            showTranslationEditor = true
+                        }
+                        .controlSize(.small)
+                    }
+                    if presentation.actions.contains(.retranslate) {
                         Button("Retranslate") { showRetranslateConfirmation = true }
                             .controlSize(.small)
                     }
                 }
-            } else {
+            } else if presentation.actions.contains(.translate) {
                 Button(action: onTranslate) {
                     Label("Translate into \(languageLabel)", systemImage: "globe")
                 }
@@ -2233,6 +2789,228 @@ private struct SentenceRow: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This replaces the current translation with a new draft for review.")
+        }
+        .sheet(isPresented: $showTranslationEditor) {
+            AssistantResultEditSheet(text: $editedTranslation) {
+                onEditTranslation(editedTranslation)
+                showTranslationEditor = false
+            }
+        }
+    }
+}
+
+/// Shared editor keeps macOS and iPad lifecycle semantics identical: saving creates an edited draft.
+private struct AssistantResultEditSheet: View {
+    @Binding var text: String
+    let onSave: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Edit assistant result")
+                .font(.headline)
+            TextEditor(text: $text)
+                .frame(minHeight: 180)
+                .accessibilityIdentifier("assistantResult.editText")
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Save draft", action: onSave)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityIdentifier("assistantResult.saveEdit")
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 360, idealWidth: 520, minHeight: 280)
+    }
+}
+
+private struct TranscriptCorrectionSheet: View {
+    let segment: TranscriptSegment
+    let hasStoredCorrection: Bool
+    let conflictChoices: [StoredTranscriptOverlayCandidate]
+    let onPreview: (TimeInterval, TimeInterval) -> Void
+    let onSave: (String, TimeInterval, TimeInterval) throws -> Void
+    let onRestore: () throws -> Void
+    let onResolveConflict: (String) throws -> Void
+    @State private var correctedText: String
+    @State private var correctedStart: TimeInterval
+    @State private var correctedEnd: TimeInterval
+    @State private var validationError: String?
+    @Environment(\.dismiss) private var dismiss
+
+    init(
+        segment: TranscriptSegment,
+        hasStoredCorrection: Bool,
+        conflictChoices: [StoredTranscriptOverlayCandidate],
+        onPreview: @escaping (TimeInterval, TimeInterval) -> Void,
+        onSave: @escaping (String, TimeInterval, TimeInterval) throws -> Void,
+        onRestore: @escaping () throws -> Void,
+        onResolveConflict: @escaping (String) throws -> Void
+    ) {
+        self.segment = segment
+        self.hasStoredCorrection = hasStoredCorrection
+        self.conflictChoices = conflictChoices
+        self.onPreview = onPreview
+        self.onSave = onSave
+        self.onRestore = onRestore
+        self.onResolveConflict = onResolveConflict
+        _correctedText = State(initialValue: segment.spokenText)
+        _correctedStart = State(initialValue: segment.start)
+        _correctedEnd = State(initialValue: segment.end)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Corrected sentence") {
+                    TextEditor(text: $correctedText)
+                        .frame(minHeight: 120)
+                        .accessibilityIdentifier("transcript.text")
+                }
+                Section("Timing") {
+                    LabeledContent("Start") {
+                        TextField(
+                            "Start",
+                            value: $correctedStart,
+                            format: .number.precision(.fractionLength(2))
+                        )
+                        .multilineTextAlignment(.trailing)
+#if os(iOS)
+                        .keyboardType(.decimalPad)
+#endif
+                        .accessibilityIdentifier("transcript.start")
+                    }
+                    LabeledContent("End") {
+                        TextField(
+                            "End",
+                            value: $correctedEnd,
+                            format: .number.precision(.fractionLength(2))
+                        )
+                        .multilineTextAlignment(.trailing)
+#if os(iOS)
+                        .keyboardType(.decimalPad)
+#endif
+                        .accessibilityIdentifier("transcript.end")
+                    }
+                    Text("Sentence timing must remain inside the chapter, last at least 0.25 seconds, and not overlap its neighbors.")
+                        .font(.caption)
+                        .foregroundStyle(Palette.dim)
+                }
+                if let validationError {
+                    Section {
+                        Label(validationError, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Palette.terracotta)
+                    }
+                }
+                if conflictChoices.count > 1 {
+                    Section("Choose correction") {
+                        Text("This sentence was corrected on more than one device. Choose the version to keep.")
+                            .font(.caption)
+                            .foregroundStyle(Palette.dim)
+                        ForEach(conflictChoices) { candidate in
+                            Button {
+                                do {
+                                    try onResolveConflict(candidate.id)
+                                    dismiss()
+                                } catch {
+                                    validationError = error.localizedDescription
+                                }
+                            } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(candidate.overlay.correctedText)
+                                        .lineLimit(2)
+                                    Text("\(formatClock(candidate.overlay.correctedStart))–\(formatClock(candidate.overlay.correctedEnd)) · \(candidate.overlay.provenance.deviceID)")
+                                        .font(.caption)
+                                        .foregroundStyle(Palette.dim)
+                                }
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            }
+                            .accessibilityIdentifier("transcript.conflictChoice.\(candidate.id)")
+                        }
+                    }
+                    .accessibilityIdentifier("transcript.conflict")
+                }
+                if hasStoredCorrection {
+                    Section {
+                        Button("Restore Original", role: .destructive) {
+                            do {
+                                try onRestore()
+                                dismiss()
+                            } catch {
+                                validationError = error.localizedDescription
+                            }
+                        }
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("transcript.restore")
+                    }
+                }
+            }
+            .navigationTitle("Edit sentence")
+#if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+#endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+#if os(iOS)
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        onPreview(correctedStart, correctedEnd)
+                    } label: {
+                        Label("Preview", systemImage: "play.fill")
+                    }
+                    .disabled(!hasValidDraft)
+                    .accessibilityIdentifier("transcript.preview")
+
+                    Button("Save") {
+                        saveCorrection()
+                    }
+                    .disabled(!hasValidDraft)
+                    .accessibilityIdentifier("transcript.save")
+                }
+#else
+                ToolbarItem(placement: .confirmationAction) {
+                    HStack(spacing: 8) {
+                        Button {
+                            onPreview(correctedStart, correctedEnd)
+                        } label: {
+                            Label("Preview", systemImage: "play.fill")
+                        }
+                        .disabled(!hasValidDraft)
+                        .accessibilityIdentifier("transcript.preview")
+
+                        Button("Save") {
+                            saveCorrection()
+                        }
+                        .disabled(!hasValidDraft)
+                        .accessibilityIdentifier("transcript.save")
+                    }
+                }
+#endif
+            }
+        }
+#if os(macOS)
+        .frame(minWidth: 520, minHeight: 440)
+#endif
+    }
+
+    private var trimmedText: String {
+        correctedText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var hasValidDraft: Bool {
+        !trimmedText.isEmpty && correctedStart >= 0 && correctedEnd - correctedStart >= 0.25
+    }
+
+    private func saveCorrection() {
+        do {
+            try onSave(trimmedText, correctedStart, correctedEnd)
+            dismiss()
+        } catch {
+            validationError = error.localizedDescription
         }
     }
 }
@@ -2252,6 +3030,8 @@ extension SentenceRow: Equatable {
             && lhs.studyLanguageKey == rhs.studyLanguageKey
             && lhs.studyLearningLemmas == rhs.studyLearningLemmas
             && lhs.studyKnownLemmas == rhs.studyKnownLemmas
+            && lhs.hasStoredCorrection == rhs.hasStoredCorrection
+            && lhs.listenFirstVisibility == rhs.listenFirstVisibility
             && lhs.type.body == rhs.type.body
             && lhs.type.word == rhs.type.word
             && lhs.type.line == rhs.type.line
@@ -2276,32 +3056,45 @@ private struct WordToken: View {
     var onMarkKnown = MainActorAction()
 
     var body: some View {
-        Text(word.text)
-            .font(font.font(size: fontSize, bold: bold || isCurrent))
-            .foregroundStyle(isCurrent ? Palette.inkOnGold : (dimmed ? Palette.dim : Palette.ink))
-            .padding(.horizontal, isCurrent ? 4 : 0)
-            .padding(.vertical, 1)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(isCurrent ? Palette.gold : Color.clear)
-            )
-            .overlay(alignment: .bottom) {
-                if studyOverlayEnabled, familiarity != .known {
-                    Rectangle()
-                        .fill(Palette.terracotta)
-                        .frame(height: familiarity == .learning ? 1 : 1.5)
-                        .padding(.horizontal, isCurrent ? 4 : 0)
-                        .opacity((familiarity == .learning ? 0.7 : 1) * (dimmed ? 0.55 : 1))
+        Button {
+            onInspect()
+        } label: {
+            Text(word.text)
+                .font(font.font(size: fontSize, bold: bold || isCurrent))
+                .foregroundStyle(isCurrent ? Palette.inkOnGold : (dimmed ? Palette.dim : Palette.ink))
+                .padding(.horizontal, isCurrent ? 4 : 0)
+                .padding(.vertical, 1)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(isCurrent ? Palette.gold : Color.clear)
+                )
+                .overlay(alignment: .bottom) {
+                    if studyOverlayEnabled, familiarity != .known {
+                        Rectangle()
+                            .fill(Palette.terracotta)
+                            .frame(height: familiarity == .learning ? 1 : 1.5)
+                            .padding(.horizontal, isCurrent ? 4 : 0)
+                            .opacity((familiarity == .learning ? 0.7 : 1) * (dimmed ? 0.7 : 1))
+                    }
                 }
-            }
-            .onTapGesture { onSeek(); onInspect() }
-            .accessibilityValue(overlayAccessibilityValue)
-            .contextMenu {
-                Button("Play from here") { onPlayFrom() }
-                Button("Look up") { onInspect() }
-                Button("Add to vocabulary") { onSave() }
-                Button("Mark known") { onMarkKnown() }
-            }
+        }
+        .buttonStyle(.plain)
+#if os(iOS)
+        .frame(minWidth: 44, minHeight: 44)
+#endif
+        .accessibilityLabel(word.text.trimmingCharacters(in: .whitespacesAndNewlines))
+        .accessibilityValue(overlayAccessibilityValue)
+        .accessibilityIdentifier("reader.word.\(word.id)")
+        .accessibilityAction(named: "Play from here") { onPlayFrom() }
+        .accessibilityAction(named: "Look up") { onInspect() }
+        .accessibilityAction(named: "Add to vocabulary") { onSave() }
+        .accessibilityAction(named: "Mark known") { onMarkKnown() }
+        .contextMenu {
+            Button("Play from here") { onPlayFrom() }
+            Button("Look up") { onInspect() }
+            Button("Add to vocabulary") { onSave() }
+            Button("Mark known") { onMarkKnown() }
+        }
     }
 
     private var overlayAccessibilityValue: String {
@@ -2320,15 +3113,15 @@ private struct WordInspector: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var webHeight: CGFloat = 180
     @State private var showRetranslateConfirmation = false
+    @State private var showTranslationEditor = false
+    @State private var editedTranslation = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center) {
                 Text("Lookup")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Palette.mute)
-                    .textCase(.uppercase)
-                    .tracking(0.8)
+                    .font(.headline)
+                    .foregroundStyle(Palette.ink)
                 Spacer()
                 Button {
                     state.selectedWord = nil
@@ -2441,7 +3234,7 @@ private struct WordInspector: View {
                                 .padding(.vertical, 8)
                             } else if let gloss = state.selectedWordGloss {
                                 GlossBody(text: gloss.text, size: type.gloss)
-                                if gloss.status == .pending {
+                if gloss.status == .pending || gloss.status == .edited || gloss.status == .replaced {
                                     Text("Draft from \(gloss.model). Accept to keep it in the library.")
                                         .font(.system(size: 12))
                                         .foregroundStyle(Palette.gold)
@@ -2451,6 +3244,10 @@ private struct WordInspector: View {
                                             .buttonStyle(.borderedProminent)
                                             .tint(Palette.terracotta)
                                         Button("Reject") { state.rejectGloss(gloss) }
+                                        Button("Edit") {
+                                            editedTranslation = gloss.text
+                                            showTranslationEditor = true
+                                        }
                                         Button("Retranslate") { showRetranslateConfirmation = true }
                                     }
                                     .controlSize(.small)
@@ -2459,6 +3256,11 @@ private struct WordInspector: View {
                                     Text("Saved · Model: \(gloss.model)")
                                         .font(.system(size: 12))
                                         .foregroundStyle(Palette.gold)
+                                    Button("Edit") {
+                                        editedTranslation = gloss.text
+                                        showTranslationEditor = true
+                                    }
+                                    .buttonStyle(.bordered)
                                     Button("Retranslate") { showRetranslateConfirmation = true }
                                         .buttonStyle(.bordered)
                                 }
@@ -2529,11 +3331,19 @@ private struct WordInspector: View {
         } message: {
             Text("This replaces the current in-sentence meaning with a new draft for review.")
         }
+        .sheet(isPresented: $showTranslationEditor) {
+            AssistantResultEditSheet(text: $editedTranslation) {
+                if let gloss = state.selectedWordGloss {
+                    state.editGloss(gloss, text: editedTranslation)
+                }
+                showTranslationEditor = false
+            }
+        }
     }
 
     private var contextSegment: TranscriptSegment? {
         if let id = state.focusedSegmentID {
-            return state.transcript?.segments.first { $0.id == id }
+            return state.presentedTranscript?.segments.first { $0.id == id }
         }
         return state.currentSegment
     }
@@ -2541,10 +3351,8 @@ private struct WordInspector: View {
     private func inspectorCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Palette.mute)
-                .textCase(.uppercase)
-                .tracking(0.6)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Palette.ink)
             content()
         }
         .padding(18)
@@ -2567,8 +3375,6 @@ struct GlossBody: View {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text(section.title)
                                 .font(.system(size: sectionLabelSize, weight: .semibold))
-                                .textCase(.uppercase)
-                                .tracking(0.5)
                             Rectangle()
                                 .fill(Palette.line)
                                 .frame(height: 1)

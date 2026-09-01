@@ -35,6 +35,13 @@ enum DictionaryLookup {
 #endif
     }
 
+    /// Dictionary Services blocks on first use. Settings must not call this on the main actor.
+    static func installedNamesOffMain() async -> [String] {
+        await Task.detached(priority: .userInitiated) {
+            installedNames()
+        }.value
+    }
+
     static func searchOrder(
         preferredName: String?,
         language: StudyLanguage,

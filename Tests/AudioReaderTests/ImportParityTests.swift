@@ -5,6 +5,10 @@ import ZIPFoundation
 
 @Suite("Cross-platform import parity")
 struct ImportParityTests {
+    @Test("new installs follow the system appearance")
+    func defaultAppearanceFollowsSystem() {
+        #expect(AppSettings.default.appearance == AppAppearance.system.rawValue)
+    }
     @Test("EPUB text extraction uses the sandbox-safe ZIP implementation")
     func extractsEPUBText() throws {
         let fixture = try TemporaryFixture()
@@ -20,6 +24,738 @@ struct ImportParityTests {
 
         #expect(extracted?.contains("shared EPUB extraction") == true)
     }
+
+    @Test("EPUB spine sections remain independently navigable")
+    func preservesEPUBSpineSections() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let epub = try makeEPUB(
+            in: fixture.root,
+            name: "Sectioned Book",
+            title: "Sectioned Book",
+            author: "Ada Reader",
+            sections: [
+                ("Opening", "The opening section contains enough meaningful words for dictionary and translation study."),
+                ("Arrival", "The arrival section contains another complete passage for review and chapter navigation."),
+            ]
+        )
+
+        let document = try #require(EPUBParser.document(from: epub.path))
+
+        #expect(document.title == "Sectioned Book")
+        #expect(document.author == "Ada Reader")
+        #expect(document.sections.map(\.title) == ["Opening", "Arrival"])
+        #expect(document.sections[1].text.contains("another complete passage"))
+    }
+
+    @Test("EPUB 3 contents split nested chapters within one spine document")
+    func splitsEPUB3NavigationChapters() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let epub = try makeNavigationEPUB(in: fixture.root, usesNCX: false)
+
+        let document = try #require(EPUBParser.document(from: epub.path))
+
+        #expect(document.sections.map(\.title) == ["Part One", "The Arrival", "The Crossing"])
+        #expect(document.sections.map(\.navigationLevel) == [0, 1, 1])
+        #expect(document.cover?.data == navigationEPUBCoverData)
+        #expect(document.sections[0].text.contains("opening passage"))
+        #expect(!document.sections[0].text.contains("arrival chapter"))
+        #expect(document.sections[1].text.contains("arrival chapter"))
+        #expect(!document.sections[1].text.contains("crossing chapter"))
+        #expect(document.sections[2].text.contains("crossing chapter"))
+    }
+
+    @Test("EPUB 2 NCX remains a chapter-title fallback")
+    func usesEPUB2NCXNavigationFallback() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let epub = try makeNavigationEPUB(in: fixture.root, usesNCX: true)
+
+        let document = try #require(EPUBParser.document(from: epub.path))
+
+        #expect(document.sections.map(\.title) == ["Part One", "The Arrival", "The Crossing"])
+        #expect(document.sections.map(\.navigationLevel) == [0, 1, 1])
+        #expect(document.cover?.data == navigationEPUBCoverData)
+    }
+
+    @Test("EPUB cover metadata is extracted and imported as library artwork")
+    func importsEPUBCoverArtwork() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let incoming = fixture.root.appendingPathComponent("incoming", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+        let epub = try makeNavigationEPUB(in: incoming, usesNCX: false)
+
+        let document = try #require(EPUBParser.document(from: epub.path))
+        _ = try AudiobookImportService.importFiles([epub], into: library)
+        let book = try #require(LibraryScanner.scan(root: library).first)
+        let coverPath = try #require(book.coverPath)
+
+        #expect(document.cover?.fileExtension == "png")
+        #expect(document.cover?.data == navigationEPUBCoverData)
+        #expect(URL(fileURLWithPath: coverPath).pathExtension.lowercased() == "png")
+        #expect(try Data(contentsOf: URL(fileURLWithPath: coverPath)) == navigationEPUBCoverData)
+    }
+
+    @Test("EPUB search reports matching contents sections with readable snippets")
+    func searchesAcrossEPUBSections() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let epub = try makeNavigationEPUB(in: fixture.root, usesNCX: false)
+        let document = try #require(EPUBParser.document(from: epub.path))
+
+        let results = EPUBParser.search("lantern", in: document)
+
+        #expect(results.map(\.sectionIndex) == [1, 2])
+        #expect(results.map(\.sectionTitle) == ["The Arrival", "The Crossing"])
+        #expect(results.allSatisfy { $0.snippet.localizedCaseInsensitiveContains("lantern") })
+    }
+
+    @Test("EPUB reader preserves short published sentences between longer prose")
+    func readerPreservesAllPublishedSentences() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let prose = "This opening sentence contains several words for the reader. Hi. This closing sentence also contains several words."
+        let epub = try makeEPUB(
+            in: fixture.root,
+            name: "Short Sentences",
+            title: "Short Sentences",
+            author: nil,
+            sections: [
+                (
+                    "Greeting",
+                    prose
+                ),
+            ]
+        )
+        let transcript = try #require(EPUBParser.readerTranscript(
+            from: epub.path,
+            sectionIndex: 0,
+            chapterID: "short-sentences"
+        ))
+
+        let published = prose.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        let reconstructed = transcript.segments.map(\.displayText).joined(separator: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+
+        #expect(reconstructed == published)
+        #expect(transcript.segments.contains { $0.displayText == "Hi." })
+    }
+
+    @Test("EPUB reader preserves published punctuation and spacing")
+    func readerPreservesPunctuationSpacing() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let prose = #"The guide said, "Hello, patient world." Please don't panic; we're completely ready."#
+        let epub = try makeEPUB(
+            in: fixture.root,
+            name: "Punctuation",
+            title: "Punctuation",
+            author: nil,
+            sections: [
+                (
+                    "Dialogue",
+                    prose
+                ),
+            ]
+        )
+        let transcript = try #require(EPUBParser.readerTranscript(
+            from: epub.path,
+            sectionIndex: 0,
+            chapterID: "punctuation"
+        ))
+
+        let published = prose.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        let reconstructed = transcript.segments.map(\.displayText).joined(separator: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+
+        #expect(reconstructed == published)
+        #expect(reconstructed.contains(#"said, "Hello, patient world.""#))
+        #expect(reconstructed.contains("don't panic; we're completely ready."))
+    }
+
+    @Test("EPUB-only file import creates a readable logical book")
+    func importsEPUBOnlyFile() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let incoming = fixture.root.appendingPathComponent("incoming", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+        let epub = try makeEPUB(
+            in: incoming,
+            name: "Readable Book",
+            title: "Readable Book",
+            author: "E. Book",
+            sections: [
+                ("One", "This EPUB-only chapter provides enough words to support reading and language study."),
+                ("Two", "A second EPUB-only chapter provides navigation without requiring any audiobook file."),
+            ]
+        )
+
+        let result = try AudiobookImportService.importFiles([epub], into: library)
+        let book = try #require(LibraryScanner.scan(root: library).first)
+
+        #expect(result.createdBook)
+        #expect(book.title == "Readable Book")
+        #expect(book.author == "E. Book")
+        #expect(book.mediaAvailability == .ebookOnly)
+        #expect(book.chapters.map(\.title) == ["One", "Two"])
+        #expect(book.chapters.allSatisfy { !$0.hasAudio && $0.ebookSectionIndex != nil })
+    }
+
+    @Test("Nested folder import discovers EPUB-only, audio-only, and paired books")
+    func importsNestedMixedCollection() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let collection = fixture.root.appendingPathComponent("collection", isDirectory: true)
+        let ebookFolder = collection.appendingPathComponent("Ebook", isDirectory: true)
+        let audioFolder = collection.appendingPathComponent("Audio", isDirectory: true)
+        let pairedFolder = collection.appendingPathComponent("Paired", isDirectory: true)
+        let nestedFolder = collection.appendingPathComponent("Shelf/Deep Ebook", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        for folder in [ebookFolder, audioFolder, pairedFolder, nestedFolder] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        _ = try makeEPUB(
+            in: ebookFolder,
+            name: "Ebook",
+            title: "Ebook",
+            author: nil,
+            sections: [("Read", "This ebook-only nested title contains enough meaningful words for a readable section.")]
+        )
+        _ = try makeEPUB(
+            in: nestedFolder,
+            name: "Deep Ebook",
+            title: "Deep Ebook",
+            author: nil,
+            sections: [("Read", "This deeply nested EPUB title remains a separate logical book in the imported collection.")]
+        )
+        try Data("audio only".utf8).write(to: audioFolder.appendingPathComponent("Audio.m4b"))
+        try Data("paired audio".utf8).write(to: pairedFolder.appendingPathComponent("Paired.m4b"))
+        _ = try makeEPUB(
+            in: pairedFolder,
+            name: "Paired",
+            title: "Paired",
+            author: nil,
+            sections: [("Read", "This paired nested title contains enough meaningful words for its companion text.")]
+        )
+
+        let results = try AudiobookImportService.importFolder(collection, into: library)
+        let books = LibraryScanner.scan(root: library)
+
+        #expect(results.count == 4)
+        #expect(books.contains { $0.title == "Deep Ebook" })
+        #expect(Set(books.map(\.mediaAvailability)) == [.ebookOnly, .audioOnly, .audioAndEbook])
+    }
+
+    @Test("EPUB-only folder import rejects unreadable books before creating a destination")
+    func rejectsUnreadableEPUBOnlyFolder() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let source = fixture.root.appendingPathComponent("Unreadable", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try Data("not an EPUB archive".utf8).write(to: source.appendingPathComponent("Unreadable.epub"))
+
+        var rejection: AudiobookImportError?
+        do {
+            _ = try AudiobookImportService.importFolder(source, into: library)
+        } catch let error as AudiobookImportError {
+            rejection = error
+        } catch {
+            throw error
+        }
+
+        #expect({
+            if case .invalidEbook? = rejection { return true }
+            return false
+        }())
+        #expect(!FileManager.default.fileExists(atPath: library.path))
+    }
+
+    @Test("Explicit audio attachment preserves EPUB identity and reading state keys")
+    func explicitlyAttachesAudioToEPUBBook() async throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let incoming = fixture.root.appendingPathComponent("incoming", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+        let epub = try makeEPUB(
+            in: incoming,
+            name: "Attach Later",
+            title: "Attach Later",
+            author: nil,
+            sections: [("Read", "This imported EPUB retains its logical identity when audio is explicitly attached later.")]
+        )
+        let imported = try AudiobookImportService.importFiles([epub], into: library)
+        let before = try #require(LibraryScanner.scan(root: library).first)
+        let audio = incoming.appendingPathComponent("Attach Later.m4b")
+        try Data("later audio bytes".utf8).write(to: audio)
+
+        _ = try AudiobookImportService.addCompanionFiles([audio], to: imported.folder)
+        let after = try #require(LibraryScanner.scan(root: library).first)
+
+        #expect(after.id == before.id)
+        #expect(after.ebookPath == before.ebookPath)
+        #expect(after.mediaAvailability == .audioAndEbook)
+        #expect(after.chapters.contains { $0.hasAudio })
+        #expect(after.chapters.contains { $0.id == before.chapters.first?.id })
+        let durationLoaded = await LibraryScanner.loadDurations(for: after)
+        #expect(durationLoaded.chapters.contains { $0.id == before.chapters.first?.id })
+    }
+
+    @MainActor
+    @Test("Opening an EPUB-only section prepares published text without loading audio")
+    func opensEPUBOnlySectionWithoutAudio() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let bookFolder = fixture.root.appendingPathComponent("Book", isDirectory: true)
+        try FileManager.default.createDirectory(at: bookFolder, withIntermediateDirectories: true)
+        let epub = try makeEPUB(
+            in: bookFolder,
+            name: "Book",
+            title: "Book",
+            author: nil,
+            sections: [("First", "Published EPUB wording supports dictionary vocabulary translation summary chat quiz and review.")]
+        )
+        let book = try #require(LibraryScanner.scan(root: fixture.root).first)
+        let chapter = try #require(book.chapters.first)
+        let state = AppState()
+        state.books = [book]
+
+        state.open(chapter: chapter, in: book, autoplay: true)
+
+        #expect(state.player.loadedPath == nil)
+        #expect(state.transcript?.source == "EPUB")
+        #expect(state.transcript?.segments.first?.displayText.contains("Published EPUB wording") == true)
+        #expect(state.selectedChapterID == chapter.id)
+        let vocab = VocabEntry(
+            id: "epub-word",
+            word: "Published",
+            context: "Published EPUB wording supports dictionary vocabulary translation summary chat quiz and review.",
+            bookID: book.id,
+            bookTitle: book.title,
+            chapterID: chapter.id,
+            chapterTitle: chapter.title,
+            timestamp: 0,
+            addedAt: Date()
+        )
+        #expect(!state.canPlayVocabSentence(vocab))
+        #expect(epub.resolvingSymlinksInPath().path == book.ebookPath.map {
+            URL(fileURLWithPath: $0).resolvingSymlinksInPath().path
+        })
+    }
+
+    @MainActor
+    @Test("Contents and search results open the matching EPUB chapter")
+    func opensEPUBNavigationResult() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let bookFolder = fixture.root.appendingPathComponent("Navigation Book", isDirectory: true)
+        try FileManager.default.createDirectory(at: bookFolder, withIntermediateDirectories: true)
+        _ = try makeNavigationEPUB(in: bookFolder, usesNCX: false)
+        let book = try #require(LibraryScanner.scan(root: fixture.root).first)
+        let state = AppState()
+        state.books = [book]
+
+        let opened = state.openEbookSection(at: 2, in: book, matching: "lantern")
+
+        #expect(opened)
+        #expect(state.selectedChapter?.title == "The Crossing")
+        #expect(state.transcript?.segments.contains { $0.displayText.contains("crossing chapter") } == true)
+        #expect(state.scrollSegmentID != nil)
+    }
+
+    @MainActor
+    @Test("legacy EPUB-only catalog repair survives reload and opens title and chapter text")
+    func repairsLegacyEPUBOnlySectionIdentity() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let bookFolder = fixture.root.appendingPathComponent("Repair Book", isDirectory: true)
+        try FileManager.default.createDirectory(at: bookFolder, withIntermediateDirectories: true)
+        _ = try makeNavigationEPUB(in: bookFolder, usesNCX: false)
+        let scanned = try #require(LibraryScanner.scan(root: fixture.root).first)
+        let store = LocalSQLiteStore(fileURL: fixture.root.appendingPathComponent("library.sqlite"))
+        let legacy = StoredBook(
+            id: scanned.bookID,
+            title: scanned.title,
+            author: scanned.author,
+            source: scanned.source.rawValue,
+            chapters: scanned.chapters.map {
+                StoredChapter(id: $0.chapterID, index: $0.index, title: $0.title)
+            }
+        )
+        try store.saveBook(legacy)
+        try store.saveAssets(StoredLocalAsset.snapshots(for: scanned), bookID: legacy.id)
+
+        let restored = try #require(Persistence.loadCatalogBooks(database: store).first)
+
+        #expect(restored.chapters.map(\.ebookSectionIndex) == [0, 1, 2])
+        #expect(restored.chapters.allSatisfy { $0.ebookSectionIndex == $0.index })
+        #expect(try store.loadBooks().first?.chapters.map(\.ebookSectionIndex) == [0, 1, 2])
+        #expect(try store.pendingMutations().count == 1)
+
+        let state = AppState()
+        state.textSource = .spoken
+        state.books = [restored]
+        let titlePage = try #require(restored.chapters.first)
+        state.open(chapter: titlePage, in: restored, autoplay: false)
+
+        #expect(state.selectedChapter?.ebookSectionIndex == 0)
+        #expect(state.transcript?.segments.first?.displayText.contains("opening passage") == true)
+        #expect(state.readerTextSource == .original)
+        #expect(state.textSource == .spoken)
+
+        #expect(state.openEbookSection(at: 2, in: restored))
+        #expect(state.selectedChapter?.title == "The Crossing")
+        #expect(state.transcript?.segments.contains { $0.displayText.contains("crossing chapter") } == true)
+    }
+
+    @Test("legacy repair never assigns EPUB sections to paired audio chapters")
+    func doesNotRepairPairedAudioChaptersAsEbookSections() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let folder = fixture.root.appendingPathComponent("Paired", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let epub = try makeEPUB(
+            in: folder,
+            name: "Paired",
+            title: "Paired",
+            author: nil,
+            sections: [("One", "Published text belongs to a paired audiobook and must not replace audio chapter identity.")]
+        )
+        let audio = folder.appendingPathComponent("Paired.m4b")
+        try Data("audio".utf8).write(to: audio)
+        let book = Book(
+            id: "paired-book",
+            title: "Paired",
+            folderPath: folder.path,
+            ebookPath: epub.path,
+            chapters: [Chapter(id: "audio-chapter", index: 0, title: "Audio", audioPath: audio.path)]
+        )
+        let store = LocalSQLiteStore(fileURL: fixture.root.appendingPathComponent("library.sqlite"))
+        let stored = StoredBook(book)
+        try store.saveBook(stored)
+        try store.saveAssets(StoredLocalAsset.snapshots(for: book), bookID: stored.id)
+
+        let restored = try #require(Persistence.loadCatalogBooks(database: store).first)
+
+        #expect(restored.mediaAvailability == .audioAndEbook)
+        #expect(restored.chapters.first?.ebookSectionIndex == nil)
+        #expect(try store.pendingMutations().isEmpty)
+    }
+
+    @Test("legacy EPUB repair rejects malformed and partially repaired chapter mappings")
+    func doesNotRepairMalformedEPUBOnlyChapterMappings() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let folder = fixture.root.appendingPathComponent("Malformed Repair", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        _ = try makeNavigationEPUB(in: folder, usesNCX: false)
+        let scanned = try #require(LibraryScanner.scan(root: fixture.root).first)
+        #expect(scanned.chapters.count == 3)
+
+        let cases: [(name: String, positions: [Int], partialSectionIndex: Int?)] = [
+            ("duplicate", [0, 0, 2], nil),
+            ("negative", [-1, 0, 1], nil),
+            ("missing-and-out-of-range", [0, 1, 3], nil),
+            ("missing-chapter", [0, 1], nil),
+            ("partial", [0, 1, 2], 0),
+        ]
+        for testCase in cases {
+            let databaseURL = fixture.root.appendingPathComponent("\(testCase.name).sqlite")
+            let store = LocalSQLiteStore(fileURL: databaseURL)
+            var chapters = zip(scanned.chapters, testCase.positions).enumerated().map { offset, pair in
+                StoredChapter(
+                    id: pair.0.chapterID,
+                    index: pair.1,
+                    title: pair.0.title,
+                    ebookSectionIndex: testCase.partialSectionIndex.flatMap { offset == 0 ? $0 : nil }
+                )
+            }
+            if testCase.name == "duplicate" {
+                chapters[0].id = ChapterID(rawValue: "z-duplicate")
+                chapters[1].id = ChapterID(rawValue: "a-duplicate")
+            }
+            let legacy = StoredBook(
+                id: scanned.bookID,
+                title: scanned.title,
+                author: scanned.author,
+                source: scanned.source.rawValue,
+                chapters: chapters
+            )
+            try store.saveBook(legacy)
+            try store.saveAssets(StoredLocalAsset.snapshots(for: scanned), bookID: legacy.id)
+
+            _ = try Persistence.loadCatalogBooks(database: store)
+            let reloaded = try #require(try store.loadBooks().first)
+            let chaptersByID = Dictionary(uniqueKeysWithValues: reloaded.chapters.map { ($0.id, $0) })
+
+            #expect(reloaded.id == legacy.id, "case: \(testCase.name)")
+            #expect(reloaded.title == legacy.title, "case: \(testCase.name)")
+            #expect(reloaded.author == legacy.author, "case: \(testCase.name)")
+            #expect(reloaded.source == legacy.source, "case: \(testCase.name)")
+            #expect(chaptersByID.count == legacy.chapters.count, "case: \(testCase.name)")
+            for chapter in legacy.chapters {
+                #expect(chaptersByID[chapter.id] == chapter, "case: \(testCase.name), chapter: \(chapter.id.rawValue)")
+            }
+            #expect(try store.pendingMutations().isEmpty, "case: \(testCase.name)")
+        }
+    }
+
+#if os(macOS)
+    @MainActor
+    @Test("macOS Apple Books reads and imports expanded EPUB downloads")
+    func macAppleBooksReadsExpandedEPUBDownloads() async throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let archive = try makeNavigationEPUB(in: fixture.root, usesNCX: false)
+        let booksRoot = fixture.root.appendingPathComponent("Books", isDirectory: true)
+        _ = try expandEPUB(archive, in: booksRoot)
+
+        let items = try await MacAppleBooksLibrary.readDownloadedBooks(in: booksRoot)
+        let item = try #require(items.first)
+
+        #expect(items.count == 1)
+        #expect(item.title == "Navigation Book")
+        #expect(item.author == "Page Turner")
+        #expect(item.artworkData == navigationEPUBCoverData)
+        #expect(!item.isProtected)
+        #expect(item.canImport)
+
+        let importedRoot = fixture.root.appendingPathComponent("Imported", isDirectory: true)
+        try MacAppleBooksLibrary().importAudiobook(item, into: importedRoot)
+        let book = try #require(LibraryScanner.scan(root: importedRoot).first)
+        let coverPath = try #require(book.coverPath)
+
+        #expect(book.title == "Navigation Book")
+        #expect(book.author == "Page Turner")
+        #expect(book.source == .appleBooks)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: coverPath)) == navigationEPUBCoverData)
+    }
+
+    @Test("macOS Apple Books keeps encrypted EPUB reading content unavailable")
+    func macAppleBooksRejectsEncryptedExpandedEPUBContent() async throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let archive = try makeNavigationEPUB(in: fixture.root, usesNCX: false)
+        let booksRoot = fixture.root.appendingPathComponent("Books", isDirectory: true)
+        let expanded = try expandEPUB(archive, in: booksRoot)
+        try Data("""
+        <encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <EncryptedData xmlns="http://www.w3.org/2001/04/xmlenc#">
+            <EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/>
+            <CipherData><CipherReference URI="OEBPS/content.xhtml"/></CipherData>
+          </EncryptedData>
+        </encryption>
+        """.utf8).write(to: expanded.appendingPathComponent("META-INF/encryption.xml"))
+
+        let item = try #require(
+            try await MacAppleBooksLibrary.readDownloadedBooks(in: booksRoot).first
+        )
+
+        #expect(item.isProtected)
+        #expect(!item.canImport)
+    }
+
+    @Test("macOS Apple Books allows expanded EPUBs with obfuscated fonts")
+    func macAppleBooksAllowsExpandedEPUBWithObfuscatedFonts() async throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let archive = try makeNavigationEPUB(in: fixture.root, usesNCX: false)
+        let booksRoot = fixture.root.appendingPathComponent("Books", isDirectory: true)
+        let expanded = try expandEPUB(archive, in: booksRoot)
+        let fonts = expanded.appendingPathComponent("OEBPS/fonts", isDirectory: true)
+        try FileManager.default.createDirectory(at: fonts, withIntermediateDirectories: true)
+        try Data("obfuscated font fixture".utf8).write(to: fonts.appendingPathComponent("body.otf"))
+        try Data("""
+        <encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <EncryptedData xmlns="http://www.w3.org/2001/04/xmlenc#">
+            <EncryptionMethod Algorithm="http://www.idpf.org/2008/embedding"/>
+            <CipherData><CipherReference URI="OEBPS/fonts/body.otf"/></CipherData>
+          </EncryptedData>
+        </encryption>
+        """.utf8).write(to: expanded.appendingPathComponent("META-INF/encryption.xml"))
+
+        let item = try #require(
+            try await MacAppleBooksLibrary.readDownloadedBooks(in: booksRoot).first
+        )
+
+        #expect(item.title == "Navigation Book")
+        #expect(!item.isProtected)
+        #expect(item.canImport)
+    }
+
+    @Test("macOS Apple Books exposes only accessible downloaded media")
+    func macAppleBooksImportConstraint() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let epub = try makeEPUB(
+            in: fixture.root,
+            name: "Apple Book",
+            title: "Apple Book",
+            author: "Book Author",
+            sections: [("Read", "This accessible downloaded EPUB contains readable published words for import.")]
+        )
+        let item = MacAppleBookItem(
+            id: epub.path,
+            title: "Apple Book",
+            author: "Book Author",
+            duration: 0,
+            location: epub,
+            artworkData: nil,
+            isProtected: false,
+            isCloud: false,
+            kind: .ebook
+        )
+        var protected = item
+        protected.isProtected = true
+        var cloud = item
+        cloud.isCloud = true
+
+        #expect(item.canImport)
+        #expect(!protected.canImport)
+        #expect(!cloud.canImport)
+    }
+
+    @MainActor
+    @Test("macOS Apple Books attaches either missing companion without replacing existing media")
+    func macAppleBooksAttachesMissingCompanions() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let incoming = fixture.root.appendingPathComponent("incoming", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+        let epub = try makeEPUB(
+            in: incoming,
+            name: "Apple Companion",
+            title: "Apple Companion",
+            author: "Book Author",
+            sections: [("Read", "This Apple Books EPUB remains readable after its audiobook companion is attached.")]
+        )
+        let audio = incoming.appendingPathComponent("Apple Companion.m4b")
+        try Data("apple books companion audio".utf8).write(to: audio)
+        let appleBooks = MacAppleBooksLibrary()
+
+        let ebookOnly = try AudiobookImportService.importFiles([epub], into: library).folder
+        let audioItem = MacAppleBookItem(
+            id: audio.path,
+            title: "Apple Companion",
+            author: "Book Author",
+            duration: 0,
+            location: audio,
+            artworkData: nil,
+            isProtected: false,
+            isCloud: false,
+            kind: .audiobook
+        )
+
+        #expect(try appleBooks.addCompanion(audioItem, to: ebookOnly, required: .audiobook) == [audio.lastPathComponent])
+        let pairedFromEbook = try #require(LibraryScanner.scan(root: library).first)
+        let attachedEbookPath = try #require(pairedFromEbook.ebookPath)
+        #expect(pairedFromEbook.mediaAvailability == .audioAndEbook)
+        #expect(FileManager.default.fileExists(atPath: attachedEbookPath))
+        #expect(try appleBooks.addCompanion(audioItem, to: ebookOnly, required: .audiobook).isEmpty)
+        #expect(LibraryScanner.scan(root: library).first?.mediaAvailability == .audioAndEbook)
+
+        let secondLibrary = fixture.root.appendingPathComponent("second-library", isDirectory: true)
+        let audioOnly = try AudiobookImportService.importFiles([audio], into: secondLibrary).folder
+        let ebookItem = MacAppleBookItem(
+            id: epub.path,
+            title: "Apple Companion",
+            author: "Book Author",
+            duration: 0,
+            location: epub,
+            artworkData: nil,
+            isProtected: false,
+            isCloud: false,
+            kind: .ebook
+        )
+
+        #expect(try appleBooks.addCompanion(ebookItem, to: audioOnly, required: .ebook) == [epub.lastPathComponent])
+        let pairedFromAudio = try #require(LibraryScanner.scan(root: secondLibrary).first)
+        #expect(pairedFromAudio.mediaAvailability == .audioAndEbook)
+        #expect(pairedFromAudio.chapters.contains { $0.hasAudio })
+    }
+
+    @MainActor
+    @Test("macOS Apple Books rejects a second same-type companion without mutating the book")
+    func macAppleBooksRejectsSameTypeCompanionsWithoutMutation() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let incoming = fixture.root.appendingPathComponent("incoming", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+        let firstEPUB = try makeEPUB(
+            in: incoming,
+            name: "First Edition",
+            title: "First Edition",
+            author: "Book Author",
+            sections: [("Read", "The first EPUB must remain the effective readable publication after rejection, preserving every published sentence and the current reading position for the selected book.")]
+        )
+        let secondEPUB = try makeEPUB(
+            in: incoming,
+            name: "Second Edition",
+            title: "Second Edition",
+            author: "Book Author",
+            sections: [("Read", "This different EPUB contains enough readable publication text for validation but must never be copied into the selected book or become its effective reading content.")]
+        )
+        let firstAudio = incoming.appendingPathComponent("First Audio.m4b")
+        let secondAudio = incoming.appendingPathComponent("Second Audio.m4b")
+        try Data("first audio bytes".utf8).write(to: firstAudio)
+        try Data("different second audio bytes".utf8).write(to: secondAudio)
+        let appleBooks = MacAppleBooksLibrary()
+
+        let ebookOnly = try AudiobookImportService.importFiles([firstEPUB], into: library).folder
+        let ebookSnapshot = try directorySnapshot(ebookOnly)
+        let secondEPUBItem = MacAppleBookItem(
+            id: secondEPUB.path,
+            title: "Second Edition",
+            author: "Book Author",
+            duration: 0,
+            location: secondEPUB,
+            artworkData: nil,
+            isProtected: false,
+            isCloud: false,
+            kind: .ebook
+        )
+        #expect(throws: AudiobookImportError.self) {
+            try appleBooks.addCompanion(secondEPUBItem, to: ebookOnly, required: .audiobook)
+        }
+        #expect(try directorySnapshot(ebookOnly) == ebookSnapshot)
+        #expect(LibraryScanner.scan(root: library).first?.ebookPath?.hasSuffix("First Edition.epub") == true)
+
+        let secondLibrary = fixture.root.appendingPathComponent("second-library", isDirectory: true)
+        let audioOnly = try AudiobookImportService.importFiles([firstAudio], into: secondLibrary).folder
+        let audioSnapshot = try directorySnapshot(audioOnly)
+        let secondAudioItem = MacAppleBookItem(
+            id: secondAudio.path,
+            title: "Second Audio",
+            author: "Book Author",
+            duration: 0,
+            location: secondAudio,
+            artworkData: nil,
+            isProtected: false,
+            isCloud: false,
+            kind: .audiobook
+        )
+        #expect(throws: AudiobookImportError.self) {
+            try appleBooks.addCompanion(secondAudioItem, to: audioOnly, required: .ebook)
+        }
+        #expect(try directorySnapshot(audioOnly) == audioSnapshot)
+        #expect(LibraryScanner.scan(root: secondLibrary).first?.chapters.first?.audioPath.hasSuffix("First Audio.m4b") == true)
+    }
+
+    @Test("macOS Apple Books derives one unambiguous missing capability while metadata-only books allow either")
+    func macAppleBooksCompanionRequirementsFollowMediaAvailability() {
+        #expect(MacAppleBooksCompanionRequirement(mediaAvailability: .ebookOnly) == .audiobook)
+        #expect(MacAppleBooksCompanionRequirement(mediaAvailability: .audioOnly) == .ebook)
+        #expect(MacAppleBooksCompanionRequirement(mediaAvailability: .metadataOnly) == .either)
+        #expect(MacAppleBooksCompanionRequirement(mediaAvailability: .audioAndEbook) == nil)
+    }
+#endif
 
     @Test("File import copies audio and companion ebook with source metadata")
     func importsFiles() throws {
@@ -131,9 +867,14 @@ struct ImportParityTests {
         let library = fixture.root.appendingPathComponent("library", isDirectory: true)
         try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
         let audio = incoming.appendingPathComponent("Study Book.m4b")
-        let ebook = incoming.appendingPathComponent("Study Book.epub")
+        let ebook = try makeEPUB(
+            in: incoming,
+            name: "Study Book",
+            title: "Study Book",
+            author: nil,
+            sections: [("Read", "This later companion ebook contains enough meaningful published words for alignment.")]
+        )
         try Data("stable audiobook content".utf8).write(to: audio)
-        try Data("later ebook content".utf8).write(to: ebook)
 
         try AudiobookImportService.importFiles([audio], into: library)
         try AudiobookImportService.importFiles([audio, ebook], into: library)
@@ -301,98 +1042,36 @@ struct ImportParityTests {
         #expect(different.belongs(to: chapter) == false)
     }
 
-    @Test("Chapter readiness is computed once from matching transcript identities")
-    func computesChapterReadiness() {
-        let embedded = Chapter(
-            id: "embedded-two",
-            index: 1,
-            title: "Embedded Two",
-            audioPath: "/tmp/book.m4b",
-            duration: 120,
-            startTime: 42.5
-        )
-        let ordinary = Chapter(
-            id: "ordinary",
-            index: 0,
-            title: "Ordinary",
-            audioPath: "/tmp/chapter.mp3",
-            duration: 60,
-            startTime: nil
-        )
-        let book = Book(
-            id: "book",
-            title: "Book",
-            author: nil,
-            folderPath: "/tmp",
-            coverPath: nil,
-            ebookPath: nil,
-            chapters: [embedded, ordinary]
-        )
-        let staleEmbedded = Transcript(
-            chapterID: embedded.id,
-            audioPath: embedded.audioPath,
-            createdAt: Date(),
-            locale: "en-US",
-            segments: [],
-            source: "SpeechAnalyzer",
-            ebookAligned: false
-        )
-        let ordinaryTranscript = Transcript(
-            chapterID: ordinary.id,
-            audioPath: ordinary.audioPath,
-            createdAt: Date(),
-            locale: "en-US",
-            segments: [],
-            source: "SpeechAnalyzer",
-            ebookAligned: false
-        )
-
-        let ready = Persistence.readyChapterIDs(in: [book], transcripts: [staleEmbedded, ordinaryTranscript])
-
-        #expect(ready == [ordinary.id])
-    }
-
-    @Test("Imported-book chapter identities survive iOS container path changes")
-    func preservesImportedBookChapterIdentityAcrossContainerChanges() {
-        let oldPath = "/private/var/mobile/Containers/Data/Application/OLD/Documents/ImportedBooks/The Ride/book.m4b"
-        let currentPath = "/var/mobile/Containers/Data/Application/NEW/Documents/ImportedBooks/The Ride/book.m4b"
-
-        #expect(LibraryScanner.stableID("\(oldPath)#0.000") == LibraryScanner.stableID("\(currentPath)#0.000"))
-    }
-
-    @Test("Readiness recovers transcripts saved under an earlier iOS container")
-    func recoversTranscriptAcrossContainerChanges() {
-        let oldPath = "/private/var/mobile/Containers/Data/Application/OLD/Documents/ImportedBooks/The Ride/book.m4b"
-        let currentPath = "/var/mobile/Containers/Data/Application/NEW/Documents/ImportedBooks/The Ride/book.m4b"
-        let chapter = Chapter(
-            id: LibraryScanner.stableID("\(currentPath)#42.500"),
-            index: 1,
-            title: "Chapter Two",
-            audioPath: currentPath,
-            duration: 120,
-            startTime: 42.5
-        )
-        let transcript = Transcript(
-            chapterID: "legacy-absolute-path-id",
-            audioPath: oldPath,
-            chapterStart: 42.5,
-            createdAt: Date(),
-            locale: "en-US",
-            segments: [],
-            source: "SpeechAnalyzer",
-            ebookAligned: false
-        )
-        let book = Book(
-            id: "book",
+    @Test("vNext imported book chapter and asset identities survive iOS container path changes")
+    func preservesVNextImportedBookIdentityAcrossContainerChanges() {
+        let oldFolder = "/private/var/mobile/Containers/Data/Application/OLD/Documents/ImportedBooks-vNext/The Ride"
+        let currentFolder = "/var/mobile/Containers/Data/Application/NEW/Documents/ImportedBooks-vNext/The Ride"
+        let oldPath = "\(oldFolder)/book.m4b"
+        let currentPath = "\(currentFolder)/book.m4b"
+        let oldBookID = LibraryScanner.stableID(oldFolder)
+        let currentBookID = LibraryScanner.stableID(currentFolder)
+        let oldChapterID = LibraryScanner.stableID("\(oldPath)#0.000")
+        let currentChapterID = LibraryScanner.stableID("\(currentPath)#0.000")
+        let oldBook = Book(
+            id: oldBookID,
             title: "The Ride",
-            author: nil,
-            folderPath: currentPath,
-            coverPath: nil,
-            ebookPath: nil,
-            chapters: [chapter]
+            folderPath: oldFolder,
+            chapters: [Chapter(id: oldChapterID, index: 0, title: "One", audioPath: oldPath, startTime: 0)]
+        )
+        let currentBook = Book(
+            id: currentBookID,
+            title: "The Ride",
+            folderPath: currentFolder,
+            chapters: [Chapter(id: currentChapterID, index: 0, title: "One", audioPath: currentPath, startTime: 0)]
         )
 
-        #expect(Persistence.readyChapterIDs(in: [book], transcripts: [transcript]) == [chapter.id])
+        #expect(oldBookID == currentBookID)
+        #expect(oldChapterID == currentChapterID)
+        #expect(StoredLocalAsset.snapshots(for: oldBook).map(\.id) == StoredLocalAsset.snapshots(for: currentBook).map(\.id))
+        #expect(
+            LibraryScanner.stableID("/old/Documents/ImportedBooks/Legacy/book.m4b")
+                == LibraryScanner.stableID("/new/Documents/ImportedBooks/Legacy/book.m4b")
+        )
     }
 
     @Test("Chapter translation groups sentences by the configured block size")
@@ -411,6 +1090,10 @@ struct ImportParityTests {
 
         #expect(blocks.map(\.count) == [3, 3, 1])
         #expect(blocks.flatMap { $0 }.map(\.id) == segments.map(\.id))
+
+        let aligned = ChapterTranslationBatch.alignedBlock(containing: segments[4], in: segments, size: 3)
+        #expect(aligned.map(\.id) == ["segment-4", "segment-5", "segment-6"])
+        #expect(ChapterTranslationBatch.alignedBlock(containing: segments[0], in: segments, size: 3).map(\.id) == ["segment-1", "segment-2", "segment-3"])
     }
 
     @Test("Chapter translation parses one reviewable result per sentence")
@@ -1172,15 +1855,86 @@ struct ImportParityTests {
             contentsOf: repository.appendingPathComponent("AudioReader.xcodeproj/project.pbxproj"),
             encoding: .utf8
         )
+        let xcodeMac = try String(
+            contentsOf: repository.appendingPathComponent("Xcode/Info-macOS.plist"),
+            encoding: .utf8
+        )
+        let xcodeIOS = try String(
+            contentsOf: repository.appendingPathComponent("Xcode/Info-iOS.plist"),
+            encoding: .utf8
+        )
+        let appSource = try String(
+            contentsOf: repository.appendingPathComponent("Sources/AudioReader/AudioReaderApp.swift"),
+            encoding: .utf8
+        )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "1.0.54")
-        #expect(plist["CFBundleVersion"] as? String == "55")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "1.0.54")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "55")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 1.0.54;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 55;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "2.1.0")
+        #expect(plist["CFBundleVersion"] as? String == "93")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "2.1.0")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "93")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 2.1.0;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 93;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
+        #expect(plist["ProductAPIBaseURL"] as? String == ProductAPI.hostedProductionBaseURL.absoluteString)
+        #expect(iPadPlist["ProductAPIBaseURL"] as? String == ProductAPI.hostedProductionBaseURL.absoluteString)
+        #expect(xcodeMac.contains("ProductAPIBaseURL"))
+        #expect(xcodeIOS.contains("ProductAPIBaseURL"))
+        #expect(iPadPlist["UIBackgroundModes"] as? [String] == ["audio"])
+        #expect(xcodeIOS.contains("UIBackgroundModes"))
+        #expect(xcodeIOS.contains("audio"))
+        let iPadDocumentTypes = try #require(iPadPlist["CFBundleDocumentTypes"] as? [[String: Any]])
+        #expect(iPadDocumentTypes.contains { documentType in
+            (documentType["LSItemContentTypes"] as? [String])?.contains("org.idpf.epub-container") == true
+        })
+        #expect(xcodeIOS.contains("org.idpf.epub-container"))
+        #expect(appSource.contains(".onOpenURL"))
+        #expect(appSource.contains("importExternalEPUB"))
+        let macATS = try #require(plist["NSAppTransportSecurity"] as? [String: Any])
+        let iPadATS = try #require(iPadPlist["NSAppTransportSecurity"] as? [String: Any])
+        #expect(macATS["NSAllowsLocalNetworking"] as? Bool == true)
+        #expect(iPadATS["NSAllowsLocalNetworking"] as? Bool == true)
+    }
+
+    @Test("Xcode exposes Debug-only UI tests plus iOS companion behavior tests")
+    func keepsDeterministicUITestTargets() throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let project = try String(
+            contentsOf: repository.appendingPathComponent("AudioReader.xcodeproj/project.pbxproj"),
+            encoding: .utf8
+        )
+        let macTests = try String(
+            contentsOf: repository.appendingPathComponent("UITests/AudioReaderMacOSUITests/AudioReaderMacOSUITests.swift"),
+            encoding: .utf8
+        )
+        let iPadTests = try String(
+            contentsOf: repository.appendingPathComponent("UITests/AudioReaderIOSUITests/AudioReaderIOSUITests.swift"),
+            encoding: .utf8
+        )
+        let iPadCompanionTests = try String(
+            contentsOf: repository.appendingPathComponent("Tests/AudioReaderIOSUnitTests/DeviceAudiobookCompanionTests.swift"),
+            encoding: .utf8
+        )
+
+        #expect(project.contains("AudioReader-macOSUITests"))
+        #expect(project.contains("AudioReader-iOSUITests"))
+        #expect(project.contains("AudioReader-iOSUnitTests"))
+        #expect(project.components(separatedBy: "TEST_TARGET_NAME =").count - 1 == 3)
+        #expect(macTests.contains("--uitesting"))
+        #expect(iPadTests.contains("--uitesting"))
+        #expect(macTests.contains("--uitesting-reduce-motion"))
+        #expect(iPadTests.contains("--uitesting-reduce-motion"))
+        #expect(macTests.contains("Import Audio or EPUB"))
+        #expect(iPadTests.contains("library.importMedia"))
+        #expect(macTests.contains("transcript.restore"))
+        #expect(iPadTests.contains("transcript.restore"))
+        #expect(macTests.contains("anki.export"))
+        #expect(iPadTests.contains("anki.export"))
+        #expect(iPadCompanionTests.contains("library.addCompanion"))
+        #expect(iPadCompanionTests.contains("M4BChapterExtractor.load"))
     }
 }
 
@@ -1196,4 +1950,138 @@ private struct TemporaryFixture {
     func remove() {
         try? FileManager.default.removeItem(at: root)
     }
+}
+
+private func directorySnapshot(_ folder: URL) throws -> [String: Data] {
+    let files = try FileManager.default.contentsOfDirectory(
+        at: folder,
+        includingPropertiesForKeys: [.isRegularFileKey],
+        options: []
+    )
+    return try Dictionary(uniqueKeysWithValues: files.compactMap { file in
+        guard try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else { return nil }
+        return (file.lastPathComponent, try Data(contentsOf: file))
+    })
+}
+
+private func makeEPUB(
+    in directory: URL,
+    name: String,
+    title: String,
+    author: String?,
+    sections: [(title: String, text: String)]
+) throws -> URL {
+    let source = directory.appendingPathComponent(".\(name)-epub-source", isDirectory: true)
+    let meta = source.appendingPathComponent("META-INF", isDirectory: true)
+    let content = source.appendingPathComponent("OEBPS", isDirectory: true)
+    try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: content, withIntermediateDirectories: true)
+    try Data("application/epub+zip".utf8).write(to: source.appendingPathComponent("mimetype"))
+    try Data("""
+    <?xml version="1.0"?>
+    <container><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>
+    """.utf8).write(to: meta.appendingPathComponent("container.xml"))
+    let manifest = sections.indices.map { index in
+        "<item id=\"s\(index)\" href=\"s\(index).xhtml\" media-type=\"application/xhtml+xml\"/>"
+    }.joined()
+    let spine = sections.indices.map { "<itemref idref=\"s\($0)\"/>" }.joined()
+    let creator = author.map { "<dc:creator>\($0)</dc:creator>" } ?? ""
+    try Data("""
+    <package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>\(title)</dc:title>\(creator)</metadata><manifest>\(manifest)</manifest><spine>\(spine)</spine></package>
+    """.utf8).write(to: content.appendingPathComponent("content.opf"))
+    for (index, section) in sections.enumerated() {
+        try Data("<html><body><h1>\(section.title)</h1><p>\(section.text)</p></body></html>".utf8)
+            .write(to: content.appendingPathComponent("s\(index).xhtml"))
+    }
+    let epub = directory.appendingPathComponent("\(name).epub")
+    try FileManager.default.zipItem(at: source, to: epub, shouldKeepParent: false, compressionMethod: .deflate)
+    try FileManager.default.removeItem(at: source)
+    return epub
+}
+
+private let navigationEPUBCoverData = Data(base64Encoded:
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)!
+
+private func expandEPUB(_ archive: URL, in directory: URL) throws -> URL {
+    let expanded = directory.appendingPathComponent(
+        "0123456789ABCDEF0123456789ABCDEF.epub",
+        isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: expanded, withIntermediateDirectories: true)
+    try FileManager.default.unzipItem(at: archive, to: expanded)
+    return expanded
+}
+
+private func makeNavigationEPUB(in directory: URL, usesNCX: Bool) throws -> URL {
+    let source = directory.appendingPathComponent(".navigation-epub-source", isDirectory: true)
+    let meta = source.appendingPathComponent("META-INF", isDirectory: true)
+    let content = source.appendingPathComponent("OEBPS", isDirectory: true)
+    try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: content, withIntermediateDirectories: true)
+    try Data("application/epub+zip".utf8).write(to: source.appendingPathComponent("mimetype"))
+    try Data("""
+    <?xml version="1.0"?>
+    <container><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>
+    """.utf8).write(to: meta.appendingPathComponent("container.xml"))
+
+    let navigationManifest = usesNCX
+        ? #"<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>"#
+        : #"<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>"#
+    let spineTOC = usesNCX ? #" toc="ncx""# : ""
+    let legacyCoverMetadata = usesNCX ? #"<meta name="cover" content="cover"/>"# : ""
+    let coverProperties = usesNCX ? "" : #" properties="cover-image""#
+    try Data("""
+    <package xmlns:dc="http://purl.org/dc/elements/1.1/">
+      <metadata>
+        <dc:title>Navigation Book</dc:title>
+        <dc:creator>Page Turner</dc:creator>
+        \(legacyCoverMetadata)
+      </metadata>
+      <manifest>
+        <item id="content" href="content.xhtml" media-type="application/xhtml+xml"/>
+        <item id="cover" href="images/cover.png" media-type="image/png"\(coverProperties)/>
+        \(navigationManifest)
+      </manifest>
+      <spine\(spineTOC)><itemref idref="content"/></spine>
+    </package>
+    """.utf8).write(to: content.appendingPathComponent("content.opf"))
+
+    try Data("""
+    <html><body>
+      <h1 id="part-one">Part One</h1><p>This opening passage introduces the setting with enough published words for a reader.</p>
+      <h2 id="arrival">Arrival Heading</h2><p>The arrival chapter carries a lantern through the rain for careful language study.</p>
+      <h2 id="crossing">Crossing Heading</h2><p>The crossing chapter raises the lantern beside the river and finishes the journey.</p>
+    </body></html>
+    """.utf8).write(to: content.appendingPathComponent("content.xhtml"))
+
+    if usesNCX {
+        try Data("""
+        <ncx><navMap>
+          <navPoint id="part"><navLabel><text>Part One</text></navLabel><content src="content.xhtml#part-one"/>
+            <navPoint id="arrival"><navLabel><text>The Arrival</text></navLabel><content src="content.xhtml#arrival"/></navPoint>
+            <navPoint id="crossing"><navLabel><text>The Crossing</text></navLabel><content src="content.xhtml#crossing"/></navPoint>
+          </navPoint>
+        </navMap></ncx>
+        """.utf8).write(to: content.appendingPathComponent("toc.ncx"))
+    } else {
+        try Data("""
+        <html xmlns:epub="http://www.idpf.org/2007/ops"><body>
+          <nav epub:type="toc"><ol>
+            <li><a href="content.xhtml#part-one">Part One</a><ol>
+              <li><a href="content.xhtml#arrival">The Arrival</a></li>
+              <li><a href="content.xhtml#crossing">The Crossing</a></li>
+            </ol></li>
+          </ol></nav>
+        </body></html>
+        """.utf8).write(to: content.appendingPathComponent("nav.xhtml"))
+    }
+
+    let images = content.appendingPathComponent("images", isDirectory: true)
+    try FileManager.default.createDirectory(at: images, withIntermediateDirectories: true)
+    try navigationEPUBCoverData.write(to: images.appendingPathComponent("cover.png"))
+    let epub = directory.appendingPathComponent(usesNCX ? "Navigation EPUB 2.epub" : "Navigation EPUB 3.epub")
+    try FileManager.default.zipItem(at: source, to: epub, shouldKeepParent: false, compressionMethod: .deflate)
+    try FileManager.default.removeItem(at: source)
+    return epub
 }

@@ -15,6 +15,30 @@
 		100000000000000000000006 /* AppIcon-iPad-1024.png in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000016 /* AppIcon-iPad-1024.png */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		100000000000000000000092 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 100000000000000000000050 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 100000000000000000000040;
+			remoteInfo = "AudioReader-macOS";
+		};
+		100000000000000000000093 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 100000000000000000000050 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 100000000000000000000041;
+			remoteInfo = "AudioReader-iOS";
+		};
+		100000000000000000000094 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 100000000000000000000050 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 100000000000000000000041;
+			remoteInfo = "AudioReader-iOS";
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		100000000000000000000010 /* AudioReader.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AudioReader.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		100000000000000000000011 /* AudioReader.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AudioReader.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -24,12 +48,45 @@
 		100000000000000000000015 /* AppIcon-iPad-83.5@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "AppIcon-iPad-83.5@2x.png"; sourceTree = "<group>"; };
 		100000000000000000000016 /* AppIcon-iPad-1024.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "AppIcon-iPad-1024.png"; sourceTree = "<group>"; };
 		100000000000000000000017 /* Info-iOS.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Info-iOS.plist"; sourceTree = "<group>"; };
+		100000000000000000000018 /* AudioReader-macOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "AudioReader-macOSUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		100000000000000000000019 /* AudioReader-iOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "AudioReader-iOSUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		10000000000000000000001A /* AudioReader-iOSUnitTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "AudioReader-iOSUnitTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		100000000000000000000020 /* Sources/AudioReader */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Sources/AudioReader;
+			sourceTree = SOURCE_ROOT;
+		};
+		100000000000000000000025 /* Sources/AudioReaderDomain */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/AudioReaderDomain;
+			sourceTree = SOURCE_ROOT;
+		};
+		100000000000000000000026 /* Sources/AudioReaderLocalStore */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/AudioReaderLocalStore;
+			sourceTree = SOURCE_ROOT;
+		};
+		100000000000000000000027 /* Sources/AudioReaderNetworking */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/AudioReaderNetworking;
+			sourceTree = SOURCE_ROOT;
+		};
+		100000000000000000000028 /* UITests/AudioReaderMacOSUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = UITests/AudioReaderMacOSUITests;
+			sourceTree = SOURCE_ROOT;
+		};
+		100000000000000000000029 /* UITests/AudioReaderIOSUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = UITests/AudioReaderIOSUITests;
+			sourceTree = SOURCE_ROOT;
+		};
+		10000000000000000000002A /* Tests/AudioReaderIOSUnitTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Tests/AudioReaderIOSUnitTests;
 			sourceTree = SOURCE_ROOT;
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -51,6 +108,27 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		100000000000000000000032 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		100000000000000000000033 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		100000000000000000000034 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -58,6 +136,12 @@
 			isa = PBXGroup;
 			children = (
 				100000000000000000000020 /* Sources/AudioReader */,
+				100000000000000000000025 /* Sources/AudioReaderDomain */,
+				100000000000000000000026 /* Sources/AudioReaderLocalStore */,
+				100000000000000000000027 /* Sources/AudioReaderNetworking */,
+				100000000000000000000028 /* UITests/AudioReaderMacOSUITests */,
+				100000000000000000000029 /* UITests/AudioReaderIOSUITests */,
+				10000000000000000000002A /* Tests/AudioReaderIOSUnitTests */,
 				100000000000000000000022 /* Xcode */,
 				100000000000000000000023 /* Resources */,
 				100000000000000000000024 /* Products */,
@@ -89,6 +173,9 @@
 			children = (
 				100000000000000000000010 /* AudioReader.app */,
 				100000000000000000000011 /* AudioReader.app */,
+				100000000000000000000018 /* AudioReader-macOSUITests.xctest */,
+				100000000000000000000019 /* AudioReader-iOSUITests.xctest */,
+				10000000000000000000001A /* AudioReader-iOSUnitTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -110,6 +197,9 @@
 			);
 			fileSystemSynchronizedGroups = (
 				100000000000000000000020 /* Sources/AudioReader */,
+				100000000000000000000025 /* Sources/AudioReaderDomain */,
+				100000000000000000000026 /* Sources/AudioReaderLocalStore */,
+				100000000000000000000027 /* Sources/AudioReaderNetworking */,
 			);
 			name = "AudioReader-macOS";
 			packageProductDependencies = (
@@ -133,6 +223,9 @@
 			);
 			fileSystemSynchronizedGroups = (
 				100000000000000000000020 /* Sources/AudioReader */,
+				100000000000000000000025 /* Sources/AudioReaderDomain */,
+				100000000000000000000026 /* Sources/AudioReaderLocalStore */,
+				100000000000000000000027 /* Sources/AudioReaderNetworking */,
 			);
 			name = "AudioReader-iOS";
 			packageProductDependencies = (
@@ -141,6 +234,69 @@
 			productName = AudioReader;
 			productReference = 100000000000000000000011 /* AudioReader.app */;
 			productType = "com.apple.product-type.application";
+		};
+		100000000000000000000042 /* AudioReader-macOSUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 100000000000000000000073 /* Build configuration list for PBXNativeTarget "AudioReader-macOSUITests" */;
+			buildPhases = (
+				100000000000000000000066 /* Sources */,
+				100000000000000000000032 /* Frameworks */,
+				100000000000000000000064 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				100000000000000000000090 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				100000000000000000000028 /* UITests/AudioReaderMacOSUITests */,
+			);
+			name = "AudioReader-macOSUITests";
+			productName = "AudioReader-macOSUITests";
+			productReference = 100000000000000000000018 /* AudioReader-macOSUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		100000000000000000000043 /* AudioReader-iOSUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 100000000000000000000074 /* Build configuration list for PBXNativeTarget "AudioReader-iOSUITests" */;
+			buildPhases = (
+				100000000000000000000067 /* Sources */,
+				100000000000000000000033 /* Frameworks */,
+				100000000000000000000065 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				100000000000000000000091 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				100000000000000000000029 /* UITests/AudioReaderIOSUITests */,
+			);
+			name = "AudioReader-iOSUITests";
+			productName = "AudioReader-iOSUITests";
+			productReference = 100000000000000000000019 /* AudioReader-iOSUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		100000000000000000000044 /* AudioReader-iOSUnitTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 100000000000000000000075 /* Build configuration list for PBXNativeTarget "AudioReader-iOSUnitTests" */;
+			buildPhases = (
+				100000000000000000000069 /* Sources */,
+				100000000000000000000034 /* Frameworks */,
+				100000000000000000000068 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				100000000000000000000095 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				10000000000000000000002A /* Tests/AudioReaderIOSUnitTests */,
+			);
+			name = "AudioReader-iOSUnitTests";
+			productName = "AudioReader-iOSUnitTests";
+			productReference = 10000000000000000000001A /* AudioReader-iOSUnitTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -158,6 +314,18 @@
 					100000000000000000000041 = {
 						CreatedOnToolsVersion = 26.6;
 						ProvisioningStyle = Automatic;
+					};
+					100000000000000000000042 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 100000000000000000000040;
+					};
+					100000000000000000000043 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 100000000000000000000041;
+					};
+					100000000000000000000044 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 100000000000000000000041;
 					};
 				};
 			};
@@ -180,6 +348,9 @@
 			targets = (
 				100000000000000000000040 /* AudioReader-macOS */,
 				100000000000000000000041 /* AudioReader-iOS */,
+				100000000000000000000042 /* AudioReader-macOSUITests */,
+				100000000000000000000043 /* AudioReader-iOSUITests */,
+				100000000000000000000044 /* AudioReader-iOSUnitTests */,
 			);
 		};
 /* End PBXProject section */
@@ -203,6 +374,27 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		100000000000000000000064 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		100000000000000000000065 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		100000000000000000000068 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -220,7 +412,46 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		100000000000000000000066 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		100000000000000000000067 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		100000000000000000000069 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		100000000000000000000090 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 100000000000000000000040 /* AudioReader-macOS */;
+			targetProxy = 100000000000000000000092 /* PBXContainerItemProxy */;
+		};
+		100000000000000000000091 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 100000000000000000000041 /* AudioReader-iOS */;
+			targetProxy = 100000000000000000000093 /* PBXContainerItemProxy */;
+		};
+		100000000000000000000095 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 100000000000000000000041 /* AudioReader-iOS */;
+			targetProxy = 100000000000000000000094 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		100000000000000000000080 /* Debug */ = {
@@ -261,7 +492,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 93;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Xcode/Info-macOS.plist";
@@ -270,7 +501,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.0.54;
+				MARKETING_VERSION = 2.1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",
@@ -287,7 +518,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 93;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Xcode/Info-macOS.plist";
@@ -296,7 +527,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.0.54;
+				MARKETING_VERSION = 2.1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",
@@ -312,7 +543,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 93;
 				DEVELOPMENT_TEAM = 9XV58LJ624;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Xcode/Info-iOS.plist";
@@ -321,7 +552,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.54;
+				MARKETING_VERSION = 2.1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",
@@ -339,7 +570,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 55;
+				CURRENT_PROJECT_VERSION = 93;
 				DEVELOPMENT_TEAM = 9XV58LJ624;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Xcode/Info-iOS.plist";
@@ -348,7 +579,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.54;
+				MARKETING_VERSION = 2.1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",
@@ -361,6 +592,65 @@
 				TARGETED_DEVICE_FAMILY = 2;
 			};
 			name = Release;
+		};
+		100000000000000000000086 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.johnsonzhang.AudioReader.macOSUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_VERSION = 6.0;
+				TEST_TARGET_NAME = "AudioReader-macOS";
+			};
+			name = Debug;
+		};
+		100000000000000000000087 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 9XV58LJ624;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.johnsonzhang.AudioReader.iOSUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 2;
+				TEST_TARGET_NAME = "AudioReader-iOS";
+			};
+			name = Debug;
+		};
+		100000000000000000000088 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 9XV58LJ624;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.johnsonzhang.AudioReader.iOSUnitTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 2;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AudioReader.app/AudioReader";
+				TEST_TARGET_NAME = "AudioReader-iOS";
+			};
+			name = Debug;
 		};
 /* End XCBuildConfiguration section */
 
@@ -391,6 +681,30 @@
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
+		};
+		100000000000000000000073 /* Build configuration list for PBXNativeTarget "AudioReader-macOSUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				100000000000000000000086 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		100000000000000000000074 /* Build configuration list for PBXNativeTarget "AudioReader-iOSUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				100000000000000000000087 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		100000000000000000000075 /* Build configuration list for PBXNativeTarget "AudioReader-iOSUnitTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				100000000000000000000088 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
 
