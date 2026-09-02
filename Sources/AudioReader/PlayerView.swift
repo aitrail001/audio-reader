@@ -2581,7 +2581,7 @@ private struct SentenceRow: View {
                 if textSource == .original || textSource == .dual {
                     let original = segment.trustedEbookText ?? (textSource == .original ? segment.spokenText : nil)
                     if let original {
-                        if textSource == .original, studyOverlayEnabled {
+                        if textSource == .original, isSelected || studyOverlayEnabled {
                             wordTokens(
                                 StudyTokenIndex.tokens(in: segment, source: .original),
                                 dimmed: !isSelected

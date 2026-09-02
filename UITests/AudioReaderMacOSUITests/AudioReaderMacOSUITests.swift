@@ -10,7 +10,7 @@ final class AudioReaderMacOSUITests: XCTestCase {
         let app = launch(scenario: "empty-library")
 
         XCTAssertTrue(element("sidebar.library", in: app).waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Build your listening library"].exists)
+        XCTAssertTrue(app.staticTexts["Build your reading library"].exists)
         XCTAssertTrue(waitForHittable(app.buttons["Import Audio or EPUB"].firstMatch, timeout: 5))
         XCTAssertTrue(element("library.search", in: app).exists)
     }
@@ -37,8 +37,8 @@ final class AudioReaderMacOSUITests: XCTestCase {
         for destination in ["sidebar.library", "sidebar.nowReading", "sidebar.words", "sidebar.settings"] {
             XCTAssertTrue(element(destination, in: app).waitForExistence(timeout: 5))
         }
-        XCTAssertTrue(element("words.section.today", in: app).isHittable)
-        let studyToday = element("words.studyToday", in: app)
+        XCTAssertTrue(button("words.section.today", in: app).isHittable)
+        let studyToday = button("words.studyToday", in: app)
         XCTAssertTrue(studyToday.isHittable)
         XCTAssertEqual(studyToday.label, "Study 24 cards today")
         XCTAssertTrue(element("words.metric.reviewedToday", in: app).exists)
@@ -51,12 +51,12 @@ final class AudioReaderMacOSUITests: XCTestCase {
             in: app
         ))
 
-        element("words.section.library", in: app).tap()
+        button("words.section.library", in: app).tap()
         XCTAssertTrue(element("words.listFilter", in: app).waitForExistence(timeout: 3))
         XCTAssertTrue(element("words.category.all", in: app).exists)
-        XCTAssertEqual(element("words.pageRange", in: app).label, "Showing 1–80 of 85")
-        element("words.pageLast", in: app).tap()
-        XCTAssertEqual(element("words.pageRange", in: app).label, "Showing 81–85 of 85")
+        XCTAssertEqual(element("words.pageRange", in: app).value as? String, "Showing 1–80 of 85")
+        button("words.pageLast", in: app).tap()
+        XCTAssertEqual(element("words.pageRange", in: app).value as? String, "Showing 81–85 of 85")
         XCTAssertTrue(element("words.card.ui-vocab-new-76", in: app).waitForExistence(timeout: 3))
     }
 
@@ -88,7 +88,7 @@ final class AudioReaderMacOSUITests: XCTestCase {
         let app = launch(scenario: "words-rich")
         let entryID = "ui-vocab-due-0"
 
-        element("words.section.library", in: app).tap()
+        button("words.section.library", in: app).tap()
         XCTAssertTrue(element("words.card.\(entryID)", in: app).waitForExistence(timeout: 3))
         XCTAssertFalse(element("anki.selection.\(entryID)", in: app).exists)
 
@@ -127,10 +127,10 @@ final class AudioReaderMacOSUITests: XCTestCase {
     }
 
     private func enterAnkiExportSelection(in app: XCUIApplication) {
-        let export = element("anki.export", in: app)
+        let export = app.menuButtons.matching(identifier: "anki.export").firstMatch
         XCTAssertTrue(waitForHittable(export, timeout: 3))
         export.tap()
-        let select = app.buttons["Select for Anki export"].firstMatch
+        let select = app.menuItems["Select for Anki export"].firstMatch
         XCTAssertTrue(select.waitForExistence(timeout: 3))
         select.tap()
     }
@@ -156,22 +156,20 @@ final class AudioReaderMacOSUITests: XCTestCase {
         let app = launch(scenario: "epub-reader")
 
         XCTAssertTrue(element("reader.epubCover", in: app).waitForExistence(timeout: 5))
-        element("reader.bookNavigation", in: app).tap()
-        XCTAssertTrue(element("reader.bookNavigation.sheet", in: app).waitForExistence(timeout: 3))
-        XCTAssertTrue(app.staticTexts["The Arrival"].exists)
+        button("reader.bookNavigation", in: app).tap()
+        XCTAssertTrue(element("reader.bookSearch", in: app).waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["The Arrival"].exists)
         let search = element("reader.bookSearch", in: app)
         XCTAssertTrue(search.waitForExistence(timeout: 3))
         search.tap()
         search.typeText("paper lantern")
-        XCTAssertTrue(app.staticTexts["The Lantern Room"].waitForExistence(timeout: 3))
-        let matchingChapters = app.staticTexts.matching(
-            NSPredicate(format: "label == %@", "The Lantern Room")
+        let matchingChapters = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS %@", "The Lantern Room")
         )
+        XCTAssertTrue(matchingChapters.firstMatch.waitForExistence(timeout: 3))
         matchingChapters.element(boundBy: matchingChapters.count - 1).tap()
-        let chapterHeader = app.navigationBars.matching(
-            NSPredicate(format: "identifier CONTAINS %@", "The Lantern Room")
-        ).firstMatch
-        XCTAssertTrue(chapterHeader.waitForExistence(timeout: 3))
+        // macOS exposes the navigation title as window chrome, so the target chapter's
+        // unique reader tokens are the stable accessibility proof of the jump.
         XCTAssertTrue(app.buttons["paper"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["lantern"].exists)
     }
@@ -192,6 +190,10 @@ final class AudioReaderMacOSUITests: XCTestCase {
 
     private func element(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    private func button(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
+        app.buttons.matching(identifier: identifier).firstMatch
     }
 
     private func waitForHittable(_ element: XCUIElement, timeout: TimeInterval) -> Bool {

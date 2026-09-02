@@ -312,6 +312,9 @@ struct VocabularyView: View {
                     }
                     .listStyle(.plain)
                     .scrollContentBackground(.hidden)
+#if os(macOS)
+                    .frame(height: 300)
+#endif
                     paginationControls
                 }
             }
