@@ -20,9 +20,9 @@ struct ImportParityTests {
         let epub = fixture.root.appendingPathComponent("book.epub")
         try FileManager.default.zipItem(at: source, to: epub, shouldKeepParent: false, compressionMethod: .deflate)
 
-        let extracted = EPUBParser.extractText(from: epub.path)
+        let document = try #require(EPUBParser.document(from: epub.path))
 
-        #expect(extracted?.contains("shared EPUB extraction") == true)
+        #expect(document.text.contains("shared EPUB extraction"))
     }
 
     @Test("EPUB spine sections remain independently navigable")
