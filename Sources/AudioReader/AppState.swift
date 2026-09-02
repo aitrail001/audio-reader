@@ -259,6 +259,11 @@ final class AppState {
         return [state.current] + state.conflicts
     }
 
+    func syncDeviceName(_ deviceID: String) -> String {
+        if deviceID == account.currentDeviceID { return "This device" }
+        return account.devices.first(where: { $0.id == deviceID })?.displayName ?? "Another device"
+    }
+
     /// Promotes one device's candidate and clears its competing corrections;
     /// the immutable transcript stays untouched and the choice is resynchronized.
     func resolveTranscriptOverlayConflict(segmentID: String, choosing candidateID: String) throws {
@@ -271,6 +276,7 @@ final class AppState {
             database: database
         )
         reloadResolvedTranscriptForCurrentChapter()
+        Task { await account.synchronize() }
     }
 
     /// Saves one current correction against the immutable source fingerprint;
@@ -646,6 +652,36 @@ final class AppState {
                 hasTranscript: transcript != nil
             )
         }
+    }
+
+    /// A bulk preset persists one canonical row per family; inflected forms resolve through the shared catalog.
+    func setCommonEnglishWordsKnown(first count: Int, known: Bool) async throws -> Int {
+        let lemmas = Set(CommonEnglishWordCatalog.shared.headwords(first: count).map {
+            StudyLemma(language: "en", form: $0)
+        })
+        let next = KnownLemmaStore.setting(lemmas, known: known, in: knownLemmas)
+        let changed = known
+            ? lemmas.subtracting(Set(knownLemmas.map(\.lemma))).count
+            : lemmas.intersection(Set(knownLemmas.map(\.lemma))).count
+        guard changed > 0 else { return 0 }
+        let stored = next.map(StoredKnownLemma.init)
+        let repository = knownLemmaRepository
+        try await Task.detached(priority: .userInitiated) {
+            try repository.saveKnownLemmas(stored)
+        }.value
+        knownLemmas = next
+        account.recordUsage(
+            name: "vocab.common_words_updated",
+            properties: [
+                "known": known ? "true" : "false",
+                "requested": String(count),
+                "changed": String(changed)
+            ]
+        )
+        Self.vocabularyLog.info(
+            "common_words_update message=common_words_update component=known-lemma outcome=success known=\(known, privacy: .public) requested=\(count, privacy: .public) changed=\(changed, privacy: .public)"
+        )
+        return changed
     }
 
     func markKnown(_ word: TranscriptWord, known: Bool) {
@@ -1293,8 +1329,8 @@ final class AppState {
         refreshStudyIndex()
     }
 
-    func open(chapter: Chapter, in book: Book, autoplay: Bool) {
-        persistCurrentReaderProgress(force: true)
+    func open(chapter: Chapter, in book: Book, autoplay: Bool, persistCurrentPosition: Bool = true) {
+        if persistCurrentPosition { persistCurrentReaderProgress(force: true) }
         selectedBookID = book.id
         selectedChapterID = chapter.id
         tab = .player
@@ -1460,8 +1496,14 @@ final class AppState {
               let chosen = readerProgressState?.current,
               let chapter = selectedBook.chapters.first(where: { $0.id == chosen.chapterID.rawValue })
         else { return }
-        open(chapter: chapter, in: selectedBook, autoplay: false)
+        open(
+            chapter: chapter,
+            in: selectedBook,
+            autoplay: false,
+            persistCurrentPosition: false
+        )
         player.seek(min(chosen.relativeSeconds, chapter.duration ?? chosen.relativeSeconds))
+        Task { await account.synchronize() }
     }
 
     /// Persists chapter-relative fractional seconds. Normal playback writes at
@@ -2349,6 +2391,12 @@ final class AppState {
         studyActivityLog = Persistence.loadStudyActivityLog(database: database)
         selectedDictionaryName = settings.preferredDictionary
         player.rate = Float(settings.playbackRate)
+        if let selectedBookID {
+            readerProgressState = Persistence.loadReaderProgress(bookID: selectedBookID, database: database)
+        }
+        if transcript != nil {
+            reloadResolvedTranscriptForCurrentChapter()
+        }
         refreshStudyIndex()
     }
 

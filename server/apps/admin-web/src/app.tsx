@@ -104,6 +104,10 @@ const RAIL: ({ type: "label"; label: string } | { type: "item"; id: Section; lab
   { type: "item", id: "audit", label: "Audit" },
 ];
 
+const DESTINATIONS = RAIL.filter(
+  (item): item is { type: "item"; id: Section; label: string } => item.type === "item",
+);
+
 const BOOTSTRAP_LABELS: Record<string, string> = {
   supabaseUrlConfigured: "Supabase URL",
   supabaseAnonKeyConfigured: "Supabase anon key",
@@ -1395,6 +1399,21 @@ export function App() {
         }}
       />
       <div className="layout">
+        <label className="destination-picker">
+          <span>Operator section</span>
+          <select
+            value={section}
+            onChange={(event) => {
+              setSection(event.target.value as Section);
+            }}
+          >
+            {DESTINATIONS.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <nav className="rail" aria-label="Operator sections">
           {RAIL.map((item) =>
             item.type === "label" ? (
@@ -4303,21 +4322,48 @@ function AnalyticsTrend({ analytics }: { analytics: ProductAnalytics }) {
     y: height - inset - (point.events / max) * (height - inset * 2),
   }));
   return (
-    <svg
-      className="analytics-chart"
-      viewBox={`0 0 ${String(width)} ${String(height)}`}
-      role="img"
-      aria-label={`Event trend with ${String(analytics.summary.events)} events across ${String(analytics.series.length)} ${analytics.interval} buckets`}
-      tabIndex={0}
-    >
-      <line x1={inset} y1={height - inset} x2={width - inset} y2={height - inset} />
-      <polyline points={points.map((point) => `${String(point.x)},${String(point.y)}`).join(" ")} />
-      {points.map((point) => (
-        <circle key={point.start} cx={point.x} cy={point.y} r="4">
-          <title>{`${formatWhen(point.start)}: ${String(point.events)} events, ${String(point.activeUsers)} active learners, ${String(point.failed)} failed`}</title>
-        </circle>
-      ))}
-    </svg>
+    <>
+      <svg
+        className="analytics-chart"
+        viewBox={`0 0 ${String(width)} ${String(height)}`}
+        role="img"
+        aria-label={`Event trend with ${String(analytics.summary.events)} events across ${String(analytics.series.length)} ${analytics.interval} buckets`}
+        tabIndex={0}
+      >
+        <line x1={inset} y1={height - inset} x2={width - inset} y2={height - inset} />
+        <polyline
+          points={points.map((point) => `${String(point.x)},${String(point.y)}`).join(" ")}
+        />
+        {points.map((point) => (
+          <circle key={point.start} cx={point.x} cy={point.y} r="4">
+            <title>{`${formatWhen(point.start)}: ${String(point.events)} events, ${String(point.activeUsers)} active learners, ${String(point.failed)} failed`}</title>
+          </circle>
+        ))}
+      </svg>
+      <details className="trend-data">
+        <summary>Trend data</summary>
+        <table className="service-table" aria-label="Trend bucket values">
+          <thead>
+            <tr>
+              <th>Bucket</th>
+              <th>Events</th>
+              <th>Active learners</th>
+              <th>Failed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {analytics.series.map((point) => (
+              <tr key={point.start}>
+                <td>{formatWhen(point.start)}</td>
+                <td>{point.events}</td>
+                <td>{point.activeUsers}</td>
+                <td>{point.failed}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </details>
+    </>
   );
 }
 

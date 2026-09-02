@@ -38,7 +38,16 @@ extension AccountSession {
                         to: sqlite
                     )
                 },
-                handleConflict: AccountSyncApplicator.retainSyncConflict
+                handleConflict: AccountSyncApplicator.retainSyncConflict,
+                reviewConflicts: {
+                    Array(
+                        repeating: .readerProgress,
+                        count: try sqlite.readerProgressConflictCount()
+                    ) + Array(
+                        repeating: .transcriptCorrection,
+                        count: try sqlite.transcriptOverlayConflictCount()
+                    )
+                }
             )
         )
     }
@@ -60,6 +69,7 @@ enum AccountSyncApplicator {
             settings: Persistence.loadSettings(),
             vocabulary: Persistence.loadVocab(),
             lemmas: Persistence.loadKnownLemmas(),
+            deletedLemmas: (try? sqlite.loadDeletedKnownLemmas()) ?? [],
             books: (try? sqlite.loadBooks()) ?? [],
             transcripts: (try? sqlite.loadTranscripts()) ?? [],
             overlays: (try? sqlite.loadAllTranscriptOverlays()) ?? [],
@@ -115,6 +125,7 @@ enum AccountSyncApplicator {
         settings: AppSettings,
         vocabulary: [VocabEntry],
         lemmas: [KnownLemmaRecord],
+        deletedLemmas: [StoredKnownLemma] = [],
         books: [StoredBook] = [],
         transcripts: [StoredTranscript] = [],
         overlays: [StoredTranscriptOverlay] = [],
@@ -300,6 +311,21 @@ enum AccountSyncApplicator {
                     occurredAt: lemma.updatedAt,
                     payload: try encodePayload(
                         PortableLemma(language: lemma.language, lemma: lemma.form, state: "known")
+                    )
+                )
+            )
+        }
+        for lemma in deletedLemmas {
+            mutations.append(
+                OutboxMutation(
+                    id: MutationID.generate(),
+                    entityType: .lexemeState,
+                    entityID: uuidForLemma(language: lemma.language, form: lemma.form),
+                    operation: .delete,
+                    baseRevision: .zero,
+                    occurredAt: lemma.updatedAt,
+                    payload: try encodePayload(
+                        PortableLemma(language: lemma.language, lemma: lemma.form, state: "unknown")
                     )
                 )
             )
@@ -882,9 +908,13 @@ enum AccountSyncApplicator {
         guard let language = change.payload["language"]?.stringValue,
               let form = change.payload["lemma"]?.stringValue ?? change.payload["form"]?.stringValue
         else { throw AccountSyncApplyError.invalidPayload(change.entityType) }
-        try sqlite.upsertKnownLemma(
-            StoredKnownLemma(language: language, form: form, updatedAt: Date())
-        )
+        if change.operation == OutboxOperation.delete.rawValue {
+            try sqlite.deleteKnownLemma(language: language, form: form)
+        } else {
+            try sqlite.upsertKnownLemma(
+                StoredKnownLemma(language: language, form: form, updatedAt: Date())
+            )
+        }
     }
 
     static func isUUID(_ value: String) -> Bool {

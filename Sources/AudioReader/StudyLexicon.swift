@@ -5,7 +5,10 @@ struct StudyLemma: Hashable, Codable, Sendable {
     var form: String
 
     static func make(language: String, surface: String) -> StudyLemma? {
-        let form = DictionaryLookup.headword(surface).lowercased()
+        let normalized = DictionaryLookup.headword(surface).lowercased()
+        let form = language.lowercased().hasPrefix("en")
+            ? CommonEnglishWordCatalog.shared.headword(for: normalized) ?? normalized
+            : normalized
         guard !form.isEmpty else { return nil }
         return StudyLemma(language: language, form: form)
     }
@@ -38,7 +41,9 @@ struct KnownLemmaRecord: Hashable, Codable, Sendable {
     var form: String
     var updatedAt: Date
 
-    var lemma: StudyLemma { StudyLemma(language: language, form: form) }
+    var lemma: StudyLemma {
+        StudyLemma.make(language: language, surface: form) ?? StudyLemma(language: language, form: form)
+    }
 }
 
 struct ChapterCoverage: Equatable, Sendable {
@@ -409,6 +414,35 @@ enum VocabReversePrompt {
 }
 
 enum KnownLemmaStore {
+    static func setting(
+        _ lemmas: Set<StudyLemma>,
+        known: Bool,
+        in records: [KnownLemmaRecord],
+        at date: Date = Date()
+    ) -> [KnownLemmaRecord] {
+        var byLemma: [StudyLemma: KnownLemmaRecord] = [:]
+        for record in records {
+            let lemma = record.lemma
+            if let existing = byLemma[lemma], existing.updatedAt >= record.updatedAt { continue }
+            byLemma[lemma] = KnownLemmaRecord(
+                language: lemma.language,
+                form: lemma.form,
+                updatedAt: record.updatedAt
+            )
+        }
+        if known {
+            for lemma in lemmas where byLemma[lemma] == nil {
+                byLemma[lemma] = KnownLemmaRecord(language: lemma.language, form: lemma.form, updatedAt: date)
+            }
+        } else {
+            for lemma in lemmas { byLemma[lemma] = nil }
+        }
+        return byLemma.values.sorted {
+            if $0.language != $1.language { return $0.language < $1.language }
+            return $0.form < $1.form
+        }
+    }
+
     static func upsert(
         _ lemma: StudyLemma,
         into records: [KnownLemmaRecord],

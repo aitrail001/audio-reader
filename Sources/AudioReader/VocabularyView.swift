@@ -122,6 +122,9 @@ struct VocabularyView: View {
                 ToolbarItem(placement: .secondaryAction) {
                     ankiExportMenu
                 }
+                ToolbarItem(placement: .secondaryAction) {
+                    CommonEnglishWordsMenu(state: state)
+                }
             }
         }
 #endif
@@ -378,6 +381,7 @@ struct VocabularyView: View {
                         .buttonStyle(.borderless)
                         .disabled(state.vocab.isEmpty)
                     ankiExportMenu
+                    CommonEnglishWordsMenu(state: state)
                     Text("\(projection.listCounts[.saved, default: 0]) in My list")
                         .font(.caption)
                         .foregroundStyle(Palette.dim)

@@ -297,7 +297,7 @@ struct VocabularyReviewView: View {
                 Text(quality.intervalLabel(for: entry))
                     .font(.caption2)
             }
-            .foregroundStyle(Color.black)
+            .foregroundStyle(quality.foregroundStyle)
             .frame(maxWidth: .infinity, minHeight: 44)
         }
         .buttonStyle(.borderedProminent)
@@ -439,9 +439,15 @@ private extension VocabReviewQuality {
 
     var tint: Color {
         switch self {
-        case .forgot: .red
-        case .vague: .orange
-        case .remember: .green
+        case .forgot, .vague: Palette.panel2
+        case .remember: Palette.gold
+        }
+    }
+
+    var foregroundStyle: Color {
+        switch self {
+        case .forgot, .vague: Palette.ink
+        case .remember: Palette.inkOnGold
         }
     }
 

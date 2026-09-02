@@ -1413,11 +1413,13 @@ struct AccountSessionSyncTests {
             appliedCount: 2,
             pendingCount: 1,
             conflictCount: 1,
+            conflicts: [.readerProgress],
             entityProgress: uploading.entityProgress
         )
-        #expect(conflicted.title == "Sync conflicts need review")
-        #expect(conflicted.detail.contains("1 conflict"))
+        #expect(conflicted.title == "Choose what to keep")
+        #expect(conflicted.detail.contains("1 reading position conflict"))
         #expect(conflicted.detail.contains("1 pending"))
+        #expect(conflicted.resolutionHelp.first?.contains("compare chapter, position, device, and time") == true)
         #expect(conflicted.requiresAttention)
     }
 
@@ -1681,12 +1683,12 @@ struct AccountSessionSyncTests {
     }
 
     @MainActor
-    @Test("conflict leaves a pending retry at the server revision instead of acking success")
+    @Test("ordinary revision conflict rebases and retries automatically")
     func synchronizeDoesNotAckConflictAsSuccess() async throws {
         let client = FakeAuthClient()
         let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
         let sync = FakeSyncClient()
-        sync.pushStatus = "conflict"
+        sync.pushStatuses = ["conflict", "applied"]
         sync.conflictRevision = 4
         let outbox = InMemorySyncOutboxRepository()
         let originalID = MutationID(rawValue: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d")
@@ -1713,15 +1715,13 @@ struct AccountSessionSyncTests {
         session.setSyncEnabled(true)
         await session.synchronize()
 
-        let pending = try outbox.pendingMutations()
-        #expect(pending.count == 1)
-        #expect(pending[0].id != originalID)
-        #expect(pending[0].baseRevision.rawValue == 4)
-        #expect(String(data: pending[0].payload, encoding: .utf8) == "{\"targetLanguage\":\"zh\"}")
+        #expect(sync.pushed.count == 2)
+        #expect(sync.pushed[1].mutations.first?.baseRevision == 4)
+        #expect(try outbox.pendingMutations().isEmpty)
         #expect(session.syncStatus.phase == .completed)
-        #expect(session.syncStatus.conflictCount == 1)
-        #expect(session.syncStatus.pendingCount == 1)
-        #expect(session.syncStatus.requiresAttention)
+        #expect(session.syncStatus.conflictCount == 0)
+        #expect(session.syncStatus.pendingCount == 0)
+        #expect(!session.syncStatus.requiresAttention)
     }
 
     @MainActor
@@ -1778,8 +1778,8 @@ struct AccountSessionSyncTests {
 
         await session.synchronize()
 
-        #expect(sync.pushed.count == 2)
-        #expect(sync.pushed[1].mutations.first?.baseRevision == 7)
+        #expect(sync.pushed.count == 3)
+        #expect(sync.pushed[2].mutations.first?.baseRevision == 7)
         #expect(try outbox.pendingMutations().isEmpty)
     }
 
@@ -1827,7 +1827,7 @@ struct AccountSessionSyncTests {
     }
 
     @MainActor
-    @Test("overlay conflicts expose the server revision before the retry is queued")
+    @Test("overlay conflict is retained for review instead of automatically overwritten")
     func overlayConflictInvokesRetentionHook() async throws {
         let client = FakeAuthClient()
         let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
@@ -1860,7 +1860,8 @@ struct AccountSessionSyncTests {
                 handleConflict: { mutation, revision in
                     handledType.value = mutation.entityType.rawValue
                     handledRevision.value = revision
-                }
+                },
+                reviewConflicts: { [.transcriptCorrection] }
             )
         )
         await session.requestEmailCode("overlay-conflict@example.com")
@@ -1870,7 +1871,56 @@ struct AccountSessionSyncTests {
 
         #expect(handledType.value == OutboxEntityType.transcriptOverlay.rawValue)
         #expect(handledRevision.value == 9)
-        #expect(try outbox.pendingMutations().first?.baseRevision.rawValue == 9)
+        #expect(try outbox.pendingMutations().isEmpty)
+        #expect(sync.pushed.count == 1)
+        #expect(session.syncStatus.conflicts == [.transcriptCorrection])
+        #expect(session.syncStatus.title == "Choose what to keep")
+    }
+
+    @MainActor
+    @Test("review conflict stays stale and pending when pull fails")
+    func overlayConflictPullFailurePreservesStaleMutation() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        sync.pushStatus = "conflict"
+        sync.conflictRevision = 9
+        sync.failPull = true
+        let outbox = InMemorySyncOutboxRepository()
+        let mutation = OutboxMutation(
+            id: MutationID(rawValue: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"),
+            entityType: .transcriptOverlay,
+            entityID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            operation: .upsert,
+            baseRevision: .zero,
+            occurredAt: Date(timeIntervalSince1970: 1_777_000_000),
+            payload: Data("{\"segmentId\":\"segment\"}".utf8)
+        )
+        try outbox.enqueue(mutation)
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: outbox,
+                cursor: InMemorySyncCursorStore(),
+                snapshot: { [mutation] },
+                handleConflict: { _, _ in }
+            )
+        )
+        await session.requestEmailCode("overlay-conflict@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+        await session.synchronize()
+
+        let retained = try #require(outbox.pendingMutations().first)
+        #expect(retained.id == mutation.id)
+        #expect(retained.baseRevision == .zero)
+        #expect(sync.pushed.count == 1)
+        #expect(session.syncStatus.phase == .failed)
+        #expect(session.syncStatus.conflicts == [.transcriptCorrection])
     }
 
     @MainActor
@@ -2262,6 +2312,59 @@ struct AccountSessionSyncTests {
         #expect(sync.pushed.count == 1)
         #expect(try outbox.pendingMutations().isEmpty)
         #expect(try versions.loadVersion(entityType: "settings", entityID: "00000000-0000-4000-8000-00000000000a")?.serverVersion == 1)
+    }
+
+    @MainActor
+    @Test("acknowledged delete tombstones are not pushed again")
+    func synchronizeSkipsAcknowledgedDeleteTombstones() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        let sync = FakeSyncClient()
+        let outbox = InMemorySyncOutboxRepository()
+        let versions = InMemorySyncEntityVersionStore()
+        let entityID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        try versions.saveVersion(
+            SyncEntityVersion(
+                entityType: OutboxEntityType.lexemeState.rawValue,
+                entityID: entityID,
+                serverVersion: 5,
+                payload: SyncJSONCoding.tombstonePayload
+            )
+        )
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: outbox,
+                cursor: InMemorySyncCursorStore(),
+                versions: versions,
+                snapshot: {
+                    [
+                        OutboxMutation(
+                            id: MutationID.generate(),
+                            entityType: .lexemeState,
+                            entityID: entityID,
+                            operation: .delete,
+                            baseRevision: .zero,
+                            occurredAt: Date(timeIntervalSince1970: 1_777_000_100),
+                            payload: Data("{\"language\":\"en\",\"lemma\":\"forest\",\"state\":\"unknown\"}".utf8)
+                        )
+                    ]
+                }
+            )
+        )
+        await session.requestEmailCode("deleted-lemma@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        #expect(sync.pushed.isEmpty)
+        #expect(try outbox.pendingMutations().isEmpty)
+        #expect(session.syncStatus.pendingCount == 0)
     }
 }
 

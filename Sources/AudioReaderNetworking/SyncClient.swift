@@ -213,6 +213,27 @@ public struct AccountSyncEntityProgress: Equatable, Sendable, Identifiable {
     }
 }
 
+public enum AccountSyncConflictKind: String, Hashable, Sendable {
+    case readerProgress
+    case transcriptCorrection
+
+    public var title: String {
+        switch self {
+        case .readerProgress: "Reading position"
+        case .transcriptCorrection: "Transcript correction"
+        }
+    }
+
+    public var resolutionHelp: String {
+        switch self {
+        case .readerProgress:
+            "Open the affected book to compare chapter, position, device, and time, then choose where to continue."
+        case .transcriptCorrection:
+            "Open the affected chapter and use its correction banner to compare text, timing, and device."
+        }
+    }
+}
+
 /// Observable sync progress contains only counts and entity categories; it must never expose
 /// learning content, mutation payloads, credentials, or server response bodies to the UI.
 public struct AccountSyncStatus: Equatable, Sendable {
@@ -225,6 +246,7 @@ public struct AccountSyncStatus: Equatable, Sendable {
     public var batchCount: Int?
     public var pendingCount: Int
     public var conflictCount: Int
+    public var conflicts: [AccountSyncConflictKind]
     public var errorMessage: String?
     public var entityProgress: [AccountSyncEntityProgress]
 
@@ -249,6 +271,7 @@ public struct AccountSyncStatus: Equatable, Sendable {
         batchCount: Int? = nil,
         pendingCount: Int = 0,
         conflictCount: Int = 0,
+        conflicts: [AccountSyncConflictKind] = [],
         errorMessage: String? = nil,
         entityProgress: [AccountSyncEntityProgress] = []
     ) {
@@ -261,6 +284,7 @@ public struct AccountSyncStatus: Equatable, Sendable {
         self.batchCount = batchCount
         self.pendingCount = pendingCount
         self.conflictCount = conflictCount
+        self.conflicts = conflicts
         self.errorMessage = errorMessage
         self.entityProgress = entityProgress
     }
@@ -273,6 +297,7 @@ public struct AccountSyncStatus: Equatable, Sendable {
         batchCount: Int,
         pendingCount: Int,
         conflictCount: Int = 0,
+        conflicts: [AccountSyncConflictKind] = [],
         entityProgress: [AccountSyncEntityProgress]
     ) -> AccountSyncStatus {
         AccountSyncStatus(
@@ -284,6 +309,7 @@ public struct AccountSyncStatus: Equatable, Sendable {
             batchCount: batchCount,
             pendingCount: pendingCount,
             conflictCount: conflictCount,
+            conflicts: conflicts,
             entityProgress: entityProgress
         )
     }
@@ -293,6 +319,7 @@ public struct AccountSyncStatus: Equatable, Sendable {
         appliedCount: Int,
         pendingCount: Int,
         conflictCount: Int,
+        conflicts: [AccountSyncConflictKind] = [],
         entityProgress: [AccountSyncEntityProgress]
     ) -> AccountSyncStatus {
         AccountSyncStatus(
@@ -302,6 +329,7 @@ public struct AccountSyncStatus: Equatable, Sendable {
             appliedCount: appliedCount,
             pendingCount: pendingCount,
             conflictCount: conflictCount,
+            conflicts: conflicts,
             entityProgress: entityProgress
         )
     }
@@ -332,7 +360,7 @@ public struct AccountSyncStatus: Equatable, Sendable {
             } else {
                 "Applying downloaded changes"
             }
-        case .completed where conflictCount > 0: "Sync conflicts need review"
+        case .completed where conflictCount > 0: "Choose what to keep"
         case .completed where pendingCount > 0: "Sync has pending changes"
         case .completed: "Up to date"
         case .failed: "Sync needs attention"
@@ -366,8 +394,13 @@ public struct AccountSyncStatus: Equatable, Sendable {
         case .idle:
             break
         }
-        if conflictCount > 0 {
-            parts.append("\(conflictCount) conflict\(conflictCount == 1 ? "" : "s")")
+        for kind in Set(conflicts).sorted(by: { $0.rawValue < $1.rawValue }) {
+            let count = conflicts.filter { $0 == kind }.count
+            parts.append("\(count) \(kind.title.lowercased()) conflict\(count == 1 ? "" : "s")")
+        }
+        if conflictCount > conflicts.count {
+            let otherCount = conflictCount - conflicts.count
+            parts.append("\(otherCount) other conflict\(otherCount == 1 ? "" : "s")")
         }
         if pendingCount > 0 {
             parts.append("\(pendingCount) pending")
@@ -379,9 +412,13 @@ public struct AccountSyncStatus: Equatable, Sendable {
         let entityDetails = entityProgress
             .filter { $0.totalCount > 0 }
             .map { "\($0.title) \($0.completedCount) of \($0.totalCount)" }
-        return ([title, detail] + entityDetails)
+        return ([title, detail] + entityDetails + resolutionHelp)
             .filter { !$0.isEmpty }
             .joined(separator: ". ")
+    }
+
+    public var resolutionHelp: [String] {
+        Set(conflicts).sorted(by: { $0.rawValue < $1.rawValue }).map(\.resolutionHelp)
     }
 }
 
@@ -725,6 +762,8 @@ public struct AccountSyncRuntime: Sendable {
     public var assetUploads: @Sendable (URL) throws -> [SyncAssetUpload]
     public var applyPage: @Sendable ([SyncPulledChange], [SyncEntityVersion], String) throws -> Void
     public var handleConflict: @Sendable (OutboxMutation, Int64) throws -> Void
+    /// Returns only durable choices that remain semantically different after pull.
+    public var reviewConflicts: @Sendable () throws -> [AccountSyncConflictKind]
 
     public init(
         client: any SyncClient,
@@ -735,7 +774,8 @@ public struct AccountSyncRuntime: Sendable {
         assetUploads: @escaping @Sendable (URL) throws -> [SyncAssetUpload] = { _ in [] },
         applyChange: @escaping @Sendable (SyncPulledChange) throws -> Void = { _ in },
         applyPage: (@Sendable ([SyncPulledChange], [SyncEntityVersion], String) throws -> Void)? = nil,
-        handleConflict: @escaping @Sendable (OutboxMutation, Int64) throws -> Void = { _, _ in }
+        handleConflict: @escaping @Sendable (OutboxMutation, Int64) throws -> Void = { _, _ in },
+        reviewConflicts: @escaping @Sendable () throws -> [AccountSyncConflictKind] = { [] }
     ) {
         self.client = client
         self.outbox = outbox
@@ -749,6 +789,7 @@ public struct AccountSyncRuntime: Sendable {
             try cursor.saveCursor(nextCursor)
         }
         self.handleConflict = handleConflict
+        self.reviewConflicts = reviewConflicts
     }
 }
 

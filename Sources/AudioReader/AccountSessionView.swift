@@ -425,6 +425,13 @@ struct AccountSyncStatusView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            ForEach(session.syncStatus.resolutionHelp, id: \.self) { help in
+                Text(help)
+                    .font(.caption)
+                    .foregroundStyle(Palette.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if !compact, !session.syncStatus.entityProgress.isEmpty {
                 ForEach(session.syncStatus.entityProgress) { item in
                     HStack(spacing: 8) {

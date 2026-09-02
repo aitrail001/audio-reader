@@ -50,7 +50,7 @@ struct ShadowingPracticeView: View {
                         action: toggleListening
                     )
                 }
-                .fixedSize()
+                .frame(minWidth: 44, minHeight: 44)
             }
 
             if voice.isListening {

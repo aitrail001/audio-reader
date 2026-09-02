@@ -1103,6 +1103,13 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
         if state.current == candidate || state.conflicts.contains(candidate) {
             return .unchanged
         }
+        let hasSameCorrection = state.current.overlay.baseFingerprint == overlay.baseFingerprint
+            && state.current.overlay.correctedText == overlay.correctedText
+            && abs(state.current.overlay.correctedStart - overlay.correctedStart) < 0.001
+            && abs(state.current.overlay.correctedEnd - overlay.correctedEnd) < 0.001
+        if hasSameCorrection, revision <= state.current.revision {
+            return .unchanged
+        }
         if state.current.overlay == overlay {
             try upsertCurrentTranscriptOverlay(overlay, revision: max(revision, state.current.revision))
             return .replacedCurrent
@@ -1111,12 +1118,13 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
            revision < state.current.revision {
             return .unchanged
         }
-        if overlay.provenance.deviceID == state.current.overlay.provenance.deviceID
+        let resolvedOverlay = hasSameCorrection ? state.current.overlay : overlay
+        if resolvedOverlay.provenance.deviceID == state.current.overlay.provenance.deviceID
             || revision > state.current.revision {
             let ownsTransaction = syncPageTransactionDepth == 0
             if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
             do {
-                try upsertCurrentTranscriptOverlay(overlay, revision: revision)
+                try upsertCurrentTranscriptOverlay(resolvedOverlay, revision: revision)
                 if revision > state.current.revision {
                     try deleteTranscriptOverlayConflicts(
                         chapterID: overlay.chapterID,
@@ -1260,6 +1268,33 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
         return try connection.query(
             "SELECT * FROM local_reader_progress WHERE is_current = 1 ORDER BY book_id, id"
         ).map(Self.readerProgress(from:)).map(\.value)
+    }
+
+    /// Counts affected books only; multiple alternatives in one book are one user decision.
+    public func readerProgressConflictCount() throws -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        return try connection.query(
+            "SELECT COUNT(DISTINCT book_id) AS count FROM local_reader_progress WHERE is_current = 0"
+        ).first?.int("count") ?? 0
+    }
+
+    /// Counts affected sentences only; multiple candidates are presented in one choice.
+    public func transcriptOverlayConflictCount() throws -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        return try connection.query(
+            """
+            SELECT COUNT(*) AS count
+            FROM (
+                SELECT 1
+                FROM local_transcript_overlay_conflicts
+                GROUP BY chapter_id, segment_id
+            )
+            """
+        ).first?.int("count") ?? 0
     }
 
     /// Same-revision updates from another device remain as explicit conflicts;
@@ -1557,7 +1592,22 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
         lock.lock()
         defer { lock.unlock() }
         return try connection.query(
-            "SELECT * FROM local_known_lemmas ORDER BY language, form"
+            "SELECT * FROM local_known_lemmas WHERE deleted_at IS NULL ORDER BY language, form"
+        ).map { row in
+            StoredKnownLemma(
+                language: try row.required("language"),
+                form: try row.required("form"),
+                updatedAt: row.date("updated_at")
+            )
+        }
+    }
+
+    /// Deleted rows remain until sync acknowledges their tombstone on every signed-in device.
+    public func loadDeletedKnownLemmas() throws -> [StoredKnownLemma] {
+        lock.lock()
+        defer { lock.unlock() }
+        return try connection.query(
+            "SELECT * FROM local_known_lemmas WHERE deleted_at IS NOT NULL ORDER BY language, form"
         ).map { row in
             StoredKnownLemma(
                 language: try row.required("language"),
@@ -1574,7 +1624,17 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
         let ownsTransaction = syncPageTransactionDepth == 0
         if ownsTransaction { try connection.exec("BEGIN IMMEDIATE TRANSACTION") }
         do {
-            try connection.exec("DELETE FROM local_known_lemmas")
+            let desired = Set(lemmas.map { "\($0.language)\u{1F}\($0.form)" })
+            let active = try connection.query(
+                "SELECT language, form FROM local_known_lemmas WHERE deleted_at IS NULL"
+            )
+            let deletedAt = Date()
+            for row in active {
+                let language: String = try row.required("language")
+                let form: String = try row.required("form")
+                guard !desired.contains("\(language)\u{1F}\(form)") else { continue }
+                try markKnownLemmaDeleted(language: language, form: form, at: deletedAt)
+            }
             try insertKnownLemmas(lemmas)
             if ownsTransaction { try connection.exec("COMMIT") }
         } catch {
@@ -1589,6 +1649,13 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
         defer { lock.unlock() }
         try applySchemaUnlocked()
         try insertKnownLemmas([lemma])
+    }
+
+    public func deleteKnownLemma(language: String, form: String, at date: Date = Date()) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try applySchemaUnlocked()
+        try markKnownLemmaDeleted(language: language, form: form, at: date)
     }
 
     public func loadReviewCards() throws -> [StoredLocalReviewCard] {
@@ -2627,6 +2694,25 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
                 connection.bindDate(stmt, 3, lemma.updatedAt)
                 connection.bindDate(stmt, 4, lemma.updatedAt)
             }
+        }
+    }
+
+    private func markKnownLemmaDeleted(language: String, form: String, at date: Date) throws {
+        try connection.run(
+            """
+            INSERT INTO local_known_lemmas(
+              language, form, updated_at, created_at, server_version, deleted_at
+            ) VALUES (?,?,?,?,0,?)
+            ON CONFLICT(language, form) DO UPDATE SET
+              updated_at=MAX(local_known_lemmas.updated_at, excluded.updated_at),
+              deleted_at=excluded.deleted_at
+            """
+        ) { [connection] statement in
+            connection.bind(statement, 1, language)
+            connection.bind(statement, 2, form)
+            connection.bindDate(statement, 3, date)
+            connection.bindDate(statement, 4, date)
+            connection.bindDate(statement, 5, date)
         }
     }
 

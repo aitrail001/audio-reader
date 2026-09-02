@@ -57,6 +57,7 @@ struct NativeRedesignContractTests {
     @Test("sentence corrections and progress conflicts use the shared resolved reader state")
     func correctionAndProgressPresentation() throws {
         let player = try source("Sources/AudioReader/PlayerView.swift")
+        let appState = try source("Sources/AudioReader/AppState.swift")
         let library = try source("Sources/AudioReader/LibraryView.swift")
         let iPad = try source("Sources/AudioReader/IPadRootView.swift")
 
@@ -71,6 +72,10 @@ struct NativeRedesignContractTests {
         #expect(player.contains("state.restoreTranscriptCorrection"))
         #expect(player.contains("state.readerProgressChoices"))
         #expect(player.contains("state.resolveReaderProgress"))
+        #expect(player.contains("transcript.conflictBanner"))
+        #expect(player.contains("transcript.conflictReview."))
+        #expect(appState.contains("persistCurrentPosition: false"))
+        #expect(appState.contains("Task { await account.synchronize() }"))
         #expect(library.contains("state.continueReading(book)"))
         #expect(iPad.contains("state.continueReading(book)"))
     }
@@ -170,6 +175,24 @@ struct NativeRedesignContractTests {
         #expect(vocabulary.contains("words.category."))
         #expect(vocabulary.contains("pendingAnkiReport"))
         #expect(vocabulary.contains("ankiReport = pendingAnkiReport"))
+    }
+
+    @Test("iPad compact navigation and study controls keep native accessibility contracts")
+    func iPadCompactPolishContracts() throws {
+        let settings = try source("Sources/AudioReader/SettingsView.swift")
+        let root = try source("Sources/AudioReader/IPadRootView.swift")
+        let player = try source("Sources/AudioReader/PlayerView.swift")
+        let shadowing = try source("Sources/AudioReader/ShadowingPracticeView.swift")
+        let review = try source("Sources/AudioReader/VocabularyReviewView.swift")
+
+        #expect(!settings.contains(".navigationBarBackButtonHidden(true)"))
+        #expect(root.contains(".scrollContentBackground(.hidden)"))
+        #expect(root.contains(".fill(Palette.panel2)"))
+        #expect(player.contains(".frame(width: 44, height: 44)"))
+        #expect(shadowing.contains(".frame(minWidth: 44, minHeight: 44)"))
+        #expect(review.contains("case .forgot, .vague: Palette.panel2"))
+        #expect(review.contains("case .remember: Palette.gold"))
+        #expect(!review.contains("case .forgot: .red"))
     }
 
     private func source(_ relativePath: String) throws -> String {

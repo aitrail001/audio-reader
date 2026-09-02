@@ -335,8 +335,10 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
     public var pullCursor: String = "0"
     public var pullHasMore = false
     public var pullPages: [SyncPullResponse] = []
+    public var failPull = false
     public var bootstrapPages: [SyncBootstrapResponse] = []
     public var pushStatus: String = "applied"
+    public var pushStatuses: [String] = []
     public var conflictRevision: Int?
     public var echoPublishedAssets = false
     public private(set) var publishedAssets: [SyncAssetUpload] = []
@@ -512,16 +514,17 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
         _ = deviceID
         return withLock {
             pushed.append(request)
+            let status = pushStatuses.isEmpty ? pushStatus : pushStatuses.removeFirst()
             let results = request.mutations.map { mutation in
                 let revision: Int
-                if pushStatus == "conflict" {
+                if status == "conflict" {
                     revision = conflictRevision ?? max(mutation.baseRevision, 1)
                 } else {
                     revision = mutation.baseRevision + 1
                 }
                 return SyncMutationResult(
                     mutationId: mutation.mutationId,
-                    status: pushStatus,
+                    status: status,
                     entityRevision: revision
                 )
             }
@@ -535,8 +538,15 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
         _ = accessToken
         _ = deviceID
         _ = limit
-        return withLock {
+        return try withLock {
             pulledCursors.append(cursor)
+            if failPull {
+                throw AuthClientError.problem(
+                    status: 503,
+                    code: "sync_unavailable",
+                    detail: "The sync service is unavailable."
+                )
+            }
             if !pullPages.isEmpty {
                 return pullPages.removeFirst()
             }

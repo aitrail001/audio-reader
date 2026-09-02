@@ -644,11 +644,15 @@ struct AccountSessionFlowTests {
             ],
             lemmas: [
                 KnownLemmaRecord(language: "en", form: "whale", updatedAt: Date(timeIntervalSince1970: 1_777_000_000))
+            ],
+            deletedLemmas: [
+                StoredKnownLemma(language: "en", form: "forest", updatedAt: Date(timeIntervalSince1970: 1_777_000_100))
             ]
         )
         #expect(mutations.contains(where: { $0.entityType == .settings }))
         #expect(mutations.contains(where: { $0.entityType == .vocabulary && $0.entityID == vocabID }))
         #expect(mutations.contains(where: { $0.entityType == .lexemeState }))
+        #expect(mutations.contains(where: { $0.entityType == .lexemeState && $0.operation == .delete }))
         #expect(AccountSyncApplicator.isUUID(AccountSyncApplicator.uuidForLemma(language: "en", form: "whale")))
     }
 
@@ -2894,9 +2898,21 @@ struct AccountSessionFlowTests {
         try AccountSyncApplicator.applyPage([first], cursor: "1", to: store)
         try AccountSyncApplicator.applyPage([revision], cursor: "2", to: store)
 
-        #expect(try store.loadKnownLemmas().map(\.form) == ["read"])
-        #expect(try store.loadVersion(entityType: revision.entityType, entityID: revision.entityId)?.serverVersion == 2)
-        #expect(try store.loadCursor() == "2")
+        let deletion = SyncPulledChange(
+            sequence: 3,
+            entityType: OutboxEntityType.lexemeState.rawValue,
+            entityId: "lemma-read",
+            operation: OutboxOperation.delete.rawValue,
+            revision: 3,
+            changedAt: "2026-09-01T00:00:00Z",
+            payload: ["language": .string("en"), "lemma": .string("read"), "state": .string("unknown")]
+        )
+        try AccountSyncApplicator.applyPage([deletion], cursor: "3", to: store)
+
+        #expect(try store.loadKnownLemmas().isEmpty)
+        #expect(try store.loadDeletedKnownLemmas().map(\.form) == ["read"])
+        #expect(try store.loadVersion(entityType: deletion.entityType, entityID: deletion.entityId)?.serverVersion == 3)
+        #expect(try store.loadCursor() == "3")
     }
 
     @Test("A 7,000-record bootstrap uses bounded page transactions")

@@ -837,6 +837,7 @@ private struct IPadBookList: View {
                     Label(importMessage, systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.secondary)
                 }
+                .listRowBackground(Palette.panel)
             }
             Section {
                 ForEach(filteredBooks) { book in
@@ -869,7 +870,10 @@ private struct IPadBookList: View {
                     }
                 }
             }
+            .listRowBackground(Palette.panel)
         }
+        .scrollContentBackground(.hidden)
+        .background(Palette.bg)
         .searchable(text: $query, prompt: "Search title or author")
         .accessibilityIdentifier("library.search")
         .overlay {
@@ -956,6 +960,7 @@ private struct IPadBookDetail: View {
             }
             .padding(28)
         }
+        .background(Palette.bg)
         .navigationTitle(book.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -1108,6 +1113,8 @@ private struct DeviceAudiobooksView: View {
                 }
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(Palette.bg)
         .overlay {
             if library.isLoading {
                 ProgressView("Finding audiobooks…")
@@ -1149,7 +1156,7 @@ private struct IPadCover: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color(uiColor: .secondarySystemGroupedBackground))
+                .fill(Palette.panel2)
             if let path, let image = CoverImageCache.shared.image(for: path) {
                 Image(uiImage: image)
                     .resizable()

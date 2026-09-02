@@ -52,7 +52,6 @@ struct SettingsView: View {
         .navigationTitle("Settings")
 #if os(iOS)
         .navigationBarTitleDisplayMode(.large)
-        .navigationBarBackButtonHidden(true)
 #endif
         .toolbar {
 #if os(iOS)

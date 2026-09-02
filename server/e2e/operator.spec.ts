@@ -4,12 +4,16 @@ import { expect, test } from "@playwright/test";
 test("grouped destinations are keyboard reachable and preserve URL state", async ({ page }) => {
   await page.goto("/?preview=1&section=audit&auditAction=patch_policy");
   await expect(page.getByRole("heading", { name: "Audit" })).toBeVisible();
-  await expect(page.getByRole("navigation", { name: "Operator sections" })).toContainText("People");
-  await expect(page.getByRole("navigation", { name: "Operator sections" })).toContainText(
-    "Observe",
-  );
-  await page.getByRole("button", { name: "Activity" }).focus();
-  await page.keyboard.press("Enter");
+  const navigation = page.getByRole("navigation", { name: "Operator sections" });
+  const compactDestination = page.getByRole("combobox", { name: "Operator section" });
+  if (await compactDestination.isVisible()) {
+    await compactDestination.selectOption("usage");
+  } else {
+    await expect(navigation).toContainText("People");
+    await expect(navigation).toContainText("Observe");
+    await page.getByRole("button", { name: "Activity" }).focus();
+    await page.keyboard.press("Enter");
+  }
   await expect(page).toHaveURL(/section=usage/);
   await page.getByLabel("Request id").fill("request-preview-001");
   await expect(page).toHaveURL(/usageRequestId=request-preview-001/);
@@ -30,8 +34,12 @@ test("preview is WCAG AA clean and never renders secret fixture material", async
 test("layout remains operable at 200 percent zoom", async ({ page }) => {
   await page.goto("/?preview=1&section=overview");
   await page.evaluate("document.documentElement.style.zoom = '2'");
-  await expect(page.getByRole("button", { name: "Users" })).toBeVisible();
-  await page.getByRole("button", { name: "Users" }).click();
+  const compactDestination = page.getByRole("combobox", { name: "Operator section" });
+  if (await compactDestination.isVisible()) {
+    await compactDestination.selectOption("users");
+  } else {
+    await page.getByRole("button", { name: "Users" }).click();
+  }
   await expect(page.getByRole("heading", { name: "Users" })).toBeVisible();
 });
 
@@ -39,6 +47,8 @@ test("analytics trends remain accessible and responsive", async ({ page }, testI
   await page.goto("/?preview=1&section=metrics&metricsCountry=AU");
   await expect(page.getByRole("heading", { name: "Learning and reading trends" })).toBeVisible();
   await expect(page.getByRole("img", { name: /Event trend/ })).toBeVisible();
+  await page.getByText("Trend data", { exact: true }).click();
+  await expect(page.getByRole("table", { name: "Trend bucket values" })).toBeVisible();
   await expect(page.getByRole("table", { name: "Country distribution" })).toBeVisible();
   await expect(page.getByRole("region", { name: "Anomaly watch" })).toBeVisible();
   const accessibility = await new AxeBuilder({ page })
@@ -50,6 +60,7 @@ test("analytics trends remain accessible and responsive", async ({ page }, testI
       "document.documentElement.scrollWidth <= document.documentElement.clientWidth",
     ),
   ).toBe(true);
+  await page.evaluate("document.querySelector('.stage')?.scrollTo(0, 0)");
   await expect(page).toHaveScreenshot(`analytics-${testInfo.project.name}.png`, {
     fullPage: true,
   });

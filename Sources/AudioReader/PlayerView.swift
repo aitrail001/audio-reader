@@ -77,6 +77,9 @@ struct PlayerView: View {
             if state.readerProgressChoices.count > 1 {
                 readerProgressConflictBanner
             }
+            if !state.transcriptOverlayConflictStates.isEmpty {
+                transcriptOverlayConflictBanner
+            }
             lyricPane
             if state.selectedChapter?.hasAudio == true {
                 VStack(spacing: playbackChromeSpacing) {
@@ -155,6 +158,7 @@ struct PlayerView: View {
                 segment: segment,
                 hasStoredCorrection: state.transcriptOverlay(for: segment.id) != nil,
                 conflictChoices: state.transcriptOverlayChoices(for: segment.id),
+                deviceName: state.syncDeviceName,
                 onPreview: previewTranscriptCorrection,
                 onSave: { text, start, end in
                     try state.saveTranscriptCorrection(
@@ -220,7 +224,7 @@ struct PlayerView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(readerProgressChapterTitle(choice.chapterID.rawValue))
                         .font(.subheadline.weight(.semibold))
-                    Text("\(formatClock(choice.relativeSeconds)) · \(choice.deviceID) · \(choice.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                    Text("\(formatClock(choice.relativeSeconds)) · \(state.syncDeviceName(choice.deviceID)) · \(choice.updatedAt.formatted(date: .abbreviated, time: .shortened))")
                         .font(.caption)
                         .foregroundStyle(Palette.dim)
                 }
@@ -229,6 +233,41 @@ struct PlayerView: View {
             .buttonStyle(.bordered)
             .accessibilityIdentifier("reader.progressChoice.\(choice.id)")
         }
+    }
+
+    private var transcriptOverlayConflictBanner: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Choose a transcript correction", systemImage: "text.badge.checkmark")
+                .font(.headline)
+            Text("The same sentence was corrected differently on another device. Compare the versions before sync continues.")
+                .font(.subheadline)
+                .foregroundStyle(Palette.dim)
+            ForEach(state.transcriptOverlayConflictStates.keys.sorted(), id: \.self) { segmentID in
+                if let segment = state.presentedTranscript?.segments.first(where: { $0.id == segmentID }) {
+                    Button {
+                        editingTranscriptSegment = segment
+                    } label: {
+                        let choices = state.transcriptOverlayChoices(for: segmentID)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(choices.map { "“\($0.overlay.correctedText)”" }.joined(separator: " or "))
+                                .lineLimit(2)
+                            Text(choices.map { state.syncDeviceName($0.overlay.provenance.deviceID) }.joined(separator: " · "))
+                                .font(.caption)
+                                .foregroundStyle(Palette.dim)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityHint("Opens both corrections with their timing and device")
+                    .accessibilityIdentifier("transcript.conflictReview.\(segmentID)")
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.goldSoft)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("transcript.conflictBanner")
     }
 
     private func readerProgressChapterTitle(_ chapterID: String) -> String {
@@ -1491,6 +1530,7 @@ private struct ChapterAssistantView: View {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 16))
                         .foregroundStyle(Palette.dim)
+                        .frame(width: 44, height: 44)
                 }
                 .buttonStyle(.plain)
             }
@@ -1707,10 +1747,11 @@ private struct ChapterAssistantView: View {
                                     action: toggleDictation
                                 )
                             }
-                            .frame(width: 28, height: 28)
+                            .frame(width: 44, height: 44)
                             Button(action: sendChat) {
                                 Image(systemName: "arrow.up.circle.fill")
                                     .font(.system(size: 22))
+                                    .frame(width: 44, height: 44)
                             }
                             .buttonStyle(.plain)
                             .foregroundStyle(Palette.gold)
@@ -2743,6 +2784,7 @@ private struct TranscriptCorrectionSheet: View {
     let segment: TranscriptSegment
     let hasStoredCorrection: Bool
     let conflictChoices: [StoredTranscriptOverlayCandidate]
+    let deviceName: (String) -> String
     let onPreview: (TimeInterval, TimeInterval) -> Void
     let onSave: (String, TimeInterval, TimeInterval) throws -> Void
     let onRestore: () throws -> Void
@@ -2757,6 +2799,7 @@ private struct TranscriptCorrectionSheet: View {
         segment: TranscriptSegment,
         hasStoredCorrection: Bool,
         conflictChoices: [StoredTranscriptOverlayCandidate],
+        deviceName: @escaping (String) -> String,
         onPreview: @escaping (TimeInterval, TimeInterval) -> Void,
         onSave: @escaping (String, TimeInterval, TimeInterval) throws -> Void,
         onRestore: @escaping () throws -> Void,
@@ -2765,6 +2808,7 @@ private struct TranscriptCorrectionSheet: View {
         self.segment = segment
         self.hasStoredCorrection = hasStoredCorrection
         self.conflictChoices = conflictChoices
+        self.deviceName = deviceName
         self.onPreview = onPreview
         self.onSave = onSave
         self.onRestore = onRestore
@@ -2834,7 +2878,7 @@ private struct TranscriptCorrectionSheet: View {
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(candidate.overlay.correctedText)
                                         .lineLimit(2)
-                                    Text("\(formatClock(candidate.overlay.correctedStart))–\(formatClock(candidate.overlay.correctedEnd)) · \(candidate.overlay.provenance.deviceID)")
+                                    Text("\(formatClock(candidate.overlay.correctedStart))–\(formatClock(candidate.overlay.correctedEnd)) · \(deviceName(candidate.overlay.provenance.deviceID)) · \(candidate.overlay.updatedAt.formatted(date: .abbreviated, time: .shortened))")
                                         .font(.caption)
                                         .foregroundStyle(Palette.dim)
                                 }
