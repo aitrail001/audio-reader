@@ -154,7 +154,6 @@ struct ChunkTranslationCacheTests {
         #expect(playerView.contains("state.summarizeChapter(force: true)"))
         #expect(managed.contains("static func translateBatch("))
         #expect(managed.contains("static func lookupSummary("))
-        #expect(managed.contains("static func lookupTranslation("))
         #expect(managed.contains("lookupOnly: true"))
         #expect(managed.contains("if case .problem(status: 404, _, _) = error"))
     }

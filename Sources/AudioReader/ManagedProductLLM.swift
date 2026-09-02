@@ -146,44 +146,6 @@ enum ManagedProductLLM {
         )
     }
 
-    static func lookupTranslation(
-        task: String,
-        source: String,
-        sourceLanguage: String,
-        targetLanguage: String,
-        learnerLevel: String,
-        targetID: String? = nil,
-        context: String? = nil,
-        editionFingerprint: String = "",
-        chapterFingerprint: String = "",
-        bookTitle: String = "",
-        author: String = "",
-        chapterTitle: String = ""
-    ) async throws -> ProductTranslationResult? {
-        do {
-            return try await translate(
-                task: task,
-                source: source,
-                sourceLanguage: sourceLanguage,
-                targetLanguage: targetLanguage,
-                learnerLevel: learnerLevel,
-                targetID: targetID,
-                context: context,
-                editionFingerprint: editionFingerprint,
-                chapterFingerprint: chapterFingerprint,
-                bookTitle: bookTitle,
-                author: author,
-                chapterTitle: chapterTitle,
-                lookupOnly: true
-            )
-        } catch let error as AuthClientError {
-            if case .problem(status: 404, _, _) = error {
-                return nil
-            }
-            throw error
-        }
-    }
-
     static func chapterResults(from batch: ProductTranslationBatchResult) -> [ChapterTranslationResult] {
         batch.results.compactMap { result in
             let targetID = result.targetId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -229,57 +191,6 @@ enum ManagedProductLLM {
             sections.append("\(GlossTextFormat.learningNotesHeading)\n\(lines)")
         }
         return sections.joined(separator: "\n\n")
-    }
-
-    static func translationEnvelope(
-        targetID: String,
-        source: String,
-        sourceLanguage: String,
-        targetLanguage: String,
-        learnerLevel: String,
-        context: String? = nil,
-        contextPrevious: [String] = [],
-        contextNext: [String] = [],
-        editionFingerprint: String = "",
-        chapterFingerprint: String = "",
-        bookTitle: String = "",
-        author: String = "",
-        chapterTitle: String = ""
-    ) async throws -> String {
-        let result = try await translate(
-            task: "sentence",
-            source: source,
-            sourceLanguage: sourceLanguage,
-            targetLanguage: targetLanguage,
-            learnerLevel: learnerLevel,
-            targetID: targetID,
-            context: context,
-            contextPrevious: contextPrevious,
-            contextNext: contextNext,
-            editionFingerprint: editionFingerprint,
-            chapterFingerprint: chapterFingerprint,
-            bookTitle: bookTitle,
-            author: author,
-            chapterTitle: chapterTitle
-        )
-        let notes = result.notes.map {
-            [
-                "source": $0.source,
-                "category": $0.category,
-                "explanation": $0.explanation
-            ]
-        }
-        let envelope: [String: Any] = [
-            "translations": [
-                [
-                    "id": targetID,
-                    "translation": result.translation,
-                    "notes": notes
-                ]
-            ]
-        ]
-        let data = try JSONSerialization.data(withJSONObject: envelope)
-        return String(data: data, encoding: .utf8) ?? result.translation
     }
 
     static func summarize(

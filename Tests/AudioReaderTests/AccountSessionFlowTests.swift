@@ -483,7 +483,6 @@ struct AccountSessionFlowTests {
         #expect(appState.contains("contextPrevious"))
         #expect(appState.contains("contextNext"))
         #expect(appState.contains("contextBefore:"))
-        #expect(!appState.contains("ManagedProductLLM.translationEnvelope"))
         #expect(appState.contains("wordMeaningText"))
         #expect(appState.contains("bookTitle: book?.title"))
         #expect(try source("Sources/AudioReader/ManagedProductLLM.swift").contains("sentenceMeaningHeading"))
