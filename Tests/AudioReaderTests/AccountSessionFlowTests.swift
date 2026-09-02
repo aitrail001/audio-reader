@@ -154,25 +154,6 @@ struct AccountSessionFlowTests {
         #expect(uploads.isEmpty)
     }
 
-    @Test("expanded EPUB directories produce deterministic bounded reading-package archives")
-    func deterministicExpandedEPUBPackage() throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("epub-package-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: directory.appendingPathComponent("OPS", isDirectory: true),
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: directory) }
-        try Data("chapter".utf8).write(to: directory.appendingPathComponent("OPS/chapter.xhtml"))
-        try Data("package".utf8).write(to: directory.appendingPathComponent("OPS/package.opf"))
-
-        let first = try AccountSyncApplicator.deterministicReadingPackage(from: directory)
-        defer { try? FileManager.default.removeItem(at: first) }
-        let second = try AccountSyncApplicator.deterministicReadingPackage(from: directory)
-        defer { try? FileManager.default.removeItem(at: second) }
-        #expect(try Data(contentsOf: first) == Data(contentsOf: second))
-    }
-
     @Test("verified audio manifest installs atomically and associates its chapter before cursor commit")
     func installsAudioManifestWithChapterAssociation() throws {
         let databaseURL = FileManager.default.temporaryDirectory
@@ -210,47 +191,6 @@ struct AccountSessionFlowTests {
         #expect(FileManager.default.fileExists(atPath: manifest.localObjectPath))
         #expect(try store.loadAssets(bookID: bookID).first?.metadata["chapterID"] == chapterID.rawValue)
         #expect(try store.loadCursor() == "1")
-    }
-
-    @Test("a hydrated EPUB reading package is produced again with its exact remote kind")
-    func preservesReadingPackageSyncKind() throws {
-        let databaseURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("sync-reading-package-\(UUID().uuidString).sqlite")
-        let source = FileManager.default.temporaryDirectory
-            .appendingPathComponent("sync-reading-package-\(UUID().uuidString).zip")
-        defer { try? FileManager.default.removeItem(at: databaseURL) }
-        defer { try? FileManager.default.removeItem(at: source) }
-        try Data([1, 2, 3]).write(to: source)
-        let store = LocalSQLiteStore(fileURL: databaseURL)
-        let bookID = BookID(rawValue: "local-book")
-        try store.saveBook(StoredBook(
-            id: bookID, title: "Book", author: "Author", source: "files", chapters: []
-        ))
-        let assetID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-        let change = SyncPulledChange(
-            sequence: 1, entityType: OutboxEntityType.asset.rawValue, entityId: assetID,
-            operation: OutboxOperation.upsert.rawValue, revision: 1,
-            changedAt: "2026-08-31T00:00:00Z",
-            payload: [
-                "assetId": .string(assetID),
-                "kind": .string(SyncAssetKind.epubReadingPackage.rawValue),
-                "bookId": .string(AccountSyncApplicator.syncEntityID(bookID.rawValue, kind: "book")),
-                "contentType": .string("application/zip"), "encoding": .string("identity"),
-                "sha256": .string(String(repeating: "e", count: 64)),
-                "compressedBytes": .number(3), "originalBytes": .number(3),
-                "localObjectPath": .string(source.path),
-            ]
-        )
-        try AccountSyncApplicator.applyPage([change], versions: [], cursor: "1", to: store)
-        let local = try #require(try store.loadAssets(bookID: bookID).first)
-        defer { try? FileManager.default.removeItem(atPath: local.localMediaKey) }
-
-        let upload = try #require(try AccountSyncApplicator.assetUpload(local))
-
-        #expect(local.kind == SyncAssetKind.epub.rawValue)
-        #expect(local.metadata["syncKind"] == SyncAssetKind.epubReadingPackage.rawValue)
-        #expect(upload.kind == .epubReadingPackage)
-        #expect(upload.fileURL.path == local.localMediaKey)
     }
 
     private static func syncTranscript(chapterID: ChapterID, index: Int) -> StoredTranscript {

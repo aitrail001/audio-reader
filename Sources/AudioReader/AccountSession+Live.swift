@@ -2,7 +2,6 @@ import AuthenticationServices
 import CryptoKit
 import Foundation
 import OSLog
-import ZIPFoundation
 #if os(macOS)
 import AppKit
 #else
@@ -110,86 +109,6 @@ enum AccountSyncApplicator {
         // Operator storage availability is not user consent. This release exposes only
         // learning-data sync, so audio, EPUB, and cover rows must remain device-local.
         return transcripts
-    }
-
-    /// The server kind remains authoritative after hydration, including reading packages installed as local EPUBs.
-    static func assetUpload(
-        _ asset: StoredLocalAsset,
-        stagingDirectory: URL = FileManager.default.temporaryDirectory
-    ) throws -> SyncAssetUpload? {
-        let remoteKindName = asset.metadata["syncKind"] ?? asset.kind
-        guard let kind = SyncAssetKind(rawValue: remoteKindName), kind != .transcriptRevision else { return nil }
-        let url = URL(fileURLWithPath: asset.localMediaKey)
-            guard FileManager.default.isReadableFile(atPath: url.path) else { return nil }
-            let isDirectory = (try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-            let preparedURL = isDirectory
-                ? try deterministicReadingPackage(from: url, outputDirectory: stagingDirectory)
-                : url
-            let uploadKind: SyncAssetKind = isDirectory && kind == .epub ? .epubReadingPackage : kind
-            let digest = try SyncAssetFileIO.digest(fileURL: preparedURL)
-            let chapterID = asset.metadata["chapterID"].map {
-                syncEntityID($0, kind: "chapter")
-            }
-        return SyncAssetUpload(
-                kind: uploadKind,
-                revisionID: syncEntityID(asset.id.rawValue, kind: "asset-revision"),
-                bookID: syncEntityID(asset.bookID.rawValue, kind: "book"),
-                chapterID: chapterID,
-                contentType: asset.metadata["contentType"] ?? contentType(for: preparedURL, kind: uploadKind),
-                sha256: digest.sha256,
-                originalBytes: digest.byteCount,
-                fileURL: preparedURL,
-                compressedBytes: digest.byteCount,
-                deleteFileAfterUpload: preparedURL != url
-            )
-    }
-
-    /// ZIP entries use stable ordering, timestamp, permissions, and no compression so an expanded
-    /// EPUB directory always produces the same immutable reading-package digest.
-    static func deterministicReadingPackage(
-        from directory: URL,
-        outputDirectory: URL = FileManager.default.temporaryDirectory
-    ) throws -> URL {
-        let output = outputDirectory
-            .appendingPathComponent("AudioReader-\(UUID().uuidString).reading-package.zip")
-        let archive = try Archive(url: output, accessMode: .create)
-        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
-        let files = (FileManager.default.enumerator(
-            at: directory, includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        )?.allObjects as? [URL] ?? []).filter {
-            (try? $0.resourceValues(forKeys: keys).isRegularFile) == true
-        }.sorted {
-            $0.path.replacingOccurrences(of: directory.path + "/", with: "")
-                < $1.path.replacingOccurrences(of: directory.path + "/", with: "")
-        }
-        let fixedDate = Date(timeIntervalSince1970: 315_532_800)
-        for file in files {
-            let path = file.path.replacingOccurrences(of: directory.path + "/", with: "")
-            let size = Int64(try file.resourceValues(forKeys: keys).fileSize ?? 0)
-            let handle = try FileHandle(forReadingFrom: file)
-            defer { try? handle.close() }
-            try archive.addEntry(
-                with: path, type: .file, uncompressedSize: size,
-                modificationDate: fixedDate, permissions: 0o644, compressionMethod: .none
-            ) { position, count in
-                try handle.seek(toOffset: UInt64(position))
-                return try handle.read(upToCount: count) ?? Data()
-            }
-        }
-        return output
-    }
-
-    private static func contentType(for url: URL, kind: SyncAssetKind) -> String {
-        switch (kind, url.pathExtension.lowercased()) {
-        case (.audio, "m4b"), (.audio, "m4a"): "audio/mp4"
-        case (.audio, "mp3"): "audio/mpeg"
-        case (.epub, _): "application/epub+zip"
-        case (.epubReadingPackage, _): "application/zip"
-        case (.cover, "png"): "image/png"
-        case (.cover, _): "image/jpeg"
-        default: "application/octet-stream"
-        }
     }
 
     static func snapshot(
