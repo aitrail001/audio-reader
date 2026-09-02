@@ -330,40 +330,6 @@ enum ReaderWindowTitle {
     }
 }
 
-enum ChapterCoverageCalculator {
-    static func snapshot(
-        segments: [TranscriptSegment],
-        language: String,
-        vocab: [VocabEntry],
-        known: [KnownLemmaRecord]
-    ) -> ChapterCoverage {
-        StudyIndex.build(
-            segments: segments,
-            language: language,
-            vocab: vocab,
-            knownRecords: known
-        ).coverage
-    }
-}
-
-enum ChapterPrimingList {
-    static func build(
-        segments: [TranscriptSegment],
-        language: String,
-        vocab: [VocabEntry],
-        known: [KnownLemmaRecord],
-        limit: Int = 200
-    ) -> [ChapterStudyItem] {
-        StudyIndex.build(
-            segments: segments,
-            language: language,
-            vocab: vocab,
-            knownRecords: known,
-            primingLimit: limit
-        ).priming
-    }
-}
-
 enum StudyTextMatch {
     static func firstWholeTokenRange(of rawTerm: String, in text: String) -> Range<String.Index>? {
         let term = rawTerm.trimmingCharacters(in: .whitespacesAndNewlines)

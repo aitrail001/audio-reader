@@ -154,12 +154,12 @@ struct StudyLexiconTests {
 struct ChapterStudyListTests {
     @Test("Coverage counts unique content lemmas")
     func coverageUsesUniqueContentLemmas() {
-        let coverage = ChapterCoverageCalculator.snapshot(
+        let coverage = StudyIndex.build(
             segments: sampleSegments(),
             language: "en",
             vocab: [wordEntry("forest")],
-            known: [KnownLemmaRecord(language: "en", form: "canopy", updatedAt: Date())]
-        )
+            knownRecords: [KnownLemmaRecord(language: "en", form: "canopy", updatedAt: Date())]
+        ).coverage
 
         #expect(coverage.contentCount == 3)
         #expect(coverage.knownCount == 1)
@@ -199,12 +199,12 @@ struct ChapterStudyListTests {
 
     @Test("Stopwords do not inflate coverage")
     func ignoresStopwords() {
-        let coverage = ChapterCoverageCalculator.snapshot(
+        let coverage = StudyIndex.build(
             segments: sampleSegments(),
             language: "en",
             vocab: [],
-            known: []
-        )
+            knownRecords: []
+        ).coverage
 
         #expect(coverage.contentCount == 3)
         #expect(!coverage.caption.contains("the"))
@@ -212,12 +212,12 @@ struct ChapterStudyListTests {
 
     @Test("Vocabulary counts as covered without an explicit known mark")
     func treatsVocabAsCoveredWithoutKnownMark() {
-        let coverage = ChapterCoverageCalculator.snapshot(
+        let coverage = StudyIndex.build(
             segments: sampleSegments(),
             language: "en",
             vocab: [wordEntry("forest")],
-            known: []
-        )
+            knownRecords: []
+        ).coverage
 
         #expect(coverage.learningCount == 1)
         #expect(coverage.knownCount == 0)
@@ -226,22 +226,22 @@ struct ChapterStudyListTests {
 
     @Test("An empty transcript has zero coverage")
     func emptyTranscriptIsZero() {
-        #expect(ChapterCoverageCalculator.snapshot(
+        #expect(StudyIndex.build(
             segments: [],
             language: "en",
             vocab: [wordEntry("forest")],
-            known: []
-        ) == .empty)
+            knownRecords: []
+        ).coverage == .empty)
     }
 
     @Test("Priming is first-occurrence order and skips known lemmas")
     func primingIsFirstOccurrenceOrder() {
-        let items = ChapterPrimingList.build(
+        let items = StudyIndex.build(
             segments: sampleSegments(),
             language: "en",
             vocab: [wordEntry("forest")],
-            known: [KnownLemmaRecord(language: "en", form: "canopy", updatedAt: Date())]
-        )
+            knownRecords: [KnownLemmaRecord(language: "en", form: "canopy", updatedAt: Date())]
+        ).priming
 
         #expect(items.map(\.lemma.form) == ["forest", "stream"])
         #expect(items[0].familiarity == .learning)
@@ -251,12 +251,12 @@ struct ChapterStudyListTests {
 
     @Test("Priming walks every sentence, not only the selected one")
     func primingIgnoresUnselectedSentenceLimitation() {
-        let items = ChapterPrimingList.build(
+        let items = StudyIndex.build(
             segments: sampleSegments(),
             language: "en",
             vocab: [],
-            known: []
-        )
+            knownRecords: []
+        ).priming
 
         #expect(items.map(\.lemma.form) == ["forest", "canopy", "stream"])
         #expect(items.last?.segmentID == "second")
