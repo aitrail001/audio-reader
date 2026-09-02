@@ -37,9 +37,10 @@ $ git rev-parse HEAD
 ```
 
 `22c4c1f` is `origin/main` at checkout, commit message `add planning`
-(2026-08-26 19:23:44 +1000). It adds the planning bundle under
-`audio-reader-redesign-planning/` (design doc, OpenAPI contract, research,
-validation JSON). No product source is in that commit.
+(2026-08-26 19:23:44 +1000). It added the initial planning snapshot, which was
+later superseded by the accepted decisions in `docs/architecture/` and the
+canonical contract at `contracts/openapi-v1.yaml`. No product source is in that
+commit.
 
 The design document originally named baseline `main` at
 `e22685ae2c3b6c14eb53de8ebd2d4d3e017d6c3b`. Current HEAD is one commit ahead of
