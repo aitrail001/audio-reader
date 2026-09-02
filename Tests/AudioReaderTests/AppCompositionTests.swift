@@ -27,7 +27,6 @@ struct AppCompositionTests {
         #expect(!appState.contains("?? Persistence.store"))
         #expect(!appState.contains("Persistence.store"))
         #expect(!appState.contains("Persistence.loadVocab"))
-        #expect(!appState.contains("Persistence.saveVocab"))
         #expect(!appState.contains("Persistence.loadKnownLemmas"))
         #expect(!appState.contains("Persistence.saveKnownLemmas"))
 

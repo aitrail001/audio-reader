@@ -462,10 +462,6 @@ enum Persistence {
         ((try? store.loadVocabulary()) ?? []).map(VocabEntry.init)
     }
 
-    static func saveVocab(_ items: [VocabEntry]) {
-        try? store.saveVocabulary(items.map(StoredVocabularyOccurrence.init))
-    }
-
     static func loadKnownLemmas() -> [KnownLemmaRecord] {
         ((try? store.loadKnownLemmas()) ?? []).map(KnownLemmaRecord.init)
     }
