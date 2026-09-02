@@ -142,17 +142,6 @@ public protocol AssistantResultRepository: Sendable {
     func replaceAssistantResults(_ results: [StoredAssistantResult]) throws
 }
 
-public protocol TranslationCheckpointRepository: Sendable {
-    func loadTranslationCheckpoints() throws -> [StoredTranslationCheckpoint]
-    func saveTranslationCheckpoint(_ checkpoint: StoredTranslationCheckpoint) throws
-    func deleteTranslationCheckpoint(chapterID: ChapterID, language: String) throws
-}
-
-public protocol StudyActivityRepository: Sendable {
-    func loadStudyActivityDays() throws -> [String]
-    func saveStudyActivityDays(_ days: [String]) throws
-}
-
 public protocol SyncOutboxRepository: Sendable {
     func enqueue(_ mutation: OutboxMutation) throws
     func pendingMutations() throws -> [OutboxMutation]
