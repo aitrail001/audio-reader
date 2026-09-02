@@ -1243,14 +1243,6 @@ enum AccountSyncApplicator {
         )
     }
 
-    /// Pulled reviews stay append-only locally so learning statistics have the same history on every device.
-    static func appendReviewHistory(
-        _ change: SyncPulledChange,
-        to repository: any ReviewEventRepository
-    ) throws {
-        try repository.appendReviewEvent(try reviewEvent(from: change))
-    }
-
     static func uuidForLemma(language: String, form: String) -> String {
         uuidForStableKey("lemma:\(language):\(form)")
     }

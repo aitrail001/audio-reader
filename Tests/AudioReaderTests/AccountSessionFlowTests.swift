@@ -1091,37 +1091,31 @@ struct AccountSessionFlowTests {
         #expect(try store.loadReviewEvents().isEmpty)
     }
 
-    @Test("Pulled review events append immutable history for cross-device learning statistics")
-    func pulledReviewAppendsHistory() throws {
+    @Test("Review events append immutable history for learning statistics")
+    func reviewRepositoryAppendsHistory() throws {
         let repository = InMemoryReviewEventRepository()
-        let change = SyncPulledChange(
-            sequence: 8,
-            entityType: OutboxEntityType.reviewEvent.rawValue,
-            entityId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-            operation: OutboxOperation.append.rawValue,
-            revision: 2,
-            changedAt: "2026-08-30T02:15:00Z",
-            payload: [
-                "vocabularyId": .string("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
-                "cardId": .string("study:give-up"),
-                "face": .string("recognition"),
-                "rating": .string(VocabReviewQuality.remember.rawValue),
-                "reviewedAt": .string("2026-08-30T02:14:30Z")
-            ]
+        let reviewedAt = try #require(ISO8601DateFormatter().date(from: "2026-08-30T02:14:30Z"))
+        let stored = StoredReviewEvent(
+            id: ReviewEventID(rawValue: "dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+            vocabularyID: VocabularyOccurrenceID(rawValue: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            cardID: "study:give-up",
+            face: "recognition",
+            rating: VocabReviewQuality.remember.rawValue,
+            reviewedAt: reviewedAt
         )
 
-        try AccountSyncApplicator.appendReviewHistory(change, to: repository)
-        try AccountSyncApplicator.appendReviewHistory(change, to: repository)
+        try repository.appendReviewEvent(stored)
+        try repository.appendReviewEvent(stored)
 
         let events = try repository.loadReviewEvents()
         let event = try #require(events.first)
         #expect(events.count == 1)
-        #expect(event.id.rawValue == change.entityId)
+        #expect(event.id.rawValue == "dddddddd-dddd-4ddd-8ddd-dddddddddddd")
         #expect(event.vocabularyID.rawValue == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
         #expect(event.cardID == "study:give-up")
         #expect(event.face == "recognition")
         #expect(event.rating == VocabReviewQuality.remember.rawValue)
-        #expect(event.reviewedAt == ISO8601DateFormatter().date(from: "2026-08-30T02:14:30Z"))
+        #expect(event.reviewedAt == reviewedAt)
     }
 
     @Test("Vocabulary sync carries local sentence and translation provenance additively")
