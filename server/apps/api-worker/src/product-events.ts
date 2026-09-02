@@ -225,7 +225,8 @@ export async function toProductEvent(event: OpsProductEvent): Promise<ProductEve
       ? {}
       : { deviceSubjectId: await pseudonymousReference("device", event.deviceId) }),
     ...(event.requestId === null ? {} : { requestId: event.requestId }),
-    properties: await sanitizeActivityProperties(event.properties),
+    // Durable legacy rows are re-sanitized before Operator output without mutating provenance.
+    properties: await sanitizeProperties(event.properties),
   };
 }
 
@@ -268,13 +269,6 @@ async function sanitizeProperties(
     }
   }
   return next;
-}
-
-/** Durable legacy rows are re-sanitized before Operator output without mutating provenance. */
-async function sanitizeActivityProperties(
-  input: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  return sanitizeProperties(input);
 }
 
 async function opaqueContentProperty(key: string, value: string): Promise<string> {
