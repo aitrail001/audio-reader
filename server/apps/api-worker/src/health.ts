@@ -6,12 +6,6 @@ export type DependencyProbe = {
   ping(): Promise<ReadinessStatus>;
 };
 
-export function unavailableProbe(): DependencyProbe {
-  return {
-    ping: () => Promise.resolve("unavailable"),
-  };
-}
-
 async function safePing(probe: DependencyProbe): Promise<ReadinessStatus> {
   try {
     return await probe.ping();
