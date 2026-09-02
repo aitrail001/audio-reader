@@ -1,5 +1,5 @@
 name = "audio-reader-api-worker"
-main = "src/worker.ts"
+main = "src/index.ts"
 compatibility_date = "2026-08-26"
 
 [vars]
