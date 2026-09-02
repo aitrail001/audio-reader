@@ -12,7 +12,7 @@ private enum LocalSQLiteStoreError: Error {
     case missingTranscriptCatalogParent
 }
 
-public final class LocalSQLiteStore: SettingsRepository, BookRepository, TranscriptRepository, VocabularyRepository, KnownLemmaRepository, AssistantResultRepository, SyncOutboxRepository, SyncCursorStoring, SyncEntityVersionStoring, TranscriptOverlayRepository, ReaderProgressRepository, ReviewEventRepository, @unchecked Sendable {
+public final class LocalSQLiteStore: SettingsRepository, BookRepository, TranscriptRepository, VocabularyRepository, KnownLemmaRepository, AssistantResultRepository, SyncOutboxRepository, SyncCursorStoring, SyncEntityVersionStoring, ReviewEventRepository, @unchecked Sendable {
     /// An uploadable transcript paired with the active catalog owner observed in the same snapshot.
     public struct ActiveSyncTranscriptCandidate: Equatable, Sendable {
         public let bookID: BookID
