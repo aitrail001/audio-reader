@@ -10,10 +10,10 @@ import {
   type MemoryPasswordlessLimiterOptions,
 } from "@audio-reader/auth";
 import { createFakeDatabaseClient } from "@audio-reader/database";
-import { REQUEST_ID_HEADER } from "@audio-reader/observability";
 import { describe, expect, it, vi } from "vitest";
 import { createApiAppFromEnv, createTestApp } from "./app";
 import { createUnavailableObjectStore, type ObjectStore } from "./object-store";
+import { REQUEST_ID_HEADER } from "./observability";
 
 const DEVICE_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
 const DEVICE_B = "3fa85f64-5717-4562-b3fc-2c963f66afa7";

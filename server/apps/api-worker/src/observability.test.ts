@@ -3,16 +3,11 @@ import {
   formatError,
   logSecurityEvent,
   logUnhandledError,
-  packageId,
   REQUEST_ID_HEADER,
   resolveRequestId,
-} from "./index";
+} from "./observability";
 
-describe("@audio-reader/observability", () => {
-  it("identifies the observability package", () => {
-    expect(packageId).toBe("@audio-reader/observability");
-  });
-
+describe("api-worker observability", () => {
   it("names the correlation header X-Request-Id", () => {
     expect(REQUEST_ID_HEADER).toBe("X-Request-Id");
   });

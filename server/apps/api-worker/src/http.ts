@@ -1,5 +1,5 @@
 import type { components } from "@audio-reader/contract";
-import { REQUEST_ID_HEADER } from "@audio-reader/observability";
+import { REQUEST_ID_HEADER } from "./observability";
 
 export type Problem = components["schemas"]["Problem"];
 export type Health = components["schemas"]["Health"];
