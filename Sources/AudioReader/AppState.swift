@@ -403,10 +403,6 @@ final class AppState {
         currentReaderPosition.segment
     }
 
-    var currentWord: TranscriptWord? {
-        currentReaderPosition.word
-    }
-
     var studyLanguage: StudyLanguage {
         StudyLanguage(rawValue: settings.targetLanguage) ?? .zhHans
     }
