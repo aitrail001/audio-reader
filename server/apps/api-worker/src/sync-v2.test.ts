@@ -18,22 +18,13 @@ function headers(key?: string): Record<string, string> {
 }
 
 describe("object-backed sync v2", () => {
-  it("accepts EPUB section indices on book and chapter payloads", () => {
+  it("accepts EPUB section indices in book chapter payloads", () => {
     expect(
       validateSyncV2Payload("book", {
         localId: "book",
         title: "Book",
         source: "files",
         chapters: [{ localId: "chapter", index: 0, title: "One", ebookSectionIndex: 0 }],
-      }),
-    ).toBeUndefined();
-    expect(
-      validateSyncV2Payload("chapter", {
-        localId: "chapter",
-        index: 0,
-        title: "One",
-        localBookId: "book",
-        ebookSectionIndex: 0,
       }),
     ).toBeUndefined();
   });

@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startPostgres, type PostgresSession } from "./postgres-harness";
+import { ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION } from "./schema";
 
 const serverRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 const migrationsDir = join(serverRoot, "supabase", "migrations");
@@ -190,7 +191,7 @@ describe("forward-only assistant result lifecycle migration (postgres)", () => {
         `select migration_version from public.service_schema_versions
          where component = 'account_sync'`,
       ),
-    ).toBe(DELETED_BOOK_CLEANUP_VERSION);
+    ).toBe(ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION);
 
     expect(
       scalar(

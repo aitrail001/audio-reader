@@ -16,16 +16,7 @@ const ALLOWED_KEYS: Record<Exclude<SyncEntityType, "transcript" | "asset">, Read
     "appearance",
   ),
   book: set("localId", "title", "author", "source", "chapters"),
-  chapter: set(
-    "localId",
-    "index",
-    "title",
-    "duration",
-    "startTime",
-    "bookId",
-    "localBookId",
-    "ebookSectionIndex",
-  ),
+  chapter: set("localId", "index", "title", "duration", "startTime", "bookId", "localBookId"),
   progress: set(
     "progressKind",
     "localProgressId",
