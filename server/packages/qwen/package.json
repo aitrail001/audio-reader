@@ -18,7 +18,6 @@
     "vitest": "catalog:"
   },
   "dependencies": {
-    "@audio-reader/domain": "workspace:*",
     "@audio-reader/observability": "workspace:*"
   }
 }

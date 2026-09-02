@@ -1,7 +1,5 @@
-import type { ReadinessStatus } from "@audio-reader/domain";
-
 export const packageId = "@audio-reader/qwen" as const;
-export type { ReadinessStatus };
+export type ReadinessStatus = "ok" | "unavailable";
 
 export const DEFAULT_QWEN_BASE_URL =
   "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1" as const;

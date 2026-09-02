@@ -88,7 +88,6 @@ server/
     admin-web/      Operator console (hosted at https://audio-reader-admin.pages.dev)
   packages/
     contract/       Generated API types from OpenAPI v1
-    domain/         Shared domain types and rules
     database/       Persistence adapters and schema contract constants
     auth/           JWT validation, in-memory OTP/OAuth, hosted GoTrue adapter, profile mapping
     qwen/           Managed Qwen client (fake ping for local/test)

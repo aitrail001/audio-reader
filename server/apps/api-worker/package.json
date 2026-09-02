@@ -25,7 +25,6 @@
     "@audio-reader/auth": "workspace:*",
     "@audio-reader/contract": "workspace:*",
     "@audio-reader/database": "workspace:*",
-    "@audio-reader/domain": "workspace:*",
     "@audio-reader/observability": "workspace:*",
     "@audio-reader/qwen": "workspace:*"
   },

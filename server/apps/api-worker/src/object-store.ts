@@ -1,5 +1,6 @@
-import type { ReadinessStatus } from "@audio-reader/domain";
 import { createGcsObjectStore } from "./gcs";
+
+export type ReadinessStatus = "ok" | "unavailable";
 
 export type ObjectStore = {
   ping(): Promise<ReadinessStatus>;

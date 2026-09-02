@@ -1,5 +1,6 @@
-import type { ReadinessStatus } from "@audio-reader/domain";
 import type { Health } from "./http";
+
+type ReadinessStatus = "ok" | "unavailable";
 
 export type DependencyProbe = {
   ping(): Promise<ReadinessStatus>;

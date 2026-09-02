@@ -1,5 +1,4 @@
-import type { ReadinessStatus } from "@audio-reader/domain";
-import type { ObjectStore } from "./object-store";
+import type { ObjectStore, ReadinessStatus } from "./object-store";
 
 export type GcsServiceAccount = {
   clientEmail: string;
