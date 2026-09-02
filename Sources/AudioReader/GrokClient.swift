@@ -139,43 +139,6 @@ enum LLMProvider: String, CaseIterable, Identifiable, Codable, Sendable {
     }
 }
 
-enum APIKeyStore {
-    static var fileURL: URL { Persistence.root.appendingPathComponent("xai-api-key") }
-
-    @discardableResult
-    static func migrateLegacyCredential() -> [LegacyCredentialMigrationResult] {
-        ProviderAPIKeyStore.migrateLegacyCredentials(fileURL: fileURL, for: .grok)
-    }
-
-    static func load() -> String? {
-        return ProviderAPIKeyStore.load(.grok)
-    }
-
-    @discardableResult
-    static func save(_ key: String) -> Bool {
-        let saved = ProviderAPIKeyStore.save(key, for: .grok)
-        if saved, !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            try? FileManager.default.removeItem(at: fileURL)
-        }
-        return saved
-    }
-
-    @discardableResult
-    static func clear() -> Bool {
-        ProviderAPIKeyStore.clear(.grok)
-    }
-
-    static var hasSavedKey: Bool {
-        return ProviderAPIKeyStore.hasSavedKey(.grok)
-    }
-    static var isConfigured: Bool {
-        return ProviderAPIKeyStore.isConfigured(.grok)
-    }
-    static var sourceLabel: String {
-        return ProviderAPIKeyStore.sourceLabel(.grok)
-    }
-}
-
 enum GrokBuildCredentialProvider {
     static var authURL: URL {
 #if os(macOS)
@@ -206,72 +169,6 @@ enum GrokBuildCredentialProvider {
 
     static var sourceLabel: String {
         load() == nil ? "Grok Build sign-in not found" : "Grok Build sign-in found"
-    }
-}
-
-enum QwenAPIKeyStore {
-    static var fileURL: URL { Persistence.root.appendingPathComponent("dashscope-api-key") }
-
-    @discardableResult
-    static func migrateLegacyCredential() -> [LegacyCredentialMigrationResult] {
-        ProviderAPIKeyStore.migrateLegacyCredentials(fileURL: fileURL, for: .qwenCloud)
-    }
-
-    static func load() -> String? {
-        return ProviderAPIKeyStore.load(.qwenCloud)
-    }
-
-    @discardableResult
-    static func save(_ key: String) -> Bool {
-        let saved = ProviderAPIKeyStore.save(key, for: .qwenCloud)
-        if saved, !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            try? FileManager.default.removeItem(at: fileURL)
-        }
-        return saved
-    }
-
-    @discardableResult static func clear() -> Bool { ProviderAPIKeyStore.clear(.qwenCloud) }
-    static var hasSavedKey: Bool {
-        return ProviderAPIKeyStore.hasSavedKey(.qwenCloud)
-    }
-    static var isConfigured: Bool {
-        return ProviderAPIKeyStore.isConfigured(.qwenCloud)
-    }
-    static var sourceLabel: String {
-        return ProviderAPIKeyStore.sourceLabel(.qwenCloud)
-    }
-}
-
-enum OpenAIAPIKeyStore {
-    static var fileURL: URL { Persistence.root.appendingPathComponent("openai-api-key") }
-
-    @discardableResult
-    static func migrateLegacyCredential() -> [LegacyCredentialMigrationResult] {
-        ProviderAPIKeyStore.migrateLegacyCredentials(fileURL: fileURL, for: .openAI)
-    }
-
-    static func load() -> String? {
-        return ProviderAPIKeyStore.load(.openAI)
-    }
-
-    @discardableResult
-    static func save(_ key: String) -> Bool {
-        let saved = ProviderAPIKeyStore.save(key, for: .openAI)
-        if saved, !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            try? FileManager.default.removeItem(at: fileURL)
-        }
-        return saved
-    }
-
-    @discardableResult static func clear() -> Bool { ProviderAPIKeyStore.clear(.openAI) }
-    static var hasSavedKey: Bool {
-        return ProviderAPIKeyStore.hasSavedKey(.openAI)
-    }
-    static var isConfigured: Bool {
-        return ProviderAPIKeyStore.isConfigured(.openAI)
-    }
-    static var sourceLabel: String {
-        return ProviderAPIKeyStore.sourceLabel(.openAI)
     }
 }
 
@@ -757,9 +654,9 @@ actor GrokClient {
         case .grok:
             key = grokAuthentication == .grokBuild
                 ? GrokBuildCredentialProvider.load()
-                : APIKeyStore.load()
-        case .qwenCloud: key = QwenAPIKeyStore.load()
-        case .openAI: key = OpenAIAPIKeyStore.load()
+                : ProviderAPIKeyStore.load(.grok)
+        case .qwenCloud, .openAI:
+            key = ProviderAPIKeyStore.load(provider)
         case .appleFoundation:
             throw LLMError.appleIntelligenceUnavailable(
                 AppleIntelligenceAvailability.current().userMessage
@@ -855,9 +752,9 @@ actor GrokClient {
         case .grok:
             key = grokAuthentication == .grokBuild
                 ? GrokBuildCredentialProvider.load()
-                : APIKeyStore.load()
-        case .qwenCloud: key = QwenAPIKeyStore.load()
-        case .openAI: key = OpenAIAPIKeyStore.load()
+                : ProviderAPIKeyStore.load(.grok)
+        case .qwenCloud, .openAI:
+            key = ProviderAPIKeyStore.load(provider)
         case .appleFoundation:
             throw LLMError.appleIntelligenceUnavailable(
                 AppleIntelligenceAvailability.current().userMessage
@@ -944,14 +841,7 @@ actor GrokClient {
             return ["Managed Qwen"]
         }
         let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let savedKey: String?
-        switch provider {
-        case .managedQwen: return ["Managed Qwen"]
-        case .grok: savedKey = APIKeyStore.load()
-        case .qwenCloud: savedKey = QwenAPIKeyStore.load()
-        case .openAI: savedKey = OpenAIAPIKeyStore.load()
-        case .appleFoundation: return ["Apple Intelligence"]
-        }
+        let savedKey = ProviderAPIKeyStore.load(provider)
         guard let key = supplied?.isEmpty == false ? supplied : savedKey else {
             throw LLMError.noAPIKey(provider)
         }

@@ -669,15 +669,15 @@ final class AppState {
         case .grok:
             grokAuthentication == .grokBuild
                 ? (GrokBuildCredentialProvider.load() == nil ? .grokBuildNotLoggedIn : nil)
-                : (APIKeyStore.isConfigured ? nil : .noAPIKey(provider))
+                : (ProviderAPIKeyStore.isConfigured(.grok) ? nil : .noAPIKey(provider))
         case .qwenCloud:
-            QwenAPIKeyStore.isConfigured ? nil : .noAPIKey(provider)
+            ProviderAPIKeyStore.isConfigured(.qwenCloud) ? nil : .noAPIKey(provider)
         case .appleFoundation:
             appleIntelligenceConfigurationError()
         case .openAI:
             openAIAuthentication == .chatGPT
                 ? (CodexCLIClient.isAvailable ? nil : .codexUnavailable)
-                : (OpenAIAPIKeyStore.isConfigured ? nil : .noAPIKey(provider))
+                : (ProviderAPIKeyStore.isConfigured(.openAI) ? nil : .noAPIKey(provider))
         }
     }
 
@@ -1111,9 +1111,9 @@ final class AppState {
     func migrateLegacyProviderCredentials() {
         var results: [LegacyCredentialMigrationResult]?
         credentialMigrationSession.runOnce {
-            results = APIKeyStore.migrateLegacyCredential()
-                + QwenAPIKeyStore.migrateLegacyCredential()
-                + OpenAIAPIKeyStore.migrateLegacyCredential()
+            results = [LLMProvider.grok, .qwenCloud, .openAI].flatMap {
+                ProviderAPIKeyStore.migrateLegacyCredentials(for: $0)
+            }
         }
         if let results {
             credentialMigrationWarning = results.contains(.failed)
@@ -2415,7 +2415,7 @@ final class AppState {
     func retrieveGrokModels(baseURL: String, apiKey: String?) async -> [LLMModelInfo]? {
         grokModels = GrokModelCatalog.fallback
         let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard supplied?.isEmpty == false || APIKeyStore.isConfigured else {
+        guard supplied?.isEmpty == false || ProviderAPIKeyStore.isConfigured(.grok) else {
             grokModelsMessage = "Using the built-in xAI model catalog until an API key is configured."
             return nil
         }
@@ -2451,7 +2451,7 @@ final class AppState {
     func retrieveOpenAIModels(baseURL: String, apiKey: String?) async -> [LLMModelInfo]? {
         openAIModels = OpenAIModelCatalog.fallback
         let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard supplied?.isEmpty == false || OpenAIAPIKeyStore.isConfigured else {
+        guard supplied?.isEmpty == false || ProviderAPIKeyStore.isConfigured(.openAI) else {
             openAIModelsMessage = "Using the built-in OpenAI model catalog until an API key is configured."
             return nil
         }
@@ -2485,7 +2485,7 @@ final class AppState {
     func retrieveQwenModels(baseURL: String, apiKey: String?) async -> [LLMModelInfo]? {
         qwenModels = QwenModelCatalog.fallback
         let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard supplied?.isEmpty == false || QwenAPIKeyStore.isConfigured else {
+        guard supplied?.isEmpty == false || ProviderAPIKeyStore.isConfigured(.qwenCloud) else {
             qwenModelsMessage = "Using the built-in model catalog until a DashScope key is configured."
             return nil
         }

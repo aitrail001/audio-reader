@@ -74,6 +74,15 @@ struct ProviderCredentialTests {
         )
     }
 
+    @Test("Provider credential store owns every legacy plaintext path")
+    func providerCredentialStoreOwnsLegacyPlaintextPaths() {
+        #expect(ProviderAPIKeyStore.legacyFileURL(for: .grok)?.lastPathComponent == "xai-api-key")
+        #expect(ProviderAPIKeyStore.legacyFileURL(for: .qwenCloud)?.lastPathComponent == "dashscope-api-key")
+        #expect(ProviderAPIKeyStore.legacyFileURL(for: .openAI)?.lastPathComponent == "openai-api-key")
+        #expect(ProviderAPIKeyStore.legacyFileURL(for: .managedQwen) == nil)
+        #expect(ProviderAPIKeyStore.legacyFileURL(for: .appleFoundation) == nil)
+    }
+
     @Test("Existing vault sealed by a Keychain-shaped wrapping key unlocks after file migration")
     func migratesKeychainWrappingKeyOntoFileAndUnlocksVault() throws {
         let root = FileManager.default.temporaryDirectory
