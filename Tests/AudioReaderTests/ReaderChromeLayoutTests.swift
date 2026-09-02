@@ -173,7 +173,7 @@ struct ReaderChromeLayoutTests {
         let toolbarControls = try section(
             in: playerView,
             from: "    private var desktopCompactHeaderControls",
-            to: "    @ViewBuilder\n    private var desktopProviderControls"
+            to: "    private var sentenceLoopBinding"
         )
         #expect(toolbarControls.contains("sharedReadingMenu"))
         #expect(toolbarControls.contains("sharedLLMMenu"))
