@@ -16,7 +16,16 @@ const ALLOWED_KEYS: Record<Exclude<SyncEntityType, "transcript" | "asset">, Read
     "appearance",
   ),
   book: set("localId", "title", "author", "source", "chapters"),
-  chapter: set("localId", "index", "title", "duration", "startTime", "bookId", "localBookId"),
+  chapter: set(
+    "localId",
+    "index",
+    "title",
+    "duration",
+    "startTime",
+    "bookId",
+    "localBookId",
+    "ebookSectionIndex",
+  ),
   progress: set(
     "progressKind",
     "localProgressId",
@@ -78,7 +87,7 @@ const ALLOWED_KEYS: Record<Exclude<SyncEntityType, "transcript" | "asset">, Read
 };
 
 const NESTED_KEYS: Record<string, ReadonlySet<string>> = {
-  chapters: set("localId", "index", "title", "duration", "startTime"),
+  chapters: set("localId", "index", "title", "duration", "startTime", "ebookSectionIndex"),
   result: set(
     "id",
     "kind",
