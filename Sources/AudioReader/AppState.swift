@@ -778,11 +778,6 @@ final class AppState {
         )
     }
 
-    var acceptedSentences: [GlossEntry] {
-        glosses.filter { $0.kind == .sentence && $0.status == .accepted }
-            .sorted { $0.createdAt > $1.createdAt }
-    }
-
     var selectedChapterTranslationCheckpoint: ChapterTranslationCheckpoint? {
         guard let chapterID = selectedChapterID else { return nil }
         let id = ChapterTranslationCheckpoint.makeID(chapterID: chapterID, language: settings.targetLanguage)
