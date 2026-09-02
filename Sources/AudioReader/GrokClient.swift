@@ -895,14 +895,6 @@ actor GrokClient {
         var choices: [Choice]
     }
 
-    private struct ModelPermissionsResponse: Decodable {
-        struct Output: Decodable {
-            struct Permission: Decodable { var model: String }
-            var permissions: [Permission]
-        }
-        var output: Output?
-    }
-
     private struct ResponsesAPI: Decodable {
         var output_text: String?
         var output: [OutputItem]?
