@@ -2267,24 +2267,6 @@ final class AppState {
         return true
     }
 
-    func jumpToGloss(_ entry: GlossEntry) {
-        pendingReveal = PendingReveal(
-            kind: entry.kind == .sentence ? .sentence : .word,
-            timestamp: entry.timestamp ?? 0,
-            segmentID: nil,
-            wordID: nil,
-            wordText: entry.kind == .word ? entry.source : nil,
-            sentenceText: entry.kind == .sentence ? entry.source : entry.context
-        )
-        guard let located = locate(bookID: entry.bookID, bookTitle: entry.bookTitle, chapterID: entry.chapterID, chapterTitle: entry.chapterTitle) else {
-            errorMessage = "Could not find that passage in the library."
-            pendingReveal = nil
-            return
-        }
-        tab = .player
-        open(chapter: located.chapter, in: located.book, autoplay: false)
-    }
-
     func inspect(word: TranscriptWord) {
         showChapterAssistant = false
         selectedWord = word
@@ -2514,11 +2496,6 @@ final class AppState {
             && $0.status != .rejected
             && GlossEntry.normalize($0.source) == GlossEntry.normalize(source)
         }
-    }
-
-    func translateCurrentSentence() {
-        guard let segment = currentSegment else { return }
-        translateSentence(segment)
     }
 
     func retranslateCurrentSentence() {
