@@ -466,10 +466,6 @@ enum Persistence {
         try? store.saveVocabulary(items.map(StoredVocabularyOccurrence.init))
     }
 
-    static func saveVocabUpdates(_ updates: [VocabEntry], allItems: [VocabEntry]) {
-        try? store.upsertVocabulary(updates.map(StoredVocabularyOccurrence.init))
-    }
-
     static func loadKnownLemmas() -> [KnownLemmaRecord] {
         ((try? store.loadKnownLemmas()) ?? []).map(KnownLemmaRecord.init)
     }
@@ -713,17 +709,6 @@ enum Persistence {
         }
     }
 
-    static func deleteChapterTranslationCheckpoint(
-        chapterID: String,
-        language: String,
-        database: LocalSQLiteStore = Persistence.store
-    ) throws {
-        try database.deleteTranslationCheckpoint(
-            chapterID: ChapterID(rawValue: chapterID),
-            language: language
-        )
-    }
-
     private static func storedCheckpoint(
         _ checkpoint: ChapterTranslationCheckpoint
     ) -> StoredTranslationCheckpoint {
@@ -742,11 +727,6 @@ enum Persistence {
         ((try? database.loadAssistantResults()) ?? [])
             .filter { $0.kind == .chapterSummary }
             .compactMap(chapterSummary(from:))
-    }
-
-    static func saveChapterSummaries(_ summaries: [ChapterSummaryRecord]) {
-        let durable = ((try? store.loadAssistantResults()) ?? []).filter { $0.kind != .chapterSummary }
-        try? store.replaceAssistantResults(durable + summaries.compactMap { try? storedSummary(from: $0) })
     }
 
     /// Summary lifecycle completion must not be published until this durable write succeeds.
