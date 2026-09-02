@@ -87,50 +87,6 @@ enum FoundationModelsPromptPolicy {
     }
 }
 
-enum AppleOnDeviceJSON {
-    static func translationEnvelope(
-        id: String,
-        translation: String,
-        notes: [(source: String, category: String, explanation: String)] = []
-    ) throws -> String {
-        let payload: [String: Any] = [
-            "translations": [
-                [
-                    "id": id,
-                    "translation": translation,
-                    "notes": notes.map {
-                        [
-                            "source": $0.source,
-                            "category": $0.category,
-                            "explanation": $0.explanation
-                        ]
-                    }
-                ]
-            ]
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload)
-        return String(data: data, encoding: .utf8) ?? ""
-    }
-
-    static func chapterSummary(
-        overview: String,
-        keyPoints: [String] = [],
-        charactersOrIdeas: [String] = [],
-        keyConcepts: [(name: String, explanation: String)] = [],
-        themes: [String] = []
-    ) throws -> String {
-        let payload: [String: Any] = [
-            "overview": overview,
-            "keyPoints": keyPoints,
-            "charactersOrIdeas": charactersOrIdeas,
-            "keyConcepts": keyConcepts.map { ["name": $0.name, "explanation": $0.explanation] },
-            "themes": themes
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload)
-        return String(data: data, encoding: .utf8) ?? ""
-    }
-}
-
 actor FoundationModelsClient {
     static let shared = FoundationModelsClient()
 

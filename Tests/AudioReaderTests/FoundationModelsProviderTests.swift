@@ -35,15 +35,9 @@ struct FoundationModelsProviderTests {
 
     @Test("On-device structured JSON matches existing translation and summary parsers")
     func encodedJSONMatchesExistingContracts() throws {
-        let translationJSON = try AppleOnDeviceJSON.translationEnvelope(
-            id: "sentence-1",
-            translation: "Ella rompió el hielo.",
-            notes: [(
-                source: "broke the ice",
-                category: "idiom",
-                explanation: "empezó una conversación tensa"
-            )]
-        )
+        let translationJSON = """
+        {"translations":[{"id":"sentence-1","translation":"Ella rompió el hielo.","notes":[{"source":"broke the ice","category":"idiom","explanation":"empezó una conversación tensa"}]}]}
+        """
         let translations = try ChapterTranslationBatch.parse(
             translationJSON,
             expectedIDs: ["sentence-1"]
@@ -52,13 +46,9 @@ struct FoundationModelsProviderTests {
         #expect(translations[0].translation == "Ella rompió el hielo.")
         #expect(translations[0].notes.first?.category == "idiom")
 
-        let summaryJSON = try AppleOnDeviceJSON.chapterSummary(
-            overview: "The chapter introduces a forest as a system.",
-            keyPoints: ["Trees and animals form subsystems."],
-            charactersOrIdeas: ["the forest"],
-            keyConcepts: [("subsystem", "a system inside a larger system")],
-            themes: ["interdependence"]
-        )
+        let summaryJSON = """
+        {"overview":"The chapter introduces a forest as a system.","keyPoints":["Trees and animals form subsystems."],"charactersOrIdeas":["the forest"],"keyConcepts":[{"name":"subsystem","explanation":"a system inside a larger system"}],"themes":["interdependence"]}
+        """
         let summary = try ChapterSummaryPresentation.parse(summaryJSON)
         #expect(summary.overview.contains("forest"))
         #expect(summary.keyConcepts.first?.name == "subsystem")
