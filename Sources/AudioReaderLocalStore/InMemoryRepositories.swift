@@ -3,32 +3,6 @@ import Foundation
 import AudioReaderDomain
 #endif
 
-public struct InMemoryLocalStore: Sendable {
-    public let settings: InMemorySettingsRepository
-    public let books: InMemoryBookRepository
-    public let transcripts: InMemoryTranscriptRepository
-    public let transcriptOverlays: InMemoryTranscriptOverlayRepository
-    public let readerProgress: InMemoryReaderProgressRepository
-    public let vocabulary: InMemoryVocabularyRepository
-    public let knownLemmas: InMemoryKnownLemmaRepository
-    public let reviewEvents: InMemoryReviewEventRepository
-    public let assistantResults: InMemoryAssistantResultRepository
-    public let outbox: InMemorySyncOutboxRepository
-
-    public init() {
-        settings = InMemorySettingsRepository()
-        books = InMemoryBookRepository()
-        transcripts = InMemoryTranscriptRepository()
-        transcriptOverlays = InMemoryTranscriptOverlayRepository()
-        readerProgress = InMemoryReaderProgressRepository()
-        vocabulary = InMemoryVocabularyRepository()
-        knownLemmas = InMemoryKnownLemmaRepository()
-        reviewEvents = InMemoryReviewEventRepository()
-        assistantResults = InMemoryAssistantResultRepository()
-        outbox = InMemorySyncOutboxRepository()
-    }
-}
-
 public final class InMemoryReaderProgressRepository: ReaderProgressRepository, @unchecked Sendable {
     private let lock = NSLock()
     private var states: [BookID: StoredReaderProgressState] = [:]

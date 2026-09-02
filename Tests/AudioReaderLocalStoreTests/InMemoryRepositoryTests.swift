@@ -223,22 +223,21 @@ struct InMemoryRepositoryTests {
     @Test("in-memory repositories do not write Application Support files")
     func inMemoryRepositoriesDoNotWriteApplicationSupport() throws {
         let token = "in-memory-only-\(UUID().uuidString)"
-        let store = InMemoryLocalStore()
         let book = sampleBook(id: token, title: "Probe")
-        try store.books.saveBook(book)
-        try store.settings.saveSettings({
+        try InMemoryBookRepository().saveBook(book)
+        try InMemorySettingsRepository().saveSettings({
             var settings = StoredSettings.default
             settings.libraryPath = token
             return settings
         }())
-        try store.transcripts.saveTranscript(sampleTranscript(chapterID: token, text: token, createdAt: occurredAt))
-        try store.vocabulary.saveVocabulary([
+        try InMemoryTranscriptRepository().saveTranscript(sampleTranscript(chapterID: token, text: token, createdAt: occurredAt))
+        try InMemoryVocabularyRepository().saveVocabulary([
             sampleVocabulary(id: token, surface: token, addedAt: occurredAt)
         ])
-        try store.knownLemmas.saveKnownLemmas([
+        try InMemoryKnownLemmaRepository().saveKnownLemmas([
             StoredKnownLemma(language: "en", form: token, updatedAt: occurredAt)
         ])
-        try store.reviewEvents.appendReviewEvent(
+        try InMemoryReviewEventRepository().appendReviewEvent(
             StoredReviewEvent(
                 id: ReviewEventID(rawValue: token),
                 vocabularyID: VocabularyOccurrenceID(rawValue: token),
@@ -247,10 +246,10 @@ struct InMemoryRepositoryTests {
                 reviewedAt: occurredAt
             )
         )
-        try store.assistantResults.saveAssistantResult(
+        try InMemoryAssistantResultRepository().saveAssistantResult(
             sampleAssistantResult(id: token, text: token, createdAt: occurredAt)
         )
-        try store.outbox.enqueue(
+        try InMemorySyncOutboxRepository().enqueue(
             OutboxMutation(
                 id: MutationID(rawValue: token),
                 entityType: .book,
