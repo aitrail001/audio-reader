@@ -303,11 +303,6 @@ export type BlockedAttempt = {
   requestId?: string;
 };
 
-export type CursorPage<T> = {
-  items: T[];
-  nextCursor: string | null;
-};
-
 export type AuthConfig = {
   providers?: string[];
   turnstileSiteKey?: string;
