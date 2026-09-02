@@ -135,19 +135,6 @@ struct ReadingAssistantPromptTests {
         #expect(!appState.contains("TranslationPrompt.chapter("))
     }
 
-    @Test("retryGloss retranslates the matching sentence instead of the current playback sentence")
-    func retryGlossRetranslatesMatchingSentence() throws {
-        let appState = try source("Sources/AudioReader/AppState.swift")
-        let marker = "func retryGloss(_ entry: GlossEntry) {"
-        #expect(appState.contains(marker))
-        let start = try #require(appState.range(of: marker))
-        let remainder = appState[start.lowerBound...]
-        let end = remainder.range(of: "\n    private func selectedOrigin()")
-        let body = String(remainder[..<(end?.lowerBound ?? remainder.endIndex)])
-        #expect(body.contains("retranslateSentence("))
-        #expect(!body.contains("if entry.kind == .sentence {\n            retranslateCurrentSentence()"))
-    }
-
     @Test("Structured translation results preserve categorized language and concept notes")
     func parsesLearnerNotes() throws {
         let response = """

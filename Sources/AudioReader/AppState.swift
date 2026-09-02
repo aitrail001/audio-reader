@@ -2643,22 +2643,6 @@ final class AppState {
         refreshSelectedChapterTranslationStatus()
     }
 
-    func retryGloss(_ entry: GlossEntry) {
-        if entry.kind == .sentence {
-            // Retry the glossed sentence, not whatever is currently playing.
-            let segment = transcript?.segments.first {
-                GlossEntry.normalize($0.displayText) == GlossEntry.normalize(entry.source)
-            }
-            if let segment {
-                retranslateSentence(segment)
-            } else {
-                retranslateCurrentSentence()
-            }
-        } else {
-            retranslateSelectedWord()
-        }
-    }
-
     private func selectedOrigin() -> BackgroundJobOrigin {
         BackgroundJobOrigin(
             bookID: selectedBook?.id,
