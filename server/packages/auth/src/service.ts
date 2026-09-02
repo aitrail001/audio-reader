@@ -5,7 +5,7 @@ import {
   validateAccessToken,
   type JwtSigningConfig,
 } from "./jwt";
-import type { Principal } from "./principal";
+import type { AdminRole, Principal } from "./principal";
 
 export type OAuthProvider = "google" | "microsoft";
 export type IdentityProvider = OAuthProvider | "email";
@@ -178,12 +178,10 @@ export type AuthIdentityStore = {
   revokeDevice(userId: string, deviceId: string): Promise<DeviceRevokeResult>;
   isDeviceRevoked(userId: string, deviceId: string): Promise<boolean>;
   hasAdminRole?(userId: string): Promise<boolean>;
-  adminRoles?(
-    userId: string,
-  ): Promise<
-    ("support_readonly" | "operator" | "privacy_officer" | "billing_operator" | "superadmin")[]
-  >;
-  grantAdminRole?(userId: string): Promise<void>;
+  adminRoles?(userId: string): Promise<AdminRole[]>;
+  hasAnyAdminRole?(role?: AdminRole): Promise<boolean>;
+  hasAdminRoleHistory?(userId: string, role: AdminRole): Promise<boolean>;
+  grantAdminRole?(userId: string, role?: AdminRole): Promise<void>;
 };
 
 export type SettingsPutResult =

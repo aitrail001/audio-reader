@@ -1,10 +1,11 @@
-import { createMemoryIdentityStore } from "@audio-reader/database";
+import { createMemoryIdentityStore, type IdentityStore } from "@audio-reader/database";
 import { describe, expect, it } from "vitest";
 import { createHostedAuthService, type HostedAuthFetch } from "./hosted-auth";
 import { signAccessToken, type JwtSigningConfig } from "./jwt";
 
 const EMAIL = "reader@example.com";
 const DEVICE_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+const BOOTSTRAP_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const JWT: JwtSigningConfig = {
   issuer: "https://example.supabase.co/auth/v1",
   audience: "authenticated",
@@ -61,6 +62,24 @@ async function sessionBody(email = EMAIL) {
     token_type: "bearer",
     user: { id: "user-hosted", email },
   };
+}
+
+async function authenticateBootstrap(identity: IdentityStore) {
+  const { fetch } = createFetch(() => jsonResponse(500, { message: "unused" }));
+  const auth = createHostedAuthService({
+    jwt: JWT,
+    supabaseUrl: "https://example.supabase.co",
+    supabaseAnonKey: "anon-key",
+    fetch,
+    identity,
+    adminBootstrapEmail: EMAIL,
+  });
+  const token = await signAccessToken({ sub: BOOTSTRAP_ID, email: EMAIL }, JWT);
+  return auth.authenticate(
+    new Request("https://audio-reader.local/session", {
+      headers: { authorization: `Bearer ${token}` },
+    }),
+  );
 }
 
 describe("hosted GoTrue auth service", () => {
@@ -468,48 +487,72 @@ describe("hosted GoTrue auth service", () => {
     ).resolves.toBeNull();
   });
 
-  it("grants bootstrap admin only when no operator exists yet", async () => {
-    const bootstrapId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  it("grants the configured bootstrap identity a superadmin role when no admin exists", async () => {
     const otherId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-    const { fetch } = createFetch(() => jsonResponse(500, { message: "unused" }));
     const empty = createMemoryIdentityStore();
-    const firstAuth = createHostedAuthService({
-      jwt: JWT,
-      supabaseUrl: "https://example.supabase.co",
-      supabaseAnonKey: "anon-key",
-      fetch,
-      identity: empty,
-      adminBootstrapEmail: EMAIL,
-    });
-    const token = await signAccessToken({ sub: bootstrapId, email: EMAIL }, JWT);
-    const headers = { authorization: `Bearer ${token}` };
-    const first = await firstAuth.authenticate(
-      new Request("https://audio-reader.local/session", { headers }),
-    );
+    const first = await authenticateBootstrap(empty);
     expect(first?.role).toBe("admin");
-    expect(first?.adminRoles).toEqual(["operator"]);
-    expect(await empty.hasAdminRole(bootstrapId)).toBe(true);
-    const again = await firstAuth.authenticate(
-      new Request("https://audio-reader.local/session", { headers }),
-    );
+    expect(first?.adminRoles).toEqual(["superadmin"]);
+    expect(await empty.hasAdminRole(BOOTSTRAP_ID)).toBe(true);
+    const again = await authenticateBootstrap(empty);
     expect(again?.role).toBe("admin");
 
     const occupied = createMemoryIdentityStore();
     await occupied.ensureProfile({ userId: otherId, email: "ops@example.com" });
     await occupied.grantAdminRole(otherId);
-    const blocked = createHostedAuthService({
-      jwt: JWT,
-      supabaseUrl: "https://example.supabase.co",
-      supabaseAnonKey: "anon-key",
-      fetch,
-      identity: occupied,
-      adminBootstrapEmail: EMAIL,
-    });
-    const second = await blocked.authenticate(
-      new Request("https://audio-reader.local/session", { headers }),
-    );
+    const second = await authenticateBootstrap(occupied);
     expect(second?.role).toBe("user");
-    expect(await occupied.hasAdminRole(bootstrapId)).toBe(false);
+    expect(await occupied.hasAdminRole(BOOTSTRAP_ID)).toBe(false);
+  });
+
+  it("promotes the configured legacy bootstrap operator when no superadmin exists", async () => {
+    const identity = createMemoryIdentityStore();
+    await identity.ensureProfile({ userId: BOOTSTRAP_ID, email: EMAIL });
+    await identity.grantAdminRole(BOOTSTRAP_ID);
+    const principal = await authenticateBootstrap(identity);
+
+    expect(principal?.adminRoles).toEqual(["operator", "superadmin"]);
+    expect(await identity.hasAnyAdminRole("superadmin")).toBe(true);
+  });
+
+  it("does not promote a scoped bootstrap admin without the legacy operator role", async () => {
+    const identity = createMemoryIdentityStore();
+    await identity.ensureProfile({ userId: BOOTSTRAP_ID, email: EMAIL });
+    await identity.grantAdminRole(BOOTSTRAP_ID, "privacy_officer");
+    const principal = await authenticateBootstrap(identity);
+
+    expect(principal?.adminRoles).toEqual(["privacy_officer"]);
+    expect(await identity.hasAnyAdminRole("superadmin")).toBe(false);
+  });
+
+  it("does not restore a revoked bootstrap superadmin grant", async () => {
+    const identity = createMemoryIdentityStore();
+    await identity.ensureProfile({ userId: BOOTSTRAP_ID, email: EMAIL });
+    let grantAttempted = false;
+    Object.assign(identity, {
+      hasAdminRole: () => Promise.resolve(false),
+      adminRoles: () => Promise.resolve([]),
+      hasAnyAdminRole: () => Promise.resolve(false),
+      hasAdminRoleHistory: () => Promise.resolve(true),
+      grantAdminRole: () => {
+        grantAttempted = true;
+        return Promise.resolve();
+      },
+    });
+    const principal = await authenticateBootstrap(identity);
+
+    expect(principal?.role).toBe("user");
+    expect(grantAttempted).toBe(false);
+  });
+
+  it("does not elevate when persistence reports success without an active grant", async () => {
+    const identity = createMemoryIdentityStore();
+    await identity.ensureProfile({ userId: BOOTSTRAP_ID, email: EMAIL });
+    Object.assign(identity, { grantAdminRole: () => Promise.resolve() });
+    const principal = await authenticateBootstrap(identity);
+
+    expect(principal?.role).toBe("user");
+    expect(principal?.adminRoles).toEqual([]);
   });
 
   it("preserves scoped admin roles instead of collapsing them into generic admin", async () => {

@@ -37,10 +37,6 @@ const GOTRUE_PROVIDERS: Record<OAuthProvider, string> = {
 
 const BLOCKED_ACCOUNT_STATUSES = new Set(["suspended", "deletion_pending", "deleted"]);
 
-type IdentityAdminProbe = AuthIdentityStore & {
-  hasAnyAdminRole?: () => Promise<boolean>;
-};
-
 export function createHostedAuthService(options: HostedAuthServiceOptions): AuthService {
   const now = options.now ?? (() => new Date());
   const fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
@@ -54,8 +50,8 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
       allowLocalIssuance: false,
     });
 
-  // Admin comes from admin_roles, not the JWT. Bootstrap email may insert the
-  // first operator row once; it must not re-grant after an operator revoke.
+  // Admin comes from admin_roles, not the JWT. The configured bootstrap identity
+  // receives one superadmin grant, including upgrades from legacy operator grants.
   async function principalFromProfile(
     profile: ProductProfile,
     subject: string,
@@ -68,11 +64,18 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
       adminRoles = admin ? ["operator"] : [];
     }
     const bootstrap = options.adminBootstrapEmail?.trim().toLowerCase() ?? "";
-    const bootstrapMatch =
-      !admin && bootstrap !== "" && profile.email.trim().toLowerCase() === bootstrap;
+    const bootstrapMatch = bootstrap !== "" && profile.email.trim().toLowerCase() === bootstrap;
     if (bootstrapMatch && identity !== undefined) {
-      admin = await grantBootstrapAdmin(identity, profile.accountId, requestId);
-      if (admin) adminRoles = ["operator"];
+      const granted = await grantBootstrapAdmin(
+        identity,
+        profile.accountId,
+        requestId,
+        adminRoles.includes("operator"),
+      );
+      if (granted) {
+        admin = true;
+        adminRoles = [...new Set([...adminRoles, "superadmin" as const])];
+      }
     }
     return {
       subject,
@@ -88,21 +91,30 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
     store: AuthIdentityStore,
     accountId: string,
     requestId: string,
+    isLegacyAdmin: boolean,
   ): Promise<boolean> {
-    const probe: IdentityAdminProbe = store;
-    let anyAdmin: boolean;
+    let conflictingAdmin: boolean;
+    let priorSuperadmin: boolean;
     try {
-      anyAdmin = probe.hasAnyAdminRole === undefined ? true : await probe.hasAnyAdminRole();
+      conflictingAdmin =
+        (await store.hasAnyAdminRole?.(isLegacyAdmin ? "superadmin" : undefined)) ?? true;
+      priorSuperadmin = (await store.hasAdminRoleHistory?.(accountId, "superadmin")) ?? true;
     } catch {
-      anyAdmin = true;
+      conflictingAdmin = true;
+      priorSuperadmin = true;
     }
-    if (anyAdmin) {
+    // Multiple superadmins are valid; this guard only prevents late automatic bootstrap.
+    if (conflictingAdmin || priorSuperadmin) {
       logAuthEvent({
         message: "admin_bootstrap_grant",
         requestId,
         accountId,
         outcome: "skipped",
-        reason: "admins_exist",
+        reason: priorSuperadmin
+          ? "grant_history_exists"
+          : isLegacyAdmin
+            ? "superadmin_exists"
+            : "admins_exist",
       });
       return false;
     }
@@ -110,7 +122,11 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
       return false;
     }
     try {
-      await store.grantAdminRole(accountId);
+      await store.grantAdminRole(accountId, "superadmin");
+      const activeRoles = await store.adminRoles?.(accountId);
+      if (activeRoles?.includes("superadmin") !== true) {
+        throw new Error("bootstrap superadmin grant was not persisted");
+      }
       logAuthEvent({
         message: "admin_bootstrap_grant",
         requestId,
