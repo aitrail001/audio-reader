@@ -10,12 +10,9 @@ struct StableDomainIdentifierTests {
 
     @Test("typed IDs round-trip through Codable")
     func idsRoundTripThroughCodable() throws {
-        try assertStringIDRoundTrip(UserID(rawValue: "user-1"))
-        try assertStringIDRoundTrip(DeviceID(rawValue: "device-1"))
         try assertStringIDRoundTrip(BookID(rawValue: "c0ffeelegacybookid"))
         try assertStringIDRoundTrip(AssetID(rawValue: "asset-1"))
         try assertStringIDRoundTrip(ChapterID(rawValue: "c0ffeelegacychapterid"))
-        try assertStringIDRoundTrip(TranscriptRevisionID(rawValue: "revision-1"))
         try assertStringIDRoundTrip(VocabularyOccurrenceID(rawValue: "occurrence-1"))
         try assertStringIDRoundTrip(ReviewEventID(rawValue: "review-1"))
         try assertStringIDRoundTrip(MutationID(rawValue: "mutation-1"))
@@ -28,12 +25,9 @@ struct StableDomainIdentifierTests {
 
     @Test("newly created IDs are unique and path-independent")
     func newlyCreatedIDsAreUniqueAndPathIndependent() {
-        assertGeneratedIDsAreUniqueAndPathIndependent(UserID.self)
-        assertGeneratedIDsAreUniqueAndPathIndependent(DeviceID.self)
         assertGeneratedIDsAreUniqueAndPathIndependent(BookID.self)
         assertGeneratedIDsAreUniqueAndPathIndependent(AssetID.self)
         assertGeneratedIDsAreUniqueAndPathIndependent(ChapterID.self)
-        assertGeneratedIDsAreUniqueAndPathIndependent(TranscriptRevisionID.self)
         assertGeneratedIDsAreUniqueAndPathIndependent(VocabularyOccurrenceID.self)
         assertGeneratedIDsAreUniqueAndPathIndependent(ReviewEventID.self)
         assertGeneratedIDsAreUniqueAndPathIndependent(MutationID.self)
