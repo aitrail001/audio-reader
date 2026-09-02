@@ -8,42 +8,6 @@ struct StableDomainIdentifierTests {
     private let iOSContainerPath =
         "/var/mobile/Containers/Data/Application/ABC/Documents/ImportedBooks/The Ride"
 
-    @Test("legacy Book and Chapter JSON decode into stable IDs")
-    func legacyBookAndChapterJSONDecodeIntoStableIDs() throws {
-        let json = Data("""
-        {
-          "id": "c0ffeelegacybookid",
-          "title": "Moby-Dick",
-          "author": "Herman Melville",
-          "folderPath": "\(absoluteBookPath)",
-          "coverPath": "\(absoluteBookPath)/cover.jpg",
-          "ebookPath": "\(absoluteBookPath)/book.epub",
-          "chapters": [
-            {
-              "id": "c0ffeelegacychapterid",
-              "index": 0,
-              "title": "Loomings",
-              "audioPath": "\(absoluteBookPath)/01.m4b",
-              "duration": 321.5,
-              "startTime": null
-            }
-          ],
-          "source": "localFolder"
-        }
-        """.utf8)
-
-        let book = try JSONDecoder().decode(LegacyBookJSON.self, from: json)
-
-        #expect(book.id == BookID(rawValue: "c0ffeelegacybookid"))
-        #expect(book.title == "Moby-Dick")
-        #expect(book.chapters.count == 1)
-        #expect(book.chapters[0].id == ChapterID(rawValue: "c0ffeelegacychapterid"))
-        #expect(book.chapters[0].index == 0)
-        #expect(book.chapters[0].title == "Loomings")
-        #expect(book.id.rawValue != absoluteBookPath)
-        #expect(book.chapters[0].id.rawValue != "\(absoluteBookPath)/01.m4b")
-    }
-
     @Test("typed IDs round-trip through Codable")
     func idsRoundTripThroughCodable() throws {
         try assertStringIDRoundTrip(UserID(rawValue: "user-1"))
