@@ -230,10 +230,6 @@ enum LibraryScanner {
         return path
     }
 
-    static func containsAudio(in folder: URL) -> Bool {
-        allFiles(in: folder).contains { audioExt.contains($0.pathExtension.lowercased()) }
-    }
-
     static func containsBookMedia(in folder: URL) -> Bool {
         allFiles(in: folder).contains {
             let ext = $0.pathExtension.lowercased()
