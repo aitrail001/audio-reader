@@ -3119,7 +3119,9 @@ private struct WordInspector: View {
                             if DictionaryLookup.hasSystemDefinition(word.text) {
                                 SystemDictionaryView(term: word.text)
                                     .id(DictionaryLookup.headword(word.text))
-                                    .frame(minHeight: 360, idealHeight: 480)
+                                    // A flexible intrinsic-height query here recurses through the
+                                    // surrounding inspector/scroll layout on physical iPadOS.
+                                    .frame(height: 480)
                                     .clipShape(RoundedRectangle(cornerRadius: 8))
 
                                 Text("iPadOS shows entries from its installed dictionaries. Dictionary ordering and selection are managed by iPadOS.")

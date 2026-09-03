@@ -686,7 +686,7 @@ public struct LiveProductAIClient: ProductAIClient, Sendable {
 
     private func mapProblem(status: Int, body: Data) -> AuthClientError {
         let problem = try? decoder.decode(APIProblem.self, from: body)
-        let detail = problem?.detail?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var detail = problem?.detail?.trimmingCharacters(in: .whitespacesAndNewlines)
             ?? problem?.title
             ?? "Managed Qwen request failed (\(status))."
         let code = problem?.code ?? "error"
@@ -695,6 +695,13 @@ public struct LiveProductAIClient: ProductAIClient, Sendable {
         }
         if code == "device_revoked" {
             return .deviceRevoked(detail)
+        }
+        // Keep server internals private while giving support the identifier needed
+        // to correlate an otherwise generic failure with the Worker log.
+        if status >= 500,
+           let traceID = problem?.traceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !traceID.isEmpty {
+            detail += " Reference: \(traceID)."
         }
         return .problem(status: status, code: code, detail: detail)
     }

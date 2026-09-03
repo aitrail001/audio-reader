@@ -527,6 +527,15 @@ struct PlatformParityContractTests {
         #expect(!dictionarySummaryView.contains("#if os("))
     }
 
+    @Test("iPad system dictionary uses a concrete height inside the scrolling inspector")
+    func ipadSystemDictionaryAvoidsRecursiveIntrinsicSizing() throws {
+        let playerView = try source("Sources/AudioReader/PlayerView.swift")
+
+        #expect(playerView.contains("SystemDictionaryView(term: word.text)"))
+        #expect(playerView.contains(".frame(height: 480)"))
+        #expect(!playerView.contains(".frame(minHeight: 360, idealHeight: 480)"))
+    }
+
     @Test("Both platforms share the selected audiobook language end to end")
     func sharesAudiobookLanguage() throws {
         let settingsView = try source("Sources/AudioReader/SettingsView.swift")

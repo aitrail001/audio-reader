@@ -45,6 +45,12 @@ final class AudioReaderIOSUITests: XCTestCase {
         element("reader.sentence.ui-sentence-1", in: app).tap()
         XCTAssertTrue(element("reader.word.ui-word-1", in: app).isHittable)
         element("reader.word.ui-word-1", in: app).tap()
+        XCTAssertTrue(app.staticTexts["Lookup"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.state, .runningForeground)
+        XCTAssertTrue(app.buttons["Open Dictionary Full Screen"].waitForExistence(timeout: 3))
+        element("reader.word.ui-word-2", in: app).tap()
+        XCTAssertTrue(app.staticTexts["Lookup"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.state, .runningForeground)
 
         app.terminate()
         let wordsApp = launch(scenario: "words")
