@@ -642,6 +642,7 @@ export function validateManagedPromptOutput(
   } catch {
     return { valid: false, parsed: null, errors: ["$ must be valid JSON."] };
   }
+  normalizeTranslationNoteKeys(subtask, parsed);
   const errors: string[] = [];
   validateSchemaValue(parsed, outputSchema(subtask), "$", errors);
   if (subtask === "heard_quiz" && options.allowedSegmentIDs !== undefined) {
@@ -694,6 +695,38 @@ export function validateManagedPromptOutput(
         : null,
     errors,
   };
+}
+
+/** Canonicalize the one observed localized Qwen field without relaxing any other schema keys. */
+function normalizeTranslationNoteKeys(subtask: ManagedPromptSubtask, parsed: unknown): void {
+  if (
+    !["sentence", "word", "chapter_batch"].includes(subtask) ||
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed)
+  ) {
+    return;
+  }
+  const root = parsed as Record<string, unknown>;
+  const noteLists =
+    subtask === "chapter_batch" && Array.isArray(root.translations)
+      ? root.translations.map((translation) =>
+          typeof translation === "object" && translation !== null && !Array.isArray(translation)
+            ? (translation as Record<string, unknown>).notes
+            : undefined,
+        )
+      : [root.notes];
+  for (const notes of noteLists) {
+    if (!Array.isArray(notes)) continue;
+    for (const note of notes) {
+      if (typeof note !== "object" || note === null || Array.isArray(note)) continue;
+      const record = note as Record<string, unknown>;
+      if (!("explanation" in record) && typeof record["解释"] === "string") {
+        record.explanation = record["解释"];
+        delete record["解释"];
+      }
+    }
+  }
 }
 
 function validateSchemaValue(

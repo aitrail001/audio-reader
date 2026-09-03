@@ -1,7 +1,7 @@
 import { createFakePrincipal } from "@audio-reader/auth";
-import { createFakeDatabaseClient } from "@audio-reader/database";
+import { createFakeDatabaseClient, RestPersistenceError } from "@audio-reader/database";
 import { createFakeQwenClient } from "@audio-reader/qwen";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTestApp } from "./app";
 import { buildAccountExportPayload } from "./account-export";
 import { assistantMethodError, isAssistantPath } from "./assistant-routes";
@@ -217,6 +217,70 @@ describe("managed Qwen assistant API", () => {
     expect(rows[0]?.cacheEntryId).toBeNull();
     expect(rows[0]?.outputText).toContain("你好");
   });
+
+  it.each([
+    {
+      label: "single translation",
+      path: "/v1/ai/translations",
+      body: sentenceBody("Do not log this single source"),
+      output: '{"translation":"保留单句","notes":[]}',
+      expected: "保留单句",
+    },
+    {
+      label: "translation batch",
+      path: "/v1/ai/translation-batches",
+      body: batchBody([{ id: "s1", text: "Do not log this batch source" }]),
+      output: '{"translations":[{"id":"s1","translation":"保留批次","notes":[]}]}',
+      expected: "保留批次",
+    },
+  ])(
+    "returns a generated and cached $label when private-result persistence fails",
+    async (testCase) => {
+      const database = createFakeDatabaseClient();
+      const failureDetail = "private persistence failed with secret material";
+      database.ops.recordAssistantUse = () =>
+        Promise.reject(new RestPersistenceError(502, failureDetail));
+      const app = createTestApp({
+        database,
+        qwen: createFakeQwenClient({ text: testCase.output }),
+      });
+      const requestId = `assistant-persistence-${testCase.label.replaceAll(" ", "-")}`;
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+      const response = await app.fetch(
+        new Request(`http://localhost${testCase.path}`, {
+          method: "POST",
+          headers: {
+            ...AUTH_HEADERS,
+            "Idempotency-Key": requestId,
+            "X-Request-Id": requestId,
+          },
+          body: JSON.stringify(testCase.body),
+        }),
+      );
+      const persistenceLogs = warning.mock.calls
+        .map(([value]) => String(value))
+        .filter((value) => value.includes("assistant_result_persistence_failed"));
+      warning.mockRestore();
+
+      expect(response.status).toBe(200);
+      const body = await readJson(response);
+      const result =
+        isRecord(body) && Array.isArray(body.results) ? (body.results[0] as unknown) : body;
+      expect(isRecord(result) && result.translation).toBe(testCase.expected);
+      expect(isRecord(result) && result.provenance).toBe("generated");
+      expect(isRecord(result) && typeof result.sharedCacheEntryID).toBe("string");
+      expect(persistenceLogs).toHaveLength(1);
+      expect(JSON.parse(persistenceLogs[0] ?? "{}")).toMatchObject({
+        message: "assistant_result_persistence_failed",
+        requestId,
+        task: "translation",
+        errorName: "RestPersistenceError",
+      });
+      expect(persistenceLogs.join("\n")).not.toContain(failureDetail);
+      expect(persistenceLogs.join("\n")).not.toContain("Do not log this");
+    },
+  );
 
   it("uses the winning shared cache UUID when a concurrent insert wins", async () => {
     const database = createFakeDatabaseClient();
@@ -2377,6 +2441,42 @@ describe("managed Qwen cache identity and batch edge cases", () => {
     const looked = await readJson(lookup);
     expect(isRecord(looked) && looked.cacheHitCount).toBe(0);
     expect(isRecord(looked) && looked.missingIds).toEqual(["s1", "s2"]);
+  });
+
+  it("accepts Qwen translation notes that use the Chinese explanation key", async () => {
+    const app = createTestApp({
+      qwen: createFakeQwenClient({
+        text: JSON.stringify({
+          translations: [
+            {
+              id: "s1",
+              translation: "你好。",
+              notes: [{ source: "Hello", category: "phrase", 解释: "问候语" }],
+            },
+          ],
+        }),
+      }),
+    });
+
+    const response = await postAssistant(
+      app,
+      "/v1/ai/translation-batches",
+      batchBody([{ id: "s1", text: "Hello." }], {
+        editionFingerprint: "ed-localized-note",
+        chapterFingerprint: "ch-localized-note",
+      }),
+      "idempotency-key-qwen-localized-note",
+    );
+
+    expect(response.status).toBe(200);
+    const body = await readJson(response);
+    const results = isRecord(body) && Array.isArray(body.results) ? body.results : [];
+    expect(results).toMatchObject([
+      {
+        translation: "你好。",
+        notes: [{ source: "Hello", category: "phrase", explanation: "问候语" }],
+      },
+    ]);
   });
 
   it("rejects legacy results and targetId fields outside the batch contract", async () => {

@@ -221,7 +221,7 @@ describe("deleted book asset cleanup", () => {
     ).toEqual([expect.objectContaining({ revision: 3 })]);
   });
 
-  it("resumes cleanup from a duplicate tombstone after object deletion fails", async () => {
+  it("returns a committed push and resumes cleanup from a duplicate tombstone after object deletion fails", async () => {
     const inner = createFakeObjectStore();
     let failCanonicalDelete = true;
     storage = {
@@ -245,11 +245,13 @@ describe("deleted book asset cleanup", () => {
     const mutation = deleteMutation({ mutationId: "40000000-0000-4000-8000-000000000011" });
     const batchId = "41000000-0000-4000-8000-000000000011";
 
-    expect((await pushDelete(app, mutation, "delete-book-assets-retry", batchId)).status).toBe(500);
+    expect((await pushDelete(app, mutation, "delete-book-assets-retry", batchId)).status).toBe(200);
     await expect(database.ops.getAsset(ACCOUNT_ID, ready.assetId)).resolves.toMatchObject({
       status: "deleting",
     });
-    expect((await pushDelete(app, mutation, "delete-book-assets-retry", batchId)).status).toBe(200);
+    expect((await pushDelete(app, mutation, "delete-book-assets-retry-2", batchId)).status).toBe(
+      200,
+    );
     await expect(database.ops.getAsset(ACCOUNT_ID, ready.assetId)).resolves.toMatchObject({
       status: "deleting",
     });
@@ -280,7 +282,7 @@ describe("deleted book asset cleanup", () => {
       "delete-book-claim-failure",
     );
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(200);
     await expect(database.ops.getAsset(ACCOUNT_ID, ready.assetId)).resolves.toMatchObject({
       status: "deleting",
     });
@@ -298,6 +300,72 @@ describe("deleted book asset cleanup", () => {
           change.operation === "delete",
       ),
     ).toHaveLength(1);
+  });
+
+  it("acknowledges unrelated mutations after committed book cleanup fails", async () => {
+    const inner = createFakeObjectStore();
+    let blockedKey = "";
+    storage = {
+      ...inner,
+      async delete(key) {
+        if (key === blockedKey) throw new Error("object deletion failed after sync commit");
+        await inner.delete(key);
+      },
+    };
+    app = testApp(database, storage);
+    const ready = await reserveTranscript(app, {
+      bookId: BOOK_ID,
+      revisionId: "20000000-0000-4000-8000-000000000081",
+      chapterId: "30000000-0000-4000-8000-000000000081",
+      label: "mixed-batch",
+      complete: true,
+    });
+    blockedKey = (await database.ops.getAsset(ACCOUNT_ID, ready.assetId))?.objectKey ?? "";
+    const bookMutationId = "40000000-0000-4000-8000-000000000081";
+    const progressMutationId = "40000000-0000-4000-8000-000000000082";
+
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const response = await app.fetch(
+      new Request("http://localhost/v2/sync/push", {
+        method: "POST",
+        headers: requestHeaders("delete-book-assets-mixed-batch"),
+        body: JSON.stringify({
+          deviceId: DEVICE_ID,
+          batchId: "41000000-0000-4000-8000-000000000081",
+          mutations: [
+            deleteMutation({ mutationId: bookMutationId }),
+            {
+              mutationId: progressMutationId,
+              entityType: "progress",
+              entityId: "50000000-0000-4000-8000-000000000081",
+              operation: "upsert",
+              baseRevision: 0,
+              occurredAt: "2026-09-01T00:00:00Z",
+              payload: { progressKind: "reader", relativeSeconds: 42 },
+            },
+          ],
+        }),
+      }),
+    );
+    const cleanupLogs = warning.mock.calls
+      .map(([value]) => JSON.parse(String(value)) as Record<string, unknown>)
+      .filter((entry) => entry.message === "sync_book_asset_cleanup");
+    warning.mockRestore();
+
+    expect(response.status).toBe(200);
+    const body: { results: Array<{ mutationId: string; status: string }> } = await response.json();
+    expect(body.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ mutationId: bookMutationId, status: "applied" }),
+        expect.objectContaining({ mutationId: progressMutationId, status: "applied" }),
+      ]),
+    );
+    expect(cleanupLogs).toContainEqual(
+      expect.objectContaining({ outcome: "partial_failure", failedCount: 1 }),
+    );
+    await expect(database.ops.getAsset(ACCOUNT_ID, ready.assetId)).resolves.toMatchObject({
+      status: "deleting",
+    });
   });
 
   it("compensates a Worker fallback write that races a book tombstone", async () => {
@@ -521,7 +589,7 @@ describe("deleted book asset cleanup", () => {
     blockedKey = (await database.ops.getAsset(ACCOUNT_ID, second.assetId))?.objectKey ?? "";
 
     const mutation = deleteMutation({ mutationId: "40000000-0000-4000-8000-000000000021" });
-    expect((await pushDelete(app, mutation, "delete-book-assets-partial")).status).toBe(500);
+    expect((await pushDelete(app, mutation, "delete-book-assets-partial")).status).toBe(200);
     await expect(database.ops.getAsset(ACCOUNT_ID, first.assetId)).resolves.toMatchObject({
       status: "deleting",
     });

@@ -2295,6 +2295,9 @@ private struct TranscriptTextColumn: View {
                                 state.focusedSegmentID = segment.id
                                 state.focusedWordID = word.id
                                 state.inspect(word: word)
+#if os(iOS)
+                                DictionaryLookup.lookUpInDictionary(word.text)
+#endif
                             },
                             onSave: { word in state.addVocab(word: word, segment: segment) },
                             onMarkKnown: { word in
@@ -3117,14 +3120,7 @@ private struct WordInspector: View {
                         inspectorCard(title: "Apple Dictionary") {
 #if os(iOS)
                             if DictionaryLookup.hasSystemDefinition(word.text) {
-                                SystemDictionaryView(term: word.text)
-                                    .id(DictionaryLookup.headword(word.text))
-                                    // A flexible intrinsic-height query here recurses through the
-                                    // surrounding inspector/scroll layout on physical iPadOS.
-                                    .frame(height: 480)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                                Text("iPadOS shows entries from its installed dictionaries. Dictionary ordering and selection are managed by iPadOS.")
+                                Text("The iPadOS dictionary opens automatically when you select a word. Dictionary ordering and selection are managed by iPadOS.")
                                     .font(.system(size: 12))
                                     .foregroundStyle(Palette.dim)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -3138,7 +3134,7 @@ private struct WordInspector: View {
                             Button {
                                 DictionaryLookup.lookUpInDictionary(word.text)
                             } label: {
-                                Label("Open Dictionary Full Screen", systemImage: "book")
+                                Label("Open Apple Dictionary", systemImage: "book")
                                     .inspectorActionLabel()
                                     .frame(maxWidth: .infinity)
                             }

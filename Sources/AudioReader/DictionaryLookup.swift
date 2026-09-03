@@ -157,6 +157,7 @@ enum DictionaryLookup {
 #endif
     }
 
+    /// Presents Apple's dictionary full screen; embedding it in reader layout causes AttributeGraph cycles.
     @MainActor
     static func lookUpInDictionary(_ raw: String) {
         let word = headword(raw)
@@ -168,6 +169,7 @@ enum DictionaryLookup {
         guard UIReferenceLibraryViewController.dictionaryHasDefinition(forTerm: word) else { return }
         Task { @MainActor in
             let controller = UIReferenceLibraryViewController(term: word)
+            controller.modalPresentationStyle = .fullScreen
             guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                   let root = scene.keyWindow?.rootViewController
             else { return }

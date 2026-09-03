@@ -279,7 +279,7 @@ async function pushSync(context: SyncRouteContext): Promise<Response> {
   );
 }
 
-/** A book tombstone owns deletion of its announced child objects; rows stay durable until storage confirms deletion. */
+/** A book tombstone owns child deletion; post-commit failures stay durable for retry and cannot fail the push. */
 async function cleanupDeletedBookAssets(input: {
   context: SyncRouteContext;
   accountId: string;
@@ -305,12 +305,11 @@ async function cleanupDeletedBookAssets(input: {
     ),
   ];
   if (bookIds.length === 0) return;
-  if (input.context.ops === undefined || input.context.objects === undefined) {
-    throw new Error("Deleted-book asset cleanup is not configured.");
-  }
-
   logBookAssetCleanup(input, "start", { bookCount: bookIds.length });
   try {
+    if (input.context.ops === undefined || input.context.objects === undefined) {
+      throw new Error("Deleted-book asset cleanup is not configured.");
+    }
     const claimed = await input.context.ops.claimDeletedBookAssets(input.accountId, bookIds);
     const objectDeletionSucceeded: string[] = [];
     let failed = 0;
@@ -340,7 +339,7 @@ async function cleanupDeletedBookAssets(input: {
         failedCount: failed,
         objectDeleteDeferredCount: deferred,
       });
-      throw new Error("One or more deleted-book objects could not be removed.");
+      return;
     }
     logBookAssetCleanup(input, "success", {
       bookCount: bookIds.length,
@@ -349,15 +348,8 @@ async function cleanupDeletedBookAssets(input: {
       failedCount: 0,
       objectDeleteDeferredCount: deferred,
     });
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message === "One or more deleted-book objects could not be removed."
-    ) {
-      throw error;
-    }
+  } catch {
     logBookAssetCleanup(input, "failure", { bookCount: bookIds.length });
-    throw error;
   }
 }
 

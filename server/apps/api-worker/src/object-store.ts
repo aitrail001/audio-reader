@@ -516,7 +516,8 @@ export function createSupabaseObjectStore(options: SupabaseStorageOptions): Obje
     },
     async delete(key) {
       const response = await fetchImpl(objectUrl(key), { method: "DELETE", headers });
-      if (response.status !== 404 && !response.ok) {
+      if (response.status === 404 || (await isSupabaseNotFound(response, "authenticated"))) return;
+      if (!response.ok) {
         throw new Error("supabase storage delete failed");
       }
     },

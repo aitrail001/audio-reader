@@ -527,13 +527,18 @@ struct PlatformParityContractTests {
         #expect(!dictionarySummaryView.contains("#if os("))
     }
 
-    @Test("iPad system dictionary uses a concrete height inside the scrolling inspector")
-    func ipadSystemDictionaryAvoidsRecursiveIntrinsicSizing() throws {
+    @Test("iPad system dictionary opens automatically outside the scrolling inspector")
+    func ipadSystemDictionaryAvoidsEmbeddedControllerLayoutCycles() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
+        let dictionaryHTMLView = try source("Sources/AudioReader/DictionaryHTMLView.swift")
+        let dictionaryLookup = try source("Sources/AudioReader/DictionaryLookup.swift")
 
-        #expect(playerView.contains("SystemDictionaryView(term: word.text)"))
-        #expect(playerView.contains(".frame(height: 480)"))
-        #expect(!playerView.contains(".frame(minHeight: 360, idealHeight: 480)"))
+        #expect(!playerView.contains("SystemDictionaryView(term: word.text)"))
+        #expect(!dictionaryHTMLView.contains("struct SystemDictionaryView"))
+        #expect(playerView.contains("DictionaryLookup.lookUpInDictionary(word.text)"))
+        #expect(playerView.contains("state.inspect(word: word)\n#if os(iOS)\n                                DictionaryLookup.lookUpInDictionary(word.text)"))
+        #expect(dictionaryLookup.contains("controller.modalPresentationStyle = .fullScreen"))
+        #expect(playerView.contains("Open Apple Dictionary"))
     }
 
     @Test("Both platforms share the selected audiobook language end to end")
