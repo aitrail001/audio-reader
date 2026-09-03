@@ -2973,6 +2973,41 @@ struct AccountSessionFlowTests {
         #expect(try store.loadCursor() == "7000")
     }
 
+    @Test("A dependency update does not materialize the entire vocabulary table")
+    func dependencyUpdateUsesBoundedVocabularyQuery() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-page-targeted-vocabulary-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        var changes = (1...1_000).map(syncVocabularyChange(index:))
+        changes[0].entityId = changes[0].entityId.uppercased()
+        for start in stride(from: 0, to: changes.count, by: 100) {
+            let page = Array(changes[start..<min(start + 100, changes.count)])
+            try AccountSyncApplicator.applyPage(page, cursor: String(start + page.count), to: store)
+        }
+        #expect(store.maximumVocabularyQueryCount <= 100)
+        store.resetVocabularyQueryMetrics()
+        let vocabularyID = changes[0].entityId.lowercased()
+        let progress = SyncPulledChange(
+            sequence: 1_001,
+            entityType: OutboxEntityType.progress.rawValue,
+            entityId: vocabularyID,
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 2,
+            changedAt: "2026-08-30T01:00:00Z",
+            payload: [
+                "vocabularyId": .string(vocabularyID),
+                "reviewCount": .number(1),
+                "lastReviewedAt": .string("2026-08-30T01:00:00Z")
+            ]
+        )
+
+        try AccountSyncApplicator.applyPage([progress], cursor: "1001", to: store)
+
+        #expect(store.maximumVocabularyQueryCount <= 1)
+    }
+
     @Test("A successful learning page commits vocabulary, progress, review, versions, and cursor together")
     func learningSyncPageCommitsOneTransaction() throws {
         let root = FileManager.default.temporaryDirectory

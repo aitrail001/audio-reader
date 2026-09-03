@@ -515,7 +515,9 @@ enum AccountSyncApplicator {
                     && $0.operation != OutboxOperation.delete.rawValue
             }
             let existingVocabulary = Dictionary(
-                uniqueKeysWithValues: try sqlite.loadVocabulary().map {
+                uniqueKeysWithValues: try sqlite.loadVocabulary(
+                    ids: vocabularyUpserts.map { VocabularyOccurrenceID(rawValue: $0.entityId) }
+                ).map {
                     ($0.id.rawValue.lowercased(), VocabEntry($0))
                 }
             )
@@ -726,7 +728,9 @@ enum AccountSyncApplicator {
                 return nil
             }
             let incoming = try vocabulary(from: change)
-            let existing = try store.loadVocabulary().first {
+            let existing = try store.loadVocabulary(
+                ids: [VocabularyOccurrenceID(rawValue: change.entityId)]
+            ).first {
                 $0.id.rawValue.caseInsensitiveCompare(change.entityId) == .orderedSame
             }.map(VocabEntry.init)
             let resolved = existing.map {
@@ -736,7 +740,9 @@ enum AccountSyncApplicator {
             return resolved
         case OutboxEntityType.progress.rawValue:
             let vocabularyID = try requiredString("vocabularyId", in: change)
-            guard let stored = try store.loadVocabulary().first(where: {
+            guard let stored = try store.loadVocabulary(
+                ids: [VocabularyOccurrenceID(rawValue: vocabularyID)]
+            ).first(where: {
                 $0.id.rawValue.caseInsensitiveCompare(vocabularyID) == .orderedSame
             }) else {
                 if try store.isVocabularyTombstoned(entityID: vocabularyID) { return nil }
@@ -748,7 +754,7 @@ enum AccountSyncApplicator {
             return entry
         case OutboxEntityType.reviewEvent.rawValue:
             let event = try reviewEvent(from: change)
-            guard let stored = try store.loadVocabulary().first(where: {
+            guard let stored = try store.loadVocabulary(ids: [event.vocabularyID]).first(where: {
                 $0.id == event.vocabularyID
             }) else {
                 if try store.isVocabularyTombstoned(entityID: event.vocabularyID.rawValue) { return nil }

@@ -54,6 +54,7 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
     private(set) var schemaApplicationCount = 0
     public private(set) var lastTranscriptSegmentQueryCount = 0
     public private(set) var maximumTranscriptSegmentQueryCount = 0
+    public private(set) var maximumVocabularyQueryCount = 0
 
     public init(fileURL: URL) {
         url = fileURL
@@ -1373,9 +1374,36 @@ public final class LocalSQLiteStore: SettingsRepository, BookRepository, Transcr
     public func loadVocabulary() throws -> [StoredVocabularyOccurrence] {
         lock.lock()
         defer { lock.unlock() }
-        return try connection.query(
+        let vocabulary = try connection.query(
             "SELECT * FROM local_vocabulary_occurrences ORDER BY added_at DESC, id"
         ).map(Self.vocabulary(from:))
+        maximumVocabularyQueryCount = max(maximumVocabularyQueryCount, vocabulary.count)
+        return vocabulary
+    }
+
+    /// Sync dependency resolution must not decode every rich vocabulary row for a small page.
+    public func loadVocabulary(ids: [VocabularyOccurrenceID]) throws -> [StoredVocabularyOccurrence] {
+        let ids = Array(Set(ids.map { $0.rawValue.lowercased() }))
+        guard !ids.isEmpty else { return [] }
+        lock.lock()
+        defer { lock.unlock() }
+        let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ", ")
+        let vocabulary = try connection.query(
+            "SELECT * FROM local_vocabulary_occurrences WHERE lower(id) IN (\(placeholders))",
+            bind: { [connection] statement in
+                for (index, id) in ids.enumerated() {
+                    connection.bind(statement, Int32(index + 1), id)
+                }
+            }
+        ).map(Self.vocabulary(from:))
+        maximumVocabularyQueryCount = max(maximumVocabularyQueryCount, vocabulary.count)
+        return vocabulary
+    }
+
+    public func resetVocabularyQueryMetrics() {
+        lock.lock()
+        defer { lock.unlock() }
+        maximumVocabularyQueryCount = 0
     }
 
     public func saveVocabulary(_ entries: [StoredVocabularyOccurrence]) throws {

@@ -4,6 +4,90 @@ import Testing
 
 @Suite("Book asset persistence bridge")
 struct BookAssetPersistenceBridgeTests {
+    @Test("embedded M4B chapters hash their shared physical file once")
+    func embeddedM4BChaptersReuseOneDigest() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let audio = directory.appendingPathComponent("shared-book.m4b")
+        try Data("audio".utf8).write(to: audio)
+        let audioPath = audio.path
+        let book = Book(
+            id: "shared-m4b",
+            title: "Shared M4B",
+            folderPath: directory.path,
+            chapters: (0..<16).map { index in
+                Chapter(
+                    id: "chapter-\(index)",
+                    index: index,
+                    title: "Chapter \(index + 1)",
+                    audioPath: audioPath
+                )
+            }
+        )
+        var digestCount = 0
+
+        let assets = StoredLocalAsset.snapshots(for: book) { _ in
+            digestCount += 1
+            return .init(
+                contentHash: "shared-hash",
+                byteCount: 5,
+                regularFileCount: 1,
+                isDirectory: false
+            )
+        }
+
+        #expect(assets.count == 16)
+        #expect(assets.allSatisfy { $0.contentHash == "shared-hash" })
+        #expect(digestCount == 1)
+    }
+
+    @Test("changed embedded M4B replaces every shared chapter digest in one pass")
+    func changedEmbeddedM4BReusesNewDigest() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let audio = directory.appendingPathComponent("shared-book.m4b")
+        try Data("audio".utf8).write(to: audio)
+        let book = Book(
+            id: "changed-shared-m4b",
+            title: "Changed Shared M4B",
+            folderPath: directory.path,
+            chapters: (0..<16).map { index in
+                Chapter(
+                    id: "chapter-\(index)",
+                    index: index,
+                    title: "Chapter \(index + 1)",
+                    audioPath: audio.path
+                )
+            }
+        )
+        let existing = StoredLocalAsset.snapshots(for: book) { _ in
+            .init(contentHash: "old-hash", byteCount: 5, regularFileCount: 1, isDirectory: false)
+        }
+        try Data("updated audio".utf8).write(to: audio)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: 60)],
+            ofItemAtPath: audio.path
+        )
+        var digestCount = 0
+
+        let assets = StoredLocalAsset.snapshots(for: book, reusing: existing) { _ in
+            digestCount += 1
+            return .init(
+                contentHash: "new-hash",
+                byteCount: 13,
+                regularFileCount: 1,
+                isDirectory: false
+            )
+        }
+
+        #expect(assets.allSatisfy { $0.contentHash == "new-hash" })
+        #expect(digestCount == 1)
+    }
+
     @Test("audio EPUB and cover paths round-trip through typed local assets")
     func assetsRoundTripWithoutLibraryRescan() throws {
         let directory = FileManager.default.temporaryDirectory

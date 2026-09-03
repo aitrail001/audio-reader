@@ -37,7 +37,7 @@ final class AudioReaderMacOSUITests: XCTestCase {
         for destination in ["sidebar.library", "sidebar.nowReading", "sidebar.words", "sidebar.settings"] {
             XCTAssertTrue(element(destination, in: app).waitForExistence(timeout: 5))
         }
-        XCTAssertTrue(button("words.section.today", in: app).isHittable)
+        XCTAssertTrue(waitForHittable(button("words.section.today", in: app), timeout: 5))
         let studyToday = button("words.studyToday", in: app)
         XCTAssertTrue(studyToday.isHittable)
         XCTAssertEqual(studyToday.label, "Study 24 cards today")
@@ -52,7 +52,9 @@ final class AudioReaderMacOSUITests: XCTestCase {
             in: app
         ))
 
-        button("words.section.library", in: app).tap()
+        let librarySection = button("words.section.library", in: app)
+        XCTAssertTrue(waitForHittable(librarySection, timeout: 5))
+        librarySection.tap()
         XCTAssertTrue(element("words.listFilter", in: app).waitForExistence(timeout: 3))
         XCTAssertTrue(element("words.scope.all", in: app).exists)
         XCTAssertEqual(element("words.pageRange", in: app).value as? String, "Showing 1–80 of 85")
@@ -114,7 +116,9 @@ final class AudioReaderMacOSUITests: XCTestCase {
         let app = launch(scenario: "words-rich")
         let entryID = "ui-vocab-due-0"
 
-        button("words.section.library", in: app).tap()
+        let librarySection = button("words.section.library", in: app)
+        XCTAssertTrue(waitForHittable(librarySection, timeout: 5))
+        librarySection.tap()
         XCTAssertTrue(element("words.row.\(entryID)", in: app).waitForExistence(timeout: 3))
         XCTAssertFalse(element("anki.selection.\(entryID)", in: app).exists)
 
