@@ -540,10 +540,23 @@ enum AccountSyncApplicator {
                         chapterIDs: transcriptChapterIDs
                     )
                 }
+                // A fresh device has no parent row to delete. Record tombstones first so
+                // later progress/review rows are ignored instead of blocking the page forever.
+                for change in applicableChanges where
+                    change.entityType == OutboxEntityType.vocabulary.rawValue
+                        && change.operation == OutboxOperation.delete.rawValue {
+                    _ = try applyLearning(change, to: sqlite)
+                    if let version = pageVersions.first(where: {
+                        $0.entityType == change.entityType
+                            && $0.entityID == change.entityId
+                            && $0.serverVersion == Int64(change.revision)
+                    }) {
+                        try sqlite.saveVersion(version)
+                    }
+                }
                 try sqlite.upsertVocabulary(vocabularyRows)
                 for change in applicableChanges {
-                    if change.entityType == OutboxEntityType.vocabulary.rawValue,
-                       change.operation != OutboxOperation.delete.rawValue {
+                    if change.entityType == OutboxEntityType.vocabulary.rawValue {
                         continue
                     }
                     try apply(change, to: sqlite)

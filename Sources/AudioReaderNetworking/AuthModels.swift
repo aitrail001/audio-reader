@@ -51,7 +51,7 @@ public enum AccountMode: String, Codable, Sendable, Equatable {
     public var isSyncEnabled: Bool { self == .signedInSyncOn }
 }
 
-public enum AuthOAuthProvider: String, Codable, Sendable, CaseIterable {
+public enum AuthOAuthProvider: String, Codable, Sendable, CaseIterable, Hashable {
     case google
     case microsoft
 }

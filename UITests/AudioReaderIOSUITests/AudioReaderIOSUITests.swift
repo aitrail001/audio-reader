@@ -16,6 +16,27 @@ final class AudioReaderIOSUITests: XCTestCase {
         XCTAssertTrue(element("library.search", in: app).exists)
     }
 
+    func testSettingsOffersOnlySupportedIPadAIConnections() {
+        let app = launch(scenario: "library")
+
+        navigate(to: "sidebar.settings", in: app)
+        let connection = element("settings.llmConnection", in: app)
+        XCTAssertTrue(scrollToExistence(connection, in: app))
+        connection.tap()
+
+        for label in [
+            "AudioReader · Managed Qwen",
+            "xAI · API key",
+            "Qwen · API key",
+            "OpenAI · API key",
+            "On-device · Apple Intelligence",
+        ] {
+            XCTAssertTrue(app.buttons[label].waitForExistence(timeout: 3), "Missing \(label)")
+        }
+        XCTAssertFalse(app.buttons["xAI · Grok Build (OAuth)"].exists)
+        XCTAssertFalse(app.buttons["OpenAI · ChatGPT plan (OAuth)"].exists)
+    }
+
     func testSidebarReadingLookupAndDueReview() {
         let app = launch(scenario: "library")
 
@@ -37,6 +58,7 @@ final class AudioReaderIOSUITests: XCTestCase {
         let studyToday = element("words.studyToday", in: app)
         XCTAssertTrue(studyToday.isHittable)
         XCTAssertEqual(studyToday.label, "Study 24 cards today")
+        XCTAssertEqual(element("words.metric.learning", in: app).label, "Learning, 4")
         XCTAssertTrue(element("words.metric.reviewedToday", in: app).exists)
         XCTAssertTrue(element("words.todayCards", in: app).exists)
         XCTAssertTrue(scrollToExistence(element("words.todayCard.ui-vocab-due-0", in: app), in: app))
@@ -49,11 +71,36 @@ final class AudioReaderIOSUITests: XCTestCase {
 
         element("words.section.library", in: app).tap()
         XCTAssertTrue(element("words.listFilter", in: app).waitForExistence(timeout: 3))
-        XCTAssertTrue(element("words.category.all", in: app).exists)
+        XCTAssertTrue(element("words.scope.all", in: app).exists)
         XCTAssertEqual(element("words.pageRange", in: app).label, "Showing 1–80 of 85")
         element("words.pageLast", in: app).tap()
         XCTAssertEqual(element("words.pageRange", in: app).label, "Showing 81–85 of 85")
-        XCTAssertTrue(element("words.card.ui-vocab-new-76", in: app).waitForExistence(timeout: 3))
+        XCTAssertTrue(element("words.row.ui-vocab-new-76", in: app).waitForExistence(timeout: 3))
+        element("words.pageFirst", in: app).tap()
+        XCTAssertTrue(element("words.row.ui-vocab-new-0", in: app).waitForExistence(timeout: 3))
+
+        element("words.scope.learning", in: app).tap()
+        XCTAssertTrue(waitForNonExistence(element("words.row.ui-vocab-new-0", in: app), timeout: 3))
+        XCTAssertTrue(element("words.row.ui-vocab-due-0", in: app).waitForExistence(timeout: 3))
+        XCTAssertTrue(element("words.row.ui-vocab-due-3", in: app).exists)
+        element("words.myList.ui-vocab-due-0", in: app).tap()
+        XCTAssertTrue(element("words.row.ui-vocab-due-0", in: app).exists)
+
+        element("words.scope.myList", in: app).tap()
+        XCTAssertTrue(waitForNonExistence(element("words.row.ui-vocab-due-0", in: app), timeout: 3))
+        XCTAssertFalse(element("words.row.ui-vocab-due-3", in: app).exists)
+        XCTAssertTrue(element("words.row.ui-vocab-due-1", in: app).exists)
+
+        element("words.scope.known", in: app).tap()
+        element("words.known.add", in: app).tap()
+        let knownWord = app.textFields["Word"].firstMatch
+        XCTAssertTrue(knownWord.waitForExistence(timeout: 3))
+        knownWord.tap()
+        knownWord.typeText("Done.")
+        app.buttons["Add"].firstMatch.tap()
+        XCTAssertTrue(element("words.known.en.do", in: app).waitForExistence(timeout: 3))
+        app.buttons["Remove do from Known"].firstMatch.tap()
+        XCTAssertTrue(waitForNonExistence(element("words.known.en.do", in: app), timeout: 3))
 
         app.terminate()
         let sidebarApp = launch(scenario: "library")
@@ -98,17 +145,16 @@ final class AudioReaderIOSUITests: XCTestCase {
         let entryID = "ui-vocab-due-0"
 
         element("words.section.library", in: app).tap()
-        XCTAssertTrue(element("words.card.\(entryID)", in: app).waitForExistence(timeout: 3))
+        XCTAssertTrue(element("words.row.\(entryID)", in: app).waitForExistence(timeout: 3))
         XCTAssertFalse(element("anki.selection.\(entryID)", in: app).exists)
 
         let myList = element("words.myList.\(entryID)", in: app)
         XCTAssertTrue(scrollToExistence(myList, in: app))
         let originalMyListLabel = myList.label
-        XCTAssertEqual(originalMyListLabel, "Add to My list")
 
         enterAnkiExportSelection(in: app)
         let selection = element("anki.selection.\(entryID)", in: app)
-        XCTAssertTrue(selection.waitForExistence(timeout: 3))
+        XCTAssertTrue(scrollToExistence(selection, in: app))
         XCTAssertEqual(selection.value as? String, "Not selected")
         selection.tap()
 
@@ -125,7 +171,7 @@ final class AudioReaderIOSUITests: XCTestCase {
 
         enterAnkiExportSelection(in: app)
         let secondSelection = element("anki.selection.\(entryID)", in: app)
-        XCTAssertTrue(secondSelection.waitForExistence(timeout: 3))
+        XCTAssertTrue(scrollToExistence(secondSelection, in: app))
         secondSelection.tap()
         XCTAssertEqual(element("anki.selection.count", in: app).value as? String, "1 selected")
 
@@ -205,14 +251,25 @@ final class AudioReaderIOSUITests: XCTestCase {
         if waitForHittable(identifiedExport, timeout: 2) {
             export = identifiedExport
         } else {
-            let more = app.buttons["More"].firstMatch
-            XCTAssertTrue(more.waitForExistence(timeout: 3))
-            more.tap()
-            export = app.buttons["Export to Anki"].firstMatch
+            let vocabularyActions = app.descendants(matching: .any).matching(
+                NSPredicate(format: "label == %@", "Vocabulary actions")
+            ).firstMatch
+            if !waitForHittable(vocabularyActions, timeout: 2) {
+                let more = app.buttons["More"].firstMatch
+                XCTAssertTrue(more.waitForExistence(timeout: 3))
+                more.tap()
+            }
+            XCTAssertTrue(waitForHittable(vocabularyActions, timeout: 3))
+            vocabularyActions.tap()
+            export = app.descendants(matching: .any).matching(
+                NSPredicate(format: "label == %@", "Export to Anki")
+            ).firstMatch
         }
         XCTAssertTrue(waitForHittable(export, timeout: 3))
         export.tap()
-        let select = app.buttons["Select for Anki export"].firstMatch
+        let select = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Select for Anki export")
+        ).firstMatch
         XCTAssertTrue(select.waitForExistence(timeout: 3))
         select.tap()
     }

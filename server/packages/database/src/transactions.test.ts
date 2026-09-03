@@ -2470,6 +2470,47 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
       lastErrorRemoved: true,
     });
   });
+
+  it("bootstraps vocabulary before dependent learning data across pages", () => {
+    const session = requireDb(db);
+    const userId = "91919191-9191-4919-8919-919191919191";
+    const vocabularyId = "92929292-9292-4929-8929-929292929292";
+    execOk(
+      session,
+      `insert into public.profiles (user_id, account_status)
+       values (${sqlString(userId)}::uuid, 'active');
+       insert into public.sync_v2_changes (
+         user_id, entity_type, entity_id, operation, revision, payload
+       ) values
+       (${sqlString(userId)}::uuid, 'progress', ${sqlString(vocabularyId)}::uuid,
+        'upsert', 1, ${sqlJson({ vocabularyId, reviewCount: 1 })}::jsonb),
+       (${sqlString(userId)}::uuid, 'vocabulary', ${sqlString(vocabularyId)}::uuid,
+        'upsert', 1, ${sqlJson({ surface: "loom" })}::jsonb)`,
+    );
+
+    const first = callJson(
+      session,
+      `select public.bootstrap_sync_v2_page(
+        ${sqlString(userId)}::uuid, null, 0, 1, 1048576
+      )`,
+    );
+    expect(requireJsonObjectArray(first.entities).map((entity) => entity.entity_type)).toEqual([
+      "vocabulary",
+    ]);
+    expect(first.nextOffset).toBe(1);
+    expect(first.hasMore).toBe(true);
+
+    const second = callJson(
+      session,
+      `select public.bootstrap_sync_v2_page(
+        ${sqlString(userId)}::uuid, ${String(first.cursor)}, 1, 1, 1048576
+      )`,
+    );
+    expect(requireJsonObjectArray(second.entities).map((entity) => entity.entity_type)).toEqual([
+      "progress",
+    ]);
+    expect(second.hasMore).toBe(false);
+  });
 });
 
 function delay(ms: number): Promise<void> {

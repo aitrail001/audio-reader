@@ -6,6 +6,10 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
     public private(set) var exchangeCount = 0
     public private(set) var bootstrapCount = 0
     public var bootstrapReadiness = AccountSyncReadiness()
+    public var authProviders = AuthOAuthProvider.allCases.map { AuthProvider(id: $0.rawValue) }
+        + [AuthProvider(id: "email_otp")]
+    public var authConfigError: Error?
+    public var authorizeHook: (@Sendable (Int) async -> Void)?
     public private(set) var logoutTokens: [String] = []
     public private(set) var recordedUsage: [ProductUsageEvent] = []
 
@@ -43,11 +47,10 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
     }
 
     public func authConfig() async throws -> AuthConfig {
-        AuthConfig(providers: [
-            AuthProvider(id: "google"),
-            AuthProvider(id: "microsoft"),
-            AuthProvider(id: "email_otp")
-        ])
+        if let authConfigError {
+            throw authConfigError
+        }
+        return AuthConfig(providers: authProviders)
     }
 
     public func requestEmailOTP(email: String) async throws {
@@ -71,7 +74,7 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
         codeChallenge: String,
         state: String
     ) async throws -> OAuthAuthorization {
-        withLock {
+        let (result, attempt) = withLock {
             authorizeCount += 1
             let code = "oauth-code-\(authorizeCount)"
             oauthCodes[code] = OAuthRecord(
@@ -87,8 +90,12 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
                 URLQueryItem(name: "state", value: state),
                 URLQueryItem(name: "redirect_uri", value: redirectURI.absoluteString)
             ]
-            return OAuthAuthorization(authorizationURL: url.url!, state: state)
+            return (OAuthAuthorization(authorizationURL: url.url!, state: state), authorizeCount)
         }
+        if let authorizeHook {
+            await authorizeHook(attempt)
+        }
+        return result
     }
 
     public func exchangeOAuth(

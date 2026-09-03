@@ -25,8 +25,11 @@ public final class AccountSession {
     public private(set) var lastExportStatus: String?
     public private(set) var pendingExport: AccountExportFile?
     public private(set) var operatorLearningAnalyticsEnabled: Bool?
+    public private(set) var availableOAuthProviders: Set<AuthOAuthProvider> = []
+    public private(set) var authConfigurationLoaded = false
     var pendingOAuth: PendingOAuth?
     var pendingAuthorizationURL: URL?
+    @ObservationIgnored private var oauthSignInInProgress = false
     @ObservationIgnored private var syncTask: Task<Void, Never>?
     @ObservationIgnored private var syncReadinessRetryTask: Task<Void, Never>?
 
@@ -191,6 +194,19 @@ public final class AccountSession {
     }
 
     public func signInWithOAuth(_ provider: AuthOAuthProvider) async {
+        // One pending verifier must own the entire browser round trip. A rapid second
+        // tap can otherwise replace it while the first authorization request is suspended.
+        guard !oauthSignInInProgress else { return }
+        oauthSignInInProgress = true
+        defer { oauthSignInInProgress = false }
+        if !authConfigurationLoaded {
+            await refreshAuthConfiguration()
+        }
+        guard availableOAuthProviders.contains(provider) else {
+            let name = provider == .google ? "Google" : "Microsoft"
+            errorMessage = "\(name) sign-in is not available right now. Use email sign-in or try again later."
+            return
+        }
         await beginOAuth(provider)
         guard let pending = pendingOAuth, let authorizationURL = pendingAuthorizationURL, errorMessage == nil else { return }
         await run(activity: "Signing in…") {
@@ -199,6 +215,21 @@ public final class AccountSession {
                 callbackScheme: ProductAPI.callbackScheme
             )
             try await finishOAuth(callbackURL: callback, pending: pending)
+        }
+    }
+
+    /// The server reflects the hosted identity provider's current switches; clients
+    /// must not offer a social login solely because this app knows its identifier.
+    public func refreshAuthConfiguration() async {
+        do {
+            let config = try await client.authConfig()
+            availableOAuthProviders = Set(
+                config.providers.compactMap { AuthOAuthProvider(rawValue: $0.id) }
+            )
+            authConfigurationLoaded = true
+        } catch {
+            availableOAuthProviders = []
+            authConfigurationLoaded = true
         }
     }
 

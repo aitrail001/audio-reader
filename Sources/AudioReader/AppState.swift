@@ -654,6 +654,17 @@ final class AppState {
         }
     }
 
+    /// Manual list editing uses the active audiobook language and the same canonical family identity as reader actions.
+    @discardableResult
+    func addKnownWord(_ surface: String) -> Bool {
+        guard let lemma = StudyLemma.make(language: studyLexiconLanguage, surface: surface) else { return false }
+        markKnown(lemma: lemma, known: true)
+        Self.vocabularyLog.info(
+            "known_word_add message=known_word_add component=known-lemma outcome=success language=\(lemma.language, privacy: .public)"
+        )
+        return true
+    }
+
     /// A bulk preset persists one canonical row per family; inflected forms resolve through the shared catalog.
     func setCommonEnglishWordsKnown(first count: Int, known: Bool) async throws -> Int {
         let lemmas = Set(CommonEnglishWordCatalog.shared.headwords(first: count).map {

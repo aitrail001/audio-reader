@@ -101,6 +101,8 @@ struct AccountSessionView: View {
                 // still refreshes. This only reloads the device list.
                 await session.refreshDevices()
                 await session.refreshAnalyticsPreference()
+            } else {
+                await session.refreshAuthConfiguration()
             }
         }
         .alert("Sign out of AudioReader?", isPresented: $confirmSignOut) {
@@ -149,27 +151,55 @@ struct AccountSessionView: View {
 
     private var signedOutContent: some View {
         VStack(alignment: .leading, spacing: stackSpacing) {
-            Button {
-                Task { await session.signInWithOAuth(.google) }
-            } label: {
-                Label("Sign in with Google", systemImage: "globe")
-                    .font(.body)
-                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            if !session.authConfigurationLoaded {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Checking sign-in options…")
+                        .font(.body)
+                        .foregroundStyle(Palette.dim)
+                }
             }
-            .accessibilityLabel("Sign in with Google")
-            .disabled(session.isBusy)
 
-            Button {
-                Task { await session.signInWithOAuth(.microsoft) }
-            } label: {
-                Label("Sign in with Microsoft", systemImage: "globe")
-                    .font(.body)
-                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            if session.availableOAuthProviders.contains(.google) {
+                Button {
+                    Task { await session.signInWithOAuth(.google) }
+                } label: {
+                    Label("Sign in with Google", systemImage: "globe")
+                        .font(.body)
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                }
+                .accessibilityLabel("Sign in with Google")
+                .disabled(session.isBusy)
             }
-            .accessibilityLabel("Sign in with Microsoft")
-            .disabled(session.isBusy)
 
-            Text("Or request a one-time email code. The same confirmation is shown whether or not the address already has an account.")
+            if session.availableOAuthProviders.contains(.microsoft) {
+                Button {
+                    Task { await session.signInWithOAuth(.microsoft) }
+                } label: {
+                    Label("Sign in with Microsoft", systemImage: "globe")
+                        .font(.body)
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                }
+                .accessibilityLabel("Sign in with Microsoft")
+                .disabled(session.isBusy)
+            }
+
+            if session.authConfigurationLoaded, session.availableOAuthProviders.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Social sign-in is temporarily unavailable. You can still sign in by email.")
+                        .font(.body)
+                        .foregroundStyle(Palette.dim)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Check again") {
+                        Task { await session.refreshAuthConfiguration() }
+                    }
+                    .disabled(session.isBusy)
+                    .accessibilityLabel("Check social sign-in options again")
+                }
+            }
+
+            Text("Request a one-time email code. The same confirmation is shown whether or not the address already has an account.")
                 .font(.body)
                 .foregroundStyle(Palette.dim)
                 .fixedSize(horizontal: false, vertical: true)

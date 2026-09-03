@@ -120,6 +120,21 @@ export type SyncStore = {
 };
 
 const ENTITY_TYPE_SET = new Set<string>(SYNC_ENTITY_TYPES);
+const BOOTSTRAP_ENTITY_ORDER = [
+  "book",
+  "chapter",
+  "vocabulary",
+  "settings",
+  "transcript",
+  "transcript_overlay",
+  "lexeme_state",
+  "progress",
+  "review_event",
+  "asset",
+  "assistant_result",
+  "study_activity",
+  "chat_message",
+];
 
 export function isSyncEntityType(value: string): value is SyncEntityType {
   return ENTITY_TYPE_SET.has(value);
@@ -221,11 +236,14 @@ export function createMemorySyncStore(
         if (change.sequence > snapshotCursor) continue;
         latest.set(`${change.entityType}|${change.entityId}`, change);
       }
-      const ordered = [...latest.values()].sort(
-        (left, right) =>
+      const ordered = [...latest.values()].sort((left, right) => {
+        const rank = bootstrapEntityRank(left.entityType) - bootstrapEntityRank(right.entityType);
+        return (
+          rank ||
           left.entityType.localeCompare(right.entityType) ||
-          left.entityId.localeCompare(right.entityId),
-      );
+          left.entityId.localeCompare(right.entityId)
+        );
+      });
       const page = ordered.slice(input.offset, input.offset + input.limit);
       const entities = await Promise.all(
         page.map(async (change) => ({
@@ -263,6 +281,12 @@ export function createMemorySyncStore(
       return Promise.resolve(undefined);
     },
   };
+}
+
+/** Initial-sync pages keep parents durable before dependent learning rows are exposed. */
+function bootstrapEntityRank(entityType: string): number {
+  const rank = BOOTSTRAP_ENTITY_ORDER.indexOf(entityType);
+  return rank < 0 ? BOOTSTRAP_ENTITY_ORDER.length : rank;
 }
 
 export function createSupabaseSyncStore(

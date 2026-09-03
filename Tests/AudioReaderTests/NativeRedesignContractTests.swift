@@ -86,6 +86,7 @@ struct NativeRedesignContractTests {
 
         #expect(vocabulary.contains("due in this view"))
         #expect(vocabulary.contains("words.reviewDue"))
+        #expect(vocabulary.contains("ToolbarItem(placement: .topBarTrailing) { vocabularyUtilitiesMenu }"))
         #expect(vocabulary.contains("VocabularyListFilter.allCases"))
         #expect(vocabulary.contains("VocabularyFilterProjection.make"))
         #expect(vocabulary.contains("ForEach(page.entries)"))
@@ -95,7 +96,7 @@ struct NativeRedesignContractTests {
         #expect(vocabulary.contains(".task(id: learningRefreshRequest)"))
         #expect(vocabulary.contains("withTaskCancellationHandler"))
         #expect(vocabulary.contains("learningSnapshotRequest == learningRefreshRequest"))
-        #expect(!vocabulary.contains("private var filtered"))
+        #expect(!vocabulary.contains("private var filtered:"))
         #expect(!vocabulary.contains("VocabReviewScheduler.dueEntries(in: filtered"))
         #expect(vocabulary.contains("minHeight: 44"))
     }
@@ -129,6 +130,31 @@ struct NativeRedesignContractTests {
 
         #expect(vocabulary.contains(#"Label("Review due — \(projection.due.count)""#))
         #expect(vocabulary.contains(#"Label("Choose review""#))
+    }
+
+    @Test("Vocabulary uses compact scopes and exposes editable learning and known lists")
+    func vocabularyListManagementLayout() throws {
+        let vocabulary = try source("Sources/AudioReader/VocabularyView.swift")
+
+        #expect(vocabulary.contains("enum VocabularyLibraryScope"))
+        #expect(vocabulary.contains("ForEach(VocabularyLibraryScope.allCases)"))
+        #expect(vocabulary.contains(#"case .learning: "Learning""#))
+        #expect(vocabulary.contains(#"case .myList: "My List""#))
+        #expect(vocabulary.contains(#"case .known: "Known""#))
+        #expect(vocabulary.contains("case .learning: .learning"))
+        #expect(vocabulary.contains("case .myList: .saved"))
+        #expect(vocabulary.contains("case .learning: learningSnapshot.queue.learning.count"))
+        #expect(vocabulary.contains("case .myList: state.vocab.count(where: \\.isInLearnList)"))
+        #expect(vocabulary.contains("return effectiveListFilter.symbol"))
+        #expect(vocabulary.contains("return switch effectiveListFilter"))
+        #expect(vocabulary.contains(#"Button("Add known word""#))
+        #expect(vocabulary.contains("state.addKnownWord(knownWordDraft)"))
+        #expect(vocabulary.contains("state.setVocabularyLearnList(entry.id, included: !entry.isInLearnList)"))
+        #expect(vocabulary.contains("Add to My list"))
+        #expect(!vocabulary.contains("Add to Learning"))
+        #expect(vocabulary.contains("state.markKnown(lemma: record.lemma, known: false)"))
+        #expect(vocabulary.contains("private struct VocabularyLibraryRow"))
+        #expect(!vocabulary.contains(".frame(height: 300)"))
     }
 
     @Test("Anki export selection is explicit, temporary, accessible, and distinct from My List")

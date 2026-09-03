@@ -1,5 +1,5 @@
 import { createMemoryIdentityStore, type IdentityStore } from "@audio-reader/database";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createHostedAuthService, type HostedAuthFetch } from "./hosted-auth";
 import { signAccessToken, type JwtSigningConfig } from "./jwt";
 
@@ -83,6 +83,45 @@ async function authenticateBootstrap(identity: IdentityStore) {
 }
 
 describe("hosted GoTrue auth service", () => {
+  it("reports only OAuth providers enabled by GoTrue", async () => {
+    const { fetch, calls } = createFetch(() =>
+      jsonResponse(200, { external: { email: true, google: false, azure: true } }),
+    );
+    const auth = createHostedAuthService({
+      jwt: JWT,
+      supabaseUrl: "https://example.supabase.co",
+      supabaseAnonKey: "anon-key",
+      fetch,
+    });
+
+    await expect(auth.authConfig()).resolves.toEqual({
+      providers: [{ id: "microsoft" }, { id: "email_otp" }],
+    });
+    expect(calls.map((call) => call.url)).toEqual(["https://example.supabase.co/auth/v1/settings"]);
+  });
+
+  it("rejects an OAuth provider disabled by GoTrue before opening a browser", async () => {
+    const { fetch, calls } = createFetch(() =>
+      jsonResponse(200, { external: { email: true, google: false, azure: true } }),
+    );
+    const auth = createHostedAuthService({
+      jwt: JWT,
+      supabaseUrl: "https://example.supabase.co",
+      supabaseAnonKey: "anon-key",
+      fetch,
+    });
+
+    await expect(
+      auth.authorizeOAuth({
+        provider: "google",
+        redirectUri: "audioreader://auth/callback",
+        codeChallenge: "a".repeat(43),
+        state: "oauth-state-google",
+      }),
+    ).resolves.toEqual({ ok: false, code: "provider_disabled" });
+    expect(calls).toHaveLength(1);
+  });
+
   it("requests an email OTP without enumerating unknown addresses", async () => {
     const { fetch, calls } = createFetch(() => jsonResponse(200, null));
     const auth = createHostedAuthService({
@@ -234,7 +273,9 @@ describe("hosted GoTrue auth service", () => {
   });
 
   it("returns a GoTrue authorize URL for Google and Azure without local-complete", async () => {
-    const { fetch, calls } = createFetch(() => jsonResponse(500, { message: "should not fetch" }));
+    const { fetch, calls } = createFetch(() =>
+      jsonResponse(200, { external: { email: true, google: true, azure: true } }),
+    );
     const auth = createHostedAuthService({
       jwt: JWT,
       supabaseUrl: "https://example.supabase.co/",
@@ -273,7 +314,10 @@ describe("hosted GoTrue auth service", () => {
     const microsoftUrl = new URL(microsoft.value.authorizationUrl);
     expect(microsoftUrl.searchParams.get("provider")).toBe("azure");
     expect(microsoftUrl.searchParams.get("scopes")).toBe("email");
-    expect(calls).toHaveLength(0);
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://example.supabase.co/auth/v1/settings",
+      "https://example.supabase.co/auth/v1/settings",
+    ]);
   });
 
   it("reads GoTrue tokens from a nested session envelope", async () => {
@@ -337,9 +381,42 @@ describe("hosted GoTrue auth service", () => {
     expect(calls[0]?.url).toBe("https://example.supabase.co/auth/v1/token?grant_type=pkce");
     expect(calls[0]?.body).toEqual({
       auth_code: "auth-code-1",
-      code: "auth-code-1",
       code_verifier: "c".repeat(43),
     });
+  });
+
+  it("reports a PKCE verifier mismatch without logging the code or verifier", async () => {
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const { fetch } = createFetch(() =>
+        jsonResponse(400, {
+          error_code: "bad_code_verifier",
+          msg: "code challenge does not match previously saved code verifier",
+        }),
+      );
+      const auth = createHostedAuthService({
+        jwt: JWT,
+        supabaseUrl: "https://example.supabase.co",
+        supabaseAnonKey: "anon-key",
+        fetch,
+      });
+
+      await expect(
+        auth.exchangeOAuth({
+          provider: "google",
+          code: "sensitive-auth-code",
+          codeVerifier: "v".repeat(43),
+          redirectUri: "audioreader://auth/callback",
+          deviceId: DEVICE_ID,
+        }),
+      ).resolves.toEqual({ ok: false, code: "pkce_mismatch" });
+      const logs = spy.mock.calls.flat().join("\n");
+      expect(logs).toContain("bad_code_verifier");
+      expect(logs).not.toContain("sensitive-auth-code");
+      expect(logs).not.toContain("v".repeat(43));
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("refreshes and logs out through GoTrue", async () => {

@@ -441,7 +441,11 @@ enum UITestLaunchScenario {
                 addedAt: now.addingTimeInterval(Double(index + 4))
             )
         }
-        return due + new
+        return (due + new).enumerated().map { index, entry in
+            var entry = entry
+            entry.isInLearnList = index < 3
+            return entry
+        }
     }
 }
 

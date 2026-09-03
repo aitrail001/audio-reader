@@ -60,6 +60,40 @@ describe("memory sync store", () => {
     expect(page.hasMore).toBe(false);
   });
 
+  it("bootstraps vocabulary before dependent progress across page boundaries", async () => {
+    const store = createMemorySyncStore();
+    await store.push({
+      userId: USER_A,
+      deviceId: DEVICE_A,
+      batchId: BATCH,
+      mutations: [
+        progressMutation(),
+        {
+          mutationId: MUTATION_B,
+          entityType: "vocabulary",
+          entityId: ENTITY,
+          operation: "upsert",
+          baseRevision: 0,
+          occurredAt: "2026-08-26T09:12:04.000Z",
+          payload: { surface: "loom" },
+        },
+      ],
+    });
+
+    const first = await store.bootstrap({ userId: USER_A, cursor: null, offset: 0, limit: 1 });
+    const second = await store.bootstrap({
+      userId: USER_A,
+      cursor: first.cursor,
+      offset: first.nextOffset,
+      limit: 1,
+    });
+
+    expect(first.entities.map((entity) => entity.entityType)).toEqual(["vocabulary"]);
+    expect(first.hasMore).toBe(true);
+    expect(second.entities.map((entity) => entity.entityType)).toEqual(["progress"]);
+    expect(second.hasMore).toBe(false);
+  });
+
   it("applies a mutation once and isolates users", async () => {
     const store = createMemorySyncStore();
     const first = await store.push({

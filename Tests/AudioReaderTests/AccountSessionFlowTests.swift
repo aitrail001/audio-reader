@@ -1023,6 +1023,42 @@ struct AccountSessionFlowTests {
         ).contains(where: { $0.entityType == .vocabulary && $0.entityID == vocabularyID }))
     }
 
+    @Test("A fresh bootstrap records a vocabulary tombstone before dependent progress")
+    func bootstrapVocabularyTombstonePrecedesProgress() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-bootstrap-tombstone-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LocalSQLiteStore(fileURL: url)
+        let vocabularyID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let progress = SyncPulledChange(
+            sequence: 1,
+            entityType: OutboxEntityType.progress.rawValue,
+            entityId: vocabularyID,
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T03:00:00Z",
+            payload: [
+                "vocabularyId": .string(vocabularyID),
+                "reviewCount": .number(1)
+            ]
+        )
+        let deletion = SyncPulledChange(
+            sequence: 2,
+            entityType: OutboxEntityType.vocabulary.rawValue,
+            entityId: vocabularyID,
+            operation: OutboxOperation.delete.rawValue,
+            revision: 2,
+            changedAt: "2026-08-30T03:01:00Z",
+            payload: [:]
+        )
+
+        try AccountSyncApplicator.applyPage([progress, deletion], cursor: "2", to: store)
+
+        #expect(try store.loadCursor() == "2")
+        #expect(try store.loadVocabulary().isEmpty)
+        #expect(try store.isVocabularyTombstoned(entityID: vocabularyID))
+    }
+
     @Test("A non-UUID vocabulary tombstone deletes the original local identifier on another device")
     func legacyVocabularyDeletionRoundTripsAcrossDevices() throws {
         let url = FileManager.default.temporaryDirectory

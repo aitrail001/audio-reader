@@ -87,6 +87,7 @@ export type BootstrapSession = {
 export type AuthFailureCode =
   | "invalid_otp"
   | "invalid_oauth"
+  | "pkce_mismatch"
   | "invalid_refresh"
   | "invalid_token"
   | "invalid_issuer"
@@ -95,6 +96,7 @@ export type AuthFailureCode =
   | "expired"
   | "missing_subject"
   | "not_ready"
+  | "provider_disabled"
   | "already_linked"
   | "device_revoked"
   | "not_found";
@@ -190,7 +192,9 @@ export type SettingsPutResult =
   | { ok: false; code: "not_found" };
 
 export type AuthService = {
-  authConfig(): { providers: readonly { id: AuthProviderId }[] };
+  authConfig():
+    | { providers: readonly { id: AuthProviderId }[] }
+    | Promise<{ providers: readonly { id: AuthProviderId }[] }>;
   canIssueSessions(): boolean;
   authenticate(request: Request): Promise<Principal | null>;
   requestEmailOtp(email: string): Promise<AuthResult<{ accepted: true }>>;

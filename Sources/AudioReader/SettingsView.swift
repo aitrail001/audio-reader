@@ -285,14 +285,15 @@ struct SettingsView: View {
                 if let warning = state.credentialMigrationWarning {
                     migrationWarning(warning)
                 }
-                settingRow("Provider") {
-                    Picker("Provider", selection: $draft.llmProvider) {
-                        ForEach(LLMProvider.allCases) { provider in
-                            Text(provider.menuLabel).tag(provider.rawValue)
+                settingRow("Connection") {
+                    Picker("Connection", selection: draftLLMConnectionBinding) {
+                        ForEach(LLMConnectionChoice.availableOnCurrentPlatform) { connection in
+                            Text(connection.menuLabel).tag(connection)
                         }
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                    .accessibilityIdentifier("settings.llmConnection")
                 }
 
                 Divider().overlay(Palette.line)
@@ -312,6 +313,14 @@ struct SettingsView: View {
             }
         }
         .listRowBackground(Palette.panel)
+    }
+
+    /// Settings and the reader must expose the same platform-safe authentication choices.
+    private var draftLLMConnectionBinding: Binding<LLMConnectionChoice> {
+        Binding(
+            get: { LLMConnectionChoice.selected(in: draft) },
+            set: { $0.apply(to: &draft) }
+        )
     }
 
     private var managedQwenSettings: some View {

@@ -138,6 +138,24 @@ struct AppCompositionTests {
     }
 
     @MainActor
+    @Test("Known words can be added manually with canonical persistence")
+    func addsCanonicalKnownWordManually() throws {
+        let knownLemmas = InMemoryKnownLemmaRepository()
+        let state = AppState(
+            composition: AppComposition(
+                vocabulary: InMemoryVocabularyRepository(),
+                knownLemmas: knownLemmas
+            ),
+            account: AccountSession.isolated()
+        )
+
+        #expect(state.addKnownWord("Done."))
+        #expect(!state.addKnownWord("   "))
+        #expect(state.knownLemmas.map(\.form) == ["do"])
+        #expect(try knownLemmas.loadKnownLemmas().map(\.form) == ["do"])
+    }
+
+    @MainActor
     @Test("Mark known persists through the injected lemma repository")
     func markKnownPersistsThroughInjectedRepository() throws {
         let vocabulary = InMemoryVocabularyRepository()

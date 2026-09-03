@@ -35,7 +35,7 @@ enum VocabularyListFilter: String, CaseIterable, Identifiable, Sendable {
         case .saved: "My list"
         case .due: "Due now"
         case .new: "New"
-        case .learning: "Learning"
+        case .learning: "Learning stage"
         case .review: "Review"
         }
     }

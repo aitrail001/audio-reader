@@ -96,6 +96,7 @@ struct PlatformParityContractTests {
         #expect(vocabularyView.contains(".navigationTitle(\"Vocabulary\")"))
         #expect(vocabularyView.contains(".navigationBarTitleDisplayMode(.inline)"))
         #expect(vocabularyView.contains("VocabularyListFilter.allCases"))
+        #expect(vocabularyView.contains("Learning stage is based on review progress."))
         #expect(vocabularyView.contains("My list is the list you control."))
         #expect(reviewView.contains("entry.bookTitle"))
         #expect(reviewView.contains("entry.chapterTitle"))
@@ -141,14 +142,29 @@ struct PlatformParityContractTests {
         let vocabularyView = try source("Sources/AudioReader/VocabularyView.swift")
         let learningDashboard = try source("Sources/AudioReader/VocabularyLearningDashboard.swift")
 
-        #expect(vocabularyView.contains("private var categoryFilters: some View"))
-        #expect(vocabularyView.contains("ScrollView(.horizontal)"))
+        #expect(vocabularyView.contains("private var libraryScopePicker: some View"))
+        #expect(vocabularyView.contains("private var vocabularyFilterMenu: some View"))
         #expect(vocabularyView.contains("private var compactPaginationControls: some View"))
         #expect(vocabularyView.contains("words.pageRange"))
         #expect(vocabularyView.contains("words.pageLast"))
-        #expect(vocabularyView.contains("words.card.\\(entry.id)"))
+        #expect(vocabularyView.contains("words.row.\\(entry.id)"))
         #expect(learningDashboard.contains("words.todayCard.\\(entry.id)"))
         #expect(vocabularyView.contains("#if os(iOS)\n        .frame(minWidth: 44, minHeight: 44)"))
+    }
+
+    @Test("Words list management stays shared across macOS and iPad")
+    func vocabularyListManagementIsPlatformNeutral() throws {
+        let vocabularyView = try source("Sources/AudioReader/VocabularyView.swift")
+        let library = try section(
+            in: vocabularyView,
+            from: "    private var vocabularyLibrary: some View",
+            to: "    private func deleteSwipeButton"
+        )
+
+        #expect(library.contains("libraryScopePicker"))
+        #expect(library.contains("knownWordList"))
+        #expect(library.contains("vocabularyEntryList"))
+        #expect(!library.contains("#if os("))
     }
 
     @Test("Learn lists remain manageable when no cards are due on both platforms")
@@ -581,6 +597,20 @@ struct PlatformParityContractTests {
         #expect(playerView.contains("state.selectedLLMConnection.compactLabel"))
         #expect(appState.contains("var selectedLLMConnection: LLMConnectionChoice"))
         #expect(!playerView.contains("Picker(\"Provider\", selection: $state.settings.llmProvider)"))
+    }
+
+    @Test("Settings uses the same platform-safe AI connection list as the reader")
+    func settingsExposePlatformSafeConnections() throws {
+        let settingsView = try source("Sources/AudioReader/SettingsView.swift")
+        let providerSection = try section(
+            in: settingsView,
+            from: "    private var providerSection: some View",
+            to: "    private var managedQwenSettings: some View"
+        )
+
+        #expect(providerSection.contains("Picker(\"Connection\", selection: draftLLMConnectionBinding)"))
+        #expect(providerSection.contains("ForEach(LLMConnectionChoice.availableOnCurrentPlatform)"))
+        #expect(!providerSection.contains("LLMProvider.allCases"))
     }
 
     @Test("Chapter summary drafts share review, persistence, and background-job behavior")

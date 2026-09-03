@@ -41,6 +41,7 @@ final class AudioReaderMacOSUITests: XCTestCase {
         let studyToday = button("words.studyToday", in: app)
         XCTAssertTrue(studyToday.isHittable)
         XCTAssertEqual(studyToday.label, "Study 24 cards today")
+        XCTAssertEqual(element("words.metric.learning", in: app).label, "Learning, 4")
         XCTAssertTrue(element("words.metric.reviewedToday", in: app).exists)
         XCTAssertTrue(element("words.todayCards", in: app).exists)
         XCTAssertTrue(scrollToExistence(element("words.todayCard.ui-vocab-due-0", in: app), in: app))
@@ -53,11 +54,36 @@ final class AudioReaderMacOSUITests: XCTestCase {
 
         button("words.section.library", in: app).tap()
         XCTAssertTrue(element("words.listFilter", in: app).waitForExistence(timeout: 3))
-        XCTAssertTrue(element("words.category.all", in: app).exists)
+        XCTAssertTrue(element("words.scope.all", in: app).exists)
         XCTAssertEqual(element("words.pageRange", in: app).value as? String, "Showing 1–80 of 85")
         button("words.pageLast", in: app).tap()
         XCTAssertEqual(element("words.pageRange", in: app).value as? String, "Showing 81–85 of 85")
-        XCTAssertTrue(element("words.card.ui-vocab-new-76", in: app).waitForExistence(timeout: 3))
+        XCTAssertTrue(element("words.row.ui-vocab-new-76", in: app).waitForExistence(timeout: 3))
+        button("words.pageFirst", in: app).tap()
+        XCTAssertTrue(element("words.row.ui-vocab-new-0", in: app).waitForExistence(timeout: 3))
+
+        element("words.scope.learning", in: app).tap()
+        XCTAssertTrue(waitForNonExistence(element("words.row.ui-vocab-new-0", in: app), timeout: 3))
+        XCTAssertTrue(element("words.row.ui-vocab-due-0", in: app).waitForExistence(timeout: 3))
+        XCTAssertTrue(element("words.row.ui-vocab-due-3", in: app).exists)
+        button("words.myList.ui-vocab-due-0", in: app).tap()
+        XCTAssertTrue(element("words.row.ui-vocab-due-0", in: app).exists)
+
+        element("words.scope.myList", in: app).tap()
+        XCTAssertTrue(waitForNonExistence(element("words.row.ui-vocab-due-0", in: app), timeout: 3))
+        XCTAssertFalse(element("words.row.ui-vocab-due-3", in: app).exists)
+        XCTAssertTrue(element("words.row.ui-vocab-due-1", in: app).exists)
+
+        element("words.scope.known", in: app).tap()
+        button("words.known.add", in: app).tap()
+        let knownWord = app.textFields["Word"].firstMatch
+        XCTAssertTrue(knownWord.waitForExistence(timeout: 3))
+        knownWord.tap()
+        knownWord.typeText("Done.")
+        app.buttons["Add"].firstMatch.tap()
+        XCTAssertTrue(element("words.known.en.do", in: app).waitForExistence(timeout: 3))
+        app.buttons["Remove do from Known"].firstMatch.tap()
+        XCTAssertTrue(waitForNonExistence(element("words.known.en.do", in: app), timeout: 3))
     }
 
     func testCorrectionRestoreAndSyncActions() {
@@ -89,13 +115,12 @@ final class AudioReaderMacOSUITests: XCTestCase {
         let entryID = "ui-vocab-due-0"
 
         button("words.section.library", in: app).tap()
-        XCTAssertTrue(element("words.card.\(entryID)", in: app).waitForExistence(timeout: 3))
+        XCTAssertTrue(element("words.row.\(entryID)", in: app).waitForExistence(timeout: 3))
         XCTAssertFalse(element("anki.selection.\(entryID)", in: app).exists)
 
         let myList = element("words.myList.\(entryID)", in: app)
         XCTAssertTrue(scrollToExistence(myList, in: app))
         let originalMyListLabel = myList.label
-        XCTAssertEqual(originalMyListLabel, "Add to My list")
 
         enterAnkiExportSelection(in: app)
         let selection = element("anki.selection.\(entryID)", in: app)
