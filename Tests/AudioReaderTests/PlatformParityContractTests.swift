@@ -838,6 +838,8 @@ struct PlatformParityContractTests {
         let macLibraryView = try source("Sources/AudioReader/LibraryView.swift")
         let macAppleBooksView = try source("Sources/AudioReader/MacAppleBooksView.swift")
         let macAppleBooksLibrary = try source("Sources/AudioReader/MacAppleBooksLibrary.swift")
+        let importService = try source("Sources/AudioReader/AudiobookImportService.swift")
+        let libraryScanner = try source("Sources/AudioReader/LibraryScanner.swift")
         let iPadRoot = try source("Sources/AudioReader/IPadRootView.swift")
         let iPadImports = try source("Sources/AudioReader/IPadImports.swift")
 
@@ -852,6 +854,9 @@ struct PlatformParityContractTests {
         #expect(macAppleBooksLibrary.contains("func addCompanion("))
         #expect(macAppleBooksLibrary.contains("required: MacAppleBooksCompanionRequirement"))
         #expect(macAppleBooksLibrary.contains("reason=capability_already_present"))
+        #expect(macRoot.contains("to: book,\n                        in: libraryRoot"))
+        #expect(importService.contains("to book: Book,\n        in root: URL"))
+        #expect(libraryScanner.contains(".audioreader-book-id"))
 
         #expect(iPadRoot.contains("case appleBooksExport(bookID: String)"))
         #expect(iPadRoot.contains("companionTargetBookID"))
@@ -860,6 +865,8 @@ struct PlatformParityContractTests {
         #expect(iPadRoot.contains("Button(\"Apple Books Export…\")"))
         #expect(iPadRoot.contains("library.addDeviceCompanion."))
         #expect(iPadImports.contains("func addCompanion("))
+        #expect(iPadImports.contains("to book: Book,"))
+        #expect(iPadRoot.contains("to: book\n                    )"))
         #expect(iPadRoot.contains("IPadEPUBImportPolicy.supportedEquivalent"))
     }
 

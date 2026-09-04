@@ -617,8 +617,8 @@ struct IPadRootView: View {
             let urls = try result.get()
             let added = try AudiobookImportService.addCompanionFiles(
                 urls,
-                to: URL(fileURLWithPath: book.folderPath, isDirectory: true)
-            )
+                to: book
+            ).addedFileNames
             importMessage = added.isEmpty
                 ? "Those files are already attached to \(book.title)."
                 : "Added \(added.joined(separator: ", ")) to \(book.title)."
@@ -659,7 +659,7 @@ struct IPadRootView: View {
                     }
                     let added = try await deviceLibrary.addCompanion(
                         item,
-                        to: URL(fileURLWithPath: book.folderPath, isDirectory: true)
+                        to: book
                     )
                     importMessage = added.isEmpty
                         ? "That device audiobook is already attached to \(book.title)."

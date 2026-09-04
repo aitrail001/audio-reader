@@ -681,6 +681,50 @@ struct ImportParityTests {
     }
 
     @MainActor
+    @Test("macOS Apple Books materializes a metadata-only synced book")
+    func macAppleBooksMaterializesMetadataOnlyBook() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let incoming = fixture.root.appendingPathComponent("incoming", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+        let audio = incoming.appendingPathComponent("Blue Ocean Strategy, Expanded Edition.m4b")
+        try Data("apple books audio".utf8).write(to: audio)
+        let book = Book(
+            id: "synced-apple-book",
+            title: "Blue Ocean Strategy, Expanded Edition",
+            folderPath: "",
+            chapters: [Chapter(id: "synced-chapter", index: 0, title: "Book", audioPath: "")],
+            source: .deviceAudiobooks
+        )
+        let item = MacAppleBookItem(
+            id: audio.path,
+            title: book.title,
+            author: "W. Chan Kim",
+            duration: 0,
+            location: audio,
+            artworkData: nil,
+            isProtected: false,
+            isCloud: false,
+            kind: .audiobook
+        )
+
+        let added = try MacAppleBooksLibrary().addCompanion(
+            item,
+            to: book,
+            in: library,
+            required: .audiobook
+        )
+        let scanned = try #require(LibraryScanner.scan(root: library).first)
+
+        #expect(added == [audio.lastPathComponent])
+        #expect(scanned.id == book.id)
+        let scannedFolder = URL(fileURLWithPath: scanned.folderPath).standardizedFileURL.resolvingSymlinksInPath()
+        let libraryFolder = library.standardizedFileURL.resolvingSymlinksInPath()
+        #expect(scannedFolder.path.hasPrefix(libraryFolder.path + "/"))
+    }
+
+    @MainActor
     @Test("macOS Apple Books rejects a second same-type companion without mutating the book")
     func macAppleBooksRejectsSameTypeCompanionsWithoutMutation() throws {
         let fixture = try TemporaryFixture()
@@ -776,6 +820,37 @@ struct ImportParityTests {
         #expect(FileManager.default.fileExists(atPath: book.appendingPathComponent("Sample Book.epub").path))
         let source = try String(contentsOf: book.appendingPathComponent(".audioreader-source"), encoding: .utf8)
         #expect(source == BookSource.files.rawValue)
+    }
+
+    @Test("A companion materializes a metadata-only synced book inside the managed library")
+    func companionMaterializesMetadataOnlyBook() throws {
+        let fixture = try TemporaryFixture()
+        defer { fixture.remove() }
+        let incoming = fixture.root.appendingPathComponent("incoming", isDirectory: true)
+        let library = fixture.root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+        let audio = incoming.appendingPathComponent("Blue Ocean Strategy, Expanded Edition.m4b")
+        try Data("audio fixture".utf8).write(to: audio)
+        let synced = Book(
+            id: "synced-book-id",
+            title: "Blue Ocean Strategy, Expanded Edition",
+            author: "W. Chan Kim",
+            folderPath: "",
+            chapters: [Chapter(id: "synced-chapter", index: 0, title: "Book", audioPath: "")],
+            source: .deviceAudiobooks
+        )
+
+        let result = try AudiobookImportService.addCompanionFiles([audio], to: synced, in: library)
+        let scanned = try #require(LibraryScanner.scan(root: library).first)
+
+        #expect(result.createdBook)
+        #expect(result.folder.deletingLastPathComponent() == library)
+        #expect(result.addedFileNames == [audio.lastPathComponent])
+        #expect(scanned.id == synced.id)
+        #expect(scanned.title == synced.title)
+        #expect(scanned.author == synced.author)
+        #expect(scanned.source == synced.source)
+        #expect(scanned.mediaAvailability == .audioOnly)
     }
 
     @Test("Imported device audiobook is discoverable with its source metadata")
@@ -1868,12 +1943,12 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "2.4.2")
-        #expect(plist["CFBundleVersion"] as? String == "103")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "2.4.2")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "103")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 2.4.2;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 103;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "2.4.3")
+        #expect(plist["CFBundleVersion"] as? String == "104")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "2.4.3")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "104")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 2.4.3;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 104;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
         #expect(plist["ProductAPIBaseURL"] as? String == ProductAPI.hostedProductionBaseURL.absoluteString)

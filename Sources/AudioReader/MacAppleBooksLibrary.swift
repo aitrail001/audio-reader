@@ -252,6 +252,34 @@ final class MacAppleBooksLibrary {
         }
     }
 
+    /// Metadata-only sync rows deliberately have no local path. Materialize one
+    /// under the configured library before attaching Apple Books media.
+    func addCompanion(
+        _ item: MacAppleBookItem,
+        to book: Book,
+        in libraryRoot: URL,
+        required: MacAppleBooksCompanionRequirement
+    ) throws -> [String] {
+        guard book.folderPath.isEmpty else {
+            return try addCompanion(
+                item,
+                to: URL(fileURLWithPath: book.folderPath, isDirectory: true),
+                required: required
+            )
+        }
+        guard item.canImport, let location = item.location else {
+            throw AudiobookImportError.protectedOrUnavailable
+        }
+        guard required.accepts(item.kind) else {
+            throw AudiobookImportError.incompatibleCompanion
+        }
+        return try AudiobookImportService.addCompanionFiles(
+            [location],
+            to: book,
+            in: libraryRoot
+        ).addedFileNames
+    }
+
     private func containsMedia(of kind: MacAppleBookItem.Kind, in folder: URL) -> Bool {
         mediaURLs(of: kind, in: folder).isEmpty == false
     }

@@ -260,7 +260,10 @@ struct LibraryView: View {
     private func addCompanionFiles(to book: Book) {
 #if os(macOS)
         do {
-            guard let added = try MacAudiobookImporter.chooseCompanionFiles(for: book) else { return }
+            guard let added = try MacAudiobookImporter.chooseCompanionFiles(
+                for: book,
+                libraryRoot: libraryRoot
+            ) else { return }
             bookUpdateResult = added.isEmpty
                 ? "Those companion files are already attached to \(book.title)."
                 : "Added \(added.joined(separator: ", ")) to \(book.title)."

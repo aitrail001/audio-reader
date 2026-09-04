@@ -33,7 +33,7 @@ enum MacAudiobookImporter {
         return url.lastPathComponent
     }
 
-    static func chooseCompanionFiles(for book: Book) throws -> [String]? {
+    static func chooseCompanionFiles(for book: Book, libraryRoot: URL) throws -> [String]? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
@@ -42,10 +42,8 @@ enum MacAudiobookImporter {
         panel.prompt = "Add to Book"
         panel.message = "Choose missing audiobook audio, an EPUB, or cover artwork for \(book.title)."
         guard panel.runModal() == .OK else { return nil }
-        return try AudiobookImportService.addCompanionFiles(
-            panel.urls,
-            to: URL(fileURLWithPath: book.folderPath, isDirectory: true)
-        )
+        return try AudiobookImportService.addCompanionFiles(panel.urls, to: book, in: libraryRoot)
+            .addedFileNames
     }
 
     static func chooseEbook(for book: Book, replacingExisting: Bool) throws -> URL? {

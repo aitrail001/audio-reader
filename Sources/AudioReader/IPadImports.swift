@@ -191,9 +191,13 @@ final class DeviceAudiobookLibrary {
         return .init(folder: folder, createdBook: true, addedFileNames: [destination.lastPathComponent])
     }
 
-    /// The selected book folder remains the identity owner when device audio is
-    /// attached, so an existing EPUB and its reading state are never replaced.
-    func addCompanion(_ item: DeviceAudiobookItem, to bookFolder: URL) async throws -> [String] {
+    /// The selected book identity remains the owner when device audio is attached;
+    /// metadata-only sync rows are first materialized in the managed library.
+    func addCompanion(
+        _ item: DeviceAudiobookItem,
+        to book: Book,
+        in libraryRoot: URL = Persistence.importedBooksURL
+    ) async throws -> [String] {
         guard item.canImport, let assetURL = item.assetURL else {
             throw AudiobookImportError.protectedOrUnavailable
         }
@@ -209,14 +213,18 @@ final class DeviceAudiobookLibrary {
                 }
             }
             let chapters = await companionLoader.chapters(assetURL)
-            let added = try AudiobookImportService.addCompanionFiles([staged.audio], to: bookFolder)
-            if !added.isEmpty, !chapters.isEmpty {
-                try M4BChapterExtractor.save(chapters, in: bookFolder)
+            let result = try AudiobookImportService.addCompanionFiles(
+                [staged.audio],
+                to: book,
+                in: libraryRoot
+            )
+            if !result.addedFileNames.isEmpty, !chapters.isEmpty {
+                try M4BChapterExtractor.save(chapters, in: result.folder)
             }
             deviceImportLog.info(
-                "device_companion_finished message=device_companion_finished requestId=\(requestID, privacy: .public) component=device-book-import source=device-audiobooks outcome=success added_count=\(added.count, privacy: .public)"
+                "device_companion_finished message=device_companion_finished requestId=\(requestID, privacy: .public) component=device-book-import source=device-audiobooks outcome=success added_count=\(result.addedFileNames.count, privacy: .public)"
             )
-            return added
+            return result.addedFileNames
         } catch {
             deviceImportLog.error(
                 "device_companion_finished message=device_companion_finished requestId=\(requestID, privacy: .public) component=device-book-import source=device-audiobooks outcome=failure error_type=\(String(reflecting: type(of: error)), privacy: .public)"

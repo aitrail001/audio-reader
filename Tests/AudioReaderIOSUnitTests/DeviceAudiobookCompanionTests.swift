@@ -4,6 +4,42 @@ import XCTest
 
 @MainActor
 final class DeviceAudiobookCompanionTests: XCTestCase {
+    func testAddCompanionMaterializesMetadataOnlySyncedBook() async throws {
+        let fixture = try DeviceCompanionFixture()
+        defer { fixture.remove() }
+        let sourceAudio = fixture.root.appendingPathComponent("Device Audio.m4b")
+        try Data("device audio".utf8).write(to: sourceAudio)
+        let chapters = [EmbeddedM4BChapter(title: "Opening", start: 0, duration: 12)]
+        let library = DeviceAudiobookLibrary(companionLoader: .init(
+            stage: { url in .init(audio: url, cleanupFolder: nil) },
+            chapters: { _ in chapters }
+        ))
+        let item = DeviceAudiobookItem(
+            id: 21,
+            title: "Synced Device Book",
+            author: "Book Author",
+            duration: 12,
+            assetURL: sourceAudio,
+            artworkData: nil,
+            isProtected: false
+        )
+        let book = Book(
+            id: "synced-device-book",
+            title: item.title,
+            author: item.author,
+            folderPath: "",
+            chapters: [Chapter(id: "synced-chapter", index: 0, title: "Book", audioPath: "")],
+            source: .deviceAudiobooks
+        )
+
+        let added = try await library.addCompanion(item, to: book, in: fixture.root)
+        let scanned = try XCTUnwrap(LibraryScanner.scan(root: fixture.root).first)
+
+        XCTAssertEqual(added, [sourceAudio.lastPathComponent])
+        XCTAssertEqual(scanned.id, book.id)
+        XCTAssertEqual(M4BChapterExtractor.load(in: URL(fileURLWithPath: scanned.folderPath)), chapters)
+    }
+
     func testAddCompanionPreservesExistingEPUBMarkerAndM4BChaptersAndRepeatsAsNoOp() async throws {
         let fixture = try DeviceCompanionFixture()
         defer { fixture.remove() }
@@ -38,9 +74,24 @@ final class DeviceAudiobookCompanionTests: XCTestCase {
             artworkData: nil,
             isProtected: false
         )
+        let book = Book(
+            id: LibraryScanner.stableID(bookFolder.path),
+            title: "Selected Book",
+            author: "Book Author",
+            folderPath: bookFolder.path,
+            ebookPath: epub.path,
+            chapters: [Chapter(
+                id: "published-text",
+                index: 0,
+                title: "Published Text",
+                audioPath: "",
+                ebookSectionIndex: 0
+            )],
+            source: .files
+        )
 
-        let firstAddition = try await library.addCompanion(item, to: bookFolder)
-        let repeatAddition = try await library.addCompanion(item, to: bookFolder)
+        let firstAddition = try await library.addCompanion(item, to: book, in: fixture.root)
+        let repeatAddition = try await library.addCompanion(item, to: book, in: fixture.root)
         XCTAssertEqual(firstAddition, ["Apple Books Audio.m4b"])
         XCTAssertEqual(repeatAddition, [])
         XCTAssertEqual(try Data(contentsOf: epub), epubBytes)
@@ -75,9 +126,15 @@ final class DeviceAudiobookCompanionTests: XCTestCase {
             isProtected: false
         )
         let missingTarget = fixture.root.appendingPathComponent("missing/Selected Book", isDirectory: true)
+        let missingBook = Book(
+            id: "missing-book",
+            title: "Selected Book",
+            folderPath: missingTarget.path,
+            chapters: [Chapter(id: "missing-chapter", index: 0, title: "Book", audioPath: "")]
+        )
 
         do {
-            _ = try await library.addCompanion(item, to: missingTarget)
+            _ = try await library.addCompanion(item, to: missingBook, in: fixture.root)
             XCTFail("Expected attachment into a missing book folder to fail")
         } catch {
             XCTAssertFalse(FileManager.default.fileExists(atPath: stagingFolder.path))

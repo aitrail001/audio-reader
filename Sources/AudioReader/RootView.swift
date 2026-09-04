@@ -271,7 +271,8 @@ struct RootView: View {
                     }
                     let added = try macAppleBooks.addCompanion(
                         item,
-                        to: URL(fileURLWithPath: book.folderPath, isDirectory: true),
+                        to: book,
+                        in: libraryRoot,
                         required: requirement
                     )
                     macAppleBooks.message = added.isEmpty
