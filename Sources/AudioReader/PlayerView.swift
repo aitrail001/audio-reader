@@ -980,6 +980,8 @@ struct PlayerView: View {
                     .foregroundStyle(Palette.gold)
             }
             .help("Play / Pause")
+            .accessibilityLabel(state.player.isPlaying ? "Pause" : "Play")
+            .accessibilityIdentifier("reader.playback.toggle")
 
             Button { state.skipSentence(direction: 1) } label: {
                 Image(systemName: "forward.end.fill")
@@ -1176,6 +1178,7 @@ struct PlayerView: View {
                     .contentShape(Rectangle())
             }
             .accessibilityLabel(state.player.isPlaying ? "Pause" : "Play")
+            .accessibilityIdentifier("reader.playback.toggle")
 
             Button { state.skipSentence(direction: 1) } label: {
                 Image(systemName: "forward.end.fill")
@@ -2180,16 +2183,28 @@ private struct TranscriptTextColumn: View {
                             studyLearningLemmas: studyLearning,
                             studyKnownLemmas: studyKnown,
                             onSeek: { time in
-                                state.focusedSegmentID = segment.id
-                                state.seekToSentence(segment, time: time, autoplay: state.settings.playOnSelect)
+                                state.selectPlaybackAnchor(
+                                    sentence: segment,
+                                    word: nil,
+                                    time: time,
+                                    startPlayback: state.settings.playOnSelect
+                                )
                             },
                             onPlayFrom: { time in
-                                state.focusedSegmentID = segment.id
-                                state.seekToSentence(segment, time: time, autoplay: true)
+                                state.selectPlaybackAnchor(
+                                    sentence: segment,
+                                    word: nil,
+                                    time: time,
+                                    startPlayback: true
+                                )
                             },
                             onInspect: { word in
-                                state.focusedSegmentID = segment.id
-                                state.inspect(word: word, in: segment)
+                                state.selectPlaybackAnchor(
+                                    sentence: segment,
+                                    word: word,
+                                    time: word.start,
+                                    startPlayback: state.settings.playOnSelect
+                                )
                             },
                             onSave: { word in state.addVocab(word: word, segment: segment) },
                             onMarkKnown: { word in
@@ -2442,7 +2457,6 @@ private struct SentenceRow: View {
                     bold: type.bold,
                     studyOverlayEnabled: studyOverlayEnabled,
                     familiarity: familiarity(of: word),
-                    onSeek: MainActorAction { onSeek(word.start) },
                     onPlayFrom: MainActorAction { onPlayFrom(word.start) },
                     onInspect: MainActorAction { onInspect(word) },
                     onSave: MainActorAction { onSave(word) },
@@ -2959,7 +2973,6 @@ private struct WordToken: View {
     var bold = false
     var studyOverlayEnabled = false
     var familiarity: WordFamiliarity = .unknown
-    let onSeek: MainActorAction
     let onPlayFrom: MainActorAction
     let onInspect: MainActorAction
     let onSave: MainActorAction

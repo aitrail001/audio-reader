@@ -190,6 +190,8 @@ struct PlatformParityContractTests {
     @Test("Deep Reading playback logic remains shared and platform-neutral")
     func deepReadingLogicIsShared() throws {
         let appState = try source("Sources/AudioReader/AppState.swift")
+        let playerEngine = try source("Sources/AudioReader/PlayerEngine.swift")
+        let playerView = try source("Sources/AudioReader/PlayerView.swift")
         let sharedLogic = try section(
             in: appState,
             from: "    func setDeepReadingMode(_ enabled: Bool)",
@@ -201,6 +203,12 @@ struct PlatformParityContractTests {
         #expect(sharedLogic.contains("func continueDeepReading()"))
         #expect(sharedLogic.contains("func tickPlaybackModes()"))
         #expect(sharedLogic.contains("func resetDeepReadingAfterSeek()"))
+        #expect(sharedLogic.contains("func selectPlaybackAnchor("))
+        #expect(playerView.contains("state.selectPlaybackAnchor("))
+        #expect(playerView.contains("word: word"))
+        #expect(playerView.components(separatedBy: "reader.playback.toggle").count - 1 == 2)
+        #expect(playerEngine.contains("pendingSeekToken"))
+        #expect(playerEngine.contains("message=playback.seek"))
     }
 
     @Test("Both platforms expose sentence-paced modes and a continue action")
@@ -842,7 +850,7 @@ struct PlatformParityContractTests {
         #expect(playerView.contains("PlatformTap("))
         #expect(playerView.contains("action: toggleDictation"))
         #expect(!playerView.contains("Button(action: toggleDictation)"))
-        #expect(playerView.contains("MainActorAction { onSeek(word.start) }"))
+        #expect(playerView.contains("MainActorAction { onInspect(word) }"))
         #expect(!interaction.contains("@unchecked Sendable"))
         #expect(!interaction.contains("nonisolated(unsafe)"))
         #expect(playerView.contains("\"Stop voice input\""))

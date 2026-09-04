@@ -53,6 +53,10 @@ final class AppState {
         subsystem: "com.johnsonzhang.AudioReader",
         category: "chapter-assistant"
     )
+    private static let playbackLog = Logger(
+        subsystem: "com.johnsonzhang.AudioReader",
+        category: "playback"
+    )
 
     var settings: AppSettings
     var books: [Book] = []
@@ -1786,9 +1790,8 @@ final class AppState {
             if settings.deepReadingMode {
                 listenFirstReplayRevealedSegmentID = current.id
             }
-            player.seek(current.start)
             armDeepReadingSentence(current)
-            player.play()
+            player.seek(current.start, playWhenReady: true)
         }
     }
 
@@ -1861,11 +1864,24 @@ final class AppState {
         }
     }
 
-    func seekToSentence(_ sentence: TranscriptSegment, time: TimeInterval, autoplay: Bool) {
-        player.seek(time)
+    /// Makes sentence and word selection the sole owner of the next playback anchor.
+    func selectPlaybackAnchor(
+        sentence: TranscriptSegment,
+        word: TranscriptWord?,
+        time: TimeInterval,
+        startPlayback: Bool
+    ) {
+        let wasPlaying = player.isPlaying
+        focusedSegmentID = sentence.id
+        if let word { inspect(word: word, in: sentence) }
+        listenFirstReplayRevealedSegmentID = nil
         armDeepReadingSentence(sentence)
+        let shouldPlay = wasPlaying || startPlayback
+        Self.playbackLog.info(
+            "message=playback.anchor component=reader outcome=selected sentence_id=\(sentence.id, privacy: .public) word_id=\(word?.id ?? "none", privacy: .public) requested_seconds=\(time) was_playing=\(wasPlaying) start_requested=\(startPlayback) should_play=\(shouldPlay)"
+        )
+        player.seek(time, playWhenReady: shouldPlay)
         persistCurrentReaderProgress(force: true)
-        if autoplay, !player.isPlaying { player.play() }
     }
 
     func seekPlayback(to time: TimeInterval) {
@@ -1889,9 +1905,8 @@ final class AppState {
         else { return }
         let next = transcript.segments[index + 1]
         listenFirstReplayRevealedSegmentID = nil
-        player.seek(next.start)
         armDeepReadingSentence(next)
-        player.play()
+        player.seek(next.start, playWhenReady: true)
         persistCurrentReaderProgress(force: true)
     }
 
@@ -1899,8 +1914,7 @@ final class AppState {
         persistCurrentReaderProgress()
         if loopSentence, let current = currentSegment,
            player.currentTime >= current.end - 0.04 {
-            player.seek(current.start)
-            player.play()
+            player.seek(current.start, playWhenReady: true)
             return
         }
         guard isSentencePacedModeEnabled, player.isPlaying, let transcript = presentedTranscript else { return }

@@ -5,6 +5,17 @@ import Testing
 @MainActor
 @Suite("Deep Reading mode")
 struct DeepReadingModeTests {
+    private enum PaceMode: CaseIterable {
+        case continuous
+        case listenFirst
+        case readAndPause
+    }
+
+    private enum TapTarget: CaseIterable {
+        case sentence
+        case word
+    }
+
     @Test("Sentence-paced modes default off and migrate existing settings")
     func migratesExistingSettings() throws {
         #expect(AppSettings.default.deepReadingMode == false)
@@ -196,6 +207,131 @@ struct DeepReadingModeTests {
         #expect(state.deepReadingPausedSentenceID == "first")
     }
 
+    @Test("Sentence and word taps share one playback-anchor contract")
+    func tapPlaybackBehaviorMatrix() throws {
+        let audioURL = try makeSilentAudioFixture()
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+
+        for paceMode in PaceMode.allCases {
+            for playOnTap in [false, true] {
+                for target in TapTarget.allCases {
+                    for wasPlaying in [false, true] {
+                        let state = makeState()
+                        state.player.load(path: audioURL.path, duration: 4)
+                        switch paceMode {
+                        case .continuous:
+                            break
+                        case .listenFirst:
+                            state.setDeepReadingMode(true)
+                        case .readAndPause:
+                            state.setReadAndPauseMode(true)
+                        }
+                        if wasPlaying { state.player.play() }
+
+                        let sentence = try #require(state.presentedTranscript?.segments[1])
+                        let word = target == .word ? sentence.words[0] : nil
+                        state.selectPlaybackAnchor(
+                            sentence: sentence,
+                            word: word,
+                            time: word?.start ?? sentence.start,
+                            startPlayback: playOnTap
+                        )
+
+                        #expect(state.player.currentTime == 2)
+                        #expect(state.player.isPlaying == (wasPlaying || playOnTap))
+                        #expect(state.focusedSegmentID == "second")
+                        #expect(state.selectedWord?.id == word?.id)
+                        #expect(state.deepReadingPausedSentenceID == nil)
+                        if paceMode == .continuous {
+                            #expect(state.deepReadingActiveSentenceID == nil)
+                        } else {
+                            #expect(state.deepReadingActiveSentenceID == "second")
+                        }
+                        state.player.tearDown()
+                    }
+                }
+            }
+        }
+    }
+
+    @Test("Selecting after a paced pause arms and stops at the new sentence")
+    func selectingAfterPacedPauseUsesNewBoundary() throws {
+        let state = makeState()
+        state.setReadAndPauseMode(true)
+        state.player.currentTime = 0.5
+        state.player.isPlaying = true
+        state.tickPlaybackModes()
+        state.player.currentTime = 2.06
+        state.tickPlaybackModes()
+        #expect(state.deepReadingPausedSentenceID == "first")
+
+        let second = try #require(state.presentedTranscript?.segments[1])
+        state.selectPlaybackAnchor(
+            sentence: second,
+            word: nil,
+            time: second.start,
+            startPlayback: false
+        )
+
+        #expect(state.player.currentTime == 2)
+        #expect(state.deepReadingPausedSentenceID == nil)
+        #expect(state.deepReadingActiveSentenceID == "second")
+        state.player.isPlaying = true
+        state.player.currentTime = 4.06
+        state.tickPlaybackModes()
+        #expect(state.player.isPlaying == false)
+        #expect(state.deepReadingPausedSentenceID == "second")
+    }
+
+    @Test("Only the latest asynchronous seek may set the effective position")
+    func latestSeekWins() async throws {
+        let audioURL = try makeSilentAudioFixture()
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+        let state = makeState()
+        state.player.load(path: audioURL.path, duration: 4)
+
+        state.player.seek(0.5, playWhenReady: false)
+        state.player.seek(2, playWhenReady: false)
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(abs(state.player.currentTime - 2) < 0.05)
+    }
+
+    @Test("Pausing invalidates an in-flight seek-and-play request")
+    func pauseCancelsPendingSeekPlayback() async throws {
+        let audioURL = try makeSilentAudioFixture()
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+        let state = makeState()
+        state.player.load(path: audioURL.path, duration: 4)
+
+        state.player.seek(2, playWhenReady: true)
+        state.player.pause()
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(!state.player.isPlaying)
+    }
+
+    @Test("A paced boundary reached by seek cannot be restarted by that seek completion")
+    func seekCompletionCannotOverridePacedPause() async throws {
+        let audioURL = try makeSilentAudioFixture()
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+        let state = makeState()
+        state.player.load(path: audioURL.path, duration: 4)
+        state.setReadAndPauseMode(true)
+        let second = try #require(state.presentedTranscript?.segments[1])
+
+        state.selectPlaybackAnchor(
+            sentence: second,
+            word: nil,
+            time: 3.98,
+            startPlayback: true
+        )
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(!state.player.isPlaying)
+        #expect(state.deepReadingPausedSentenceID == "second")
+    }
+
     private func makeState() -> AppState {
         let first = TranscriptSegment(
             id: "first",
@@ -257,5 +393,32 @@ struct DeepReadingModeTests {
             model: "local-test",
             createdAt: Date()
         )
+    }
+
+    private func makeSilentAudioFixture() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audioreader-playback-anchor-\(UUID().uuidString).wav")
+        let sampleRate: UInt32 = 8_000
+        let sampleCount = Int(sampleRate) * 4
+        var data = Data()
+        func append<T: FixedWidthInteger>(_ value: T) {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        }
+        data.append(contentsOf: Array("RIFF".utf8))
+        append(UInt32(36 + sampleCount * 2))
+        data.append(contentsOf: Array("WAVEfmt ".utf8))
+        append(UInt32(16))
+        append(UInt16(1))
+        append(UInt16(1))
+        append(sampleRate)
+        append(sampleRate * 2)
+        append(UInt16(2))
+        append(UInt16(16))
+        data.append(contentsOf: Array("data".utf8))
+        append(UInt32(sampleCount * 2))
+        data.append(Data(count: sampleCount * 2))
+        try data.write(to: url, options: .atomic)
+        return url
     }
 }

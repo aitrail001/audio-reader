@@ -33,7 +33,12 @@ struct ShadowingPracticeView: View {
 
             HStack(spacing: 10) {
                 Button("Replay sentence") {
-                    state.seekToSentence(segment, time: segment.start, autoplay: true)
+                    state.selectPlaybackAnchor(
+                        sentence: segment,
+                        word: nil,
+                        time: segment.start,
+                        startPlayback: true
+                    )
                 }
                 .buttonStyle(.bordered)
                 .disabled(voice.isListening || voice.isRequestingPermission)

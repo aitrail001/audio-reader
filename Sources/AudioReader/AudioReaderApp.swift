@@ -237,6 +237,7 @@ enum UITestLaunchScenario {
             source: "ui-test",
             ebookAligned: false
         )
+        state.player.load(path: chapter.audioPath, duration: chapter.duration)
         state.vocab = [
             VocabEntry(
                 id: "ui-vocab-1",
@@ -293,6 +294,11 @@ enum UITestLaunchScenario {
         case "read-and-pause":
             state.tab = .player
             state.prepareUITestReadAndPause(segmentID: "ui-sentence-4", time: 8.74)
+        case "playback-anchor":
+            state.tab = .player
+            state.settings.playOnSelect = true
+            state.player.seek(8.74)
+            state.prepareUITestReadAndPause(segmentID: "ui-sentence-4", time: 8.74)
         case "words", "words-rich": state.tab = .vocab
         case "settings": state.tab = .settings
         default: state.tab = .library
@@ -303,10 +309,10 @@ enum UITestLaunchScenario {
     /// without bundling test media or touching the user's library.
     private static func makeAudioFixture() -> URL {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("audioreader-ui-fixture.wav")
+            .appendingPathComponent("audioreader-ui-fixture-v2.wav")
         guard !FileManager.default.fileExists(atPath: url.path) else { return url }
         let sampleRate: UInt32 = 8_000
-        let sampleCount = Int(sampleRate) * 4
+        let sampleCount = Int(sampleRate) * 12
         var data = Data()
         func append<T: FixedWidthInteger>(_ value: T) {
             var littleEndian = value.littleEndian

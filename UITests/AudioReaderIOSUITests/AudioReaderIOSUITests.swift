@@ -262,6 +262,26 @@ final class AudioReaderIOSUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Future sentence hidden in Listen First."].exists)
     }
 
+    func testPlayOnTapMovesAWordAwayFromThePreviousPacedPause() {
+        let app = launch(scenario: "playback-anchor")
+        let secondSentence = element("reader.sentence.ui-sentence-2", in: app)
+        XCTAssertTrue(secondSentence.waitForExistence(timeout: 3))
+        secondSentence.tap()
+        XCTAssertTrue(waitForLabel(element("reader.playback.toggle", in: app), label: "Pause", timeout: 2))
+        element("reader.playback.toggle", in: app).tap()
+
+        let secondWord = element("reader.word.ui-sentence-2-word-0", in: app)
+        XCTAssertTrue(secondWord.waitForExistence(timeout: 3))
+        secondWord.tap()
+        XCTAssertTrue(app.staticTexts["Lookup"].waitForExistence(timeout: 3))
+        element("reader.lookup.close", in: app).tap()
+        XCTAssertTrue(element("reader.readAndPauseCoach", in: app).waitForExistence(timeout: 4))
+        XCTAssertEqual(
+            element("reader.word.ui-sentence-2-word-3", in: app).value as? String,
+            "current audio word"
+        )
+    }
+
     func testTranslationActionsStayCompactBesideLookup() {
         XCUIDevice.shared.orientation = .portrait
         let app = launch(scenario: "translation-layout")
@@ -372,6 +392,12 @@ final class AudioReaderIOSUITests: XCTestCase {
 
     private func waitForNonExistence(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
         let predicate = NSPredicate(format: "exists == false")
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func waitForLabel(_ element: XCUIElement, label: String, timeout: TimeInterval) -> Bool {
+        let predicate = NSPredicate(format: "exists == true AND label == %@", label)
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
         return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
     }
