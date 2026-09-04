@@ -117,6 +117,144 @@ struct AccountSessionFlowTests {
         #expect(uploads.allSatisfy { $0.kind == .transcriptRevision })
     }
 
+    @MainActor
+    @Test("a stale deleted-book asset link publishes after its catalog parent")
+    func deletedBookAssetPublishesAfterCatalogPush() async throws {
+        let sync = FakeSyncClient()
+        sync.pullCursor = "1"
+        let outbox = InMemorySyncOutboxRepository()
+        let cursor = InMemorySyncCursorStore()
+        try cursor.saveCursor("1")
+        let book = StoredBook(
+            id: BookID(rawValue: "restored-book"),
+            title: "Restored Book",
+            source: "test",
+            chapters: [StoredChapter(id: ChapterID(rawValue: "restored-chapter"), index: 0, title: "Chapter")]
+        )
+        let bookMutation = try AccountSyncApplicator.bookMutation(for: book)
+        sync.assetParentEntityID = bookMutation.entityID
+        let account = AccountSession(
+            client: FakeAuthClient(),
+            store: InMemoryAuthSessionStore(),
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: outbox,
+                cursor: cursor,
+                snapshot: { [bookMutation] },
+                assetUploads: { directory in
+                    let file = directory.appendingPathComponent("restored.transcript.json")
+                    let data = Data("transcript".utf8)
+                    try data.write(to: file)
+                    let digest = try SyncAssetFileIO.digest(fileURL: file)
+                    return [SyncAssetUpload(
+                        revisionID: "restored-revision",
+                        bookID: bookMutation.entityID,
+                        chapterID: AccountSyncApplicator.syncEntityID("restored-chapter", kind: "chapter"),
+                        sha256: digest.sha256,
+                        originalBytes: digest.byteCount,
+                        segmentCount: 1,
+                        fileURL: file,
+                        compressedBytes: digest.byteCount,
+                        deleteFileAfterUpload: true
+                    )]
+                }
+            )
+        )
+        await account.requestEmailCode("asset-repair@example.com")
+        await account.verifyEmailCode("123456")
+        account.setSyncEnabled(true)
+
+        await account.synchronize()
+
+        #expect(account.syncStatus.phase == .completed)
+        #expect(account.syncStatus.pendingCount == 0)
+        #expect(account.syncStatus.skippedDeletedAssetCount == 0)
+        #expect(sync.publishAssetAttemptCount == 1)
+        #expect(sync.publishedAssets.count == 1)
+        #expect(sync.pushed.flatMap(\.mutations).contains { $0.entityId == bookMutation.entityID })
+        #expect(try outbox.pendingMutations().isEmpty)
+    }
+
+    @MainActor
+    @Test("a book deleted during asset publication is skipped with clear completed feedback")
+    func concurrentDeletedBookAssetIsSkippedAndPulled() async throws {
+        let sync = FakeSyncClient()
+        sync.pullCursor = "2"
+        sync.publishAssetFailures = [
+            .problem(status: 409, code: "asset_book_deleted", detail: "Asset book is already deleted.")
+        ]
+        sync.pullChanges = [SyncPulledChange(
+            sequence: 2,
+            entityType: OutboxEntityType.book.rawValue,
+            entityId: "deleted-book",
+            operation: OutboxOperation.delete.rawValue,
+            revision: 2,
+            changedAt: "2026-09-04T00:00:00Z",
+            payload: ["localId": .string("deleted-book")]
+        )]
+        let outbox = InMemorySyncOutboxRepository()
+        let cursor = InMemorySyncCursorStore()
+        try cursor.saveCursor("1")
+        let mutation = OutboxMutation(
+            id: MutationID.generate(),
+            entityType: .book,
+            entityID: "deleted-book",
+            operation: .upsert,
+            baseRevision: .zero,
+            occurredAt: Date(),
+            payload: Data("{}".utf8)
+        )
+        let account = AccountSession(
+            client: FakeAuthClient(),
+            store: InMemoryAuthSessionStore(),
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: outbox,
+                cursor: cursor,
+                snapshot: { [mutation] },
+                assetUploads: { directory in
+                    try (1...2).map { index in
+                        let file = directory.appendingPathComponent("deleted-\(index).transcript.json")
+                        let data = Data("transcript-\(index)".utf8)
+                        try data.write(to: file)
+                        let digest = try SyncAssetFileIO.digest(fileURL: file)
+                        return SyncAssetUpload(
+                            revisionID: "deleted-revision-\(index)",
+                            bookID: mutation.entityID,
+                            chapterID: "deleted-chapter-\(index)",
+                            sha256: digest.sha256,
+                            originalBytes: digest.byteCount,
+                            segmentCount: 1,
+                            fileURL: file,
+                            compressedBytes: digest.byteCount,
+                            deleteFileAfterUpload: true
+                        )
+                    }
+                },
+                applyPage: { _, _, _ in }
+            )
+        )
+        await account.requestEmailCode("asset-race@example.com")
+        await account.verifyEmailCode("123456")
+        account.setSyncEnabled(true)
+
+        await account.synchronize()
+
+        #expect(account.syncStatus.phase == .completed)
+        #expect(account.syncStatus.pendingCount == 0)
+        #expect(account.syncStatus.skippedDeletedAssetCount == 2)
+        #expect(account.syncStatus.detail.contains("book was deleted on another device"))
+        #expect(account.syncStatus.accessibilityDescription.contains("book was deleted on another device"))
+        #expect(sync.publishAssetAttemptCount == 1)
+        #expect(sync.publishedAssets.isEmpty)
+        #expect(!sync.pulledCursors.isEmpty)
+        #expect(try outbox.pendingMutations().isEmpty)
+    }
+
     @Test("operator cloud-media capability does not opt the user into book uploads")
     func operatorCapabilityDoesNotAuthorizeBookMedia() throws {
         let root = FileManager.default.temporaryDirectory

@@ -247,6 +247,7 @@ public struct AccountSyncStatus: Equatable, Sendable {
     public var pendingCount: Int
     public var conflictCount: Int
     public var conflicts: [AccountSyncConflictKind]
+    public var skippedDeletedAssetCount: Int
     public var errorMessage: String?
     public var entityProgress: [AccountSyncEntityProgress]
 
@@ -272,6 +273,7 @@ public struct AccountSyncStatus: Equatable, Sendable {
         pendingCount: Int = 0,
         conflictCount: Int = 0,
         conflicts: [AccountSyncConflictKind] = [],
+        skippedDeletedAssetCount: Int = 0,
         errorMessage: String? = nil,
         entityProgress: [AccountSyncEntityProgress] = []
     ) {
@@ -285,6 +287,7 @@ public struct AccountSyncStatus: Equatable, Sendable {
         self.pendingCount = pendingCount
         self.conflictCount = conflictCount
         self.conflicts = conflicts
+        self.skippedDeletedAssetCount = skippedDeletedAssetCount
         self.errorMessage = errorMessage
         self.entityProgress = entityProgress
     }
@@ -320,6 +323,7 @@ public struct AccountSyncStatus: Equatable, Sendable {
         pendingCount: Int,
         conflictCount: Int,
         conflicts: [AccountSyncConflictKind] = [],
+        skippedDeletedAssetCount: Int = 0,
         entityProgress: [AccountSyncEntityProgress]
     ) -> AccountSyncStatus {
         AccountSyncStatus(
@@ -330,6 +334,7 @@ public struct AccountSyncStatus: Equatable, Sendable {
             pendingCount: pendingCount,
             conflictCount: conflictCount,
             conflicts: conflicts,
+            skippedDeletedAssetCount: skippedDeletedAssetCount,
             entityProgress: entityProgress
         )
     }
@@ -404,6 +409,10 @@ public struct AccountSyncStatus: Equatable, Sendable {
         }
         if pendingCount > 0 {
             parts.append("\(pendingCount) pending")
+        }
+        if skippedDeletedAssetCount > 0 {
+            let noun = skippedDeletedAssetCount == 1 ? "transcript" : "transcripts"
+            parts.append("\(skippedDeletedAssetCount) \(noun) skipped because the book was deleted on another device")
         }
         return parts.joined(separator: " · ")
     }

@@ -547,6 +547,22 @@ describe("deleted book asset cleanup", () => {
       );
       expect(reissue.status).toBe(409);
 
+      const newAssetForDeletedBook = await app.fetch(
+        new Request("http://localhost/v2/assets/uploads", {
+          method: "POST",
+          headers: requestHeaders("deleted-book-new-asset"),
+          body: JSON.stringify({
+            ...draft,
+            sha256: "cd".repeat(32),
+            fileName: "after-delete.m4b",
+          }),
+        }),
+      );
+      expect(newAssetForDeletedBook.status).toBe(409);
+      await expect(newAssetForDeletedBook.json()).resolves.toMatchObject({
+        code: "asset_book_deleted",
+      });
+
       vi.advanceTimersByTime(17 * 60_000);
       expect((await pushDelete(app, mutation, "direct-race-expired-retry")).status).toBe(200);
       await expect(database.ops.getAsset(ACCOUNT_ID, ticket.assetId)).resolves.toMatchObject({

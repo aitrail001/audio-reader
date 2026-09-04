@@ -262,6 +262,8 @@ enum UITestLaunchScenario {
             state.tab = .player
             state.focusedSegmentID = transcriptSegments[0].id
             state.selectedWord = firstWord
+            state.selectedWordSegmentID = transcriptSegments[0].id
+            state.selectedWordContextText = transcriptSegments[0].spokenText
             let source = transcriptSegments[0].displayText
             state.glosses = [GlossEntry(
                 id: GlossEntry.makeID(

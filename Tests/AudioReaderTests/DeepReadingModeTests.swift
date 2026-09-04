@@ -135,6 +135,34 @@ struct DeepReadingModeTests {
         #expect(state.selectedWordContextSegment?.id == "second")
     }
 
+    @Test("Original-text lookup keeps its own sentence and meaning while audio highlights another")
+    func originalTextLookupKeepsExactSentenceContext() throws {
+        let state = makeState()
+        var second = try #require(state.transcript?.segments[1])
+        second.ebookText = "Civilization grew beside the river."
+        second.individualEbookMatchTrusted = true
+        second.documentEbookUseAllowed = true
+        state.transcript?.segments[1] = second
+        state.reloadResolvedTranscriptForCurrentChapter()
+        state.player.currentTime = 0.5
+        state.focusedSegmentID = second.id
+        let selectedWord = try #require(
+            StudyTokenIndex.tokens(in: second, source: .original)
+                .first { DictionaryLookup.headword($0.text) == "Civilization" }
+        )
+        state.inspect(word: selectedWord, in: second)
+        state.glosses = [wordGloss(text: "Wrong meaning", context: "First.")]
+
+        #expect(state.currentSegment?.id == "first")
+        #expect(state.selectedWordContextSegment?.id == "second")
+        #expect(state.selectedWordContextText == second.displayText)
+        #expect(state.selectedWordGloss == nil)
+
+        state.glosses.append(wordGloss(text: "Correct meaning", context: second.displayText))
+
+        #expect(state.selectedWordGloss?.text == "Correct meaning")
+    }
+
     @Test("Continue advances from the paused sentence and arms the next one")
     func continuesWithNextSentence() {
         let state = makeState()
@@ -215,5 +243,19 @@ struct DeepReadingModeTests {
             ebookAligned: false
         )
         return state
+    }
+
+    private func wordGloss(text: String, context: String) -> GlossEntry {
+        GlossEntry(
+            id: UUID().uuidString,
+            kind: .word,
+            language: "zh-Hans",
+            source: "civilization",
+            context: context,
+            text: text,
+            status: .pending,
+            model: "local-test",
+            createdAt: Date()
+        )
     }
 }

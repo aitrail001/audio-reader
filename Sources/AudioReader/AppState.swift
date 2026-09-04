@@ -110,6 +110,8 @@ final class AppState {
     var errorMessage: String?
     var pendingExternalEPUBDuplicate: PendingExternalEPUBDuplicate?
     var selectedWord: TranscriptWord?
+    var selectedWordSegmentID: String?
+    var selectedWordContextText: String?
     var definition: String?
     var dictionaryHits: [DictionaryHit] = []
     var selectedDictionaryName: String = ""
@@ -816,18 +818,17 @@ final class AppState {
         return lookupGloss(
             kind: .word,
             source: DictionaryLookup.headword(word.text),
-            context: selectedWordContextSegment?.displayText
+            context: selectedWordContextText
         )
     }
 
     var selectedWordContextSegment: TranscriptSegment? {
-        guard let word = selectedWord else { return nil }
-        if let focusedSegmentID,
-           let focused = presentedTranscript?.segments.first(where: { $0.id == focusedSegmentID }),
-           focused.words.contains(where: { $0.id == word.id }) {
-            return focused
+        guard let word = selectedWord, let segments = presentedTranscript?.segments else { return nil }
+        if let selectedWordSegmentID,
+           let selected = segments.first(where: { $0.id == selectedWordSegmentID }) {
+            return selected
         }
-        return presentedTranscript?.segments.first { segment in
+        return segments.first { segment in
             segment.words.contains(where: { $0.id == word.id })
         }
     }
@@ -1413,6 +1414,8 @@ final class AppState {
         refreshLLMBusyState()
         if pendingReveal == nil {
             selectedWord = nil
+            selectedWordSegmentID = nil
+            selectedWordContextText = nil
             definition = nil
             dictionaryHits = []
             focusedSegmentID = nil
@@ -1978,13 +1981,16 @@ final class AppState {
             return
         }
         account.recordUsage(name: "vocab.added", properties: ["wordLength": "\(head.count)"])
-        let gloss = lookupGloss(kind: .word, source: head, context: segment.displayText)
+        let context = selectedWord?.id == word.id && selectedWordSegmentID == segment.id
+            ? selectedWordContextText ?? segment.displayText
+            : segment.displayText
+        let gloss = lookupGloss(kind: .word, source: head, context: context)
         let accepted = gloss?.status == .accepted ? gloss : lookupGloss(kind: .word, source: head, context: nil)
         let dict = selectedDictionaryHit ?? dictionaryHits.first
         let sourceLanguage = StudyTokenIndex.languageKey(for: audiobookLanguage(for: book))
         let canonicalization = VocabularyCanonicalizer.canonicalize(
             surfaceForm: head,
-            context: segment.displayText,
+            context: context,
             language: sourceLanguage
         )
         var entry = VocabEntry(
@@ -2007,7 +2013,7 @@ final class AppState {
             translationLanguage: accepted?.language ?? gloss?.language,
             translationModel: accepted?.model ?? gloss?.model,
             sourceLanguage: sourceLanguage,
-            context: segment.displayText,
+            context: context,
             spokenText: segment.spokenText,
             ebookText: segment.trustedEbookText,
             bookID: book.id,
@@ -2036,7 +2042,7 @@ final class AppState {
             entryID: entry.id,
             offline: canonicalization,
             surfaceForm: head,
-            context: segment.displayText,
+            context: context,
             language: sourceLanguage
         )
     }
@@ -2369,9 +2375,11 @@ final class AppState {
         return true
     }
 
-    func inspect(word: TranscriptWord) {
+    func inspect(word: TranscriptWord, in segment: TranscriptSegment) {
         showChapterAssistant = false
         selectedWord = word
+        selectedWordSegmentID = segment.id
+        selectedWordContextText = selectedContext(for: word, in: segment)
         translationError = nil
         dictionaryHits = []
         definition = nil
@@ -2397,6 +2405,17 @@ final class AppState {
 
     var selectedDictionaryHit: DictionaryHit? {
         dictionaryHits.first { $0.name == selectedDictionaryName } ?? dictionaryHits.first
+    }
+
+    private func selectedContext(for word: TranscriptWord, in segment: TranscriptSegment) -> String {
+        if let original = segment.trustedEbookText,
+           StudyTokenIndex.tokens(in: segment, source: .original).contains(where: { $0.id == word.id }) {
+            return original
+        }
+        if segment.words.contains(where: { $0.id == word.id }) || segment.resolvedOverlayText != nil {
+            return segment.spokenText
+        }
+        return segment.displayText
     }
 
     func presentSettings() {
@@ -2598,11 +2617,13 @@ final class AppState {
         if let hit = glosses.first(where: { $0.id == id }), hit.status != .rejected {
             return hit
         }
+        let normalizedContext = GlossEntry.normalize(context ?? "")
         return glosses.first {
             $0.kind == kind
             && $0.language == settings.targetLanguage
             && $0.status != .rejected
             && GlossEntry.normalize($0.source) == GlossEntry.normalize(source)
+            && GlossEntry.normalize($0.context ?? "") == normalizedContext
         }
     }
 
@@ -2623,12 +2644,13 @@ final class AppState {
     func translateSelectedWord() {
         guard let word = selectedWord else { return }
         let segment = selectedWordContextSegment
+        let context = selectedWordContextText
         account.recordUsage(name: "ai.translation.requested", properties: ["kind": "word"])
         let head = DictionaryLookup.headword(word.text)
         translate(
             kind: .word,
             source: head,
-            context: segment?.displayText,
+            context: context,
             timestamp: word.start,
             segment: segment,
             targetID: word.id
@@ -2638,11 +2660,12 @@ final class AppState {
     func retranslateSelectedWord() {
         guard let word = selectedWord else { return }
         let segment = selectedWordContextSegment
+        let context = selectedWordContextText
         let head = DictionaryLookup.headword(word.text)
         translate(
             kind: .word,
             source: head,
-            context: segment?.displayText,
+            context: context,
             timestamp: word.start,
             segment: segment,
             targetID: word.id,
@@ -4737,9 +4760,11 @@ final class AppState {
                 textSource = .dual
                 persistSettings()
             }
-            inspect(word: word)
+            inspect(word: word, in: segment)
         } else {
             selectedWord = nil
+            selectedWordSegmentID = nil
+            selectedWordContextText = nil
             dictionaryHits = []
         }
     }

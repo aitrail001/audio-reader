@@ -809,6 +809,8 @@ struct PlayerView: View {
                 guard !presented else { return }
                 state.showChapterAssistant = false
                 state.selectedWord = nil
+                state.selectedWordSegmentID = nil
+                state.selectedWordContextText = nil
                 state.definition = nil
                 state.dictionaryHits = []
             }
@@ -2325,7 +2327,7 @@ private struct TranscriptTextColumn: View {
                             },
                             onInspect: { word in
                                 state.focusedSegmentID = segment.id
-                                state.inspect(word: word)
+                                state.inspect(word: word, in: segment)
 #if os(iOS)
                                 DictionaryLookup.lookUpInDictionary(word.text)
 #endif
@@ -3180,6 +3182,8 @@ private struct WordInspector: View {
                 Spacer()
                 Button {
                     state.selectedWord = nil
+                    state.selectedWordSegmentID = nil
+                    state.selectedWordContextText = nil
                     state.definition = nil
                     state.dictionaryHits = []
                 } label: {
@@ -3326,6 +3330,7 @@ private struct WordInspector: View {
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
                                 .accessibilityLabel("This-sentence meaning (\(state.selectedLLMModel))")
+                                .accessibilityIdentifier("reader.lookup.meaning")
                             }
                             if let err = state.translationError {
                                 Text(err)
@@ -3400,7 +3405,7 @@ private struct WordInspector: View {
     }
 
     private var contextSegment: TranscriptSegment? {
-        state.selectedWordContextSegment ?? state.currentSegment
+        state.selectedWordContextSegment
     }
 
     private func addVocabularyTitle(isSaved: Bool) -> String {

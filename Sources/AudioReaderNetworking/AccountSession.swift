@@ -698,7 +698,6 @@ public final class AccountSession {
         let deviceID = try store.deviceID()
         syncStatus = AccountSyncStatus(phase: .preparing)
         try await bootstrapInitialStateIfNeeded(runtime: runtime, deviceID: deviceID, jobID: jobID)
-        try await publishPendingAssets(runtime: runtime, deviceID: deviceID, jobID: jobID)
         try await Task.detached { try Self.enqueueDirtySnapshot(runtime: runtime) }.value
         let (pendingBeforeCoalescing, pending, plan) = try await Task.detached {
             let pendingBeforeCoalescing = try runtime.outbox.pendingMutations().count
@@ -832,6 +831,14 @@ public final class AccountSession {
             )
         }
 
+        // Catalog parents must exist before their transcript children. This also lets a
+        // locally retained book rebase over a server tombstone before asset reservation.
+        let skippedDeletedAssets = try await publishPendingAssets(
+            runtime: runtime,
+            deviceID: deviceID,
+            jobID: jobID
+        )
+
         var hasMore = true
         var pages = 0
         var applied = 0
@@ -923,6 +930,7 @@ public final class AccountSession {
             pendingCount: remaining,
             conflictCount: retainedConflicts.count,
             conflicts: retainedConflicts,
+            skippedDeletedAssetCount: skippedDeletedAssets,
             entityProgress: entityProgress
         )
         if applied > 0 {
@@ -1038,7 +1046,7 @@ public final class AccountSession {
         runtime: AccountSyncRuntime,
         deviceID: String,
         jobID: String
-    ) async throws {
+    ) async throws -> Int {
         let stagingDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AudioReaderSyncAssetUploads-v2-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
@@ -1053,7 +1061,13 @@ public final class AccountSession {
             throw AccountSyncRunError.invalidAssetStaging
         }
         var uploaded = 0
+        var skippedDeletedAssets = 0
+        var remotelyDeletedBookIDs: Set<String> = []
         for asset in assets {
+            if let bookID = asset.bookID, remotelyDeletedBookIDs.contains(bookID) {
+                skippedDeletedAssets += 1
+                continue
+            }
             if asset.kind == .transcriptRevision,
                let version = try runtime.versions?.loadVersion(
                 entityType: OutboxEntityType.transcript.rawValue,
@@ -1081,18 +1095,40 @@ public final class AccountSession {
                     )
                 ]
             )
-            try await withAccessToken { access in
-                try await runtime.client.publishAsset(
-                    accessToken: access,
-                    deviceID: deviceID,
-                    asset: asset
+            do {
+                try await withAccessToken { access in
+                    try await runtime.client.publishAsset(
+                        accessToken: access,
+                        deviceID: deviceID,
+                        asset: asset
+                    )
+                }
+            } catch where Self.isDeletedBookAssetError(error) {
+                skippedDeletedAssets += 1
+                if let bookID = asset.bookID { remotelyDeletedBookIDs.insert(bookID) }
+                Self.syncLog.info(
+                    "sync_asset_publish message=sync_asset_publish requestId=\(jobID, privacy: .public) kind=\(asset.kind.rawValue, privacy: .public) outcome=skipped_deleted_book"
                 )
+                continue
             }
             uploaded += 1
             Self.syncLog.info(
                 "sync_asset_publish message=sync_asset_publish requestId=\(jobID, privacy: .public) kind=\(asset.kind.rawValue, privacy: .public) outcome=ready completed=\(uploaded, privacy: .public) total=\(assets.count, privacy: .public)"
             )
         }
+        if skippedDeletedAssets > 0 {
+            Self.syncLog.info(
+                "sync_asset_publish message=sync_asset_publish requestId=\(jobID, privacy: .public) outcome=skipped_deleted_book count=\(skippedDeletedAssets, privacy: .public)"
+            )
+        }
+        return skippedDeletedAssets
+    }
+
+    /// Only the stable server code represents a harmless parent tombstone race.
+    /// Other upload conflicts remain fatal so user data is never silently skipped.
+    nonisolated private static func isDeletedBookAssetError(_ error: Error) -> Bool {
+        guard case .problem(let status, let code, _) = error as? AuthClientError else { return false }
+        return status == 409 && code == "asset_book_deleted"
     }
 
     /// A first sync reads one consistent latest-state snapshot before creating upload intent.

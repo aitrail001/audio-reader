@@ -341,6 +341,9 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
     public var pushStatuses: [String] = []
     public var conflictRevision: Int?
     public var echoPublishedAssets = false
+    public var assetParentEntityID: String?
+    public var publishAssetFailures: [AuthClientError] = []
+    public private(set) var publishAssetAttemptCount = 0
     public private(set) var publishedAssets: [SyncAssetUpload] = []
     public private(set) var manifestLookups: [String] = []
     public private(set) var downloadedAssetIDs: [String] = []
@@ -377,6 +380,19 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
     public func publishAsset(accessToken: String, deviceID: String, asset: SyncAssetUpload) async throws {
         _ = accessToken
         _ = deviceID
+        let failure = withLock { () -> AuthClientError? in
+            publishAssetAttemptCount += 1
+            if let assetParentEntityID,
+               !pushed.flatMap(\.mutations).contains(where: { $0.entityId == assetParentEntityID }) {
+                return .problem(
+                    status: 409,
+                    code: "asset_book_deleted",
+                    detail: "Asset book is already deleted."
+                )
+            }
+            return publishAssetFailures.isEmpty ? nil : publishAssetFailures.removeFirst()
+        }
+        if let failure { throw failure }
         let copy = FileManager.default.temporaryDirectory
             .appendingPathComponent("AudioReaderFakeAsset-\(UUID().uuidString).object")
         try FileManager.default.copyItem(at: asset.fileURL, to: copy)
