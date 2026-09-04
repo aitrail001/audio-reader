@@ -89,8 +89,12 @@ final class AppState {
     private(set) var vocabReviewEvents: [StoredReviewEvent] = [] {
         didSet { vocabularyLearningRevision &+= 1 }
     }
+    private(set) var knownLemmasRevision: UInt = 0
     var knownLemmas: [KnownLemmaRecord] = [] {
-        didSet { refreshStudyIndex() }
+        didSet {
+            knownLemmasRevision &+= 1
+            refreshStudyIndex()
+        }
     }
     private(set) var studyIndex = StudyIndex.empty
     var chapterStudyPresentation: ChapterStudyPresentation?

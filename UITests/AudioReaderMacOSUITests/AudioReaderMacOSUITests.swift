@@ -57,6 +57,7 @@ final class AudioReaderMacOSUITests: XCTestCase {
         librarySection.tap()
         XCTAssertTrue(element("words.listFilter", in: app).waitForExistence(timeout: 3))
         XCTAssertTrue(element("words.scope.all", in: app).exists)
+        choose("Oldest added", from: "words.sortOrder", in: app)
         XCTAssertEqual(element("words.pageRange", in: app).value as? String, "Showing 1–80 of 85")
         button("words.pageLast", in: app).tap()
         XCTAssertEqual(element("words.pageRange", in: app).value as? String, "Showing 81–85 of 85")
@@ -77,6 +78,7 @@ final class AudioReaderMacOSUITests: XCTestCase {
         XCTAssertTrue(element("words.row.ui-vocab-due-1", in: app).exists)
 
         element("words.scope.known", in: app).tap()
+        choose("Recently added", from: "words.sortOrder", in: app)
         button("words.known.add", in: app).tap()
         let knownWord = element("words.known.wordField", in: app)
         XCTAssertTrue(knownWord.waitForExistence(timeout: 3))
@@ -86,6 +88,29 @@ final class AudioReaderMacOSUITests: XCTestCase {
         XCTAssertTrue(element("words.known.en.do", in: app).waitForExistence(timeout: 3))
         app.buttons["Remove do from Known"].firstMatch.tap()
         XCTAssertTrue(waitForNonExistence(element("words.known.en.do", in: app), timeout: 3))
+    }
+
+    func testVocabularySortDisplayStylesAndKnownPages() {
+        let app = launch(scenario: "words-rich")
+        element("words.section.library", in: app).tap()
+
+        XCTAssertTrue(element("words.sortOrder", in: app).waitForExistence(timeout: 3))
+        XCTAssertTrue(element("words.displayStyle", in: app).exists)
+        choose("Oldest added", from: "words.sortOrder", in: app)
+        choose("Cards", from: "words.displayStyle", in: app)
+        XCTAssertTrue(element("words.cardSummary.ui-vocab-due-0", in: app).waitForExistence(timeout: 3))
+        choose("Tags", from: "words.displayStyle", in: app)
+        XCTAssertTrue(element("words.tag.ui-vocab-due-0", in: app).waitForExistence(timeout: 3))
+        choose("List", from: "words.displayStyle", in: app)
+
+        element("words.scope.known", in: app).tap()
+        XCTAssertEqual(element("words.pageRange", in: app).value as? String, "Showing 1–80 of 167")
+        button("words.pageLast", in: app).tap()
+        XCTAssertEqual(element("words.pageRange", in: app).value as? String, "Showing 161–167 of 167")
+        XCTAssertTrue(element("words.known.en.known-164", in: app).waitForExistence(timeout: 3))
+        choose("Most common", from: "words.sortOrder", in: app)
+        XCTAssertTrue(element("words.known.en.the", in: app).waitForExistence(timeout: 3))
+        XCTAssertTrue(element("words.known.en.be", in: app).exists)
     }
 
     func testCorrectionRestoreAndSyncActions() {
@@ -247,6 +272,17 @@ final class AudioReaderMacOSUITests: XCTestCase {
         }
         app.launch()
         return app
+    }
+
+    private func choose(_ title: String, from identifier: String, in app: XCUIApplication) {
+        element(identifier, in: app).tap()
+        let menuItem = app.menuItems[title].firstMatch
+        if menuItem.waitForExistence(timeout: 1) {
+            menuItem.tap()
+        } else {
+            XCTAssertTrue(app.buttons[title].firstMatch.waitForExistence(timeout: 2))
+            app.buttons[title].firstMatch.tap()
+        }
     }
 
     private func element(_ identifier: String, in app: XCUIApplication) -> XCUIElement {

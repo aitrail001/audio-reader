@@ -12,6 +12,10 @@ struct AudioReaderApp: App {
     init() {
         let args = CommandLine.arguments
 #if DEBUG
+        if args.contains("--uitesting") {
+            UserDefaults.standard.set("recentlyAdded", forKey: "words.sortOrder")
+            UserDefaults.standard.set("list", forKey: "words.displayStyle")
+        }
         _state = State(initialValue: AppState(
             composition: args.contains("--uitesting") ? .inMemory() : .live
         ))
@@ -255,6 +259,16 @@ enum UITestLaunchScenario {
         ]
         if scenario == "words-rich" {
             state.vocab = makeRichVocabularyFixture(book: book, chapter: chapter)
+            state.knownLemmas = (0..<165).map { index in
+                KnownLemmaRecord(
+                    language: "en",
+                    form: String(format: "known-%03d", index),
+                    updatedAt: Date(timeIntervalSince1970: Double(index))
+                )
+            } + [
+                KnownLemmaRecord(language: "en", form: "the", updatedAt: Date(timeIntervalSince1970: 1_000)),
+                KnownLemmaRecord(language: "en", form: "be", updatedAt: Date(timeIntervalSince1970: 1_001)),
+            ]
         }
 
         switch scenario {

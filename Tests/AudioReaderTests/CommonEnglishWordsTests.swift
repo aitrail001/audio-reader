@@ -33,6 +33,16 @@ struct CommonEnglishWordsTests {
         #expect(KnownLemmaRecord(language: "en", form: "did", updatedAt: .distantPast).lemma.form == "do")
     }
 
+    @Test("Commonness rank follows the word-family order and accepts inflections")
+    func commonnessRank() throws {
+        let catalog = CommonEnglishWordCatalog.shared
+        let first = try #require(catalog.headwords(first: 1).first)
+
+        #expect(catalog.rank(for: first) == 1)
+        #expect(catalog.rank(for: "did") == catalog.rank(for: "do"))
+        #expect(catalog.rank(for: "zyzzyva") == nil)
+    }
+
     @Test("Non-English and unknown English forms keep their normal identity")
     func unsupportedFormsStayUnchanged() {
         #expect(StudyLemma.make(language: "fr", surface: "Faites.")?.form == "faites")

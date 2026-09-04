@@ -41,6 +41,30 @@ private enum VocabularyLibraryScope: String, CaseIterable, Identifiable {
     }
 }
 
+private enum VocabularyDisplayStyle: String, CaseIterable, Identifiable {
+    case list
+    case cards
+    case tags
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .list: "List"
+        case .cards: "Cards"
+        case .tags: "Tags"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .list: "list.bullet"
+        case .cards: "rectangle.grid.1x2"
+        case .tags: "tag"
+        }
+    }
+}
+
 struct VocabularyView: View {
     private static let performanceLog = Logger(
         subsystem: "com.johnsonzhang.AudioReader",
@@ -63,8 +87,10 @@ struct VocabularyView: View {
     @State private var ankiReport: AnkiExportReport?
     @State private var ankiExportError: String?
     @State private var projection = VocabularyFilterProjection.empty
+    @State private var knownWordProjection = VocabularyKnownWordProjection(filtered: [])
     @State private var learningSnapshot = VocabularyLearningSnapshot.empty
     @State private var isFiltering = true
+    @State private var isFilteringKnownWords = true
     @State private var refreshClock = Date()
     @State private var learningSnapshotRequest: VocabularyLearningRefreshRequest?
     @State private var pageIndex = 0
@@ -73,6 +99,20 @@ struct VocabularyView: View {
     @State private var pendingDetail: VocabEntry?
     @State private var showAddKnownWord = false
     @State private var knownWordDraft = ""
+    @AppStorage("words.sortOrder") private var sortOrderRawValue = VocabularySortOrder.recentlyAdded.rawValue
+    @AppStorage("words.displayStyle") private var displayStyleRawValue = VocabularyDisplayStyle.list.rawValue
+
+    private var sortOrder: VocabularySortOrder {
+        VocabularySortOrder(rawValue: sortOrderRawValue) ?? .recentlyAdded
+    }
+
+    private var displayStyle: VocabularyDisplayStyle {
+        VocabularyDisplayStyle(rawValue: displayStyleRawValue) ?? .list
+    }
+
+    private var activeDisplayStyle: VocabularyDisplayStyle {
+        exportSelection.isActive ? .list : displayStyle
+    }
 
     private var effectiveListFilter: VocabularyListFilter {
         switch libraryScope {
@@ -90,7 +130,16 @@ struct VocabularyView: View {
             bookFilter: bookFilter,
             category: category,
             list: effectiveListFilter,
+            sort: sortOrder,
             minute: Int(refreshClock.timeIntervalSince1970 / 60)
+        )
+    }
+
+    private var knownWordFilterRequest: VocabularyKnownWordFilterRequest {
+        VocabularyKnownWordFilterRequest(
+            revision: state.knownLemmasRevision,
+            query: query,
+            sort: sortOrder
         )
     }
 
@@ -103,6 +152,10 @@ struct VocabularyView: View {
 
     private var page: VocabularyPage {
         VocabularyPage(entries: projection.filtered, requestedIndex: pageIndex)
+    }
+
+    private var knownWordPage: VocabularyKnownWordPage {
+        VocabularyKnownWordPage(records: knownWordProjection.filtered, requestedIndex: pageIndex)
     }
 
     var body: some View {
@@ -161,6 +214,9 @@ struct VocabularyView: View {
         .task(id: filterRequest) {
             await refreshFilterProjection(for: filterRequest)
         }
+        .task(id: knownWordFilterRequest) {
+            await refreshKnownWordProjection(for: knownWordFilterRequest)
+        }
         .task(id: learningRefreshRequest) {
             await refreshLearningSnapshot(for: learningRefreshRequest)
         }
@@ -169,6 +225,8 @@ struct VocabularyView: View {
         .onChange(of: category) { _, _ in pageIndex = 0 }
         .onChange(of: listFilter) { _, _ in pageIndex = 0 }
         .onChange(of: libraryScope) { _, _ in pageIndex = 0 }
+        .onChange(of: sortOrderRawValue) { _, _ in pageIndex = 0 }
+        .onChange(of: displayStyleRawValue) { _, _ in pageIndex = 0 }
         .onChange(of: workspaceSection) { _, section in
             if section != .library, exportSelection.isActive {
                 leaveAnkiExportMode()
@@ -408,58 +466,101 @@ struct VocabularyView: View {
             empty
         } else {
             VStack(spacing: 0) {
-                List {
-                    ForEach(page.entries) { entry in
-                        VocabularyLibraryRow(
-                            entry: entry,
-                            showsExportSelection: exportSelection.isActive,
-                            selectedForExport: exportSelection.isSelected(entry.id),
-                            onOpen: { pendingDetail = entry },
-                            onToggleLearning: {
-                                state.setVocabularyLearnList(entry.id, included: !entry.isInLearnList)
-                            },
-                            onMarkKnown: learningLemma(for: entry).map { lemma in
-                                {
-                                    state.setVocabularyLearnList(entry.id, included: false)
-                                    state.markKnown(lemma: lemma, known: true)
-                                }
-                            },
-                            onToggleExportSelection: { exportSelection.toggle(entry.id) }
-                        )
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            deleteSwipeButton(entry)
-                        }
-                        .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                            myListSwipeButton(entry)
-                        }
-                        .contextMenu {
-                            Button("View details") { pendingDetail = entry }
-                            Button("Open in text") {
-                                if state.jumpToVocab(entry) { onOpenInText() }
-                            }
-                            Button(entry.isInLearnList ? "Remove from My list" : "Add to My list") {
-                                state.setVocabularyLearnList(entry.id, included: !entry.isInLearnList)
-                            }
-                            if learningLemma(for: entry) != nil {
-                                Button("Mark known") { moveToKnown(entry) }
-                            }
-                            Divider()
-                            Button("Delete", role: .destructive) { pendingDelete = entry }
-                        }
-                        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
-                        .listRowBackground(Color.clear)
-                    }
-                }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
+                vocabularyEntryCollection
                 paginationControls
             }
         }
     }
 
     @ViewBuilder
+    private var vocabularyEntryCollection: some View {
+        switch activeDisplayStyle {
+        case .list:
+            List {
+                ForEach(page.entries) { entry in
+                    VocabularyLibraryRow(
+                        entry: entry,
+                        showsExportSelection: exportSelection.isActive,
+                        selectedForExport: exportSelection.isSelected(entry.id),
+                        onOpen: { pendingDetail = entry },
+                        onToggleLearning: {
+                            state.setVocabularyLearnList(entry.id, included: !entry.isInLearnList)
+                        },
+                        onMarkKnown: learningLemma(for: entry).map { lemma in
+                            {
+                                state.setVocabularyLearnList(entry.id, included: false)
+                                state.markKnown(lemma: lemma, known: true)
+                            }
+                        },
+                        onToggleExportSelection: { exportSelection.toggle(entry.id) }
+                    )
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        deleteSwipeButton(entry)
+                    }
+                    .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                        myListSwipeButton(entry)
+                    }
+                    .contextMenu { vocabularyEntryActions(entry) }
+                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                    .listRowBackground(Color.clear)
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+        case .cards:
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 12)], spacing: 12) {
+                    ForEach(page.entries) { entry in
+                        VocabularyLibraryCard(
+                            entry: entry,
+                            onOpen: { pendingDetail = entry },
+                            onToggleLearning: {
+                                state.setVocabularyLearnList(entry.id, included: !entry.isInLearnList)
+                            },
+                            onMarkKnown: learningLemma(for: entry).map { _ in { moveToKnown(entry) } }
+                        )
+                        .contextMenu { vocabularyEntryActions(entry) }
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 10)
+            }
+        case .tags:
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
+                    ForEach(page.entries) { entry in
+                        VocabularyLibraryTag(entry: entry) { pendingDetail = entry }
+                            .contextMenu { vocabularyEntryActions(entry) }
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 10)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func vocabularyEntryActions(_ entry: VocabEntry) -> some View {
+        Button("View details") { pendingDetail = entry }
+        Button("Open in text") {
+            if state.jumpToVocab(entry) { onOpenInText() }
+        }
+        Button(entry.isInLearnList ? "Remove from My list" : "Add to My list") {
+            state.setVocabularyLearnList(entry.id, included: !entry.isInLearnList)
+        }
+        if learningLemma(for: entry) != nil {
+            Button("Mark known") { moveToKnown(entry) }
+        }
+        Divider()
+        Button("Delete", role: .destructive) { pendingDelete = entry }
+    }
+
+    @ViewBuilder
     private var knownWordList: some View {
-        if filteredKnownWords.isEmpty {
+        if isFilteringKnownWords && knownWordProjection.filtered.isEmpty {
+            ProgressView("Preparing known words…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if knownWordProjection.filtered.isEmpty {
             ContentUnavailableView(
                 query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     ? "No known words yet"
@@ -469,28 +570,63 @@ struct VocabularyView: View {
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
+            VStack(spacing: 0) {
+                knownWordCollection
+                paginationControls
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var knownWordCollection: some View {
+        switch activeDisplayStyle {
+        case .list:
             List {
-                ForEach(filteredKnownWords, id: \.lemma) { record in
-                    VocabularyKnownWordRow(record: record) {
-                        state.markKnown(lemma: record.lemma, known: false)
-                    }
-                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        Button("Remove", role: .destructive) {
-                            state.markKnown(lemma: record.lemma, known: false)
+                ForEach(knownWordPage.records, id: \.lemma) { record in
+                    VocabularyKnownWordRow(record: record) { removeKnownWord(record) }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button("Remove", role: .destructive) { removeKnownWord(record) }
                         }
-                    }
-                    .contextMenu {
-                        Button("Remove from Known", role: .destructive) {
-                            state.markKnown(lemma: record.lemma, known: false)
+                        .contextMenu {
+                            Button("Remove from Known", role: .destructive) { removeKnownWord(record) }
                         }
-                    }
-                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
-                    .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                        .listRowBackground(Color.clear)
                 }
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
+        case .cards:
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
+                    ForEach(knownWordPage.records, id: \.lemma) { record in
+                        VocabularyKnownWordCard(record: record) { removeKnownWord(record) }
+                            .contextMenu {
+                                Button("Remove from Known", role: .destructive) { removeKnownWord(record) }
+                            }
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 10)
+            }
+        case .tags:
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
+                    ForEach(knownWordPage.records, id: \.lemma) { record in
+                        VocabularyKnownWordTag(record: record) { removeKnownWord(record) }
+                            .contextMenu {
+                                Button("Remove from Known", role: .destructive) { removeKnownWord(record) }
+                            }
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 10)
+            }
         }
+    }
+
+    private func removeKnownWord(_ record: KnownLemmaRecord) {
+        state.markKnown(lemma: record.lemma, known: false)
     }
 
     private func myListSwipeButton(_ entry: VocabEntry) -> some View {
@@ -512,16 +648,6 @@ struct VocabularyView: View {
         case .myList: state.vocab.count(where: \.isInLearnList)
         case .known: state.knownLemmas.count
         }
-    }
-
-    private var filteredKnownWords: [KnownLemmaRecord] {
-        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        return state.knownLemmas
-            .filter { search.isEmpty || $0.form.localizedCaseInsensitiveContains(search) }
-            .sorted {
-                if $0.language != $1.language { return $0.language < $1.language }
-                return $0.form.localizedStandardCompare($1.form) == .orderedAscending
-            }
     }
 
     private func learningLemma(for entry: VocabEntry) -> StudyLemma? {
@@ -743,7 +869,7 @@ struct VocabularyView: View {
                     text: $query
                 )
                     .textFieldStyle(.plain)
-                if isFiltering && libraryScope != .known {
+                if (isFiltering && libraryScope != .known) || (isFilteringKnownWords && libraryScope == .known) {
                     ProgressView()
                         .controlSize(.small)
                         .accessibilityLabel("Filtering vocabulary")
@@ -763,13 +889,65 @@ struct VocabularyView: View {
             .background(Palette.panel2)
             .clipShape(RoundedRectangle(cornerRadius: 8))
 
-            Text(filterSummary)
-                .font(.caption)
-                .foregroundStyle(Palette.dim)
+            HStack(spacing: 8) {
+                sortOrderMenu
+                displayStyleMenu
+                Spacer(minLength: 8)
+                Text(filterSummary)
+                    .font(.caption)
+                    .foregroundStyle(Palette.dim)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.trailing)
+            }
         }
         .padding(.horizontal, 24)
         .padding(.top, 8)
         .padding(.bottom, 6)
+    }
+
+    private var sortOrderMenu: some View {
+        Menu {
+            ForEach(VocabularySortOrder.allCases) { order in
+                Button {
+                    sortOrderRawValue = order.rawValue
+                } label: {
+                    if sortOrder == order { Label(order.title, systemImage: "checkmark") }
+                    else { Text(order.title) }
+                }
+            }
+            if sortOrder == .mostCommon {
+                Divider()
+                Text("English frequency rank; unranked words follow.")
+            }
+        } label: {
+            Label(sortOrder.title, systemImage: "arrow.up.arrow.down")
+        }
+        .accessibilityLabel("Sort order, \(sortOrder.title)")
+        .accessibilityIdentifier("words.sortOrder")
+#if os(iOS)
+        .frame(minWidth: 44, minHeight: 44)
+#endif
+    }
+
+    private var displayStyleMenu: some View {
+        Menu {
+            ForEach(VocabularyDisplayStyle.allCases) { style in
+                Button {
+                    displayStyleRawValue = style.rawValue
+                } label: {
+                    if displayStyle == style { Label(style.title, systemImage: "checkmark") }
+                    else { Label(style.title, systemImage: style.symbol) }
+                }
+            }
+        } label: {
+            Label(displayStyle.title, systemImage: displayStyle.symbol)
+        }
+        .disabled(exportSelection.isActive)
+        .accessibilityLabel("Display style, \(displayStyle.title)")
+        .accessibilityIdentifier("words.displayStyle")
+#if os(iOS)
+        .frame(minWidth: 44, minHeight: 44)
+#endif
     }
 
     private var vocabularyFilterMenu: some View {
@@ -834,7 +1012,7 @@ struct VocabularyView: View {
     private var filterSummary: String {
         switch libraryScope {
         case .known:
-            "\(filteredKnownWords.count) known word\(filteredKnownWords.count == 1 ? "" : "s")"
+            "\(knownWordProjection.filtered.count) known word\(knownWordProjection.filtered.count == 1 ? "" : "s")"
         case .learning:
             "\(projection.filtered.count) in Learning · Learning stage is based on review progress."
         case .myList:
@@ -844,9 +1022,21 @@ struct VocabularyView: View {
         }
     }
 
+    private var activePageCount: Int {
+        libraryScope == .known ? knownWordPage.pageCount : page.pageCount
+    }
+
+    private var activePageIndex: Int {
+        libraryScope == .known ? knownWordPage.index : page.index
+    }
+
+    private var activePageRangeDescription: String {
+        libraryScope == .known ? knownWordPage.rangeDescription : page.rangeDescription
+    }
+
     @ViewBuilder
     private var paginationControls: some View {
-        if page.pageCount > 1 {
+        if activePageCount > 1 {
             Group {
 #if os(iOS)
                 compactPaginationControls
@@ -894,17 +1084,17 @@ struct VocabularyView: View {
     }
 
     private var pageRangeLabel: some View {
-        Text(page.rangeDescription)
+        Text(activePageRangeDescription)
             .font(.caption)
             .foregroundStyle(Palette.dim)
-            .accessibilityLabel("Showing \(page.rangeDescription)")
+            .accessibilityLabel("Showing \(activePageRangeDescription)")
             .accessibilityIdentifier("words.pageRange")
     }
 
     private var pagePicker: some View {
         Picker("Page", selection: $pageIndex) {
-            ForEach(0..<page.pageCount, id: \.self) { index in
-                Text("Page \(index + 1) of \(page.pageCount)").tag(index)
+            ForEach(0..<activePageCount, id: \.self) { index in
+                Text("Page \(index + 1) of \(activePageCount)").tag(index)
             }
         }
         .labelsHidden()
@@ -921,40 +1111,40 @@ struct VocabularyView: View {
         } label: {
             paginationIcon("backward.end")
         }
-        .disabled(page.index == 0)
+        .disabled(activePageIndex == 0)
         .accessibilityLabel("First page")
         .accessibilityIdentifier("words.pageFirst")
     }
 
     private var previousPageButton: some View {
         Button {
-            pageIndex = max(0, page.index - 1)
+            pageIndex = max(0, activePageIndex - 1)
         } label: {
             paginationIcon("chevron.left")
         }
-        .disabled(page.index == 0)
+        .disabled(activePageIndex == 0)
         .accessibilityLabel("Previous page")
         .accessibilityIdentifier("words.pagePrevious")
     }
 
     private var nextPageButton: some View {
         Button {
-            pageIndex = min(page.pageCount - 1, page.index + 1)
+            pageIndex = min(activePageCount - 1, activePageIndex + 1)
         } label: {
             paginationIcon("chevron.right")
         }
-        .disabled(page.index == page.pageCount - 1)
+        .disabled(activePageIndex == activePageCount - 1)
         .accessibilityLabel("Next page")
         .accessibilityIdentifier("words.pageNext")
     }
 
     private var lastPageButton: some View {
         Button {
-            pageIndex = page.pageCount - 1
+            pageIndex = activePageCount - 1
         } label: {
             paginationIcon("forward.end")
         }
-        .disabled(page.index == page.pageCount - 1)
+        .disabled(activePageIndex == activePageCount - 1)
         .accessibilityLabel("Last page")
         .accessibilityIdentifier("words.pageLast")
     }
@@ -1041,6 +1231,7 @@ struct VocabularyView: View {
                 bookFilter: request.bookFilter,
                 category: request.category,
                 list: request.list,
+                sort: request.sort,
                 at: Date()
             )
         }
@@ -1061,6 +1252,34 @@ struct VocabularyView: View {
         let elapsedMilliseconds = Int(Date().timeIntervalSince(startedAt) * 1_000)
         Self.performanceLog.info(
             "words_projection_finish message=words_projection_finish requestId=\(requestID, privacy: .public) component=vocabulary outcome=ready filtered=\(result.filtered.count, privacy: .public) availableRows=\(result.filtered.count, privacy: .public) elapsedMs=\(elapsedMilliseconds, privacy: .public)"
+        )
+    }
+
+    /// Known words use the same off-main projection boundary as rich vocabulary cards.
+    private func refreshKnownWordProjection(for request: VocabularyKnownWordFilterRequest) async {
+        let requestID = UUID().uuidString
+        let startedAt = Date()
+        isFilteringKnownWords = true
+        if !request.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+        guard !Task.isCancelled else { return }
+        let records = state.knownLemmas
+        Self.performanceLog.info(
+            "message=known_words_projection component=vocabulary outcome=started requestId=\(requestID, privacy: .public) total=\(records.count, privacy: .public) sort=\(request.sort.rawValue, privacy: .public)"
+        )
+        let result = await Task.detached(priority: .userInitiated) {
+            VocabularyKnownWordProjection.make(records: records, query: request.query, sort: request.sort)
+        }.value
+        guard !Task.isCancelled, request == knownWordFilterRequest else { return }
+        knownWordProjection = result
+        if libraryScope == .known {
+            pageIndex = VocabularyKnownWordPage(records: result.filtered, requestedIndex: pageIndex).index
+        }
+        isFilteringKnownWords = false
+        let elapsedMilliseconds = Int(Date().timeIntervalSince(startedAt) * 1_000)
+        Self.performanceLog.info(
+            "message=known_words_projection component=vocabulary outcome=ready requestId=\(requestID, privacy: .public) filtered=\(result.filtered.count, privacy: .public) elapsedMs=\(elapsedMilliseconds, privacy: .public)"
         )
     }
 
@@ -1094,7 +1313,14 @@ private struct VocabularyFilterRequest: Hashable, Sendable {
     let bookFilter: String
     let category: VocabCategory?
     let list: VocabularyListFilter
+    let sort: VocabularySortOrder
     let minute: Int
+}
+
+private struct VocabularyKnownWordFilterRequest: Hashable, Sendable {
+    let revision: UInt
+    let query: String
+    let sort: VocabularySortOrder
 }
 
 private struct VocabularyLearningRefreshRequest: Hashable, Sendable {
@@ -1253,6 +1479,177 @@ private struct VocabularyKnownWordRow: View {
         .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("words.known.\(record.language).\(record.form)")
+    }
+}
+
+private struct VocabularyLibraryCard: View {
+    let entry: VocabEntry
+    let onOpen: () -> Void
+    let onToggleLearning: () -> Void
+    let onMarkKnown: (() -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button(action: onOpen) {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(entry.word)
+                            .font(.system(.title3, design: .serif, weight: .semibold))
+                            .foregroundStyle(Palette.ink)
+                            .lineLimit(2)
+                        Spacer(minLength: 8)
+                        Text(entry.category.title)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Palette.gold)
+                    }
+                    Text(entry.translation ?? entry.definition ?? entry.context)
+                        .font(.callout)
+                        .foregroundStyle(Palette.dim)
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
+                    Text("\(entry.bookTitle) · \(VocabularyLearningStage.resolve(entry).rawValue.capitalized)")
+                        .font(.caption)
+                        .foregroundStyle(Palette.mute)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Divider().foregroundStyle(Palette.line)
+            HStack(spacing: 8) {
+                Button(action: onToggleLearning) {
+                    Label(entry.isInLearnList ? "In My List" : "Add to My List", systemImage: entry.isInLearnList ? "star.fill" : "star")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(entry.isInLearnList ? Palette.gold : Palette.dim)
+#if os(iOS)
+                .frame(minHeight: 44)
+#endif
+                Spacer()
+                if let onMarkKnown {
+                    Button(action: onMarkKnown) {
+                        Label("Known", systemImage: "checkmark.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(Palette.dim)
+#if os(iOS)
+                    .frame(minHeight: 44)
+#endif
+                }
+            }
+            .font(.caption)
+        }
+        .padding(12)
+        .background(Palette.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Palette.line, lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("words.cardSummary.\(entry.id)")
+    }
+}
+
+private struct VocabularyLibraryTag: View {
+    let entry: VocabEntry
+    let onOpen: () -> Void
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(spacing: 6) {
+                if entry.isInLearnList {
+                    Image(systemName: "star.fill")
+                        .font(.caption2)
+                        .foregroundStyle(Palette.gold)
+                }
+                Text(entry.word)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .font(.system(.callout, design: .serif, weight: .medium))
+            .foregroundStyle(Palette.ink)
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .background(Palette.panel)
+            .clipShape(Capsule())
+            .overlay { Capsule().stroke(Palette.line, lineWidth: 1) }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(entry.word), \(entry.category.title)")
+        .accessibilityHint("Opens vocabulary details and editing actions.")
+        .accessibilityIdentifier("words.tag.\(entry.id)")
+    }
+}
+
+private struct VocabularyKnownWordCard: View {
+    let record: KnownLemmaRecord
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.seal.fill")
+                .foregroundStyle(Palette.gold)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(record.form)
+                    .font(.system(.title3, design: .serif, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                Text("\(record.language.uppercased()) · Added \(record.updatedAt.formatted(date: .abbreviated, time: .omitted))")
+                    .font(.caption)
+                    .foregroundStyle(Palette.dim)
+            }
+            Spacer(minLength: 8)
+            Button(role: .destructive, action: onRemove) {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Remove \(record.form) from Known")
+#if os(iOS)
+            .frame(width: 44, height: 44)
+#endif
+        }
+        .padding(12)
+        .background(Palette.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Palette.line, lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("words.knownCard.\(record.language).\(record.form)")
+    }
+}
+
+private struct VocabularyKnownWordTag: View {
+    let record: KnownLemmaRecord
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(record.form)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Button(action: onRemove) {
+                Image(systemName: "xmark")
+                    .font(.caption2.weight(.bold))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Remove \(record.form) from Known")
+#if os(iOS)
+            .frame(width: 44, height: 44)
+#endif
+        }
+        .font(.system(.callout, design: .serif, weight: .medium))
+        .foregroundStyle(Palette.ink)
+        .padding(.leading, 10)
+        .padding(.trailing, 8)
+        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        .background(Palette.goldSoft)
+        .clipShape(Capsule())
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("words.knownTag.\(record.language).\(record.form)")
     }
 }
 

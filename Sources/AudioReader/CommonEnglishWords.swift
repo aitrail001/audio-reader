@@ -25,6 +25,7 @@ struct CommonEnglishWordCatalog: Sendable {
 
     private let rankedHeadwords: [String]
     private let headwordByForm: [String: String]
+    private let rankByHeadword: [String: Int]
 
     func headwords(first count: Int) -> [String] {
         Array(rankedHeadwords.prefix(max(0, count)))
@@ -32,6 +33,11 @@ struct CommonEnglishWordCatalog: Sendable {
 
     func headword(for form: String) -> String? {
         headwordByForm[Self.normalized(form)]
+    }
+
+    func rank(for form: String) -> Int? {
+        guard let headword = headword(for: form) else { return nil }
+        return rankByHeadword[headword]
     }
 
     /// Attribution stays in the resource header so redistributed rankings retain their license context.
@@ -64,7 +70,12 @@ struct CommonEnglishWordCatalog: Sendable {
         guard headwords.count == 5_000, Set(headwords).count == 5_000 else {
             throw CocoaError(.fileReadCorruptFile)
         }
-        return CommonEnglishWordCatalog(rankedHeadwords: headwords, headwordByForm: byForm)
+        let ranks = Dictionary(uniqueKeysWithValues: headwords.enumerated().map { ($0.element, $0.offset + 1) })
+        return CommonEnglishWordCatalog(
+            rankedHeadwords: headwords,
+            headwordByForm: byForm,
+            rankByHeadword: ranks
+        )
     }
 
     private static func normalized(_ form: String) -> String {

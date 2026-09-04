@@ -157,6 +157,23 @@ struct NativeRedesignContractTests {
         #expect(!vocabulary.contains(".frame(height: 300)"))
     }
 
+    @Test("Vocabulary lists expose sorting, bounded Known pages, and three display styles")
+    func vocabularyListPresentationControls() throws {
+        let vocabulary = try source("Sources/AudioReader/VocabularyView.swift")
+
+        #expect(vocabulary.contains("enum VocabularyDisplayStyle"))
+        #expect(vocabulary.contains("VocabularyDisplayStyle.allCases"))
+        #expect(vocabulary.contains("VocabularySortOrder.allCases"))
+        #expect(vocabulary.contains("words.sortOrder"))
+        #expect(vocabulary.contains("words.displayStyle"))
+        #expect(vocabulary.contains("VocabularyKnownWordPage("))
+        #expect(vocabulary.contains("ForEach(knownWordPage.records"))
+        #expect(vocabulary.contains("LazyVGrid"))
+        #expect(vocabulary.contains("case .list"))
+        #expect(vocabulary.contains("case .cards"))
+        #expect(vocabulary.contains("case .tags"))
+    }
+
     @Test("Anki export selection is explicit, temporary, accessible, and distinct from My List")
     func ankiExportSelectionModeContract() throws {
         let vocabulary = try source("Sources/AudioReader/VocabularyView.swift")
