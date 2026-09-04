@@ -272,6 +272,7 @@ struct VocabularyView: View {
         NavigationStack {
             Form {
                 TextField("Word", text: $knownWordDraft)
+                    .accessibilityIdentifier("words.known.wordField")
                 Text("Inflected forms are stored with their canonical word family in the current audiobook language.")
                     .font(.caption)
                     .foregroundStyle(Palette.dim)
@@ -618,6 +619,7 @@ struct VocabularyView: View {
             Label("More", systemImage: "ellipsis.circle")
         }
         .accessibilityLabel("Vocabulary actions")
+        .accessibilityIdentifier("words.actions")
     }
 
     private var ankiExportMenu: some View {
@@ -860,7 +862,11 @@ struct VocabularyView: View {
                 }
 #endif
             }
+#if os(iOS)
+            .buttonStyle(.plain)
+#else
             .buttonStyle(.borderless)
+#endif
             .padding(.horizontal, 24)
             .padding(.vertical, 4)
             .background(Palette.panel)
@@ -913,11 +919,8 @@ struct VocabularyView: View {
         Button {
             pageIndex = 0
         } label: {
-            Image(systemName: "backward.end")
+            paginationIcon("backward.end")
         }
-#if os(iOS)
-        .frame(minWidth: 44, minHeight: 44)
-#endif
         .disabled(page.index == 0)
         .accessibilityLabel("First page")
         .accessibilityIdentifier("words.pageFirst")
@@ -927,11 +930,8 @@ struct VocabularyView: View {
         Button {
             pageIndex = max(0, page.index - 1)
         } label: {
-            Image(systemName: "chevron.left")
+            paginationIcon("chevron.left")
         }
-#if os(iOS)
-        .frame(minWidth: 44, minHeight: 44)
-#endif
         .disabled(page.index == 0)
         .accessibilityLabel("Previous page")
         .accessibilityIdentifier("words.pagePrevious")
@@ -941,11 +941,8 @@ struct VocabularyView: View {
         Button {
             pageIndex = min(page.pageCount - 1, page.index + 1)
         } label: {
-            Image(systemName: "chevron.right")
+            paginationIcon("chevron.right")
         }
-#if os(iOS)
-        .frame(minWidth: 44, minHeight: 44)
-#endif
         .disabled(page.index == page.pageCount - 1)
         .accessibilityLabel("Next page")
         .accessibilityIdentifier("words.pageNext")
@@ -955,14 +952,19 @@ struct VocabularyView: View {
         Button {
             pageIndex = page.pageCount - 1
         } label: {
-            Image(systemName: "forward.end")
+            paginationIcon("forward.end")
         }
-#if os(iOS)
-        .frame(minWidth: 44, minHeight: 44)
-#endif
         .disabled(page.index == page.pageCount - 1)
         .accessibilityLabel("Last page")
         .accessibilityIdentifier("words.pageLast")
+    }
+
+    private func paginationIcon(_ systemName: String) -> some View {
+        Image(systemName: systemName)
+#if os(iOS)
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
+#endif
     }
 
     private var empty: some View {

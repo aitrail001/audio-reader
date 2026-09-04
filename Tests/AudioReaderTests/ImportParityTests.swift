@@ -1931,7 +1931,7 @@ struct ImportParityTests {
         #expect(iPadTests.contains("library.importMedia"))
         #expect(macTests.contains("transcript.restore"))
         #expect(iPadTests.contains("transcript.restore"))
-        #expect(macTests.contains("anki.export"))
+        #expect(macTests.contains("words.actions"))
         #expect(iPadTests.contains("anki.export"))
         #expect(iPadCompanionTests.contains("library.addCompanion"))
         #expect(iPadCompanionTests.contains("M4BChapterExtractor.load"))

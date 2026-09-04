@@ -91,7 +91,11 @@ final class AudioReaderIOSUITests: XCTestCase {
         element("words.pageLast", in: app).tap()
         XCTAssertEqual(element("words.pageRange", in: app).label, "Showing 81–85 of 85")
         XCTAssertTrue(element("words.row.ui-vocab-new-76", in: app).waitForExistence(timeout: 3))
-        element("words.pageFirst", in: app).tap()
+        let firstPage = element("words.pageFirst", in: app)
+        XCTAssertGreaterThanOrEqual(firstPage.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(firstPage.frame.height, 44)
+        element("words.pagePicker", in: app).tap()
+        app.buttons["Page 1 of 2"].firstMatch.tap()
         XCTAssertTrue(element("words.row.ui-vocab-new-0", in: app).waitForExistence(timeout: 3))
 
         element("words.scope.learning", in: app).tap()

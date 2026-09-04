@@ -37,7 +37,7 @@ final class AudioReaderMacOSUITests: XCTestCase {
         for destination in ["sidebar.library", "sidebar.nowReading", "sidebar.words", "sidebar.settings"] {
             XCTAssertTrue(element(destination, in: app).waitForExistence(timeout: 5))
         }
-        XCTAssertTrue(waitForHittable(button("words.section.today", in: app), timeout: 5))
+        XCTAssertTrue(waitForHittable(element("words.section.today", in: app), timeout: 5))
         let studyToday = button("words.studyToday", in: app)
         XCTAssertTrue(studyToday.isHittable)
         XCTAssertEqual(studyToday.label, "Study 24 cards today")
@@ -52,7 +52,7 @@ final class AudioReaderMacOSUITests: XCTestCase {
             in: app
         ))
 
-        let librarySection = button("words.section.library", in: app)
+        let librarySection = element("words.section.library", in: app)
         XCTAssertTrue(waitForHittable(librarySection, timeout: 5))
         librarySection.tap()
         XCTAssertTrue(element("words.listFilter", in: app).waitForExistence(timeout: 3))
@@ -78,7 +78,7 @@ final class AudioReaderMacOSUITests: XCTestCase {
 
         element("words.scope.known", in: app).tap()
         button("words.known.add", in: app).tap()
-        let knownWord = app.textFields["Word"].firstMatch
+        let knownWord = element("words.known.wordField", in: app)
         XCTAssertTrue(knownWord.waitForExistence(timeout: 3))
         knownWord.tap()
         knownWord.typeText("Done.")
@@ -116,7 +116,7 @@ final class AudioReaderMacOSUITests: XCTestCase {
         let app = launch(scenario: "words-rich")
         let entryID = "ui-vocab-due-0"
 
-        let librarySection = button("words.section.library", in: app)
+        let librarySection = element("words.section.library", in: app)
         XCTAssertTrue(waitForHittable(librarySection, timeout: 5))
         librarySection.tap()
         XCTAssertTrue(element("words.row.\(entryID)", in: app).waitForExistence(timeout: 3))
@@ -156,8 +156,11 @@ final class AudioReaderMacOSUITests: XCTestCase {
     }
 
     private func enterAnkiExportSelection(in app: XCUIApplication) {
-        let export = app.menuButtons.matching(identifier: "anki.export").firstMatch
-        XCTAssertTrue(waitForHittable(export, timeout: 3))
+        let actions = app.menuButtons.matching(identifier: "words.actions").firstMatch
+        XCTAssertTrue(waitForHittable(actions, timeout: 3))
+        actions.tap()
+        let export = app.menuItems["Export to Anki"].firstMatch
+        XCTAssertTrue(export.waitForExistence(timeout: 3))
         export.tap()
         let select = app.menuItems["Select for Anki export"].firstMatch
         XCTAssertTrue(select.waitForExistence(timeout: 3))
