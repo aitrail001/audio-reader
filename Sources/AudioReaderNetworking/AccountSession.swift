@@ -25,8 +25,11 @@ public final class AccountSession {
     public private(set) var lastExportStatus: String?
     public private(set) var pendingExport: AccountExportFile?
     public private(set) var operatorLearningAnalyticsEnabled: Bool?
+    public private(set) var availableOAuthProviders: Set<AuthOAuthProvider> = []
+    public private(set) var authConfigurationLoaded = false
     var pendingOAuth: PendingOAuth?
     var pendingAuthorizationURL: URL?
+    @ObservationIgnored private var oauthSignInInProgress = false
     @ObservationIgnored private var syncTask: Task<Void, Never>?
     @ObservationIgnored private var syncReadinessRetryTask: Task<Void, Never>?
 
@@ -191,6 +194,19 @@ public final class AccountSession {
     }
 
     public func signInWithOAuth(_ provider: AuthOAuthProvider) async {
+        // One pending verifier must own the entire browser round trip. A rapid second
+        // tap can otherwise replace it while the first authorization request is suspended.
+        guard !oauthSignInInProgress else { return }
+        oauthSignInInProgress = true
+        defer { oauthSignInInProgress = false }
+        if !authConfigurationLoaded {
+            await refreshAuthConfiguration()
+        }
+        guard availableOAuthProviders.contains(provider) else {
+            let name = provider == .google ? "Google" : "Microsoft"
+            errorMessage = "\(name) sign-in is not available right now. Use email sign-in or try again later."
+            return
+        }
         await beginOAuth(provider)
         guard let pending = pendingOAuth, let authorizationURL = pendingAuthorizationURL, errorMessage == nil else { return }
         await run(activity: "Signing in…") {
@@ -199,6 +215,21 @@ public final class AccountSession {
                 callbackScheme: ProductAPI.callbackScheme
             )
             try await finishOAuth(callbackURL: callback, pending: pending)
+        }
+    }
+
+    /// The server reflects the hosted identity provider's current switches; clients
+    /// must not offer a social login solely because this app knows its identifier.
+    public func refreshAuthConfiguration() async {
+        do {
+            let config = try await client.authConfig()
+            availableOAuthProviders = Set(
+                config.providers.compactMap { AuthOAuthProvider(rawValue: $0.id) }
+            )
+            authConfigurationLoaded = true
+        } catch {
+            availableOAuthProviders = []
+            authConfigurationLoaded = true
         }
     }
 
@@ -447,6 +478,7 @@ public final class AccountSession {
                     appliedCount: syncStatus.appliedCount,
                     pendingCount: pendingCount,
                     conflictCount: syncStatus.conflictCount,
+                    conflicts: syncStatus.conflicts,
                     errorMessage: message,
                     entityProgress: syncStatus.entityProgress
                 )
@@ -659,15 +691,13 @@ public final class AccountSession {
     }
 
     /// Snapshot enumerates local learning data; only rows whose payload differs
-    /// from the last applied version are enqueued. Conflicts stay pending as a
-    /// new mutation at the server revision so the original mutationId is not
-    /// retried as a duplicate.
+    /// from the last applied version are enqueued. Review conflicts keep their
+    /// stale mutation pending until the remote alternative has been pulled.
     private func drainSync(runtime: AccountSyncRuntime) async throws {
         let jobID = ProductHTTP.makeRequestID()
         let deviceID = try store.deviceID()
         syncStatus = AccountSyncStatus(phase: .preparing)
         try await bootstrapInitialStateIfNeeded(runtime: runtime, deviceID: deviceID, jobID: jobID)
-        try await publishPendingAssets(runtime: runtime, deviceID: deviceID, jobID: jobID)
         try await Task.detached { try Self.enqueueDirtySnapshot(runtime: runtime) }.value
         let (pendingBeforeCoalescing, pending, plan) = try await Task.detached {
             let pendingBeforeCoalescing = try runtime.outbox.pendingMutations().count
@@ -685,7 +715,9 @@ public final class AccountSession {
         }
         var entityProgress = Self.syncEntityProgress(pending)
         var uploaded = 0
-        var conflicts = 0
+        var detectedReviewConflicts: [AccountSyncConflictKind] = []
+        var reviewMutationIDs: [MutationID] = []
+        var automaticRetries: [OutboxMutation] = []
         Self.syncLog.info(
             "sync_push_start message=sync_push_start requestId=\(jobID, privacy: .public) pending=\(pending.count, privacy: .public) uploadable=\(plan.uploadableCount, privacy: .public) skipped=\(plan.skipped.count, privacy: .public) encodedBytes=\(plan.encodedBytes, privacy: .public) maxMutationBytes=\(plan.maximumMutationBytes, privacy: .public)"
         )
@@ -705,7 +737,8 @@ public final class AccountSession {
                     batchIndex: batchOffset + 1,
                     batchCount: plan.batches.count,
                     pendingCount: pending.count - uploaded,
-                    conflictCount: conflicts,
+                    conflictCount: detectedReviewConflicts.count,
+                    conflicts: detectedReviewConflicts,
                     entityProgress: entityProgress
                 )
                 let request = SyncPushRequest(
@@ -721,7 +754,12 @@ public final class AccountSession {
                 // another device that this client has not pulled. Only a successfully applied
                 // pull page may advance the local acknowledgement cursor.
                 for result in pushed.results {
-                    try applyPushResult(result, lookup: &lookup, runtime: runtime, jobID: jobID)
+                    let disposition = try applyPushResult(
+                        result,
+                        lookup: &lookup,
+                        runtime: runtime,
+                        jobID: jobID
+                    )
                     if result.status == "applied" || result.status == "duplicate" {
                         uploaded += 1
                         if let mutation = lookup[result.mutationId],
@@ -729,12 +767,77 @@ public final class AccountSession {
                         {
                             entityProgress[index].completedCount += 1
                         }
-                    } else if result.status == "conflict" {
-                        conflicts += 1
+                    }
+                    switch disposition {
+                    case .retry(let mutation): automaticRetries.append(mutation)
+                    case .needsReview(let kind, let mutationID):
+                        detectedReviewConflicts.append(kind)
+                        reviewMutationIDs.append(mutationID)
+                    case nil: break
                     }
                 }
             }
         }
+
+        if !automaticRetries.isEmpty {
+            let retryPlan = try Self.syncPushPlan(automaticRetries)
+            var lookup = Dictionary(uniqueKeysWithValues: automaticRetries.map { ($0.id.rawValue, $0) })
+            var stillChanging = 0
+            Self.syncLog.info(
+                "sync_conflict_retry_start message=sync_conflict_retry_start requestId=\(jobID, privacy: .public) count=\(automaticRetries.count, privacy: .public)"
+            )
+            for batch in retryPlan.batches {
+                let request = SyncPushRequest(
+                    deviceId: deviceID,
+                    batchId: UUID().uuidString.lowercased(),
+                    baseCursor: try runtime.cursor.loadCursor(),
+                    mutations: try batch.map { try $0.productMutation() }
+                )
+                let pushed = try await withAccessToken { access in
+                    try await runtime.client.push(accessToken: access, deviceID: deviceID, request: request)
+                }
+                for result in pushed.results {
+                    let disposition = try applyPushResult(
+                        result,
+                        lookup: &lookup,
+                        runtime: runtime,
+                        jobID: jobID
+                    )
+                    if result.status == "applied" || result.status == "duplicate" {
+                        uploaded += 1
+                        if let mutation = lookup[result.mutationId],
+                           let index = entityProgress.firstIndex(where: { $0.entityType == mutation.entityType.rawValue })
+                        {
+                            entityProgress[index].completedCount += 1
+                        }
+                    }
+                    switch disposition {
+                    case .retry: stillChanging += 1
+                    case .needsReview(let kind, let mutationID):
+                        detectedReviewConflicts.append(kind)
+                        reviewMutationIDs.append(mutationID)
+                    case nil: break
+                    }
+                }
+            }
+            guard stillChanging == 0 else {
+                Self.syncLog.info(
+                    "sync_conflict_retry_finished message=sync_conflict_retry_finished requestId=\(jobID, privacy: .public) outcome=still_changing count=\(stillChanging, privacy: .public)"
+                )
+                throw AccountSyncRunError.concurrentChanges
+            }
+            Self.syncLog.info(
+                "sync_conflict_retry_finished message=sync_conflict_retry_finished requestId=\(jobID, privacy: .public) outcome=applied count=\(automaticRetries.count, privacy: .public)"
+            )
+        }
+
+        // Catalog parents must exist before their transcript children. This also lets a
+        // locally retained book rebase over a server tombstone before asset reservation.
+        let skippedDeletedAssets = try await publishPendingAssets(
+            runtime: runtime,
+            deviceID: deviceID,
+            jobID: jobID
+        )
 
         var hasMore = true
         var pages = 0
@@ -747,7 +850,8 @@ public final class AccountSession {
                 completedCount: applied,
                 batchIndex: pages,
                 pendingCount: (try? runtime.outbox.pendingMutations().count) ?? 0,
-                conflictCount: conflicts,
+                conflictCount: detectedReviewConflicts.count,
+                conflicts: detectedReviewConflicts,
                 entityProgress: entityProgress
             )
             let pulled = try await withAccessToken { access in
@@ -771,7 +875,8 @@ public final class AccountSession {
                 appliedCount: applied,
                 batchIndex: pages,
                 pendingCount: (try? runtime.outbox.pendingMutations().count) ?? 0,
-                conflictCount: conflicts,
+                conflictCount: detectedReviewConflicts.count,
+                conflicts: detectedReviewConflicts,
                 entityProgress: entityProgress
             )
             // Even device-local media announcements are consumed with this cursor page.
@@ -798,7 +903,8 @@ public final class AccountSession {
                 appliedCount: applied,
                 batchIndex: pages,
                 pendingCount: (try? runtime.outbox.pendingMutations().count) ?? 0,
-                conflictCount: conflicts,
+                conflictCount: detectedReviewConflicts.count,
+                conflicts: detectedReviewConflicts,
                 entityProgress: entityProgress
             )
             hasMore = pulled.hasMore
@@ -810,15 +916,21 @@ public final class AccountSession {
         if hasMore {
             throw AccountSyncRunError.pullPageLimitReached
         }
+        // A retained review mutation stays stale until its remote alternative is
+        // durably applied, so an interrupted pull can never turn it into an overwrite.
+        try runtime.outbox.markAcknowledged(ids: reviewMutationIDs)
         Self.syncLog.info(
             "sync_finish message=sync_finish requestId=\(jobID, privacy: .public) applied=\(applied, privacy: .public)"
         )
         let remaining = try runtime.outbox.pendingMutations().count
+        let retainedConflicts = try runtime.reviewConflicts()
         syncStatus = .completed(
             uploadedCount: uploaded,
             appliedCount: applied,
             pendingCount: remaining,
-            conflictCount: conflicts,
+            conflictCount: retainedConflicts.count,
+            conflicts: retainedConflicts,
+            skippedDeletedAssetCount: skippedDeletedAssets,
             entityProgress: entityProgress
         )
         if applied > 0 {
@@ -934,7 +1046,7 @@ public final class AccountSession {
         runtime: AccountSyncRuntime,
         deviceID: String,
         jobID: String
-    ) async throws {
+    ) async throws -> Int {
         let stagingDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AudioReaderSyncAssetUploads-v2-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
@@ -949,7 +1061,13 @@ public final class AccountSession {
             throw AccountSyncRunError.invalidAssetStaging
         }
         var uploaded = 0
+        var skippedDeletedAssets = 0
+        var remotelyDeletedBookIDs: Set<String> = []
         for asset in assets {
+            if let bookID = asset.bookID, remotelyDeletedBookIDs.contains(bookID) {
+                skippedDeletedAssets += 1
+                continue
+            }
             if asset.kind == .transcriptRevision,
                let version = try runtime.versions?.loadVersion(
                 entityType: OutboxEntityType.transcript.rawValue,
@@ -977,18 +1095,40 @@ public final class AccountSession {
                     )
                 ]
             )
-            try await withAccessToken { access in
-                try await runtime.client.publishAsset(
-                    accessToken: access,
-                    deviceID: deviceID,
-                    asset: asset
+            do {
+                try await withAccessToken { access in
+                    try await runtime.client.publishAsset(
+                        accessToken: access,
+                        deviceID: deviceID,
+                        asset: asset
+                    )
+                }
+            } catch where Self.isDeletedBookAssetError(error) {
+                skippedDeletedAssets += 1
+                if let bookID = asset.bookID { remotelyDeletedBookIDs.insert(bookID) }
+                Self.syncLog.info(
+                    "sync_asset_publish message=sync_asset_publish requestId=\(jobID, privacy: .public) kind=\(asset.kind.rawValue, privacy: .public) outcome=skipped_deleted_book"
                 )
+                continue
             }
             uploaded += 1
             Self.syncLog.info(
                 "sync_asset_publish message=sync_asset_publish requestId=\(jobID, privacy: .public) kind=\(asset.kind.rawValue, privacy: .public) outcome=ready completed=\(uploaded, privacy: .public) total=\(assets.count, privacy: .public)"
             )
         }
+        if skippedDeletedAssets > 0 {
+            Self.syncLog.info(
+                "sync_asset_publish message=sync_asset_publish requestId=\(jobID, privacy: .public) outcome=skipped_deleted_book count=\(skippedDeletedAssets, privacy: .public)"
+            )
+        }
+        return skippedDeletedAssets
+    }
+
+    /// Only the stable server code represents a harmless parent tombstone race.
+    /// Other upload conflicts remain fatal so user data is never silently skipped.
+    nonisolated private static func isDeletedBookAssetError(_ error: Error) -> Bool {
+        guard case .problem(let status, let code, _) = error as? AuthClientError else { return false }
+        return status == 409 && code == "asset_book_deleted"
     }
 
     /// A first sync reads one consistent latest-state snapshot before creating upload intent.
@@ -1140,12 +1280,17 @@ public final class AccountSession {
         try syncPushPlan(pending).batches
     }
 
+    private enum PushConflictDisposition {
+        case retry(OutboxMutation)
+        case needsReview(AccountSyncConflictKind, MutationID)
+    }
+
     private func applyPushResult(
         _ result: SyncMutationResult,
         lookup: inout [String: OutboxMutation],
         runtime: AccountSyncRuntime,
         jobID: String
-    ) throws {
+    ) throws -> PushConflictDisposition? {
         let mutationID = MutationID(rawValue: result.mutationId)
         switch result.status {
         case "applied", "duplicate":
@@ -1162,9 +1307,15 @@ public final class AccountSession {
                 )
             }
         case "conflict":
-            guard let mutation = lookup[result.mutationId] else { return }
+            guard let mutation = lookup[result.mutationId] else { return nil }
             let serverRevision = Int64(result.entityRevision ?? Int(mutation.baseRevision.rawValue))
-            try runtime.handleConflict(mutation, serverRevision)
+            if let kind = Self.reviewConflictKind(for: mutation) {
+                try runtime.handleConflict(mutation, serverRevision)
+                Self.syncLog.info(
+                    "sync_conflict_retained message=sync_conflict_retained requestId=\(jobID, privacy: .public) entityType=\(mutation.entityType.rawValue, privacy: .public)"
+                )
+                return .needsReview(kind, mutationID)
+            }
             var retry = mutation
             retry.id = MutationID.generate()
             retry.baseRevision = ServerVersion(serverRevision)
@@ -1173,11 +1324,27 @@ public final class AccountSession {
             Self.syncLog.info(
                 "sync_conflict_requeued message=sync_conflict_requeued requestId=\(jobID, privacy: .public) entityType=\(mutation.entityType.rawValue, privacy: .public)"
             )
+            return .retry(retry)
         default:
             Self.syncLog.info(
                 "sync_push_rejected message=sync_push_rejected requestId=\(jobID, privacy: .public) status=\(result.status, privacy: .public)"
             )
         }
+        return nil
+    }
+
+    nonisolated private static func reviewConflictKind(for mutation: OutboxMutation) -> AccountSyncConflictKind? {
+        if mutation.entityType == .transcriptOverlay {
+            return .transcriptCorrection
+        }
+        guard mutation.entityType == .progress,
+              let payload = try? SyncJSONCoding.decoder.decode(
+                  [String: SyncJSONValue].self,
+                  from: mutation.payload
+              ),
+              payload["progressKind"]?.stringValue == "reader"
+        else { return nil }
+        return .readerProgress
     }
 
     nonisolated private static func enqueueDirtySnapshot(runtime: AccountSyncRuntime) throws {
@@ -1190,12 +1357,18 @@ public final class AccountSession {
         for var candidate in candidates {
             let key = Self.entityKey(candidate)
             let existingRows = pendingByEntity[key] ?? []
+            // A genuine reader/transcript conflict must remain stale until pull applies
+            // the other device's value and presents both candidates to the learner.
+            if existingRows.contains(where: { Self.reviewConflictKind(for: $0) != nil }) {
+                continue
+            }
             if let version = try runtime.versions?.loadVersion(
                 entityType: candidate.entityType.rawValue,
                 entityID: candidate.entityID
             ) {
                 candidate.baseRevision = ServerVersion(version.serverVersion)
-                if SyncJSONCoding.payloadsMatch(version.payload, candidate.payload) {
+                if SyncJSONCoding.payloadsMatch(version.payload, candidate.payload)
+                    || (candidate.operation == .delete && version.payload == SyncJSONCoding.tombstonePayload) {
                     // The learner reverted to the last server-applied value. Any older local
                     // intent for this entity is stale and must not be uploaded after the skip.
                     try runtime.outbox.markAcknowledged(ids: existingRows.map(\.id))
@@ -1361,6 +1534,7 @@ private enum AccountSyncRunError: LocalizedError {
     case invalidBootstrapPage
     case invalidTranscriptManifest
     case invalidAssetStaging
+    case concurrentChanges
 
     var errorDescription: String? {
         switch self {
@@ -1374,6 +1548,8 @@ private enum AccountSyncRunError: LocalizedError {
             "A transcript object manifest is invalid. Sync paused before changing local data."
         case .invalidAssetStaging:
             "A generated sync asset escaped its private staging directory. Sync paused without deleting local media."
+        case .concurrentChanges:
+            "Another device is still changing the same data. AudioReader kept this device's change and will retry on the next sync."
         }
     }
 }

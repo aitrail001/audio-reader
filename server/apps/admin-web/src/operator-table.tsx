@@ -197,11 +197,7 @@ export function OperatorTable<T>(props: {
                 const open = props.expandedId === id;
                 return (
                   <Fragment key={id}>
-                    <tr
-                      className={open ? "selected" : undefined}
-                      tabIndex={0}
-                      aria-label={`${props.noun} ${id}`}
-                    >
+                    <tr className={open ? "selected" : undefined}>
                       {props.columns.map((column) => (
                         <td key={column.id} className={column.numeric === true ? "num" : undefined}>
                           {column.render(row)}

@@ -53,6 +53,10 @@ final class AppState {
         subsystem: "com.johnsonzhang.AudioReader",
         category: "chapter-assistant"
     )
+    private static let playbackLog = Logger(
+        subsystem: "com.johnsonzhang.AudioReader",
+        category: "playback"
+    )
 
     var settings: AppSettings
     var books: [Book] = []
@@ -85,8 +89,12 @@ final class AppState {
     private(set) var vocabReviewEvents: [StoredReviewEvent] = [] {
         didSet { vocabularyLearningRevision &+= 1 }
     }
+    private(set) var knownLemmasRevision: UInt = 0
     var knownLemmas: [KnownLemmaRecord] = [] {
-        didSet { refreshStudyIndex() }
+        didSet {
+            knownLemmasRevision &+= 1
+            refreshStudyIndex()
+        }
     }
     private(set) var studyIndex = StudyIndex.empty
     var chapterStudyPresentation: ChapterStudyPresentation?
@@ -110,6 +118,8 @@ final class AppState {
     var errorMessage: String?
     var pendingExternalEPUBDuplicate: PendingExternalEPUBDuplicate?
     var selectedWord: TranscriptWord?
+    var selectedWordSegmentID: String?
+    var selectedWordContextText: String?
     var definition: String?
     var dictionaryHits: [DictionaryHit] = []
     var selectedDictionaryName: String = ""
@@ -151,7 +161,6 @@ final class AppState {
     var chapterTranslationFailed = false
     private(set) var chapterTranslationStopRequested = false
     var focusedSegmentID: String?
-    var focusedWordID: String?
     var scrollSegmentID: String?
     var revealToken: Int = 0
 
@@ -259,6 +268,11 @@ final class AppState {
         return [state.current] + state.conflicts
     }
 
+    func syncDeviceName(_ deviceID: String) -> String {
+        if deviceID == account.currentDeviceID { return "This device" }
+        return account.devices.first(where: { $0.id == deviceID })?.displayName ?? "Another device"
+    }
+
     /// Promotes one device's candidate and clears its competing corrections;
     /// the immutable transcript stays untouched and the choice is resynchronized.
     func resolveTranscriptOverlayConflict(segmentID: String, choosing candidateID: String) throws {
@@ -271,6 +285,7 @@ final class AppState {
             database: database
         )
         reloadResolvedTranscriptForCurrentChapter()
+        Task { await account.synchronize() }
     }
 
     /// Saves one current correction against the immutable source fingerprint;
@@ -401,10 +416,6 @@ final class AppState {
 
     var currentSegment: TranscriptSegment? {
         currentReaderPosition.segment
-    }
-
-    var currentWord: TranscriptWord? {
-        currentReaderPosition.word
     }
 
     var studyLanguage: StudyLanguage {
@@ -652,6 +663,47 @@ final class AppState {
         }
     }
 
+    /// Manual list editing uses the active audiobook language and the same canonical family identity as reader actions.
+    @discardableResult
+    func addKnownWord(_ surface: String) -> Bool {
+        guard let lemma = StudyLemma.make(language: studyLexiconLanguage, surface: surface) else { return false }
+        markKnown(lemma: lemma, known: true)
+        Self.vocabularyLog.info(
+            "known_word_add message=known_word_add component=known-lemma outcome=success language=\(lemma.language, privacy: .public)"
+        )
+        return true
+    }
+
+    /// A bulk preset persists one canonical row per family; inflected forms resolve through the shared catalog.
+    func setCommonEnglishWordsKnown(first count: Int, known: Bool) async throws -> Int {
+        let lemmas = Set(CommonEnglishWordCatalog.shared.headwords(first: count).map {
+            StudyLemma(language: "en", form: $0)
+        })
+        let next = KnownLemmaStore.setting(lemmas, known: known, in: knownLemmas)
+        let changed = known
+            ? lemmas.subtracting(Set(knownLemmas.map(\.lemma))).count
+            : lemmas.intersection(Set(knownLemmas.map(\.lemma))).count
+        guard changed > 0 else { return 0 }
+        let stored = next.map(StoredKnownLemma.init)
+        let repository = knownLemmaRepository
+        try await Task.detached(priority: .userInitiated) {
+            try repository.saveKnownLemmas(stored)
+        }.value
+        knownLemmas = next
+        account.recordUsage(
+            name: "vocab.common_words_updated",
+            properties: [
+                "known": known ? "true" : "false",
+                "requested": String(count),
+                "changed": String(changed)
+            ]
+        )
+        Self.vocabularyLog.info(
+            "common_words_update message=common_words_update component=known-lemma outcome=success known=\(known, privacy: .public) requested=\(count, privacy: .public) changed=\(changed, privacy: .public)"
+        )
+        return changed
+    }
+
     func markKnown(_ word: TranscriptWord, known: Bool) {
         guard let lemma = StudyLemma.make(language: studyLexiconLanguage, surface: word.text) else { return }
         markKnown(lemma: lemma, known: known)
@@ -669,15 +721,15 @@ final class AppState {
         case .grok:
             grokAuthentication == .grokBuild
                 ? (GrokBuildCredentialProvider.load() == nil ? .grokBuildNotLoggedIn : nil)
-                : (APIKeyStore.isConfigured ? nil : .noAPIKey(provider))
+                : (ProviderAPIKeyStore.isConfigured(.grok) ? nil : .noAPIKey(provider))
         case .qwenCloud:
-            QwenAPIKeyStore.isConfigured ? nil : .noAPIKey(provider)
+            ProviderAPIKeyStore.isConfigured(.qwenCloud) ? nil : .noAPIKey(provider)
         case .appleFoundation:
             appleIntelligenceConfigurationError()
         case .openAI:
             openAIAuthentication == .chatGPT
                 ? (CodexCLIClient.isAvailable ? nil : .codexUnavailable)
-                : (OpenAIAPIKeyStore.isConfigured ? nil : .noAPIKey(provider))
+                : (ProviderAPIKeyStore.isConfigured(.openAI) ? nil : .noAPIKey(provider))
         }
     }
 
@@ -774,13 +826,19 @@ final class AppState {
         return lookupGloss(
             kind: .word,
             source: DictionaryLookup.headword(word.text),
-            context: currentSegment?.displayText
+            context: selectedWordContextText
         )
     }
 
-    var acceptedSentences: [GlossEntry] {
-        glosses.filter { $0.kind == .sentence && $0.status == .accepted }
-            .sorted { $0.createdAt > $1.createdAt }
+    var selectedWordContextSegment: TranscriptSegment? {
+        guard let word = selectedWord, let segments = presentedTranscript?.segments else { return nil }
+        if let selectedWordSegmentID,
+           let selected = segments.first(where: { $0.id == selectedWordSegmentID }) {
+            return selected
+        }
+        return segments.first { segment in
+            segment.words.contains(where: { $0.id == word.id })
+        }
     }
 
     var selectedChapterTranslationCheckpoint: ChapterTranslationCheckpoint? {
@@ -1111,9 +1169,9 @@ final class AppState {
     func migrateLegacyProviderCredentials() {
         var results: [LegacyCredentialMigrationResult]?
         credentialMigrationSession.runOnce {
-            results = APIKeyStore.migrateLegacyCredential()
-                + QwenAPIKeyStore.migrateLegacyCredential()
-                + OpenAIAPIKeyStore.migrateLegacyCredential()
+            results = [LLMProvider.grok, .qwenCloud, .openAI].flatMap {
+                ProviderAPIKeyStore.migrateLegacyCredentials(for: $0)
+            }
         }
         if let results {
             credentialMigrationWarning = results.contains(.failed)
@@ -1302,8 +1360,8 @@ final class AppState {
         refreshStudyIndex()
     }
 
-    func open(chapter: Chapter, in book: Book, autoplay: Bool) {
-        persistCurrentReaderProgress(force: true)
+    func open(chapter: Chapter, in book: Book, autoplay: Bool, persistCurrentPosition: Bool = true) {
+        if persistCurrentPosition { persistCurrentReaderProgress(force: true) }
         selectedBookID = book.id
         selectedChapterID = chapter.id
         tab = .player
@@ -1364,10 +1422,11 @@ final class AppState {
         refreshLLMBusyState()
         if pendingReveal == nil {
             selectedWord = nil
+            selectedWordSegmentID = nil
+            selectedWordContextText = nil
             definition = nil
             dictionaryHits = []
             focusedSegmentID = nil
-            focusedWordID = nil
             scrollSegmentID = nil
         }
         if autoplay && chapter.hasAudio { player.play() }
@@ -1469,8 +1528,14 @@ final class AppState {
               let chosen = readerProgressState?.current,
               let chapter = selectedBook.chapters.first(where: { $0.id == chosen.chapterID.rawValue })
         else { return }
-        open(chapter: chapter, in: selectedBook, autoplay: false)
+        open(
+            chapter: chapter,
+            in: selectedBook,
+            autoplay: false,
+            persistCurrentPosition: false
+        )
         player.seek(min(chosen.relativeSeconds, chapter.duration ?? chosen.relativeSeconds))
+        Task { await account.synchronize() }
     }
 
     /// Persists chapter-relative fractional seconds. Normal playback writes at
@@ -1688,8 +1753,12 @@ final class AppState {
         if player.isPlaying {
             player.pause()
             persistCurrentReaderProgress(force: true)
-        } else if settings.deepReadingMode, deepReadingPausedSentenceID != nil {
-            continueDeepReading()
+        } else if isSentencePacedModeEnabled, deepReadingPausedSentenceID != nil {
+            if canContinueDeepReading {
+                continueDeepReading()
+            } else {
+                replaySentence()
+            }
         } else {
             armDeepReadingSentence()
             player.play()
@@ -1725,9 +1794,8 @@ final class AppState {
             if settings.deepReadingMode {
                 listenFirstReplayRevealedSegmentID = current.id
             }
-            player.seek(current.start)
             armDeepReadingSentence(current)
-            player.play()
+            player.seek(current.start, playWhenReady: true)
         }
     }
 
@@ -1737,7 +1805,7 @@ final class AppState {
     }
 
     var canContinueDeepReading: Bool {
-        guard settings.deepReadingMode,
+        guard isSentencePacedModeEnabled,
               let transcript = presentedTranscript,
               let sentenceID = deepReadingPausedSentenceID,
               let index = transcript.segments.firstIndex(where: { $0.id == sentenceID })
@@ -1749,13 +1817,22 @@ final class AppState {
         settings.deepReadingMode && deepReadingPausedSentenceID != nil
     }
 
+    var isReadAndPausePaused: Bool {
+        settings.readAndPauseMode && deepReadingPausedSentenceID != nil
+    }
+
+    private var isSentencePacedModeEnabled: Bool {
+        settings.deepReadingMode || settings.readAndPauseMode
+    }
+
     func setDeepReadingMode(_ enabled: Bool) {
         guard settings.deepReadingMode != enabled else { return }
         settings.deepReadingMode = enabled
         if enabled {
+            settings.readAndPauseMode = false
             loopSentence = false
             if player.isPlaying { armDeepReadingSentence() }
-        } else {
+        } else if !settings.readAndPauseMode {
             deepReadingActiveSentenceID = nil
             deepReadingPausedSentenceID = nil
             listenFirstReplayRevealedSegmentID = nil
@@ -1763,18 +1840,52 @@ final class AppState {
         persistSettings()
     }
 
+    /// Read & Pause shares sentence-boundary playback with Listen First but never conceals text.
+    func setReadAndPauseMode(_ enabled: Bool) {
+        guard settings.readAndPauseMode != enabled else { return }
+        settings.readAndPauseMode = enabled
+        if enabled {
+            settings.deepReadingMode = false
+            loopSentence = false
+            listenFirstReplayRevealedSegmentID = nil
+            if player.isPlaying { armDeepReadingSentence() }
+        } else if !settings.deepReadingMode {
+            deepReadingActiveSentenceID = nil
+            deepReadingPausedSentenceID = nil
+        }
+        persistSettings()
+    }
+
     func setSentenceLoop(_ enabled: Bool) {
         loopSentence = enabled
-        if enabled, settings.deepReadingMode {
-            setDeepReadingMode(false)
+        if enabled, isSentencePacedModeEnabled {
+            settings.deepReadingMode = false
+            settings.readAndPauseMode = false
+            deepReadingActiveSentenceID = nil
+            deepReadingPausedSentenceID = nil
+            listenFirstReplayRevealedSegmentID = nil
+            persistSettings()
         }
     }
 
-    func seekToSentence(_ sentence: TranscriptSegment, time: TimeInterval, autoplay: Bool) {
-        player.seek(time)
+    /// Makes sentence and word selection the sole owner of the next playback anchor.
+    func selectPlaybackAnchor(
+        sentence: TranscriptSegment,
+        word: TranscriptWord?,
+        time: TimeInterval,
+        startPlayback: Bool
+    ) {
+        let wasPlaying = player.isPlaying
+        focusedSegmentID = sentence.id
+        if let word { inspect(word: word, in: sentence) }
+        listenFirstReplayRevealedSegmentID = nil
         armDeepReadingSentence(sentence)
+        let shouldPlay = wasPlaying || startPlayback
+        Self.playbackLog.info(
+            "message=playback.anchor component=reader outcome=selected sentence_id=\(sentence.id, privacy: .public) word_id=\(word?.id ?? "none", privacy: .public) requested_seconds=\(time) was_playing=\(wasPlaying) start_requested=\(startPlayback) should_play=\(shouldPlay)"
+        )
+        player.seek(time, playWhenReady: shouldPlay)
         persistCurrentReaderProgress(force: true)
-        if autoplay, !player.isPlaying { player.play() }
     }
 
     func seekPlayback(to time: TimeInterval) {
@@ -1790,7 +1901,7 @@ final class AppState {
     }
 
     func continueDeepReading() {
-        guard settings.deepReadingMode,
+        guard isSentencePacedModeEnabled,
               let transcript = presentedTranscript,
               let sentenceID = deepReadingPausedSentenceID,
               let index = transcript.segments.firstIndex(where: { $0.id == sentenceID }),
@@ -1798,9 +1909,8 @@ final class AppState {
         else { return }
         let next = transcript.segments[index + 1]
         listenFirstReplayRevealedSegmentID = nil
-        player.seek(next.start)
         armDeepReadingSentence(next)
-        player.play()
+        player.seek(next.start, playWhenReady: true)
         persistCurrentReaderProgress(force: true)
     }
 
@@ -1808,11 +1918,10 @@ final class AppState {
         persistCurrentReaderProgress()
         if loopSentence, let current = currentSegment,
            player.currentTime >= current.end - 0.04 {
-            player.seek(current.start)
-            player.play()
+            player.seek(current.start, playWhenReady: true)
             return
         }
-        guard settings.deepReadingMode, player.isPlaying, let transcript = presentedTranscript else { return }
+        guard isSentencePacedModeEnabled, player.isPlaying, let transcript = presentedTranscript else { return }
         if deepReadingActiveSentenceID == nil {
             armDeepReadingSentence()
         }
@@ -1824,6 +1933,10 @@ final class AppState {
         player.seek(max(sentence.start, sentence.end - 0.06))
         deepReadingActiveSentenceID = nil
         deepReadingPausedSentenceID = sentence.id
+        // A paced pause is a deliberate reading stop. Re-center its audio sentence even
+        // when an earlier lookup remains selected in the inspector.
+        scrollSegmentID = sentence.id
+        revealToken &+= 1
         persistCurrentReaderProgress(force: true)
     }
 
@@ -1840,7 +1953,7 @@ final class AppState {
     }
 
     private func armDeepReadingSentence(_ sentence: TranscriptSegment? = nil) {
-        guard settings.deepReadingMode, let sentence = sentence ?? currentSegment else {
+        guard isSentencePacedModeEnabled, let sentence = sentence ?? currentSegment else {
             deepReadingActiveSentenceID = nil
             deepReadingPausedSentenceID = nil
             return
@@ -1852,7 +1965,7 @@ final class AppState {
     private func resetDeepReadingAfterSeek() {
         deepReadingPausedSentenceID = nil
         listenFirstReplayRevealedSegmentID = nil
-        if settings.deepReadingMode, player.isPlaying {
+        if isSentencePacedModeEnabled, player.isPlaying {
             armDeepReadingSentence()
         } else {
             deepReadingActiveSentenceID = nil
@@ -1886,13 +1999,16 @@ final class AppState {
             return
         }
         account.recordUsage(name: "vocab.added", properties: ["wordLength": "\(head.count)"])
-        let gloss = lookupGloss(kind: .word, source: head, context: segment.displayText)
+        let context = selectedWord?.id == word.id && selectedWordSegmentID == segment.id
+            ? selectedWordContextText ?? segment.displayText
+            : segment.displayText
+        let gloss = lookupGloss(kind: .word, source: head, context: context)
         let accepted = gloss?.status == .accepted ? gloss : lookupGloss(kind: .word, source: head, context: nil)
         let dict = selectedDictionaryHit ?? dictionaryHits.first
         let sourceLanguage = StudyTokenIndex.languageKey(for: audiobookLanguage(for: book))
         let canonicalization = VocabularyCanonicalizer.canonicalize(
             surfaceForm: head,
-            context: segment.displayText,
+            context: context,
             language: sourceLanguage
         )
         var entry = VocabEntry(
@@ -1915,7 +2031,7 @@ final class AppState {
             translationLanguage: accepted?.language ?? gloss?.language,
             translationModel: accepted?.model ?? gloss?.model,
             sourceLanguage: sourceLanguage,
-            context: segment.displayText,
+            context: context,
             spokenText: segment.spokenText,
             ebookText: segment.trustedEbookText,
             bookID: book.id,
@@ -1944,9 +2060,19 @@ final class AppState {
             entryID: entry.id,
             offline: canonicalization,
             surfaceForm: head,
-            context: segment.displayText,
+            context: context,
             language: sourceLanguage
         )
+    }
+
+    /// iPadOS cannot import UIReferenceLibraryViewController text, so a saved word
+    /// requests AudioReader's reviewable contextual meaning when none exists yet.
+    func addVocabAndRequestMeaning(word: TranscriptWord, segment: TranscriptSegment) {
+        let hadMeaning = selectedWordGloss != nil
+        addVocab(word: word, segment: segment)
+        if !hadMeaning {
+            translateSelectedWord()
+        }
     }
 
     /// Ambiguous offline proposals remain isolated unless the bounded managed
@@ -2267,27 +2393,11 @@ final class AppState {
         return true
     }
 
-    func jumpToGloss(_ entry: GlossEntry) {
-        pendingReveal = PendingReveal(
-            kind: entry.kind == .sentence ? .sentence : .word,
-            timestamp: entry.timestamp ?? 0,
-            segmentID: nil,
-            wordID: nil,
-            wordText: entry.kind == .word ? entry.source : nil,
-            sentenceText: entry.kind == .sentence ? entry.source : entry.context
-        )
-        guard let located = locate(bookID: entry.bookID, bookTitle: entry.bookTitle, chapterID: entry.chapterID, chapterTitle: entry.chapterTitle) else {
-            errorMessage = "Could not find that passage in the library."
-            pendingReveal = nil
-            return
-        }
-        tab = .player
-        open(chapter: located.chapter, in: located.book, autoplay: false)
-    }
-
-    func inspect(word: TranscriptWord) {
+    func inspect(word: TranscriptWord, in segment: TranscriptSegment) {
         showChapterAssistant = false
         selectedWord = word
+        selectedWordSegmentID = segment.id
+        selectedWordContextText = selectedContext(for: word, in: segment)
         translationError = nil
         dictionaryHits = []
         definition = nil
@@ -2313,6 +2423,17 @@ final class AppState {
 
     var selectedDictionaryHit: DictionaryHit? {
         dictionaryHits.first { $0.name == selectedDictionaryName } ?? dictionaryHits.first
+    }
+
+    private func selectedContext(for word: TranscriptWord, in segment: TranscriptSegment) -> String {
+        if let original = segment.trustedEbookText,
+           StudyTokenIndex.tokens(in: segment, source: .original).contains(where: { $0.id == word.id }) {
+            return original
+        }
+        if segment.words.contains(where: { $0.id == word.id }) || segment.resolvedOverlayText != nil {
+            return segment.spokenText
+        }
+        return segment.displayText
     }
 
     func presentSettings() {
@@ -2376,6 +2497,12 @@ final class AppState {
         studyActivityLog = Persistence.loadStudyActivityLog(database: database)
         selectedDictionaryName = settings.preferredDictionary
         player.rate = Float(settings.playbackRate)
+        if let selectedBookID {
+            readerProgressState = Persistence.loadReaderProgress(bookID: selectedBookID, database: database)
+        }
+        if transcript != nil {
+            reloadResolvedTranscriptForCurrentChapter()
+        }
         refreshStudyIndex()
     }
 
@@ -2415,7 +2542,7 @@ final class AppState {
     func retrieveGrokModels(baseURL: String, apiKey: String?) async -> [LLMModelInfo]? {
         grokModels = GrokModelCatalog.fallback
         let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard supplied?.isEmpty == false || APIKeyStore.isConfigured else {
+        guard supplied?.isEmpty == false || ProviderAPIKeyStore.isConfigured(.grok) else {
             grokModelsMessage = "Using the built-in xAI model catalog until an API key is configured."
             return nil
         }
@@ -2451,7 +2578,7 @@ final class AppState {
     func retrieveOpenAIModels(baseURL: String, apiKey: String?) async -> [LLMModelInfo]? {
         openAIModels = OpenAIModelCatalog.fallback
         let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard supplied?.isEmpty == false || OpenAIAPIKeyStore.isConfigured else {
+        guard supplied?.isEmpty == false || ProviderAPIKeyStore.isConfigured(.openAI) else {
             openAIModelsMessage = "Using the built-in OpenAI model catalog until an API key is configured."
             return nil
         }
@@ -2485,7 +2612,7 @@ final class AppState {
     func retrieveQwenModels(baseURL: String, apiKey: String?) async -> [LLMModelInfo]? {
         qwenModels = QwenModelCatalog.fallback
         let supplied = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard supplied?.isEmpty == false || QwenAPIKeyStore.isConfigured else {
+        guard supplied?.isEmpty == false || ProviderAPIKeyStore.isConfigured(.qwenCloud) else {
             qwenModelsMessage = "Using the built-in model catalog until a DashScope key is configured."
             return nil
         }
@@ -2508,17 +2635,14 @@ final class AppState {
         if let hit = glosses.first(where: { $0.id == id }), hit.status != .rejected {
             return hit
         }
+        let normalizedContext = GlossEntry.normalize(context ?? "")
         return glosses.first {
             $0.kind == kind
             && $0.language == settings.targetLanguage
             && $0.status != .rejected
             && GlossEntry.normalize($0.source) == GlossEntry.normalize(source)
+            && GlossEntry.normalize($0.context ?? "") == normalizedContext
         }
-    }
-
-    func translateCurrentSentence() {
-        guard let segment = currentSegment else { return }
-        translateSentence(segment)
     }
 
     func retranslateCurrentSentence() {
@@ -2537,27 +2661,31 @@ final class AppState {
 
     func translateSelectedWord() {
         guard let word = selectedWord else { return }
+        let segment = selectedWordContextSegment
+        let context = selectedWordContextText
         account.recordUsage(name: "ai.translation.requested", properties: ["kind": "word"])
         let head = DictionaryLookup.headword(word.text)
         translate(
             kind: .word,
             source: head,
-            context: currentSegment?.displayText,
+            context: context,
             timestamp: word.start,
-            segment: currentSegment,
+            segment: segment,
             targetID: word.id
         )
     }
 
     func retranslateSelectedWord() {
         guard let word = selectedWord else { return }
+        let segment = selectedWordContextSegment
+        let context = selectedWordContextText
         let head = DictionaryLookup.headword(word.text)
         translate(
             kind: .word,
             source: head,
-            context: currentSegment?.displayText,
+            context: context,
             timestamp: word.start,
-            segment: currentSegment,
+            segment: segment,
             targetID: word.id,
             force: true
         )
@@ -2673,22 +2801,6 @@ final class AppState {
             persistVocabulary()
         }
         refreshSelectedChapterTranslationStatus()
-    }
-
-    func retryGloss(_ entry: GlossEntry) {
-        if entry.kind == .sentence {
-            // Retry the glossed sentence, not whatever is currently playing.
-            let segment = transcript?.segments.first {
-                GlossEntry.normalize($0.displayText) == GlossEntry.normalize(entry.source)
-            }
-            if let segment {
-                retranslateSentence(segment)
-            } else {
-                retranslateCurrentSentence()
-            }
-        } else {
-            retranslateSelectedWord()
-        }
     }
 
     private func selectedOrigin() -> BackgroundJobOrigin {
@@ -4659,7 +4771,6 @@ final class AppState {
         let time = (word?.start ?? segment.start) + 0.02
         player.seek(time)
         focusedSegmentID = segment.id
-        focusedWordID = word?.id
         scrollSegmentID = segment.id
         revealToken += 1
         if let word {
@@ -4667,9 +4778,11 @@ final class AppState {
                 textSource = .dual
                 persistSettings()
             }
-            inspect(word: word)
+            inspect(word: word, in: segment)
         } else {
             selectedWord = nil
+            selectedWordSegmentID = nil
+            selectedWordContextText = nil
             dictionaryHits = []
         }
     }
@@ -4746,6 +4859,15 @@ extension AppState {
     /// Produces a completed-sentence pause without touching a user's media or provider credentials.
     func prepareUITestListenFirstPause(segmentID: String, time: TimeInterval) {
         settings.deepReadingMode = true
+        settings.readAndPauseMode = false
+        player.currentTime = time
+        deepReadingActiveSentenceID = nil
+        deepReadingPausedSentenceID = segmentID
+    }
+
+    func prepareUITestReadAndPause(segmentID: String, time: TimeInterval) {
+        settings.deepReadingMode = false
+        settings.readAndPauseMode = true
         player.currentTime = time
         deepReadingActiveSentenceID = nil
         deepReadingPausedSentenceID = segmentID

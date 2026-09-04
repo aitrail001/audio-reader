@@ -29,29 +29,42 @@ extension StoredBook {
 }
 
 extension StoredLocalAsset {
+    /// Embedded M4B chapters share one physical file, so each save hashes that path at most once.
     static func snapshots(
         for book: Book,
-        reusing existing: [StoredLocalAsset] = []
+        reusing existing: [StoredLocalAsset] = [],
+        digestFile: (URL) throws -> AudiobookImportService.AssetDigest =
+            AudiobookImportService.assetDigest
     ) -> [StoredLocalAsset] {
-        var assets = book.chapters.compactMap { chapter -> StoredLocalAsset? in
-            guard !chapter.audioPath.isEmpty else { return nil }
-            return snapshot(
+        var assets: [StoredLocalAsset] = []
+        var reusable = existing
+        var attemptedDigestPaths: Set<String> = []
+        for chapter in book.chapters where !chapter.audioPath.isEmpty {
+            let asset = snapshot(
                 bookID: book.bookID,
                 kind: "audio",
                 path: chapter.audioPath,
                 discriminator: chapter.id,
                 metadata: ["chapterID": chapter.id],
-                existing: existing
+                existing: reusable,
+                attemptedDigestPaths: &attemptedDigestPaths,
+                digestFile: digestFile
             )
+            assets.append(asset)
+            reusable.append(asset)
         }
         if let path = book.ebookPath {
-            assets.append(snapshot(
+            let asset = snapshot(
                 bookID: book.bookID,
                 kind: "epub",
                 path: path,
                 discriminator: "epub",
-                existing: existing
-            ))
+                existing: reusable,
+                attemptedDigestPaths: &attemptedDigestPaths,
+                digestFile: digestFile
+            )
+            assets.append(asset)
+            reusable.append(asset)
         }
         if let path = book.coverPath {
             assets.append(snapshot(
@@ -59,7 +72,9 @@ extension StoredLocalAsset {
                 kind: "cover",
                 path: path,
                 discriminator: "cover",
-                existing: existing
+                existing: reusable,
+                attemptedDigestPaths: &attemptedDigestPaths,
+                digestFile: digestFile
             ))
         }
         return assets.sorted { $0.id.rawValue < $1.id.rawValue }
@@ -71,7 +86,9 @@ extension StoredLocalAsset {
         path: String,
         discriminator: String,
         metadata: [String: String] = [:],
-        existing: [StoredLocalAsset]
+        existing: [StoredLocalAsset],
+        attemptedDigestPaths: inout Set<String>,
+        digestFile: (URL) throws -> AudiobookImportService.AssetDigest
     ) -> StoredLocalAsset {
         let attributes = try? FileManager.default.attributesOfItem(atPath: path)
         let modified = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970
@@ -79,14 +96,26 @@ extension StoredLocalAsset {
             .map { String(format: "%02x", $0) }.joined()
         var storedMetadata = metadata
         if let modified { storedMetadata["modifiedAt"] = String(modified) }
-        let matching = existing.first { $0.id.rawValue == rawID }
         let isDirectory = (attributes?[.type] as? FileAttributeType) == .typeDirectory
         let digest: AudiobookImportService.AssetDigest?
+        let byteCount = (attributes?[.size] as? NSNumber)?.int64Value
+        let reusableDigest = existing.first {
+            $0.id.rawValue == rawID
+                && $0.localMediaKey == path
+                && $0.byteCount == byteCount
+                && $0.metadata["modifiedAt"] == storedMetadata["modifiedAt"]
+                && $0.contentHash != nil
+        } ?? existing.first {
+            $0.localMediaKey == path
+                && $0.byteCount == byteCount
+                && $0.metadata["modifiedAt"] == storedMetadata["modifiedAt"]
+                && $0.contentHash != nil
+        }
         if !isDirectory,
-           let byteCount = (attributes?[.size] as? NSNumber)?.int64Value,
-           matching?.byteCount == byteCount,
-           matching?.metadata["modifiedAt"] == storedMetadata["modifiedAt"] {
-            digest = matching?.contentHash.map {
+           let byteCount,
+           reusableDigest?.byteCount == byteCount,
+           reusableDigest?.metadata["modifiedAt"] == storedMetadata["modifiedAt"] {
+            digest = reusableDigest?.contentHash.map {
                 AudiobookImportService.AssetDigest(
                     contentHash: $0,
                     byteCount: byteCount,
@@ -94,8 +123,10 @@ extension StoredLocalAsset {
                     isDirectory: false
                 )
             }
+        } else if attemptedDigestPaths.insert(path).inserted {
+            digest = try? digestFile(URL(fileURLWithPath: path))
         } else {
-            digest = try? AudiobookImportService.assetDigest(URL(fileURLWithPath: path))
+            digest = nil
         }
         storedMetadata["representation"] = digest?.isDirectory == true ? "directory" : "file"
         if let count = digest?.regularFileCount { storedMetadata["regularFileCount"] = String(count) }

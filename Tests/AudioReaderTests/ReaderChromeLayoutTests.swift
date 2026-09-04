@@ -2,94 +2,8 @@ import Foundation
 import Testing
 @testable import AudioReader
 
-@Suite("Reader split and iPad chrome layout")
+@Suite("Reader and iPad chrome layout")
 struct ReaderChromeLayoutTests {
-    @Test("Wide containers keep the stored lookup width and a readable text column")
-    func wideLookupSplitHonorsStoredWidth() {
-        let geometry = ReaderSplitGeometry(
-            containerWidth: 1100,
-            proposedLookupWidth: 420,
-            isLookupOpen: true,
-            splitterWidth: 8
-        )
-
-        #expect(geometry.lookupWidth == 420)
-        #expect(geometry.textWidth == 672)
-    }
-
-    @Test("Narrow containers prefer reading text over the lookup panel")
-    func narrowLookupSplitPrefersText() {
-        let iPadMiniDetail = ReaderSplitGeometry(
-            containerWidth: 500,
-            proposedLookupWidth: 420,
-            isLookupOpen: true,
-            splitterWidth: ReaderSplitLayout.iPadSplitterWidth
-        )
-
-        #expect(iPadMiniDetail.lookupWidth < 220)
-        #expect(iPadMiniDetail.textWidth >= ReaderSplitLayout.absoluteMinimumTextWidth)
-        #expect(iPadMiniDetail.textWidth + iPadMiniDetail.lookupWidth + ReaderSplitLayout.iPadSplitterWidth == 500)
-    }
-
-    @Test("Closing lookup gives the transcript the full canvas")
-    func closedLookupUsesFullWidth() {
-        let geometry = ReaderSplitGeometry(
-            containerWidth: 744,
-            proposedLookupWidth: 420,
-            isLookupOpen: false,
-            splitterWidth: ReaderSplitLayout.iPadSplitterWidth
-        )
-
-        #expect(geometry.lookupWidth == 0)
-        #expect(geometry.textWidth == 744)
-    }
-
-    @Test("Dragging the splitter is clamped instead of covering the transcript")
-    func splitterDragStaysWithinReadableBounds() {
-        let draggedWider = ReaderSplitLayout.clampedLookupWidth(
-            proposed: 900,
-            containerWidth: 744,
-            splitterWidth: ReaderSplitLayout.iPadSplitterWidth
-        )
-        let draggedNarrower = ReaderSplitLayout.clampedLookupWidth(
-            proposed: 40,
-            containerWidth: 744,
-            splitterWidth: ReaderSplitLayout.iPadSplitterWidth
-        )
-
-        #expect(draggedWider == 744 - ReaderSplitLayout.preferredMinimumTextWidth - ReaderSplitLayout.iPadSplitterWidth)
-        #expect(draggedNarrower == ReaderSplitLayout.minimumLookupWidth)
-        #expect(ReaderSplitLayout.textWidth(
-            containerWidth: 744,
-            lookupWidth: draggedWider,
-            isLookupOpen: true,
-            splitterWidth: ReaderSplitLayout.iPadSplitterWidth
-        ) == ReaderSplitLayout.preferredMinimumTextWidth)
-    }
-
-    @Test("A compact iPad reader opens lookup at a fraction of the canvas")
-    func initialLookupWidthLeavesRoomForText() {
-        let portrait = ReaderSplitLayout.initialLookupWidth(
-            stored: 420,
-            containerWidth: 744,
-            splitterWidth: ReaderSplitLayout.iPadSplitterWidth
-        )
-        let landscape = ReaderSplitLayout.initialLookupWidth(
-            stored: 420,
-            containerWidth: 1133,
-            splitterWidth: ReaderSplitLayout.iPadSplitterWidth
-        )
-
-        #expect(portrait < 420)
-        #expect(ReaderSplitLayout.textWidth(
-            containerWidth: 744,
-            lookupWidth: portrait,
-            isLookupOpen: true,
-            splitterWidth: ReaderSplitLayout.iPadSplitterWidth
-        ) > 400)
-        #expect(landscape == 420)
-    }
-
     @Test("iPad column policy focuses the reader and leaves a real resize range")
     func iPadColumnsFocusReaderAndCanResize() {
         #expect(IPadSplitColumnPolicy.contentMax - IPadSplitColumnPolicy.contentMin >= 280)
@@ -116,7 +30,7 @@ struct ReaderChromeLayoutTests {
         ) == .vocabularyFocused)
     }
 
-    @Test("iPad reader chrome uses the toolbar, a draggable splitter, and one playback row")
+    @Test("iPad reader chrome uses half-height Lookup and Chapter AI sheets")
     func iPadReaderChromeContracts() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
         let iPadRoot = try source("Sources/AudioReader/IPadRootView.swift")
@@ -137,10 +51,20 @@ struct ReaderChromeLayoutTests {
         #expect(playerView.contains("reader.epubCover"))
         #expect(playerView.contains("Search Book"))
         #expect(playerView.contains("Contents"))
-        #expect(playerView.contains("SplitterPanHandle"))
-        #expect(playerView.contains("ReaderSplitGeometry("))
-        #expect(playerView.contains(".accessibilityLabel(\"Resize lookup panel\")"))
-        #expect(playerView.contains("applyLookupDrag(translation:"))
+        #expect(playerView.contains("private enum ReaderAuxiliarySheet"))
+        #expect(playerView.contains("private var iPadAuxiliarySheetBinding: Binding<ReaderAuxiliarySheet?>"))
+        #expect(playerView.contains(".sheet(item: iPadAuxiliarySheetBinding)"))
+        #expect(playerView.contains("case .lookup:"))
+        #expect(playerView.contains("case .chapterAI:"))
+        #expect(playerView.contains(".presentationDetents([.medium])"))
+        #expect(!playerView.contains(".presentationDetents([.medium, .large])"))
+        #expect(playerView.contains(".presentationDragIndicator(.visible)"))
+        #expect(playerView.contains(".presentationSizing(.form)"))
+        #expect(!playerView.contains(".presentationSizing(.page)"))
+        #expect(playerView.contains(".accessibilityIdentifier(\"reader.chapterAI.close\")"))
+        #expect(!playerView.contains("SplitterPanHandle"))
+        #expect(!playerView.contains("ReaderSplitGeometry("))
+        #expect(!playerView.contains(".accessibilityLabel(\"Resize lookup panel\")"))
         #expect(!playerView.contains("showReaderToolbar"))
         #expect(!playerView.contains("private var iPadHeader"))
         #expect(!playbackBar.contains("VStack"))
@@ -173,7 +97,7 @@ struct ReaderChromeLayoutTests {
         let toolbarControls = try section(
             in: playerView,
             from: "    private var desktopCompactHeaderControls",
-            to: "    @ViewBuilder\n    private var desktopProviderControls"
+            to: "    private var sentenceLoopBinding"
         )
         #expect(toolbarControls.contains("sharedReadingMenu"))
         #expect(toolbarControls.contains("sharedLLMMenu"))
@@ -198,6 +122,10 @@ struct ReaderChromeLayoutTests {
         #expect(!sentenceRow.contains("chapterCoverage"))
         #expect(!sentenceRow.contains("This chapter"))
         #expect(sentenceRow.contains("lhs.languageLabel == rhs.languageLabel"))
+        #expect(sentenceRow.contains("ViewThatFits(in: .horizontal)"))
+        #expect(!sentenceRow.contains("Menu(\"More\")"))
+        #expect(sentenceRow.contains("reader.translation.edit"))
+        #expect(sentenceRow.contains("reader.translation.retranslate"))
     }
 
     private func source(_ relativePath: String) throws -> String {

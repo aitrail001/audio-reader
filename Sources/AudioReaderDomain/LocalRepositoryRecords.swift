@@ -29,6 +29,7 @@ public struct StoredSettings: Codable, Equatable, Sendable {
     public var autoTranslate: Bool
     public var playOnSelect: Bool
     public var deepReadingMode: Bool
+    public var readAndPauseMode: Bool?
     public var showStudyOverlay: Bool
     public var vocabReviewPrompt: String
     public var appearance: String
@@ -70,6 +71,7 @@ public struct StoredSettings: Codable, Equatable, Sendable {
         autoTranslate: Bool = false,
         playOnSelect: Bool = true,
         deepReadingMode: Bool = false,
+        readAndPauseMode: Bool? = nil,
         showStudyOverlay: Bool = false,
         vocabReviewPrompt: String = "recognition",
         appearance: String = "system",
@@ -110,6 +112,7 @@ public struct StoredSettings: Codable, Equatable, Sendable {
         self.autoTranslate = autoTranslate
         self.playOnSelect = playOnSelect
         self.deepReadingMode = deepReadingMode
+        self.readAndPauseMode = readAndPauseMode
         self.showStudyOverlay = showStudyOverlay
         self.vocabReviewPrompt = vocabReviewPrompt
         self.appearance = appearance

@@ -1,7 +1,5 @@
-import type { ReadinessStatus } from "@audio-reader/domain";
-
 export const packageId = "@audio-reader/qwen" as const;
-export type { ReadinessStatus };
+export type ReadinessStatus = "ok" | "unavailable";
 
 export const DEFAULT_QWEN_BASE_URL =
   "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1" as const;
@@ -17,6 +15,7 @@ export type QwenMessage = {
 export type QwenCompletionRequest = {
   messages: readonly QwenMessage[];
   jsonObject?: boolean;
+  enableThinking?: boolean;
   model?: string;
 };
 
@@ -133,6 +132,9 @@ export function createQwenClient(options: QwenClientOptions): QwenClient {
         };
         if (request.jsonObject === true) {
           body.response_format = { type: "json_object" };
+        }
+        if (request.enableThinking !== undefined) {
+          body.enable_thinking = request.enableThinking;
         }
         const response = await fetchImpl(`${baseUrl}/chat/completions`, {
           method: "POST",

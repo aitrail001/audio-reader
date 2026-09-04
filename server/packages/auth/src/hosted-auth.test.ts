@@ -1,10 +1,11 @@
-import { createMemoryIdentityStore } from "@audio-reader/database";
-import { describe, expect, it } from "vitest";
+import { createMemoryIdentityStore, type IdentityStore } from "@audio-reader/database";
+import { describe, expect, it, vi } from "vitest";
 import { createHostedAuthService, type HostedAuthFetch } from "./hosted-auth";
 import { signAccessToken, type JwtSigningConfig } from "./jwt";
 
 const EMAIL = "reader@example.com";
 const DEVICE_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+const BOOTSTRAP_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const JWT: JwtSigningConfig = {
   issuer: "https://example.supabase.co/auth/v1",
   audience: "authenticated",
@@ -63,7 +64,64 @@ async function sessionBody(email = EMAIL) {
   };
 }
 
+async function authenticateBootstrap(identity: IdentityStore) {
+  const { fetch } = createFetch(() => jsonResponse(500, { message: "unused" }));
+  const auth = createHostedAuthService({
+    jwt: JWT,
+    supabaseUrl: "https://example.supabase.co",
+    supabaseAnonKey: "anon-key",
+    fetch,
+    identity,
+    adminBootstrapEmail: EMAIL,
+  });
+  const token = await signAccessToken({ sub: BOOTSTRAP_ID, email: EMAIL }, JWT);
+  return auth.authenticate(
+    new Request("https://audio-reader.local/session", {
+      headers: { authorization: `Bearer ${token}` },
+    }),
+  );
+}
+
 describe("hosted GoTrue auth service", () => {
+  it("reports only OAuth providers enabled by GoTrue", async () => {
+    const { fetch, calls } = createFetch(() =>
+      jsonResponse(200, { external: { email: true, google: false, azure: true } }),
+    );
+    const auth = createHostedAuthService({
+      jwt: JWT,
+      supabaseUrl: "https://example.supabase.co",
+      supabaseAnonKey: "anon-key",
+      fetch,
+    });
+
+    await expect(auth.authConfig()).resolves.toEqual({
+      providers: [{ id: "microsoft" }, { id: "email_otp" }],
+    });
+    expect(calls.map((call) => call.url)).toEqual(["https://example.supabase.co/auth/v1/settings"]);
+  });
+
+  it("rejects an OAuth provider disabled by GoTrue before opening a browser", async () => {
+    const { fetch, calls } = createFetch(() =>
+      jsonResponse(200, { external: { email: true, google: false, azure: true } }),
+    );
+    const auth = createHostedAuthService({
+      jwt: JWT,
+      supabaseUrl: "https://example.supabase.co",
+      supabaseAnonKey: "anon-key",
+      fetch,
+    });
+
+    await expect(
+      auth.authorizeOAuth({
+        provider: "google",
+        redirectUri: "audioreader://auth/callback",
+        codeChallenge: "a".repeat(43),
+        state: "oauth-state-google",
+      }),
+    ).resolves.toEqual({ ok: false, code: "provider_disabled" });
+    expect(calls).toHaveLength(1);
+  });
+
   it("requests an email OTP without enumerating unknown addresses", async () => {
     const { fetch, calls } = createFetch(() => jsonResponse(200, null));
     const auth = createHostedAuthService({
@@ -215,7 +273,9 @@ describe("hosted GoTrue auth service", () => {
   });
 
   it("returns a GoTrue authorize URL for Google and Azure without local-complete", async () => {
-    const { fetch, calls } = createFetch(() => jsonResponse(500, { message: "should not fetch" }));
+    const { fetch, calls } = createFetch(() =>
+      jsonResponse(200, { external: { email: true, google: true, azure: true } }),
+    );
     const auth = createHostedAuthService({
       jwt: JWT,
       supabaseUrl: "https://example.supabase.co/",
@@ -254,7 +314,10 @@ describe("hosted GoTrue auth service", () => {
     const microsoftUrl = new URL(microsoft.value.authorizationUrl);
     expect(microsoftUrl.searchParams.get("provider")).toBe("azure");
     expect(microsoftUrl.searchParams.get("scopes")).toBe("email");
-    expect(calls).toHaveLength(0);
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://example.supabase.co/auth/v1/settings",
+      "https://example.supabase.co/auth/v1/settings",
+    ]);
   });
 
   it("reads GoTrue tokens from a nested session envelope", async () => {
@@ -318,9 +381,42 @@ describe("hosted GoTrue auth service", () => {
     expect(calls[0]?.url).toBe("https://example.supabase.co/auth/v1/token?grant_type=pkce");
     expect(calls[0]?.body).toEqual({
       auth_code: "auth-code-1",
-      code: "auth-code-1",
       code_verifier: "c".repeat(43),
     });
+  });
+
+  it("reports a PKCE verifier mismatch without logging the code or verifier", async () => {
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const { fetch } = createFetch(() =>
+        jsonResponse(400, {
+          error_code: "bad_code_verifier",
+          msg: "code challenge does not match previously saved code verifier",
+        }),
+      );
+      const auth = createHostedAuthService({
+        jwt: JWT,
+        supabaseUrl: "https://example.supabase.co",
+        supabaseAnonKey: "anon-key",
+        fetch,
+      });
+
+      await expect(
+        auth.exchangeOAuth({
+          provider: "google",
+          code: "sensitive-auth-code",
+          codeVerifier: "v".repeat(43),
+          redirectUri: "audioreader://auth/callback",
+          deviceId: DEVICE_ID,
+        }),
+      ).resolves.toEqual({ ok: false, code: "pkce_mismatch" });
+      const logs = spy.mock.calls.flat().join("\n");
+      expect(logs).toContain("bad_code_verifier");
+      expect(logs).not.toContain("sensitive-auth-code");
+      expect(logs).not.toContain("v".repeat(43));
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("refreshes and logs out through GoTrue", async () => {
@@ -468,48 +564,72 @@ describe("hosted GoTrue auth service", () => {
     ).resolves.toBeNull();
   });
 
-  it("grants bootstrap admin only when no operator exists yet", async () => {
-    const bootstrapId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  it("grants the configured bootstrap identity a superadmin role when no admin exists", async () => {
     const otherId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-    const { fetch } = createFetch(() => jsonResponse(500, { message: "unused" }));
     const empty = createMemoryIdentityStore();
-    const firstAuth = createHostedAuthService({
-      jwt: JWT,
-      supabaseUrl: "https://example.supabase.co",
-      supabaseAnonKey: "anon-key",
-      fetch,
-      identity: empty,
-      adminBootstrapEmail: EMAIL,
-    });
-    const token = await signAccessToken({ sub: bootstrapId, email: EMAIL }, JWT);
-    const headers = { authorization: `Bearer ${token}` };
-    const first = await firstAuth.authenticate(
-      new Request("https://audio-reader.local/session", { headers }),
-    );
+    const first = await authenticateBootstrap(empty);
     expect(first?.role).toBe("admin");
-    expect(first?.adminRoles).toEqual(["operator"]);
-    expect(await empty.hasAdminRole(bootstrapId)).toBe(true);
-    const again = await firstAuth.authenticate(
-      new Request("https://audio-reader.local/session", { headers }),
-    );
+    expect(first?.adminRoles).toEqual(["superadmin"]);
+    expect(await empty.hasAdminRole(BOOTSTRAP_ID)).toBe(true);
+    const again = await authenticateBootstrap(empty);
     expect(again?.role).toBe("admin");
 
     const occupied = createMemoryIdentityStore();
     await occupied.ensureProfile({ userId: otherId, email: "ops@example.com" });
     await occupied.grantAdminRole(otherId);
-    const blocked = createHostedAuthService({
-      jwt: JWT,
-      supabaseUrl: "https://example.supabase.co",
-      supabaseAnonKey: "anon-key",
-      fetch,
-      identity: occupied,
-      adminBootstrapEmail: EMAIL,
-    });
-    const second = await blocked.authenticate(
-      new Request("https://audio-reader.local/session", { headers }),
-    );
+    const second = await authenticateBootstrap(occupied);
     expect(second?.role).toBe("user");
-    expect(await occupied.hasAdminRole(bootstrapId)).toBe(false);
+    expect(await occupied.hasAdminRole(BOOTSTRAP_ID)).toBe(false);
+  });
+
+  it("promotes the configured legacy bootstrap operator when no superadmin exists", async () => {
+    const identity = createMemoryIdentityStore();
+    await identity.ensureProfile({ userId: BOOTSTRAP_ID, email: EMAIL });
+    await identity.grantAdminRole(BOOTSTRAP_ID);
+    const principal = await authenticateBootstrap(identity);
+
+    expect(principal?.adminRoles).toEqual(["operator", "superadmin"]);
+    expect(await identity.hasAnyAdminRole("superadmin")).toBe(true);
+  });
+
+  it("does not promote a scoped bootstrap admin without the legacy operator role", async () => {
+    const identity = createMemoryIdentityStore();
+    await identity.ensureProfile({ userId: BOOTSTRAP_ID, email: EMAIL });
+    await identity.grantAdminRole(BOOTSTRAP_ID, "privacy_officer");
+    const principal = await authenticateBootstrap(identity);
+
+    expect(principal?.adminRoles).toEqual(["privacy_officer"]);
+    expect(await identity.hasAnyAdminRole("superadmin")).toBe(false);
+  });
+
+  it("does not restore a revoked bootstrap superadmin grant", async () => {
+    const identity = createMemoryIdentityStore();
+    await identity.ensureProfile({ userId: BOOTSTRAP_ID, email: EMAIL });
+    let grantAttempted = false;
+    Object.assign(identity, {
+      hasAdminRole: () => Promise.resolve(false),
+      adminRoles: () => Promise.resolve([]),
+      hasAnyAdminRole: () => Promise.resolve(false),
+      hasAdminRoleHistory: () => Promise.resolve(true),
+      grantAdminRole: () => {
+        grantAttempted = true;
+        return Promise.resolve();
+      },
+    });
+    const principal = await authenticateBootstrap(identity);
+
+    expect(principal?.role).toBe("user");
+    expect(grantAttempted).toBe(false);
+  });
+
+  it("does not elevate when persistence reports success without an active grant", async () => {
+    const identity = createMemoryIdentityStore();
+    await identity.ensureProfile({ userId: BOOTSTRAP_ID, email: EMAIL });
+    Object.assign(identity, { grantAdminRole: () => Promise.resolve() });
+    const principal = await authenticateBootstrap(identity);
+
+    expect(principal?.role).toBe("user");
+    expect(principal?.adminRoles).toEqual([]);
   });
 
   it("preserves scoped admin roles instead of collapsing them into generic admin", async () => {

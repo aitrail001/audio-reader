@@ -115,6 +115,7 @@ enum AudiobookImportError: LocalizedError {
 
 enum AudiobookImportService {
     private static let log = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "book-import")
+    private static let bookIDMarker = ".audioreader-book-id"
     private static let fingerprintMarker = ".audioreader-audio-fingerprint"
     private static let ebookSectionsMarker = ".audioreader-ebook-sections"
 
@@ -258,6 +259,37 @@ enum AudiobookImportService {
         let added = try copyCompanionFiles(from: urls, to: folder)
         log.info("book_attachment_finished outcome=success added_count=\(added.count, privacy: .public)")
         return added
+    }
+
+    /// A cloud catalog row has no local folder until this device attaches media.
+    /// The hidden ID marker keeps the new folder bound to that synced row even when
+    /// its display title does not reproduce the original device's folder name.
+    static func addCompanionFiles(
+        _ urls: [URL],
+        to book: Book,
+        in root: URL = Persistence.importedBooksURL
+    ) throws -> AudiobookImportResult {
+        if !book.folderPath.isEmpty {
+            let folder = URL(fileURLWithPath: book.folderPath, isDirectory: true)
+            return .init(
+                folder: folder,
+                createdBook: false,
+                addedFileNames: try addCompanionFiles(urls, to: folder)
+            )
+        }
+
+        let folder = try newBookFolder(title: book.title, in: root)
+        do {
+            try writeMarkers(source: book.source, title: book.title, author: book.author, to: folder)
+            try writeMarker(book.id, named: bookIDMarker, to: folder)
+            let added = try addCompanionFiles(urls, to: folder)
+            log.info("book_attachment_materialized message=book_attachment_materialized component=book-import outcome=success bookId=\(book.id, privacy: .public) added_count=\(added.count, privacy: .public)")
+            return .init(folder: folder, createdBook: true, addedFileNames: added)
+        } catch {
+            try? FileManager.default.removeItem(at: folder)
+            log.error("book_attachment_materialized message=book_attachment_materialized component=book-import outcome=failure bookId=\(book.id, privacy: .public) error_type=\(String(reflecting: type(of: error)), privacy: .public)")
+            throw error
+        }
     }
 
     @discardableResult

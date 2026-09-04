@@ -6,6 +6,7 @@
   --gold: #b7802e;
   --gold-soft: rgba(232, 184, 110, 0.22);
   --ink-on-gold: #241a0f;
+  --on-terracotta: #fefaf4;
   --bg: #f7f2e8;
   --panel: #fefaf4;
   --panel-2: #ede6d9;
@@ -35,6 +36,7 @@
     --gold: #e8b86d;
     --gold-soft: rgba(232, 184, 110, 0.18);
     --ink-on-gold: #14110e;
+    --on-terracotta: #0a0806;
     --bg: #14110e;
     --panel: #1e1a16;
     --panel-2: #28221c;
@@ -184,6 +186,10 @@ nav.rail {
   gap: 0.15rem;
   min-height: 0;
   overflow-y: auto;
+}
+
+.destination-picker {
+  display: none;
 }
 
 .rail-label {
@@ -414,7 +420,7 @@ button.study {
 
 button.primary {
   background: var(--terracotta);
-  color: var(--panel);
+  color: var(--on-terracotta);
   border: 0;
 }
 
@@ -525,7 +531,8 @@ button.sort {
   align-items: center;
   gap: 0.35rem;
   margin: 0;
-  padding: 0;
+  min-height: var(--control);
+  padding: 0.25rem 0;
   border: 0;
   background: transparent;
   color: inherit;
@@ -790,7 +797,9 @@ table.data tr.expand td:first-child {
 }
 
 .service-table td.mono {
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .service-table th {
@@ -891,7 +900,7 @@ table.data tr.expand td:first-child {
 }
 
 .copy-value .ghost {
-  min-height: 2.25rem;
+  min-height: var(--control);
   padding: 0 0.7rem;
 }
 
@@ -905,7 +914,8 @@ table.data tr.expand td:first-child {
   align-items: center;
   gap: 0.45rem;
   margin: 0;
-  padding: 0;
+  min-height: var(--control);
+  padding: 0.2rem 0;
   border: 0;
   background: transparent;
   color: inherit;
@@ -951,7 +961,7 @@ table.data tr.expand td:first-child {
 }
 
 .row-actions button {
-  min-height: 2.25rem;
+  min-height: var(--control);
   padding: 0 0.7rem;
   white-space: nowrap;
 }
@@ -1190,7 +1200,7 @@ table.data tr.expand .service-table {
 
 .analytics-summary strong {
   margin-top: 0.1rem;
-  font-size: 1.3rem;
+  font-size: 1rem;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1253,6 +1263,23 @@ table.data tr.expand .service-table {
   fill: var(--panel);
   stroke: currentColor;
   stroke-width: 2;
+}
+
+.trend-data {
+  margin-top: 0.65rem;
+}
+
+.trend-data summary {
+  min-height: var(--control);
+  display: flex;
+  align-items: center;
+  color: var(--terracotta-ink);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.trend-data .service-table {
+  min-width: 34rem;
 }
 
 .anomaly-watch {
@@ -1329,32 +1356,27 @@ table.data tr.expand .service-table {
   }
 
   nav.rail {
-    display: flex;
-    flex-direction: row;
-    flex-wrap: nowrap;
-    align-content: flex-start;
-    gap: 0.25rem;
-    max-height: none;
-    overflow-x: auto;
+    display: none;
+  }
+
+  .destination-picker {
+    display: grid;
+    gap: 0.3rem;
     border-right: 0;
     border-bottom: 1px solid var(--line);
-    padding: 0.55rem 0.55rem 0.7rem;
+    padding: 0.55rem 0.8rem 0.7rem;
+    background: color-mix(in srgb, var(--panel-2) 92%, transparent);
   }
 
-  .rail-label {
-    align-self: center;
-    flex: 0 0 auto;
-    margin: 0 0.25rem;
+  .destination-picker span {
+    color: var(--dim);
+    font-size: 0.75rem;
+    font-weight: 600;
   }
 
-  nav.rail button.dest {
-    flex: 0 0 auto;
-    white-space: nowrap;
-    min-width: 0;
-    min-height: var(--control);
-    padding: 0 0.7rem;
-    text-align: center;
-    font-size: 0.86rem;
+  .destination-picker select {
+    width: 100%;
+    background: var(--panel);
   }
 
   .grid-2,
@@ -1433,17 +1455,6 @@ table.data tr.expand .service-table {
 
   .analytics-chart {
     min-height: 9rem;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    scroll-behavior: auto !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
   }
 }
 

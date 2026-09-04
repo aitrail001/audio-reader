@@ -43,25 +43,6 @@ public extension TranscriptRepository {
     }
 }
 
-public protocol TranscriptOverlayRepository: Sendable {
-    func loadTranscriptOverlays(chapterID: ChapterID) throws -> [StoredTranscriptOverlay]
-    func loadAllTranscriptOverlays() throws -> [StoredTranscriptOverlay]
-    func loadTranscriptOverlayState(chapterID: ChapterID, segmentID: String) throws -> StoredTranscriptOverlayState?
-    func saveTranscriptOverlay(_ overlay: StoredTranscriptOverlay) throws
-    @discardableResult
-    func mergeTranscriptOverlay(_ overlay: StoredTranscriptOverlay, revision: Int64) throws -> TranscriptOverlayMergeOutcome
-    func resolveTranscriptOverlay(chapterID: ChapterID, segmentID: String, choosing candidateID: String) throws
-    func deleteTranscriptOverlay(id: String) throws
-}
-
-public protocol ReaderProgressRepository: Sendable {
-    func loadReaderProgress(bookID: BookID) throws -> StoredReaderProgressState?
-    func loadAllReaderProgress() throws -> [StoredReaderProgress]
-    @discardableResult
-    func mergeReaderProgress(_ progress: StoredReaderProgress) throws -> ReaderProgressMergeOutcome
-    func resolveReaderProgress(bookID: BookID, choosing candidateID: String) throws
-}
-
 public protocol VocabularyRepository: Sendable {
     func loadVocabulary() throws -> [StoredVocabularyOccurrence]
     func saveVocabulary(_ entries: [StoredVocabularyOccurrence]) throws
@@ -140,17 +121,6 @@ public protocol AssistantResultRepository: Sendable {
     func loadAssistantResultHistory(resultID: String) throws -> [StoredAssistantResultHistory]
     func saveAssistantResult(_ result: StoredAssistantResult) throws
     func replaceAssistantResults(_ results: [StoredAssistantResult]) throws
-}
-
-public protocol TranslationCheckpointRepository: Sendable {
-    func loadTranslationCheckpoints() throws -> [StoredTranslationCheckpoint]
-    func saveTranslationCheckpoint(_ checkpoint: StoredTranslationCheckpoint) throws
-    func deleteTranslationCheckpoint(chapterID: ChapterID, language: String) throws
-}
-
-public protocol StudyActivityRepository: Sendable {
-    func loadStudyActivityDays() throws -> [String]
-    func saveStudyActivityDays(_ days: [String]) throws
 }
 
 public protocol SyncOutboxRepository: Sendable {

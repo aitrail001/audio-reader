@@ -1,5 +1,4 @@
 import {
-  AUTH_PROVIDERS,
   type AuthService,
   type PasswordlessDecision,
   type PasswordlessLimiter,
@@ -113,7 +112,7 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<Respon
 
   switch (resolved.route) {
     case "/v1/auth/config":
-      return asHead(context.request, jsonResponse(authConfig(context.turnstileSiteKey)));
+      return asHead(context.request, jsonResponse(await authConfig(context)));
     case "/v1/auth/email-otp/request":
       return requestEmailOtp(context);
     case "/v1/auth/email-otp/verify":
@@ -145,10 +144,13 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<Respon
   }
 }
 
-function authConfig(turnstileSiteKey?: string): AuthConfig {
-  const key = turnstileSiteKey?.trim() ?? "";
+async function authConfig(context: AuthRouteContext): Promise<AuthConfig> {
+  const key = context.turnstileSiteKey?.trim() ?? "";
+  const configured = context.auth?.canIssueSessions()
+    ? await context.auth.authConfig()
+    : { providers: [] };
   return {
-    providers: [...AUTH_PROVIDERS],
+    providers: [...configured.providers],
     ...(key === "" ? {} : { turnstileSiteKey: key }),
   };
 }
@@ -309,6 +311,16 @@ async function authorizeOAuth(context: AuthRouteContext): Promise<Response> {
     if (result.code === "not_ready") {
       return issuanceUnavailable(context.requestId);
     }
+    if (result.code === "provider_disabled") {
+      const name = provider === "google" ? "Google" : "Microsoft";
+      return problemResponse({
+        status: 503,
+        code: "provider_not_enabled",
+        title: "Sign-in option unavailable",
+        detail: `${name} sign-in is not available right now. Use email sign-in or try again later.`,
+        traceId: context.requestId,
+      });
+    }
     return unauthorized(context.requestId, "The OAuth request is invalid.");
   }
   const payload: AuthOAuthAuthorizeResponse = {
@@ -416,6 +428,26 @@ async function exchangeOAuth(context: AuthRouteContext): Promise<Response> {
   if (!result.ok) {
     if (result.code === "not_ready") {
       return issuanceUnavailable(context.requestId);
+    }
+    if (result.code === "pkce_mismatch") {
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          component: "auth-routes",
+          message: "oauth_exchange",
+          requestId: context.requestId,
+          provider,
+          outcome: "pkce_mismatch",
+        }),
+      );
+      return problemResponse({
+        status: 409,
+        code: "oauth_session_changed",
+        title: "Restart sign-in",
+        detail:
+          "This sign-in attempt no longer matches this device. Start sign-in again, and close any older sign-in window.",
+        traceId: context.requestId,
+      });
     }
     return unauthorized(context.requestId, "The OAuth authorization code is invalid.");
   }

@@ -304,6 +304,7 @@ struct LocalVNextPersistenceTests {
         )
         var settings = StoredSettings.default
         settings.playbackRate = 1.25
+        settings.readAndPauseMode = true
 
         try store.saveAssistantResult(summary)
         try store.saveTranslationCheckpoint(checkpoint)
@@ -734,6 +735,25 @@ struct LocalVNextPersistenceTests {
         #expect(try store.loadKnownLemmas() == [newer])
     }
 
+    @Test("Known-lemma replacement keeps syncable tombstones and restores re-added words")
+    func knownLemmaReplacementKeepsTombstones() throws {
+        let fixture = temporaryDirectory().appendingPathComponent("known-lemma-tombstones.sqlite")
+        let store = LocalSQLiteStore(fileURL: fixture)
+        let forest = StoredKnownLemma(language: "en", form: "forest", updatedAt: Date(timeIntervalSince1970: 10))
+        let whale = StoredKnownLemma(language: "en", form: "whale", updatedAt: Date(timeIntervalSince1970: 10))
+
+        try store.saveKnownLemmas([forest, whale])
+        try store.saveKnownLemmas([whale])
+
+        #expect(try store.loadKnownLemmas() == [whale])
+        #expect(try store.loadDeletedKnownLemmas().map(\.form) == ["forest"])
+
+        try store.saveKnownLemmas([forest, whale])
+
+        #expect(try store.loadKnownLemmas().map(\.form) == ["forest", "whale"])
+        #expect(try store.loadDeletedKnownLemmas().isEmpty)
+    }
+
     @Test
     func rejectingTranslationIsAtomicAndDoesNotResurrectDerivedVocabulary() throws {
         let url = temporaryDirectory().appendingPathComponent("library-vNext.sqlite")
@@ -852,6 +872,27 @@ struct LocalVNextPersistenceTests {
         #expect(state.current.overlay == first)
         #expect(state.conflicts.map(\.overlay) == [conflict])
         #expect(try store.pendingMutations().isEmpty)
+    }
+
+    @Test
+    func equivalentCrossDeviceOverlayDoesNotCreateAConflict() throws {
+        let store = LocalSQLiteStore(fileURL: temporaryDirectory().appendingPathComponent("library-vNext.sqlite"))
+        let first = sampleOverlay(id: "overlay-first", deviceID: "device-a", text: "corrected")
+        var equivalent = sampleOverlay(id: "overlay-second", deviceID: "device-b", text: "corrected")
+        equivalent.provenance.createdAt = first.provenance.createdAt.addingTimeInterval(60)
+        equivalent.updatedAt = first.updatedAt.addingTimeInterval(60)
+
+        _ = try store.mergeTranscriptOverlay(first, revision: 3)
+        let outcome = try store.mergeTranscriptOverlay(equivalent, revision: 3)
+        let state = try #require(try store.loadTranscriptOverlayState(
+            chapterID: first.chapterID,
+            segmentID: first.segmentID
+        ))
+
+        #expect(outcome == .unchanged)
+        #expect(state.current.overlay == first)
+        #expect(state.conflicts.isEmpty)
+        #expect(try store.transcriptOverlayConflictCount() == 0)
     }
 
     @Test

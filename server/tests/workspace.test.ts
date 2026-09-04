@@ -7,14 +7,7 @@ import { describe, expect, it } from "vitest";
 const serverRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const expectedApps = ["api-worker", "job-worker", "admin-web"] as const;
-const expectedPackages = [
-  "contract",
-  "domain",
-  "database",
-  "auth",
-  "qwen",
-  "observability",
-] as const;
+const expectedPackages = ["contract", "database", "auth", "qwen"] as const;
 
 function readJson(path: string): unknown {
   return JSON.parse(readFileSync(path, "utf8")) as unknown;

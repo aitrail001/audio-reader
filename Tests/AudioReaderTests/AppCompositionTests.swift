@@ -27,7 +27,6 @@ struct AppCompositionTests {
         #expect(!appState.contains("?? Persistence.store"))
         #expect(!appState.contains("Persistence.store"))
         #expect(!appState.contains("Persistence.loadVocab"))
-        #expect(!appState.contains("Persistence.saveVocab"))
         #expect(!appState.contains("Persistence.loadKnownLemmas"))
         #expect(!appState.contains("Persistence.saveKnownLemmas"))
 
@@ -136,6 +135,24 @@ struct AppCompositionTests {
         #expect(state.vocab.map(\.word) == [token])
         #expect(state.knownLemmas.map(\.form) == [token])
         #expect(state.glosses.isEmpty)
+    }
+
+    @MainActor
+    @Test("Known words can be added manually with canonical persistence")
+    func addsCanonicalKnownWordManually() throws {
+        let knownLemmas = InMemoryKnownLemmaRepository()
+        let state = AppState(
+            composition: AppComposition(
+                vocabulary: InMemoryVocabularyRepository(),
+                knownLemmas: knownLemmas
+            ),
+            account: AccountSession.isolated()
+        )
+
+        #expect(state.addKnownWord("Done."))
+        #expect(!state.addKnownWord("   "))
+        #expect(state.knownLemmas.map(\.form) == ["do"])
+        #expect(try knownLemmas.loadKnownLemmas().map(\.form) == ["do"])
     }
 
     @MainActor

@@ -40,22 +40,16 @@ public struct StableID<Kind: Sendable>: StableDomainIdentifier {
     }
 }
 
-public enum UserIDTag: Sendable {}
-public enum DeviceIDTag: Sendable {}
 public enum BookIDTag: Sendable {}
 public enum AssetIDTag: Sendable {}
 public enum ChapterIDTag: Sendable {}
-public enum TranscriptRevisionIDTag: Sendable {}
 public enum VocabularyOccurrenceIDTag: Sendable {}
 public enum ReviewEventIDTag: Sendable {}
 public enum MutationIDTag: Sendable {}
 
-public typealias UserID = StableID<UserIDTag>
-public typealias DeviceID = StableID<DeviceIDTag>
 public typealias BookID = StableID<BookIDTag>
 public typealias AssetID = StableID<AssetIDTag>
 public typealias ChapterID = StableID<ChapterIDTag>
-public typealias TranscriptRevisionID = StableID<TranscriptRevisionIDTag>
 public typealias VocabularyOccurrenceID = StableID<VocabularyOccurrenceIDTag>
 public typealias ReviewEventID = StableID<ReviewEventIDTag>
 public typealias MutationID = StableID<MutationIDTag>

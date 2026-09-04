@@ -1,11 +1,11 @@
 import { createFakePrincipal } from "@audio-reader/auth";
 import { createFakeDatabaseClient } from "@audio-reader/database";
-import { REQUEST_ID_HEADER } from "@audio-reader/observability";
 import { createFakeQwenClient } from "@audio-reader/qwen";
 import { describe, expect, it, vi } from "vitest";
 import { createApiAppFromEnv, createTestApp, type WorkerEnv } from "./app";
 import { DEFAULT_MAX_BODY_BYTES, SYNC_PUSH_MAX_BODY_BYTES } from "./body";
 import { createFakeObjectStore } from "./object-store";
+import { REQUEST_ID_HEADER } from "./observability";
 
 const HEALTH_PATHS = ["/v1/health", "/healthz", "/readyz"] as const;
 

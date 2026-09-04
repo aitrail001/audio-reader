@@ -21,7 +21,6 @@ import {
   createUnavailableDatabaseClient,
   type DatabaseClient,
 } from "@audio-reader/database";
-import { logSecurityEvent, logUnhandledError, resolveRequestId } from "@audio-reader/observability";
 import { createFakeQwenClient, type QwenClient } from "@audio-reader/qwen";
 import { authMethodError, handleAuthRoute, isAuthPath } from "./auth-routes";
 import { DEFAULT_MAX_BODY_BYTES, SYNC_PUSH_MAX_BODY_BYTES, validateRequestBody } from "./body";
@@ -42,6 +41,7 @@ import {
 } from "./env";
 import { buildHealth, isServiceReady } from "./health";
 import { asHead, jsonResponse, problemResponse, withRequestId } from "./http";
+import { logSecurityEvent, logUnhandledError, resolveRequestId } from "./observability";
 import { createPostgresPasswordlessStore } from "./durable-stores";
 import {
   createMemoryIdempotencyStore,

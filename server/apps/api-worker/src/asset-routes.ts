@@ -281,7 +281,13 @@ async function createUpload(
       } catch (error) {
         if (error instanceof AssetReservationError) {
           if (error.code === "asset_book_deleted") {
-            return conflict(context.requestId, "Asset book is already deleted.");
+            return problemResponse({
+              status: 409,
+              code: "asset_book_deleted",
+              title: "Book deleted",
+              detail: "This book was deleted before its asset could be uploaded.",
+              traceId: context.requestId,
+            });
           }
           return problemResponse({
             status: 429,

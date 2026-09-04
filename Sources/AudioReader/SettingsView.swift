@@ -52,7 +52,6 @@ struct SettingsView: View {
         .navigationTitle("Settings")
 #if os(iOS)
         .navigationBarTitleDisplayMode(.large)
-        .navigationBarBackButtonHidden(true)
 #endif
         .toolbar {
 #if os(iOS)
@@ -286,14 +285,15 @@ struct SettingsView: View {
                 if let warning = state.credentialMigrationWarning {
                     migrationWarning(warning)
                 }
-                settingRow("Provider") {
-                    Picker("Provider", selection: $draft.llmProvider) {
-                        ForEach(LLMProvider.allCases) { provider in
-                            Text(provider.menuLabel).tag(provider.rawValue)
+                settingRow("Connection") {
+                    Picker("Connection", selection: draftLLMConnectionBinding) {
+                        ForEach(LLMConnectionChoice.availableOnCurrentPlatform) { connection in
+                            Text(connection.menuLabel).tag(connection)
                         }
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                    .accessibilityIdentifier("settings.llmConnection")
                 }
 
                 Divider().overlay(Palette.line)
@@ -313,6 +313,14 @@ struct SettingsView: View {
             }
         }
         .listRowBackground(Palette.panel)
+    }
+
+    /// Settings and the reader must expose the same platform-safe authentication choices.
+    private var draftLLMConnectionBinding: Binding<LLMConnectionChoice> {
+        Binding(
+            get: { LLMConnectionChoice.selected(in: draft) },
+            set: { $0.apply(to: &draft) }
+        )
     }
 
     private var managedQwenSettings: some View {
@@ -382,14 +390,17 @@ struct SettingsView: View {
                 alignedHelper("Run `grok login` in Terminal to manage this provider-owned session. AudioReader does not save the Grok Build credential.", muted: true)
             } else {
                 settingRow("Connection") {
-                    connectionStatus(APIKeyStore.sourceLabel, ready: APIKeyStore.isConfigured)
+                    connectionStatus(
+                        ProviderAPIKeyStore.sourceLabel(.grok),
+                        ready: ProviderAPIKeyStore.isConfigured(.grok)
+                    )
                 }
                 apiKeyRow(
                     label: "xAI API key",
                     placeholder: "Enter a new XAI_API_KEY",
                     key: $xAIKey,
                     removeSavedKey: $removeXAIKey,
-                    hasSavedKey: APIKeyStore.hasSavedKey
+                    hasSavedKey: ProviderAPIKeyStore.hasSavedKey(.grok)
                 )
                 settingRow("Endpoint") {
                     endpointField(
@@ -444,14 +455,17 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             helper("QwenCloud uses Responses with a required JSON-schema tool for Qwen chapter translation, and JSON Chat Completions for supported third-party models. Thinking can improve complex answers but adds latency and token usage.")
             settingRow("Connection") {
-                connectionStatus(QwenAPIKeyStore.sourceLabel, ready: QwenAPIKeyStore.isConfigured)
+                connectionStatus(
+                    ProviderAPIKeyStore.sourceLabel(.qwenCloud),
+                    ready: ProviderAPIKeyStore.isConfigured(.qwenCloud)
+                )
             }
             apiKeyRow(
                 label: "DashScope API key",
                 placeholder: "Enter a new DASHSCOPE_API_KEY",
                 key: $qwenKey,
                 removeSavedKey: $removeQwenKey,
-                hasSavedKey: QwenAPIKeyStore.hasSavedKey
+                hasSavedKey: ProviderAPIKeyStore.hasSavedKey(.qwenCloud)
             )
             settingRow("Endpoint") {
                 endpointField(
@@ -564,14 +578,17 @@ struct SettingsView: View {
                 alignedHelper("If needed, run `codex login` in Terminal and choose Sign in with ChatGPT. AudioReader prefers Codex's native executable and never reads or displays the cached OAuth tokens.", muted: true)
             } else {
                 settingRow("Connection") {
-                    connectionStatus(OpenAIAPIKeyStore.sourceLabel, ready: OpenAIAPIKeyStore.isConfigured)
+                    connectionStatus(
+                        ProviderAPIKeyStore.sourceLabel(.openAI),
+                        ready: ProviderAPIKeyStore.isConfigured(.openAI)
+                    )
                 }
                 apiKeyRow(
                     label: "OpenAI API key",
                     placeholder: "Enter a new OPENAI_API_KEY",
                     key: $openAIKey,
                     removeSavedKey: $removeOpenAIKey,
-                    hasSavedKey: OpenAIAPIKeyStore.hasSavedKey
+                    hasSavedKey: ProviderAPIKeyStore.hasSavedKey(.openAI)
                 )
                 settingRow("Endpoint") {
                     endpointField(
@@ -834,9 +851,15 @@ struct SettingsView: View {
 
     private func save() {
         let settingsSaved = Persistence.saveSettings(draft)
-        let xAIKeySaved = removeXAIKey ? APIKeyStore.clear() : APIKeyStore.save(xAIKey)
-        let qwenKeySaved = removeQwenKey ? QwenAPIKeyStore.clear() : QwenAPIKeyStore.save(qwenKey)
-        let openAIKeySaved = removeOpenAIKey ? OpenAIAPIKeyStore.clear() : OpenAIAPIKeyStore.save(openAIKey)
+        let xAIKeySaved = removeXAIKey
+            ? ProviderAPIKeyStore.clear(.grok)
+            : ProviderAPIKeyStore.save(xAIKey, for: .grok)
+        let qwenKeySaved = removeQwenKey
+            ? ProviderAPIKeyStore.clear(.qwenCloud)
+            : ProviderAPIKeyStore.save(qwenKey, for: .qwenCloud)
+        let openAIKeySaved = removeOpenAIKey
+            ? ProviderAPIKeyStore.clear(.openAI)
+            : ProviderAPIKeyStore.save(openAIKey, for: .openAI)
 
         guard settingsSaved else {
             saveFeedback = .init(message: "Settings could not be written to disk. Your changes were not applied.", succeeded: false)
@@ -855,8 +878,10 @@ struct SettingsView: View {
 
         if xAIKeySaved && qwenKeySaved && openAIKeySaved {
             saveFeedback = .init(message: "Settings saved. API keys are protected in the encrypted local vault.", succeeded: true)
-            if ![APIKeyStore.fileURL, QwenAPIKeyStore.fileURL, OpenAIAPIKeyStore.fileURL]
-                .contains(where: { FileManager.default.fileExists(atPath: $0.path) }) {
+            let legacyFilesRemain = [LLMProvider.grok, .qwenCloud, .openAI]
+                .compactMap { ProviderAPIKeyStore.legacyFileURL(for: $0) }
+                .contains { FileManager.default.fileExists(atPath: $0.path) }
+            if !legacyFilesRemain {
                 state.credentialMigrationWarning = nil
             }
         } else {

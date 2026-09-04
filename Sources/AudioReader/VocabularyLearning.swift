@@ -35,7 +35,7 @@ enum VocabularyListFilter: String, CaseIterable, Identifiable, Sendable {
         case .saved: "My list"
         case .due: "Due now"
         case .new: "New"
-        case .learning: "Learning"
+        case .learning: "Learning stage"
         case .review: "Review"
         }
     }
@@ -133,6 +133,72 @@ struct VocabularyFilterBook: Identifiable, Equatable, Sendable {
     let title: String
 }
 
+enum VocabularySortOrder: String, CaseIterable, Hashable, Identifiable, Sendable {
+    case recentlyAdded
+    case oldestAdded
+    case alphabetical
+    case mostCommon
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .recentlyAdded: "Recently added"
+        case .oldestAdded: "Oldest added"
+        case .alphabetical: "A–Z"
+        case .mostCommon: "Most common"
+        }
+    }
+
+    func sorted(_ entries: [VocabEntry]) -> [VocabEntry] {
+        entries.enumerated().sorted { indexedLHS, indexedRHS in
+            let lhs = indexedLHS.element
+            let rhs = indexedRHS.element
+            switch self {
+            case .recentlyAdded:
+                if lhs.addedAt != rhs.addedAt { return lhs.addedAt > rhs.addedAt }
+                return indexedLHS.offset < indexedRHS.offset
+            case .oldestAdded:
+                if lhs.addedAt != rhs.addedAt { return lhs.addedAt < rhs.addedAt }
+                return indexedLHS.offset < indexedRHS.offset
+            case .alphabetical:
+                break
+            case .mostCommon:
+                let lhsRank = Self.commonRank(form: lhs.studyForm, language: lhs.sourceLanguage)
+                let rhsRank = Self.commonRank(form: rhs.studyForm, language: rhs.sourceLanguage)
+                if lhsRank != rhsRank { return (lhsRank ?? .max) < (rhsRank ?? .max) }
+            }
+            let wordOrder = lhs.word.localizedStandardCompare(rhs.word)
+            if wordOrder != .orderedSame { return wordOrder == .orderedAscending }
+            return lhs.id < rhs.id
+        }.map(\.element)
+    }
+
+    func sorted(_ records: [KnownLemmaRecord]) -> [KnownLemmaRecord] {
+        records.sorted { lhs, rhs in
+            switch self {
+            case .recentlyAdded:
+                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+            case .oldestAdded:
+                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt < rhs.updatedAt }
+            case .alphabetical:
+                break
+            case .mostCommon:
+                let lhsRank = Self.commonRank(form: lhs.form, language: lhs.language)
+                let rhsRank = Self.commonRank(form: rhs.form, language: rhs.language)
+                if lhsRank != rhsRank { return (lhsRank ?? .max) < (rhsRank ?? .max) }
+            }
+            if lhs.language != rhs.language { return lhs.language < rhs.language }
+            return lhs.form.localizedStandardCompare(rhs.form) == .orderedAscending
+        }
+    }
+
+    private static func commonRank(form: String, language: String?) -> Int? {
+        if let language, !language.lowercased().hasPrefix("en") { return nil }
+        return CommonEnglishWordCatalog.shared.rank(for: form)
+    }
+}
+
 /// A single projection owns all filter-derived Words data so SwiftUI rendering
 /// never repeats full-library scans for labels, controls, and the row collection.
 struct VocabularyFilterProjection: Equatable, Sendable {
@@ -160,6 +226,7 @@ struct VocabularyFilterProjection: Equatable, Sendable {
         bookFilter: String,
         category: VocabCategory?,
         list: VocabularyListFilter = .all,
+        sort: VocabularySortOrder = .recentlyAdded,
         at date: Date
     ) -> VocabularyFilterProjection {
         // The synchronous entry point keeps model tests and non-UI callers simple.
@@ -170,6 +237,7 @@ struct VocabularyFilterProjection: Equatable, Sendable {
             bookFilter: bookFilter,
             category: category,
             list: list,
+            sort: sort,
             at: date,
             checkCancellation: neverCancelled
         )
@@ -181,6 +249,7 @@ struct VocabularyFilterProjection: Equatable, Sendable {
         bookFilter: String,
         category: VocabCategory?,
         list: VocabularyListFilter = .all,
+        sort: VocabularySortOrder = .recentlyAdded,
         at date: Date
     ) throws -> VocabularyFilterProjection {
         try build(
@@ -189,6 +258,7 @@ struct VocabularyFilterProjection: Equatable, Sendable {
             bookFilter: bookFilter,
             category: category,
             list: list,
+            sort: sort,
             at: date,
             checkCancellation: Task.checkCancellation
         )
@@ -200,6 +270,7 @@ struct VocabularyFilterProjection: Equatable, Sendable {
         bookFilter: String,
         category: VocabCategory?,
         list: VocabularyListFilter,
+        sort: VocabularySortOrder,
         at date: Date,
         checkCancellation: () throws -> Void
     ) rethrows -> VocabularyFilterProjection {
@@ -250,7 +321,7 @@ struct VocabularyFilterProjection: Equatable, Sendable {
         try checkCancellation()
         return VocabularyFilterProjection(
             books: books,
-            filtered: filtered,
+            filtered: sort.sorted(filtered),
             categoryCounts: categoryCounts,
             allCategoryCount: categoryCounts.values.reduce(0, +),
             learnListCount: entries.count(where: \.isInLearnList),
@@ -269,6 +340,23 @@ struct VocabularyFilterProjection: Equatable, Sendable {
             || entry.bookTitle.localizedCaseInsensitiveContains(query)
             || (entry.translation?.localizedCaseInsensitiveContains(query) ?? false)
             || (entry.definition?.localizedCaseInsensitiveContains(query) ?? false)
+    }
+}
+
+/// Prepares the potentially large Known collection away from SwiftUI rendering.
+struct VocabularyKnownWordProjection: Equatable, Sendable {
+    let filtered: [KnownLemmaRecord]
+
+    static func make(
+        records: [KnownLemmaRecord],
+        query: String,
+        sort: VocabularySortOrder
+    ) -> Self {
+        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let matches = records.filter {
+            search.isEmpty || $0.form.localizedCaseInsensitiveContains(search)
+        }
+        return Self(filtered: sort.sorted(matches))
     }
 }
 
@@ -309,6 +397,36 @@ struct VocabularyPage: Equatable, Sendable {
             result.append(digit)
         }
         return result
+    }
+}
+
+struct VocabularyKnownWordPage: Equatable, Sendable {
+    static let defaultSize = VocabularyPage.defaultSize
+
+    let records: [KnownLemmaRecord]
+    let index: Int
+    let pageCount: Int
+    let lowerBound: Int
+    let upperBound: Int
+    let totalCount: Int
+
+    init(records: [KnownLemmaRecord], requestedIndex: Int, size: Int = defaultSize) {
+        precondition(size > 0)
+        totalCount = records.count
+        pageCount = records.isEmpty ? 0 : (records.count + size - 1) / size
+        index = pageCount == 0 ? 0 : min(max(0, requestedIndex), pageCount - 1)
+        lowerBound = min(index * size, records.count)
+        upperBound = min(lowerBound + size, records.count)
+        self.records = Array(records[lowerBound..<upperBound])
+    }
+
+    var rangeDescription: String {
+        guard totalCount > 0 else { return "0 of 0" }
+        return "\(Self.grouped(lowerBound + 1))–\(Self.grouped(upperBound)) of \(Self.grouped(totalCount))"
+    }
+
+    private static func grouped(_ value: Int) -> String {
+        value.formatted(.number.grouping(.automatic))
     }
 }
 

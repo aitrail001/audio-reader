@@ -37,6 +37,7 @@ struct PlatformParityContractTests {
         let learningDashboard = try source("Sources/AudioReader/VocabularyLearningDashboard.swift")
         let vocabularyLearning = try source("Sources/AudioReader/VocabularyLearning.swift")
         let vocabularyCanonicalization = try source("Sources/AudioReader/VocabularyCanonicalization.swift")
+        let commonWords = try source("Sources/AudioReader/CommonEnglishWords.swift")
         let reviewSetupView = try source("Sources/AudioReader/VocabularyReviewSetupView.swift")
         let reviewView = try source("Sources/AudioReader/VocabularyReviewView.swift")
         let appState = try source("Sources/AudioReader/AppState.swift")
@@ -49,6 +50,10 @@ struct PlatformParityContractTests {
         #expect(vocabularyView.contains("VocabularyReviewSetupView("))
         #expect(vocabularyView.contains("VocabularyReviewView(state: state, entryIDs: request.entryIDs)"))
         #expect(vocabularyView.contains("VocabularyLearningDashboard("))
+        #expect(vocabularyView.contains("CommonEnglishWordsMenu("))
+        #expect(commonWords.contains(".confirmationDialog("))
+        #expect(commonWords.contains("words.commonWords"))
+        #expect(!commonWords.contains("#if os("))
         #expect(vocabularyView.contains("VocabularyWorkspaceSection"))
         #expect(vocabularyView.contains("words.section.\\(section.rawValue)"))
         #expect(vocabularyView.contains("case .today:"))
@@ -91,6 +96,7 @@ struct PlatformParityContractTests {
         #expect(vocabularyView.contains(".navigationTitle(\"Vocabulary\")"))
         #expect(vocabularyView.contains(".navigationBarTitleDisplayMode(.inline)"))
         #expect(vocabularyView.contains("VocabularyListFilter.allCases"))
+        #expect(vocabularyView.contains("Learning stage is based on review progress."))
         #expect(vocabularyView.contains("My list is the list you control."))
         #expect(reviewView.contains("entry.bookTitle"))
         #expect(reviewView.contains("entry.chapterTitle"))
@@ -136,14 +142,32 @@ struct PlatformParityContractTests {
         let vocabularyView = try source("Sources/AudioReader/VocabularyView.swift")
         let learningDashboard = try source("Sources/AudioReader/VocabularyLearningDashboard.swift")
 
-        #expect(vocabularyView.contains("private var categoryFilters: some View"))
-        #expect(vocabularyView.contains("ScrollView(.horizontal)"))
+        #expect(vocabularyView.contains("private var libraryScopePicker: some View"))
+        #expect(vocabularyView.contains("private var vocabularyFilterMenu: some View"))
         #expect(vocabularyView.contains("private var compactPaginationControls: some View"))
+        #expect(vocabularyView.contains("VocabularySortOrder.allCases"))
+        #expect(vocabularyView.contains("VocabularyDisplayStyle.allCases"))
+        #expect(vocabularyView.contains("VocabularyKnownWordPage("))
         #expect(vocabularyView.contains("words.pageRange"))
         #expect(vocabularyView.contains("words.pageLast"))
-        #expect(vocabularyView.contains("words.card.\\(entry.id)"))
+        #expect(vocabularyView.contains("words.row.\\(entry.id)"))
         #expect(learningDashboard.contains("words.todayCard.\\(entry.id)"))
         #expect(vocabularyView.contains("#if os(iOS)\n        .frame(minWidth: 44, minHeight: 44)"))
+    }
+
+    @Test("Words list management stays shared across macOS and iPad")
+    func vocabularyListManagementIsPlatformNeutral() throws {
+        let vocabularyView = try source("Sources/AudioReader/VocabularyView.swift")
+        let library = try section(
+            in: vocabularyView,
+            from: "    private var vocabularyLibrary: some View",
+            to: "    private func deleteSwipeButton"
+        )
+
+        #expect(library.contains("libraryScopePicker"))
+        #expect(library.contains("knownWordList"))
+        #expect(library.contains("vocabularyEntryList"))
+        #expect(!library.contains("#if os("))
     }
 
     @Test("Learn lists remain manageable when no cards are due on both platforms")
@@ -169,6 +193,8 @@ struct PlatformParityContractTests {
     @Test("Deep Reading playback logic remains shared and platform-neutral")
     func deepReadingLogicIsShared() throws {
         let appState = try source("Sources/AudioReader/AppState.swift")
+        let playerEngine = try source("Sources/AudioReader/PlayerEngine.swift")
+        let playerView = try source("Sources/AudioReader/PlayerView.swift")
         let sharedLogic = try section(
             in: appState,
             from: "    func setDeepReadingMode(_ enabled: Bool)",
@@ -180,27 +206,61 @@ struct PlatformParityContractTests {
         #expect(sharedLogic.contains("func continueDeepReading()"))
         #expect(sharedLogic.contains("func tickPlaybackModes()"))
         #expect(sharedLogic.contains("func resetDeepReadingAfterSeek()"))
+        #expect(sharedLogic.contains("func selectPlaybackAnchor("))
+        #expect(playerView.contains("state.selectPlaybackAnchor("))
+        #expect(playerView.contains("word: word"))
+        #expect(playerView.components(separatedBy: "reader.playback.toggle").count - 1 == 2)
+        #expect(playerEngine.contains("pendingSeekToken"))
+        #expect(playerEngine.contains("message=playback.seek"))
     }
 
-    @Test("Both platforms expose Listen First and a continue action")
+    @Test("Both platforms expose sentence-paced modes and a continue action")
     func bothPlatformsExposeDeepReadingControls() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
         let app = try source("Sources/AudioReader/AudioReaderApp.swift")
 
-        #expect(playerView.components(separatedBy: "Toggle(isOn: deepReadingBinding)").count - 1 == 2)
+        #expect(playerView.contains("Toggle(\"Listen First\", isOn: deepReadingBinding)"))
+        #expect(playerView.contains("Toggle(\"Read & Pause\", isOn: readAndPauseBinding)"))
+        #expect(playerView.components(separatedBy: "readingPaceMenu").count - 1 >= 2)
         #expect(playerView.components(separatedBy: "Button { state.continueDeepReading() }").count - 1 == 2)
         #expect(playerView.contains(".accessibilityLabel(\"Listen First\")"))
+        #expect(playerView.contains(".accessibilityLabel(\"Reading pace\")"))
         #expect(playerView.contains(".accessibilityLabel(\"Continue with next sentence\")"))
         #expect(playerView.contains(".keyboardShortcut(.return, modifiers: [.command])"))
 
         #expect(app.contains("Toggle(\"Listen First\""))
+        #expect(app.contains("Toggle(\"Read & Pause\""))
         #expect(app.contains(".keyboardShortcut(\"d\", modifiers: [.command])"))
         #expect(app.contains("Button(\"Continue with next sentence\") { state.continueDeepReading() }"))
         #expect(app.contains(".keyboardShortcut(.return, modifiers: [.command])"))
     }
 
+    @Test("iPad book selection keeps list and detail text explicitly readable")
+    func iPadBookSelectionKeepsTextReadable() throws {
+        let iPadRoot = try source("Sources/AudioReader/IPadRootView.swift")
+
+        #expect(iPadRoot.contains("accessibilityIdentifier(\"library.book.\\(book.id)\")"))
+        #expect(iPadRoot.contains("accessibilityIdentifier(\"library.bookTitle.\\(book.id)\")"))
+        #expect(iPadRoot.contains(".listRowBackground(isSelected ? Palette.terracotta.opacity(0.16) : Palette.panel)"))
+        #expect(iPadRoot.contains(".foregroundStyle(Palette.ink)"))
+    }
+
+    @Test("iPad explains the system dictionary boundary and offers contextual meaning")
+    func iPadDictionaryMeaningFallbackIsExplicit() throws {
+        let playerView = try source("Sources/AudioReader/PlayerView.swift")
+
+        #expect(playerView.contains("private enum WordInspectorSection"))
+        #expect(playerView.contains("@State private var selectedSection: WordInspectorSection = .dictionary"))
+        #expect(playerView.contains("Picker(\"Lookup section\", selection: $selectedSection)"))
+        #expect(playerView.contains(".pickerStyle(.segmented)"))
+        #expect(playerView.contains("Text(\"Dictionary\").tag(WordInspectorSection.dictionary)"))
+        #expect(playerView.contains("Text(\"Learning\").tag(WordInspectorSection.learning)"))
+        #expect(playerView.contains("iPadOS does not expose Apple Dictionary text to other apps"))
+        #expect(playerView.contains("state.addVocabAndRequestMeaning(word: word, segment: seg)"))
+    }
+
     @MainActor
-    @Test("Deep Reading and sentence loop stay mutually exclusive")
+    @Test("Sentence-paced modes and sentence loop stay mutually exclusive")
     func readingModesStayMutuallyExclusive() {
         let state = AppState()
 
@@ -211,6 +271,14 @@ struct PlatformParityContractTests {
 
         state.setSentenceLoop(true)
         #expect(!state.settings.deepReadingMode)
+        #expect(state.loopSentence)
+
+        state.setReadAndPauseMode(true)
+        #expect(state.settings.readAndPauseMode)
+        #expect(!state.loopSentence)
+
+        state.setSentenceLoop(true)
+        #expect(!state.settings.readAndPauseMode)
         #expect(state.loopSentence)
     }
 
@@ -328,6 +396,16 @@ struct PlatformParityContractTests {
         #expect(credentials.contains(".posixPermissions"))
         #expect(credentials.contains(".protectionKey"))
         #expect(!credentials.contains("KeychainCredentialVaultKeyProvider"))
+        #expect(credentials.contains("static func legacyFileURL(for provider: LLMProvider)"))
+        #expect(credentials.contains("xai-api-key"))
+        #expect(credentials.contains("dashscope-api-key"))
+        #expect(credentials.contains("openai-api-key"))
+        #expect(!client.contains("xai-api-key"))
+        #expect(!client.contains("dashscope-api-key"))
+        #expect(!client.contains("openai-api-key"))
+        #expect(!client.contains("enum APIKeyStore"))
+        #expect(!client.contains("enum QwenAPIKeyStore"))
+        #expect(!client.contains("enum OpenAIAPIKeyStore"))
         #expect(!appStateBootSection.contains("refreshGrokModels"))
         #expect(!appStateBootSection.contains("refreshQwenModels"))
         #expect(!appStateBootSection.contains("refreshOpenAIModels"))
@@ -379,7 +457,7 @@ struct PlatformParityContractTests {
         #expect(iPadRoot.contains("private var settingsSplit"))
         #expect(iPadRoot.contains("private var librarySplit"))
         #expect(iPadRoot.contains(".navigationSplitViewStyle(.automatic)"))
-        #expect(settingsView.contains("navigationBarBackButtonHidden(true)"))
+        #expect(!settingsView.contains("navigationBarBackButtonHidden(true)"))
         #expect(appState.contains("func presentSettings()"))
         #expect(appState.contains("tab = .settings"))
         #expect(appState.contains("AUDIOREADER_OPEN_SETTINGS"))
@@ -496,6 +574,45 @@ struct PlatformParityContractTests {
         #expect(!dictionarySummaryView.contains("#if os("))
     }
 
+    @Test("iPad system dictionary opens from AudioReader's lookup sheet")
+    func ipadSystemDictionaryAvoidsEmbeddedControllerLayoutCycles() throws {
+        let playerView = try source("Sources/AudioReader/PlayerView.swift")
+        let dictionaryHTMLView = try source("Sources/AudioReader/DictionaryHTMLView.swift")
+        let dictionaryLookup = try source("Sources/AudioReader/DictionaryLookup.swift")
+
+        #expect(!playerView.contains("SystemDictionaryView(term: word.text)"))
+        #expect(!dictionaryHTMLView.contains("struct SystemDictionaryView"))
+        #expect(playerView.contains("DictionaryLookup.lookUpInDictionary(word.text)"))
+        #expect(!playerView.contains("state.inspect(word: word, in: segment)\n#if os(iOS)\n                                DictionaryLookup.lookUpInDictionary(word.text)"))
+        #expect(playerView.contains(".sheet(item: iPadAuxiliarySheetBinding)"))
+        #expect(playerView.contains(".presentationDetents([.medium])"))
+        #expect(!playerView.contains(".presentationDetents([.medium, .large])"))
+        #expect(playerView.contains(".accessibilityIdentifier(\"reader.lookup.meaning\")"))
+        #expect(dictionaryLookup.contains("controller.modalPresentationStyle = .pageSheet"))
+        #expect(dictionaryLookup.contains("activationState == .foregroundActive"))
+        #expect(dictionaryLookup.contains("sheet.detents = [.medium(), .large()]"))
+        #expect(!dictionaryLookup.contains("controller.modalPresentationStyle = .fullScreen"))
+        #expect(playerView.contains("Open Apple Dictionary"))
+    }
+
+    @Test("Reader distinguishes playback and lookup word highlights")
+    func readerWordHighlightsHaveSeparateSemantics() throws {
+        let playerView = try source("Sources/AudioReader/PlayerView.swift")
+        let wordToken = try section(
+            in: playerView,
+            from: "private struct WordToken: View",
+            to: "private struct WordInspector: View"
+        )
+
+        #expect(wordToken.contains("let isPlaybackCurrent: Bool"))
+        #expect(wordToken.contains("let isLookupFocused: Bool"))
+        #expect(playerView.contains("lookupWordID: state.selectedWord?.id"))
+        #expect(wordToken.contains("isPlaybackCurrent ? Palette.gold"))
+        #expect(wordToken.contains("isLookupFocused ? Palette.terracotta"))
+        #expect(wordToken.contains("current audio word"))
+        #expect(wordToken.contains("selected for lookup"))
+    }
+
     @Test("Both platforms share the selected audiobook language end to end")
     func sharesAudiobookLanguage() throws {
         let settingsView = try source("Sources/AudioReader/SettingsView.swift")
@@ -568,6 +685,20 @@ struct PlatformParityContractTests {
         #expect(!playerView.contains("Picker(\"Provider\", selection: $state.settings.llmProvider)"))
     }
 
+    @Test("Settings uses the same platform-safe AI connection list as the reader")
+    func settingsExposePlatformSafeConnections() throws {
+        let settingsView = try source("Sources/AudioReader/SettingsView.swift")
+        let providerSection = try section(
+            in: settingsView,
+            from: "    private var providerSection: some View",
+            to: "    private var managedQwenSettings: some View"
+        )
+
+        #expect(providerSection.contains("Picker(\"Connection\", selection: draftLLMConnectionBinding)"))
+        #expect(providerSection.contains("ForEach(LLMConnectionChoice.availableOnCurrentPlatform)"))
+        #expect(!providerSection.contains("LLMProvider.allCases"))
+    }
+
     @Test("Chapter summary drafts share review, persistence, and background-job behavior")
     func chapterSummaryReviewIsShared() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
@@ -601,6 +732,35 @@ struct PlatformParityContractTests {
         #expect(pendingActions.contains("Button(\"Reject\")"))
         #expect(pendingActions.contains("Button(\"Retranslate\")"))
         #expect(!pendingActions.contains("#if os("))
+
+        let acceptedActions = try section(
+            in: playerView,
+            from: "                                } else if gloss.status == .accepted {",
+            to: "                            } else {"
+        )
+        #expect(acceptedActions.contains("HStack(spacing: 10)"))
+        #expect(acceptedActions.contains("Button(\"Edit\")"))
+        #expect(acceptedActions.contains("Button(\"Retranslate\")"))
+
+        let compactSentenceActions = try section(
+            in: playerView,
+            from: "    private func compactTranslationActions",
+            to: "    private func beginEditingTranslation"
+        )
+        #expect(compactSentenceActions.contains("Button(\"Edit\")"))
+        #expect(compactSentenceActions.contains("Button(\"Retranslate\")"))
+        #expect(!compactSentenceActions.contains("Menu(\"More\")"))
+        #expect(playerView.contains(".accessibilityIdentifier(\"reader.translation.edit\")"))
+        #expect(playerView.contains(".accessibilityIdentifier(\"reader.translation.retranslate\")"))
+
+        let sentenceTranslationBlock = try section(
+            in: playerView,
+            from: "    private func translationBlock",
+            to: "    private func translationStatus"
+        )
+        let actionPosition = try #require(sentenceTranslationBlock.range(of: "if let status = presentation.status"))
+        let glossPosition = try #require(sentenceTranslationBlock.range(of: "if let glossText = presentation.glossText"))
+        #expect(actionPosition.lowerBound < glossPosition.lowerBound)
     }
 
     @Test("Chapter summaries use one structured presentation on both platforms")
@@ -693,7 +853,7 @@ struct PlatformParityContractTests {
         #expect(playerView.contains("PlatformTap("))
         #expect(playerView.contains("action: toggleDictation"))
         #expect(!playerView.contains("Button(action: toggleDictation)"))
-        #expect(playerView.contains("MainActorAction { onSeek(word.start) }"))
+        #expect(playerView.contains("MainActorAction { onInspect(word) }"))
         #expect(!interaction.contains("@unchecked Sendable"))
         #expect(!interaction.contains("nonisolated(unsafe)"))
         #expect(playerView.contains("\"Stop voice input\""))
@@ -727,6 +887,8 @@ struct PlatformParityContractTests {
         let macLibraryView = try source("Sources/AudioReader/LibraryView.swift")
         let macAppleBooksView = try source("Sources/AudioReader/MacAppleBooksView.swift")
         let macAppleBooksLibrary = try source("Sources/AudioReader/MacAppleBooksLibrary.swift")
+        let importService = try source("Sources/AudioReader/AudiobookImportService.swift")
+        let libraryScanner = try source("Sources/AudioReader/LibraryScanner.swift")
         let iPadRoot = try source("Sources/AudioReader/IPadRootView.swift")
         let iPadImports = try source("Sources/AudioReader/IPadImports.swift")
 
@@ -741,6 +903,9 @@ struct PlatformParityContractTests {
         #expect(macAppleBooksLibrary.contains("func addCompanion("))
         #expect(macAppleBooksLibrary.contains("required: MacAppleBooksCompanionRequirement"))
         #expect(macAppleBooksLibrary.contains("reason=capability_already_present"))
+        #expect(macRoot.contains("to: book,\n                        in: libraryRoot"))
+        #expect(importService.contains("to book: Book,\n        in root: URL"))
+        #expect(libraryScanner.contains(".audioreader-book-id"))
 
         #expect(iPadRoot.contains("case appleBooksExport(bookID: String)"))
         #expect(iPadRoot.contains("companionTargetBookID"))
@@ -749,6 +914,8 @@ struct PlatformParityContractTests {
         #expect(iPadRoot.contains("Button(\"Apple Books Export…\")"))
         #expect(iPadRoot.contains("library.addDeviceCompanion."))
         #expect(iPadImports.contains("func addCompanion("))
+        #expect(iPadImports.contains("to book: Book,"))
+        #expect(iPadRoot.contains("to: book\n                    )"))
         #expect(iPadRoot.contains("IPadEPUBImportPolicy.supportedEquivalent"))
     }
 

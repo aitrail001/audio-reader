@@ -418,6 +418,16 @@ enum LegacyVaultCredentialMigration {
 enum ProviderAPIKeyStore {
     static let savedCredentialSourceLabel = "Ready — API key stored in encrypted local vault"
 
+    static func legacyFileURL(for provider: LLMProvider) -> URL? {
+        let fileName: String? = switch provider {
+        case .grok: "xai-api-key"
+        case .qwenCloud: "dashscope-api-key"
+        case .openAI: "openai-api-key"
+        case .managedQwen, .appleFoundation: nil
+        }
+        return fileName.map { Persistence.root.appendingPathComponent($0) }
+    }
+
     static func load(_ provider: LLMProvider) -> String? {
         guard provider.usesRemoteAPI, !provider.environmentKey.isEmpty else { return nil }
         if let environmentValue = ProcessInfo.processInfo.environment[provider.environmentKey],
@@ -445,7 +455,14 @@ enum ProviderAPIKeyStore {
         guard provider.usesRemoteAPI else { return false }
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return true }
-        return EncryptedFileCredentialVault.shared.save(trimmed, account: provider.rawValue)
+        guard EncryptedFileCredentialVault.shared.save(trimmed, account: provider.rawValue) else {
+            return false
+        }
+        // Delete the plaintext predecessor only after the encrypted vault accepted its replacement.
+        if let fileURL = legacyFileURL(for: provider) {
+            try? FileManager.default.removeItem(at: fileURL)
+        }
+        return true
     }
 
     @discardableResult
@@ -483,11 +500,11 @@ enum ProviderAPIKeyStore {
         )
     }
 
-    static func migrateLegacyCredentials(
-        fileURL: URL,
-        for provider: LLMProvider
-    ) -> [LegacyCredentialMigrationResult] {
-        [
+    static func migrateLegacyCredentials(for provider: LLMProvider) -> [LegacyCredentialMigrationResult] {
+        guard let fileURL = legacyFileURL(for: provider) else {
+            return [migrateLegacyKeychain(provider)]
+        }
+        return [
             migrateLegacyKeychain(provider),
             migrateLegacyFile(fileURL, for: provider)
         ]

@@ -155,6 +155,77 @@ struct VocabularyPerformanceTests {
         #expect(last.rangeDescription == "7,121–7,139 of 7,139")
     }
 
+    @Test("Vocabulary sorting supports alphabetic, added-time, and real frequency order")
+    func vocabularySortOrders() throws {
+        let ranked = CommonEnglishWordCatalog.shared.headwords(first: 200)
+        let mostCommon = try #require(ranked.first)
+        let lessCommon = try #require(ranked.last)
+        let early = entry(id: "early", word: lessCommon, addedAt: Date(timeIntervalSince1970: 10))
+        let late = entry(id: "late", word: mostCommon, addedAt: Date(timeIntervalSince1970: 30))
+        let unranked = entry(id: "middle", word: "zyzzyva", addedAt: Date(timeIntervalSince1970: 20))
+        let alphabetic = [
+            entry(id: "zebra", word: "Zebra"),
+            entry(id: "apple", word: "apple"),
+            entry(id: "middle-word", word: "middle"),
+        ]
+
+        func ids(_ sort: VocabularySortOrder) -> [String] {
+            VocabularyFilterProjection.make(
+                entries: [early, late, unranked],
+                query: "",
+                bookFilter: "all",
+                category: nil,
+                sort: sort,
+                at: Date(timeIntervalSince1970: 100)
+            ).filtered.map(\.id)
+        }
+
+        let alphabeticProjection = VocabularyFilterProjection.make(
+            entries: alphabetic,
+            query: "",
+            bookFilter: "all",
+            category: nil,
+            sort: .alphabetical,
+            at: Date(timeIntervalSince1970: 100)
+        )
+
+        #expect(alphabeticProjection.filtered.map(\.id) == ["apple", "middle-word", "zebra"])
+        #expect(ids(.recentlyAdded) == ["late", "middle", "early"])
+        #expect(ids(.oldestAdded) == ["early", "middle", "late"])
+        #expect(ids(.mostCommon) == ["late", "early", "middle"])
+    }
+
+    @Test("Known-word filtering, sorting, and paging stay bounded for a large collection")
+    func knownWordProjectionAndPages() throws {
+        let ranked = CommonEnglishWordCatalog.shared.headwords(first: 200)
+        let mostCommon = try #require(ranked.first)
+        let lessCommon = try #require(ranked.last)
+        let records = (0..<205).map { index in
+            KnownLemmaRecord(
+                language: "en",
+                form: "term-\(index)",
+                updatedAt: Date(timeIntervalSince1970: Double(index))
+            )
+        } + [
+            KnownLemmaRecord(language: "en", form: lessCommon, updatedAt: .distantPast),
+            KnownLemmaRecord(language: "en", form: mostCommon, updatedAt: .distantFuture),
+        ]
+
+        let common = VocabularyKnownWordProjection.make(records: records, query: "", sort: .mostCommon)
+        let recent = VocabularyKnownWordProjection.make(records: records, query: "term-20", sort: .recentlyAdded)
+        let firstPage = VocabularyKnownWordPage(records: common.filtered, requestedIndex: 0)
+        let lastPage = VocabularyKnownWordPage(records: common.filtered, requestedIndex: .max)
+
+        #expect(common.filtered.prefix(2).map(\.form) == [mostCommon, lessCommon])
+        #expect(recent.filtered.first?.form == "term-204")
+        #expect(firstPage.records.count == VocabularyKnownWordPage.defaultSize)
+        #expect(firstPage.rangeDescription == "1–80 of 207")
+        #expect(firstPage.pageCount == 3)
+        #expect(lastPage.index == 2)
+        #expect(lastPage.records.count == 47)
+        #expect(lastPage.rangeDescription == "161–207 of 207")
+    }
+
     @Test("Review setup summarizes every scope in one reusable projection")
     func reviewSetupProjection() {
         let now = Date(timeIntervalSince1970: 2_000_000)

@@ -37,10 +37,6 @@ const GOTRUE_PROVIDERS: Record<OAuthProvider, string> = {
 
 const BLOCKED_ACCOUNT_STATUSES = new Set(["suspended", "deletion_pending", "deleted"]);
 
-type IdentityAdminProbe = AuthIdentityStore & {
-  hasAnyAdminRole?: () => Promise<boolean>;
-};
-
 export function createHostedAuthService(options: HostedAuthServiceOptions): AuthService {
   const now = options.now ?? (() => new Date());
   const fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
@@ -54,8 +50,8 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
       allowLocalIssuance: false,
     });
 
-  // Admin comes from admin_roles, not the JWT. Bootstrap email may insert the
-  // first operator row once; it must not re-grant after an operator revoke.
+  // Admin comes from admin_roles, not the JWT. The configured bootstrap identity
+  // receives one superadmin grant, including upgrades from legacy operator grants.
   async function principalFromProfile(
     profile: ProductProfile,
     subject: string,
@@ -68,11 +64,18 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
       adminRoles = admin ? ["operator"] : [];
     }
     const bootstrap = options.adminBootstrapEmail?.trim().toLowerCase() ?? "";
-    const bootstrapMatch =
-      !admin && bootstrap !== "" && profile.email.trim().toLowerCase() === bootstrap;
+    const bootstrapMatch = bootstrap !== "" && profile.email.trim().toLowerCase() === bootstrap;
     if (bootstrapMatch && identity !== undefined) {
-      admin = await grantBootstrapAdmin(identity, profile.accountId, requestId);
-      if (admin) adminRoles = ["operator"];
+      const granted = await grantBootstrapAdmin(
+        identity,
+        profile.accountId,
+        requestId,
+        adminRoles.includes("operator"),
+      );
+      if (granted) {
+        admin = true;
+        adminRoles = [...new Set([...adminRoles, "superadmin" as const])];
+      }
     }
     return {
       subject,
@@ -88,21 +91,30 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
     store: AuthIdentityStore,
     accountId: string,
     requestId: string,
+    isLegacyAdmin: boolean,
   ): Promise<boolean> {
-    const probe: IdentityAdminProbe = store;
-    let anyAdmin: boolean;
+    let conflictingAdmin: boolean;
+    let priorSuperadmin: boolean;
     try {
-      anyAdmin = probe.hasAnyAdminRole === undefined ? true : await probe.hasAnyAdminRole();
+      conflictingAdmin =
+        (await store.hasAnyAdminRole?.(isLegacyAdmin ? "superadmin" : undefined)) ?? true;
+      priorSuperadmin = (await store.hasAdminRoleHistory?.(accountId, "superadmin")) ?? true;
     } catch {
-      anyAdmin = true;
+      conflictingAdmin = true;
+      priorSuperadmin = true;
     }
-    if (anyAdmin) {
+    // Multiple superadmins are valid; this guard only prevents late automatic bootstrap.
+    if (conflictingAdmin || priorSuperadmin) {
       logAuthEvent({
         message: "admin_bootstrap_grant",
         requestId,
         accountId,
         outcome: "skipped",
-        reason: "admins_exist",
+        reason: priorSuperadmin
+          ? "grant_history_exists"
+          : isLegacyAdmin
+            ? "superadmin_exists"
+            : "admins_exist",
       });
       return false;
     }
@@ -110,7 +122,11 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
       return false;
     }
     try {
-      await store.grantAdminRole(accountId);
+      await store.grantAdminRole(accountId, "superadmin");
+      const activeRoles = await store.adminRoles?.(accountId);
+      if (activeRoles?.includes("superadmin") !== true) {
+        throw new Error("bootstrap superadmin grant was not persisted");
+      }
       logAuthEvent({
         message: "admin_bootstrap_grant",
         requestId,
@@ -238,9 +254,46 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
     return identity.ensureProfile({ userId: principal.subject, email: principal.email });
   }
 
+  // GoTrue owns social-provider availability. Read its public settings with the
+  // anon credential so the product API never advertises a disabled provider.
+  async function enabledOAuthProviders(): Promise<Set<OAuthProvider> | undefined> {
+    const result = await gotrue("/settings", { method: "GET" });
+    if (result.status < 200 || result.status >= 300 || !isRecord(result.body)) {
+      logAuthEvent({
+        message: "hosted_auth_provider_settings",
+        requestId: "auth",
+        outcome: "unavailable",
+        reason: `gotrue_${String(result.status)}`,
+      });
+      return undefined;
+    }
+    const external = result.body.external;
+    if (!isRecord(external)) {
+      logAuthEvent({
+        message: "hosted_auth_provider_settings",
+        requestId: "auth",
+        outcome: "invalid_response",
+      });
+      return undefined;
+    }
+    return new Set(
+      (["google", "microsoft"] as const).filter((provider) => {
+        const gotrueProvider = GOTRUE_PROVIDERS[provider];
+        return external[gotrueProvider] === true;
+      }),
+    );
+  }
+
   return {
-    authConfig() {
-      return inner.authConfig();
+    async authConfig() {
+      const enabled = await enabledOAuthProviders();
+      return {
+        providers: [
+          ...(enabled?.has("google") === true ? [{ id: "google" as const }] : []),
+          ...(enabled?.has("microsoft") === true ? [{ id: "microsoft" as const }] : []),
+          { id: "email_otp" as const },
+        ],
+      };
     },
 
     canIssueSessions() {
@@ -333,8 +386,21 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
       return { ok: false, code: "invalid_otp" };
     },
 
-    authorizeOAuth(input) {
+    async authorizeOAuth(input) {
       try {
+        const enabled = await enabledOAuthProviders();
+        if (enabled === undefined) {
+          return { ok: false as const, code: "not_ready" as const };
+        }
+        if (!enabled.has(input.provider)) {
+          logAuthEvent({
+            message: "hosted_oauth_authorize",
+            requestId: "auth",
+            outcome: "provider_disabled",
+            reason: input.provider,
+          });
+          return { ok: false as const, code: "provider_disabled" as const };
+        }
         // Keep redirect_to exactly as allow-listed (no extra query). GoTrue
         // otherwise falls back to Site URL (default http://localhost:3000).
         new URL(input.redirectUri);
@@ -346,12 +412,12 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
         if (input.provider === "microsoft") {
           authorizationUrl.searchParams.set("scopes", "email");
         }
-        return Promise.resolve({
+        return {
           ok: true as const,
           value: { authorizationUrl: authorizationUrl.toString(), state: input.state },
-        });
+        };
       } catch {
-        return Promise.resolve({ ok: false as const, code: "invalid_oauth" as const });
+        return { ok: false as const, code: "invalid_oauth" as const };
       }
     },
 
@@ -360,7 +426,6 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
         method: "POST",
         body: {
           auth_code: input.code,
-          code: input.code,
           code_verifier: input.codeVerifier,
         },
       });
@@ -368,6 +433,19 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
         return { ok: false, code: "not_ready" };
       }
       if (result.status >= 400) {
+        const upstreamCode =
+          isRecord(result.body) && typeof result.body.error_code === "string"
+            ? result.body.error_code
+            : `gotrue_${String(result.status)}`;
+        logAuthEvent({
+          message: "hosted_oauth_exchange",
+          requestId: "auth",
+          outcome: "rejected",
+          reason: upstreamCode,
+        });
+        if (upstreamCode === "bad_code_verifier") {
+          return { ok: false, code: "pkce_mismatch" };
+        }
         return { ok: false, code: "invalid_oauth" };
       }
       return sessionFromGoTrue(result.body, input.deviceId, "invalid_oauth");

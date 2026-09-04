@@ -16,9 +16,13 @@
 		<data>
 		IIjf339fKevHha6E2BwE3e7QnSc=
 		</data>
+		<key>CommonEnglishWordFamilies.txt</key>
+		<data>
+		D1LeEU/vet1SzuFNJmk/DvXYPfk=
+		</data>
 		<key>Info.plist</key>
 		<data>
-		3vtIoQOGK4KSyLs8yvg2W8G8rD0=
+		FozxaX7J85sovPjRDT6SpNrjxoY=
 		</data>
 		<key>PkgInfo</key>
 		<data>
@@ -58,6 +62,13 @@
 			<key>hash2</key>
 			<data>
 			n1AXCXhS9D14v+noKj5qDU0snaH9WQHooGUIMy25wPo=
+			</data>
+		</dict>
+		<key>CommonEnglishWordFamilies.txt</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			d4NGnzxHM/PyOnvrZxhns6Y+BXD4nMRm88qo5wFtRlo=
 			</data>
 		</dict>
 		<key>ReadingAssistantPrompts.json</key>

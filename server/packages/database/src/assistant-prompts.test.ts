@@ -407,6 +407,37 @@ describe("assistant prompts", () => {
     ).toContain("$.examples must contain at least 2 items.");
   });
 
+  it("normalizes Qwen's Chinese explanation key in translation notes", () => {
+    const output = validateManagedPromptOutput(
+      "chapter_batch",
+      '{"translations":[{"id":"s1","translation":"你好","notes":[{"source":"Hello","category":"phrase","解释":"问候语"}]}]}',
+      { expectedTargetIDs: new Set(["s1"]) },
+    );
+
+    expect(output).toMatchObject({
+      valid: true,
+      parsed: {
+        translations: [
+          {
+            notes: [{ source: "Hello", category: "phrase", explanation: "问候语" }],
+          },
+        ],
+      },
+    });
+  });
+
+  it("fills harmless empty word fields that Qwen may omit", () => {
+    const output = validateManagedPromptOutput(
+      "word",
+      '{"translation":"名词 — 冰层","examples":[{"source":"Ice covered the lake.","translation":"冰覆盖了湖面。"},{"source":"The ice began to crack.","translation":"冰开始裂开。"}]}',
+    );
+
+    expect(output).toMatchObject({
+      valid: true,
+      parsed: { connection: "", notes: [] },
+    });
+  });
+
   it("includes chapter-batch target IDs in the effective message and its fingerprint", () => {
     const fields = {
       task: "chapter_batch",

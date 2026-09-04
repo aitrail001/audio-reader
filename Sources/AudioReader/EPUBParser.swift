@@ -37,10 +37,6 @@ struct EPUBBookMetadata: Equatable, Sendable {
 }
 
 enum EPUBParser {
-    static func extractText(from epubPath: String) -> String? {
-        document(from: epubPath)?.text
-    }
-
     static func document(from epubPath: String) -> EPUBDocument? {
         let epub = URL(fileURLWithPath: epubPath)
         guard FileManager.default.fileExists(atPath: epub.path) else { return nil }

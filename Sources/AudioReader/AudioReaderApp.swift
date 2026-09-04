@@ -12,6 +12,10 @@ struct AudioReaderApp: App {
     init() {
         let args = CommandLine.arguments
 #if DEBUG
+        if args.contains("--uitesting") {
+            UserDefaults.standard.set("recentlyAdded", forKey: "words.sortOrder")
+            UserDefaults.standard.set("list", forKey: "words.displayStyle")
+        }
         _state = State(initialValue: AppState(
             composition: args.contains("--uitesting") ? .inMemory() : .live
         ))
@@ -81,6 +85,10 @@ struct AudioReaderApp: App {
                     set: { state.setDeepReadingMode($0) }
                 ))
                     .keyboardShortcut("d", modifiers: [.command])
+                Toggle("Read & Pause", isOn: Binding(
+                    get: { state.settings.readAndPauseMode },
+                    set: { state.setReadAndPauseMode($0) }
+                ))
                 Button("Continue with next sentence") { state.continueDeepReading() }
                     .keyboardShortcut(.return, modifiers: [.command])
                     .disabled(!state.canContinueDeepReading)
@@ -233,6 +241,7 @@ enum UITestLaunchScenario {
             source: "ui-test",
             ebookAligned: false
         )
+        state.player.load(path: chapter.audioPath, duration: chapter.duration)
         state.vocab = [
             VocabEntry(
                 id: "ui-vocab-1",
@@ -250,13 +259,60 @@ enum UITestLaunchScenario {
         ]
         if scenario == "words-rich" {
             state.vocab = makeRichVocabularyFixture(book: book, chapter: chapter)
+            state.knownLemmas = (0..<165).map { index in
+                KnownLemmaRecord(
+                    language: "en",
+                    form: String(format: "known-%03d", index),
+                    updatedAt: Date(timeIntervalSince1970: Double(index))
+                )
+            } + [
+                KnownLemmaRecord(language: "en", form: "the", updatedAt: Date(timeIntervalSince1970: 1_000)),
+                KnownLemmaRecord(language: "en", form: "be", updatedAt: Date(timeIntervalSince1970: 1_001)),
+            ]
         }
 
         switch scenario {
         case "reader": state.tab = .player
+        case "translation-layout":
+            state.tab = .player
+            state.focusedSegmentID = transcriptSegments[0].id
+            state.selectedWord = firstWord
+            state.selectedWordSegmentID = transcriptSegments[0].id
+            state.selectedWordContextText = transcriptSegments[0].spokenText
+            let source = transcriptSegments[0].displayText
+            state.glosses = [GlossEntry(
+                id: GlossEntry.makeID(
+                    kind: .sentence,
+                    language: state.settings.targetLanguage,
+                    source: source,
+                    context: nil
+                ),
+                kind: .sentence,
+                language: state.settings.targetLanguage,
+                source: source,
+                context: nil,
+                text: "Listening changes the way we understand stories.",
+                status: .pending,
+                model: "qwen3.6-flash",
+                bookID: book.id,
+                bookTitle: book.title,
+                chapterID: chapter.id,
+                chapterTitle: chapter.title,
+                timestamp: 0,
+                createdAt: Date(timeIntervalSince1970: 1),
+                decidedAt: nil
+            )]
         case "listen-first":
             state.tab = .player
             state.prepareUITestListenFirstPause(segmentID: "ui-sentence-4", time: 8.74)
+        case "read-and-pause":
+            state.tab = .player
+            state.prepareUITestReadAndPause(segmentID: "ui-sentence-4", time: 8.74)
+        case "playback-anchor":
+            state.tab = .player
+            state.settings.playOnSelect = true
+            state.player.seek(8.74)
+            state.prepareUITestReadAndPause(segmentID: "ui-sentence-4", time: 8.74)
         case "words", "words-rich": state.tab = .vocab
         case "settings": state.tab = .settings
         default: state.tab = .library
@@ -267,10 +323,10 @@ enum UITestLaunchScenario {
     /// without bundling test media or touching the user's library.
     private static func makeAudioFixture() -> URL {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("audioreader-ui-fixture.wav")
+            .appendingPathComponent("audioreader-ui-fixture-v2.wav")
         guard !FileManager.default.fileExists(atPath: url.path) else { return url }
         let sampleRate: UInt32 = 8_000
-        let sampleCount = Int(sampleRate) * 4
+        let sampleCount = Int(sampleRate) * 12
         var data = Data()
         func append<T: FixedWidthInteger>(_ value: T) {
             var littleEndian = value.littleEndian
@@ -441,7 +497,11 @@ enum UITestLaunchScenario {
                 addedAt: now.addingTimeInterval(Double(index + 4))
             )
         }
-        return due + new
+        return (due + new).enumerated().map { index, entry in
+            var entry = entry
+            entry.isInLearnList = index < 3
+            return entry
+        }
     }
 }
 

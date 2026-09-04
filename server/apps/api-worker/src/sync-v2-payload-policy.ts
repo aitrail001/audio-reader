@@ -78,7 +78,7 @@ const ALLOWED_KEYS: Record<Exclude<SyncEntityType, "transcript" | "asset">, Read
 };
 
 const NESTED_KEYS: Record<string, ReadonlySet<string>> = {
-  chapters: set("localId", "index", "title", "duration", "startTime"),
+  chapters: set("localId", "index", "title", "duration", "startTime", "ebookSectionIndex"),
   result: set(
     "id",
     "kind",

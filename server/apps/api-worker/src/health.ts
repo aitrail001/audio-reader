@@ -1,15 +1,10 @@
-import type { ReadinessStatus } from "@audio-reader/domain";
 import type { Health } from "./http";
+
+type ReadinessStatus = "ok" | "unavailable";
 
 export type DependencyProbe = {
   ping(): Promise<ReadinessStatus>;
 };
-
-export function unavailableProbe(): DependencyProbe {
-  return {
-    ping: () => Promise.resolve("unavailable"),
-  };
-}
 
 async function safePing(probe: DependencyProbe): Promise<ReadinessStatus> {
   try {

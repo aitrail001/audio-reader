@@ -17,8 +17,5 @@
     "@cloudflare/workers-types": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
-  },
-  "dependencies": {
-    "@audio-reader/domain": "workspace:*"
   }
 }

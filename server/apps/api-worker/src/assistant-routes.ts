@@ -287,7 +287,7 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
           );
           return jsonResponse({
             ...payload,
-            sharedCacheEntryID: recorded?.cacheEntryId ?? null,
+            sharedCacheEntryID: recorded?.cacheEntryId ?? hit.id,
           });
         }
       }
@@ -445,7 +445,7 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
       return jsonResponse({
         ...generated,
         id: resultId,
-        sharedCacheEntryID: recorded?.cacheEntryId ?? null,
+        sharedCacheEntryID: recorded?.cacheEntryId ?? cacheEntryId,
         model: generated.model,
         promptVersion: policy.promptVersion,
         modelPolicyHash,
@@ -697,7 +697,7 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
           expectedTargetIDs: new Set(targetIDs),
         });
         if (output instanceof Response) return output;
-        const parsedUnits = parseBatchTranslations(completed.text, targetIDs);
+        const parsedUnits = parseBatchTranslations(output, targetIDs);
         const createdAt = new Date().toISOString();
         const generatedResults: TranslationResult[] = [...replayed];
         const missingIds: string[] = [];
@@ -1499,6 +1499,7 @@ async function completeWithPolicy(
       model: resolved.model,
       modelSource: resolved.source,
       promptVersion: resolved.promptVersion,
+      thinkingEnabled: request.enableThinking ?? false,
       systemPromptChars: resolved.systemPrompt.length,
       userPromptChars: resolved.userPrompt.length,
     },
@@ -1520,14 +1521,31 @@ async function completeWithPolicy(
     });
     return "disabled";
   }
+  const startedAt = Date.now();
+  // Managed product prompts already enforce a bounded JSON contract. Disabling Qwen's
+  // hidden reasoning path improves latency and leaves more output budget for that contract.
   const completed = await context.qwen.complete({
     ...request,
+    enableThinking: request.enableThinking ?? false,
     messages:
       assembled === undefined
         ? withPolicySystemPrompt(task, resolved.systemPrompt, request.messages)
         : request.messages,
     ...(resolved.model === "" ? {} : { model: resolved.model }),
   });
+  const durationMs = Date.now() - startedAt;
+  console.warn(
+    JSON.stringify({
+      level: completed.ok ? "info" : "warn",
+      message: "managed_qwen_response",
+      requestId: context.requestId,
+      task: eventTask,
+      outcome: completed.ok ? "ok" : completed.code,
+      model: completed.ok ? completed.model : completed.usedModel,
+      thinkingEnabled: request.enableThinking ?? false,
+      durationMs,
+    }),
+  );
   if (completed.ok && recordSuccessfulCompletion) {
     recordOperatorEvent({
       kind: "managed_qwen_ok",
@@ -1852,10 +1870,9 @@ function translationSentences(value: unknown, requestId: string): TranslationSen
 }
 
 function parseBatchTranslations(
-  text: string,
+  parsed: Record<string, unknown>,
   expectedIds: string[],
 ): Map<string, { translation: string; notes: TranslationResult["notes"] }> {
-  const parsed = parseObject(text);
   const expected = new Set(expectedIds);
   const units = new Map<string, { translation: string; notes: TranslationResult["notes"] }>();
   const list = Array.isArray(parsed.translations)
@@ -1982,17 +1999,33 @@ async function recordUse(
     privateContent?: Record<string, unknown>;
   } = {},
 ): Promise<OpsAssistantResult | undefined> {
-  return context.ops?.recordAssistantUse(userId, {
-    resultId,
-    task,
-    status,
-    cacheEntryId,
-    outputText,
-    ...(model === undefined ? {} : { model }),
-    ...(promptVersion === undefined ? {} : { promptVersion }),
-    ...(modelPolicyHash === undefined ? {} : { modelPolicyHash }),
-    ...details,
-  });
+  if (context.ops === undefined) return undefined;
+  try {
+    return await context.ops.recordAssistantUse(userId, {
+      resultId,
+      task,
+      status,
+      cacheEntryId,
+      outputText,
+      ...(model === undefined ? {} : { model }),
+      ...(promptVersion === undefined ? {} : { promptVersion }),
+      ...(modelPolicyHash === undefined ? {} : { modelPolicyHash }),
+      ...details,
+    });
+  } catch (error: unknown) {
+    if (task !== "translation") throw error;
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: "assistant_result_persistence_failed",
+        requestId: context.requestId,
+        task,
+        resultId,
+        errorName: error instanceof Error ? error.name : "unknown",
+      }),
+    );
+    return undefined;
+  }
 }
 
 function translationPrivateContent(result: TranslationResult): Record<string, unknown> {
@@ -2074,7 +2107,7 @@ async function materializePrivateTranslationResults(
       return {
         ...cached,
         id: resultId,
-        sharedCacheEntryID: recorded?.cacheEntryId ?? null,
+        sharedCacheEntryID: recorded?.cacheEntryId ?? cacheEntryId,
         model: exactModel,
         promptVersion: exactPromptVersion,
         modelPolicyHash: exactModelPolicyHash,
@@ -2153,18 +2186,6 @@ async function singleFlight<T>(key: string, work: () => Promise<T>): Promise<T> 
   } finally {
     inflight.delete(key);
   }
-}
-
-function parseObject(text: string): Record<string, unknown> {
-  try {
-    const value: unknown = JSON.parse(text);
-    if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-      return value as Record<string, unknown>;
-    }
-  } catch {
-    return {};
-  }
-  return {};
 }
 
 function stringField(record: Record<string, unknown>, key: string): string | undefined {

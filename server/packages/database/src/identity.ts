@@ -99,10 +99,11 @@ export type IdentityStore = {
   hasAdminRole(userId: string): Promise<boolean>;
   /** Active grants let sensitive Operator routes enforce narrower capabilities than admin. */
   adminRoles(userId: string): Promise<IdentityAdminRole[]>;
-  // True when any unrevoked admin_roles row exists. Used so bootstrap email
-  // grants at most the first operator and never re-grants after a revoke.
-  hasAnyAdminRole(): Promise<boolean>;
-  grantAdminRole(userId: string): Promise<void>;
+  // Bootstrap checks active grants separately from grant history so a revoked
+  // superadmin is never silently restored.
+  hasAnyAdminRole(role?: IdentityAdminRole): Promise<boolean>;
+  hasAdminRoleHistory(userId: string, role: IdentityAdminRole): Promise<boolean>;
+  grantAdminRole(userId: string, role?: IdentityAdminRole): Promise<void>;
   revokeAllDevices(userId: string): Promise<void>;
   seedActiveDevice?(userId: string, deviceId: string): void;
 };
@@ -125,7 +126,7 @@ export function createMemoryIdentityStore(options: { now?: () => Date } = {}): I
   const profiles = new Map<string, IdentityProfile>();
   const devices = new Map<string, IdentityDevice[]>();
   const settings = new Map<string, IdentitySettings>();
-  const admins = new Set<string>();
+  const admins = new Map<string, Set<IdentityAdminRole>>();
 
   function currentIso(): string {
     return now().toISOString();
@@ -345,19 +346,29 @@ export function createMemoryIdentityStore(options: { now?: () => Date } = {}): I
     },
 
     hasAdminRole(userId) {
-      return Promise.resolve(admins.has(userId));
+      return Promise.resolve((admins.get(userId)?.size ?? 0) > 0);
     },
 
     adminRoles(userId) {
-      return Promise.resolve(admins.has(userId) ? ["operator"] : []);
+      return Promise.resolve([...(admins.get(userId) ?? [])]);
     },
 
-    hasAnyAdminRole() {
-      return Promise.resolve(admins.size > 0);
+    hasAnyAdminRole(role) {
+      return Promise.resolve(
+        role === undefined
+          ? admins.size > 0
+          : [...admins.values()].some((roles) => roles.has(role)),
+      );
     },
 
-    grantAdminRole(userId) {
-      admins.add(userId);
+    hasAdminRoleHistory(userId, role) {
+      return Promise.resolve(admins.get(userId)?.has(role) === true);
+    },
+
+    grantAdminRole(userId, role = "operator") {
+      const roles = admins.get(userId) ?? new Set<IdentityAdminRole>();
+      roles.add(role);
+      admins.set(userId, roles);
       return Promise.resolve();
     },
 
@@ -749,12 +760,13 @@ export function createSupabaseIdentityStore(rest: RestClient): IdentityStore {
       });
     },
 
-    async hasAnyAdminRole() {
+    async hasAnyAdminRole(role) {
       const response = await rest.request({
         method: "GET",
         path: "/admin_roles",
         query: {
           revoked_at: "is.null",
+          ...(role === undefined ? {} : { role: `eq.${role}` }),
           select: "id",
           limit: "1",
         },
@@ -765,12 +777,30 @@ export function createSupabaseIdentityStore(rest: RestClient): IdentityStore {
       return isAdminRoleRow(restRow(response.body));
     },
 
-    async grantAdminRole(userId) {
+    async hasAdminRoleHistory(userId, role) {
+      const response = await rest.request({
+        method: "GET",
+        path: "/admin_roles",
+        query: {
+          user_id: `eq.${userId}`,
+          role: `eq.${role}`,
+          select: "id",
+          limit: "1",
+        },
+      });
+      // Fail closed: an unreadable history must never authorize a bootstrap re-grant.
+      if (!isRestOk(response.status)) {
+        return true;
+      }
+      return isAdminRoleRow(restRow(response.body));
+    },
+
+    async grantAdminRole(userId, role = "operator") {
       const response = await rest.request({
         method: "POST",
         path: "/admin_roles",
         prefer: "return=minimal",
-        body: { user_id: userId, role: "operator" },
+        body: { user_id: userId, role },
       });
       if (isRestOk(response.status) || response.status === 409) {
         return;
@@ -839,6 +869,9 @@ export function createUnavailableIdentityStore(): IdentityStore {
       return Promise.resolve([]);
     },
     hasAnyAdminRole() {
+      return Promise.resolve(true);
+    },
+    hasAdminRoleHistory() {
       return Promise.resolve(true);
     },
     grantAdminRole() {

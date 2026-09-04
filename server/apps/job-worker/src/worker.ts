@@ -13,9 +13,6 @@ import { resolveOperatorWrappingSecret } from "@audio-reader/api-worker/env";
 import { createFakeQwenClient, createQwenClient, type QwenClient } from "@audio-reader/qwen";
 import { consumeJobBatch, runScheduledMaintenance } from "./jobs";
 
-export { packageId } from "./packageId";
-export { processQueuedJobs, runScheduledMaintenance } from "./jobs";
-
 type WorkerEnv = {
   APP_VERSION?: string;
   QWEN_API_KEY?: string;

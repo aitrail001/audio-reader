@@ -5,7 +5,7 @@ import {
   validateAccessToken,
   type JwtSigningConfig,
 } from "./jwt";
-import type { Principal } from "./principal";
+import type { AdminRole, Principal } from "./principal";
 
 export type OAuthProvider = "google" | "microsoft";
 export type IdentityProvider = OAuthProvider | "email";
@@ -87,6 +87,7 @@ export type BootstrapSession = {
 export type AuthFailureCode =
   | "invalid_otp"
   | "invalid_oauth"
+  | "pkce_mismatch"
   | "invalid_refresh"
   | "invalid_token"
   | "invalid_issuer"
@@ -95,6 +96,7 @@ export type AuthFailureCode =
   | "expired"
   | "missing_subject"
   | "not_ready"
+  | "provider_disabled"
   | "already_linked"
   | "device_revoked"
   | "not_found";
@@ -178,12 +180,10 @@ export type AuthIdentityStore = {
   revokeDevice(userId: string, deviceId: string): Promise<DeviceRevokeResult>;
   isDeviceRevoked(userId: string, deviceId: string): Promise<boolean>;
   hasAdminRole?(userId: string): Promise<boolean>;
-  adminRoles?(
-    userId: string,
-  ): Promise<
-    ("support_readonly" | "operator" | "privacy_officer" | "billing_operator" | "superadmin")[]
-  >;
-  grantAdminRole?(userId: string): Promise<void>;
+  adminRoles?(userId: string): Promise<AdminRole[]>;
+  hasAnyAdminRole?(role?: AdminRole): Promise<boolean>;
+  hasAdminRoleHistory?(userId: string, role: AdminRole): Promise<boolean>;
+  grantAdminRole?(userId: string, role?: AdminRole): Promise<void>;
 };
 
 export type SettingsPutResult =
@@ -192,7 +192,9 @@ export type SettingsPutResult =
   | { ok: false; code: "not_found" };
 
 export type AuthService = {
-  authConfig(): { providers: readonly { id: AuthProviderId }[] };
+  authConfig():
+    | { providers: readonly { id: AuthProviderId }[] }
+    | Promise<{ providers: readonly { id: AuthProviderId }[] }>;
   canIssueSessions(): boolean;
   authenticate(request: Request): Promise<Principal | null>;
   requestEmailOtp(email: string): Promise<AuthResult<{ accepted: true }>>;

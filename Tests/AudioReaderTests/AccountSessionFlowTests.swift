@@ -117,6 +117,144 @@ struct AccountSessionFlowTests {
         #expect(uploads.allSatisfy { $0.kind == .transcriptRevision })
     }
 
+    @MainActor
+    @Test("a stale deleted-book asset link publishes after its catalog parent")
+    func deletedBookAssetPublishesAfterCatalogPush() async throws {
+        let sync = FakeSyncClient()
+        sync.pullCursor = "1"
+        let outbox = InMemorySyncOutboxRepository()
+        let cursor = InMemorySyncCursorStore()
+        try cursor.saveCursor("1")
+        let book = StoredBook(
+            id: BookID(rawValue: "restored-book"),
+            title: "Restored Book",
+            source: "test",
+            chapters: [StoredChapter(id: ChapterID(rawValue: "restored-chapter"), index: 0, title: "Chapter")]
+        )
+        let bookMutation = try AccountSyncApplicator.bookMutation(for: book)
+        sync.assetParentEntityID = bookMutation.entityID
+        let account = AccountSession(
+            client: FakeAuthClient(),
+            store: InMemoryAuthSessionStore(),
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: outbox,
+                cursor: cursor,
+                snapshot: { [bookMutation] },
+                assetUploads: { directory in
+                    let file = directory.appendingPathComponent("restored.transcript.json")
+                    let data = Data("transcript".utf8)
+                    try data.write(to: file)
+                    let digest = try SyncAssetFileIO.digest(fileURL: file)
+                    return [SyncAssetUpload(
+                        revisionID: "restored-revision",
+                        bookID: bookMutation.entityID,
+                        chapterID: AccountSyncApplicator.syncEntityID("restored-chapter", kind: "chapter"),
+                        sha256: digest.sha256,
+                        originalBytes: digest.byteCount,
+                        segmentCount: 1,
+                        fileURL: file,
+                        compressedBytes: digest.byteCount,
+                        deleteFileAfterUpload: true
+                    )]
+                }
+            )
+        )
+        await account.requestEmailCode("asset-repair@example.com")
+        await account.verifyEmailCode("123456")
+        account.setSyncEnabled(true)
+
+        await account.synchronize()
+
+        #expect(account.syncStatus.phase == .completed)
+        #expect(account.syncStatus.pendingCount == 0)
+        #expect(account.syncStatus.skippedDeletedAssetCount == 0)
+        #expect(sync.publishAssetAttemptCount == 1)
+        #expect(sync.publishedAssets.count == 1)
+        #expect(sync.pushed.flatMap(\.mutations).contains { $0.entityId == bookMutation.entityID })
+        #expect(try outbox.pendingMutations().isEmpty)
+    }
+
+    @MainActor
+    @Test("a book deleted during asset publication is skipped with clear completed feedback")
+    func concurrentDeletedBookAssetIsSkippedAndPulled() async throws {
+        let sync = FakeSyncClient()
+        sync.pullCursor = "2"
+        sync.publishAssetFailures = [
+            .problem(status: 409, code: "asset_book_deleted", detail: "Asset book is already deleted.")
+        ]
+        sync.pullChanges = [SyncPulledChange(
+            sequence: 2,
+            entityType: OutboxEntityType.book.rawValue,
+            entityId: "deleted-book",
+            operation: OutboxOperation.delete.rawValue,
+            revision: 2,
+            changedAt: "2026-09-04T00:00:00Z",
+            payload: ["localId": .string("deleted-book")]
+        )]
+        let outbox = InMemorySyncOutboxRepository()
+        let cursor = InMemorySyncCursorStore()
+        try cursor.saveCursor("1")
+        let mutation = OutboxMutation(
+            id: MutationID.generate(),
+            entityType: .book,
+            entityID: "deleted-book",
+            operation: .upsert,
+            baseRevision: .zero,
+            occurredAt: Date(),
+            payload: Data("{}".utf8)
+        )
+        let account = AccountSession(
+            client: FakeAuthClient(),
+            store: InMemoryAuthSessionStore(),
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: outbox,
+                cursor: cursor,
+                snapshot: { [mutation] },
+                assetUploads: { directory in
+                    try (1...2).map { index in
+                        let file = directory.appendingPathComponent("deleted-\(index).transcript.json")
+                        let data = Data("transcript-\(index)".utf8)
+                        try data.write(to: file)
+                        let digest = try SyncAssetFileIO.digest(fileURL: file)
+                        return SyncAssetUpload(
+                            revisionID: "deleted-revision-\(index)",
+                            bookID: mutation.entityID,
+                            chapterID: "deleted-chapter-\(index)",
+                            sha256: digest.sha256,
+                            originalBytes: digest.byteCount,
+                            segmentCount: 1,
+                            fileURL: file,
+                            compressedBytes: digest.byteCount,
+                            deleteFileAfterUpload: true
+                        )
+                    }
+                },
+                applyPage: { _, _, _ in }
+            )
+        )
+        await account.requestEmailCode("asset-race@example.com")
+        await account.verifyEmailCode("123456")
+        account.setSyncEnabled(true)
+
+        await account.synchronize()
+
+        #expect(account.syncStatus.phase == .completed)
+        #expect(account.syncStatus.pendingCount == 0)
+        #expect(account.syncStatus.skippedDeletedAssetCount == 2)
+        #expect(account.syncStatus.detail.contains("book was deleted on another device"))
+        #expect(account.syncStatus.accessibilityDescription.contains("book was deleted on another device"))
+        #expect(sync.publishAssetAttemptCount == 1)
+        #expect(sync.publishedAssets.isEmpty)
+        #expect(!sync.pulledCursors.isEmpty)
+        #expect(try outbox.pendingMutations().isEmpty)
+    }
+
     @Test("operator cloud-media capability does not opt the user into book uploads")
     func operatorCapabilityDoesNotAuthorizeBookMedia() throws {
         let root = FileManager.default.temporaryDirectory
@@ -152,25 +290,6 @@ struct AccountSessionFlowTests {
         )
 
         #expect(uploads.isEmpty)
-    }
-
-    @Test("expanded EPUB directories produce deterministic bounded reading-package archives")
-    func deterministicExpandedEPUBPackage() throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("epub-package-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: directory.appendingPathComponent("OPS", isDirectory: true),
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: directory) }
-        try Data("chapter".utf8).write(to: directory.appendingPathComponent("OPS/chapter.xhtml"))
-        try Data("package".utf8).write(to: directory.appendingPathComponent("OPS/package.opf"))
-
-        let first = try AccountSyncApplicator.deterministicReadingPackage(from: directory)
-        defer { try? FileManager.default.removeItem(at: first) }
-        let second = try AccountSyncApplicator.deterministicReadingPackage(from: directory)
-        defer { try? FileManager.default.removeItem(at: second) }
-        #expect(try Data(contentsOf: first) == Data(contentsOf: second))
     }
 
     @Test("verified audio manifest installs atomically and associates its chapter before cursor commit")
@@ -210,47 +329,6 @@ struct AccountSessionFlowTests {
         #expect(FileManager.default.fileExists(atPath: manifest.localObjectPath))
         #expect(try store.loadAssets(bookID: bookID).first?.metadata["chapterID"] == chapterID.rawValue)
         #expect(try store.loadCursor() == "1")
-    }
-
-    @Test("a hydrated EPUB reading package is produced again with its exact remote kind")
-    func preservesReadingPackageSyncKind() throws {
-        let databaseURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("sync-reading-package-\(UUID().uuidString).sqlite")
-        let source = FileManager.default.temporaryDirectory
-            .appendingPathComponent("sync-reading-package-\(UUID().uuidString).zip")
-        defer { try? FileManager.default.removeItem(at: databaseURL) }
-        defer { try? FileManager.default.removeItem(at: source) }
-        try Data([1, 2, 3]).write(to: source)
-        let store = LocalSQLiteStore(fileURL: databaseURL)
-        let bookID = BookID(rawValue: "local-book")
-        try store.saveBook(StoredBook(
-            id: bookID, title: "Book", author: "Author", source: "files", chapters: []
-        ))
-        let assetID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-        let change = SyncPulledChange(
-            sequence: 1, entityType: OutboxEntityType.asset.rawValue, entityId: assetID,
-            operation: OutboxOperation.upsert.rawValue, revision: 1,
-            changedAt: "2026-08-31T00:00:00Z",
-            payload: [
-                "assetId": .string(assetID),
-                "kind": .string(SyncAssetKind.epubReadingPackage.rawValue),
-                "bookId": .string(AccountSyncApplicator.syncEntityID(bookID.rawValue, kind: "book")),
-                "contentType": .string("application/zip"), "encoding": .string("identity"),
-                "sha256": .string(String(repeating: "e", count: 64)),
-                "compressedBytes": .number(3), "originalBytes": .number(3),
-                "localObjectPath": .string(source.path),
-            ]
-        )
-        try AccountSyncApplicator.applyPage([change], versions: [], cursor: "1", to: store)
-        let local = try #require(try store.loadAssets(bookID: bookID).first)
-        defer { try? FileManager.default.removeItem(atPath: local.localMediaKey) }
-
-        let upload = try #require(try AccountSyncApplicator.assetUpload(local))
-
-        #expect(local.kind == SyncAssetKind.epub.rawValue)
-        #expect(local.metadata["syncKind"] == SyncAssetKind.epubReadingPackage.rawValue)
-        #expect(upload.kind == .epubReadingPackage)
-        #expect(upload.fileURL.path == local.localMediaKey)
     }
 
     private static func syncTranscript(chapterID: ChapterID, index: Int) -> StoredTranscript {
@@ -543,7 +621,6 @@ struct AccountSessionFlowTests {
         #expect(appState.contains("contextPrevious"))
         #expect(appState.contains("contextNext"))
         #expect(appState.contains("contextBefore:"))
-        #expect(!appState.contains("ManagedProductLLM.translationEnvelope"))
         #expect(appState.contains("wordMeaningText"))
         #expect(appState.contains("bookTitle: book?.title"))
         #expect(try source("Sources/AudioReader/ManagedProductLLM.swift").contains("sentenceMeaningHeading"))
@@ -705,11 +782,15 @@ struct AccountSessionFlowTests {
             ],
             lemmas: [
                 KnownLemmaRecord(language: "en", form: "whale", updatedAt: Date(timeIntervalSince1970: 1_777_000_000))
+            ],
+            deletedLemmas: [
+                StoredKnownLemma(language: "en", form: "forest", updatedAt: Date(timeIntervalSince1970: 1_777_000_100))
             ]
         )
         #expect(mutations.contains(where: { $0.entityType == .settings }))
         #expect(mutations.contains(where: { $0.entityType == .vocabulary && $0.entityID == vocabID }))
         #expect(mutations.contains(where: { $0.entityType == .lexemeState }))
+        #expect(mutations.contains(where: { $0.entityType == .lexemeState && $0.operation == .delete }))
         #expect(AccountSyncApplicator.isUUID(AccountSyncApplicator.uuidForLemma(language: "en", form: "whale")))
     }
 
@@ -1080,6 +1161,42 @@ struct AccountSessionFlowTests {
         ).contains(where: { $0.entityType == .vocabulary && $0.entityID == vocabularyID }))
     }
 
+    @Test("A fresh bootstrap records a vocabulary tombstone before dependent progress")
+    func bootstrapVocabularyTombstonePrecedesProgress() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-bootstrap-tombstone-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = LocalSQLiteStore(fileURL: url)
+        let vocabularyID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let progress = SyncPulledChange(
+            sequence: 1,
+            entityType: OutboxEntityType.progress.rawValue,
+            entityId: vocabularyID,
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 1,
+            changedAt: "2026-08-30T03:00:00Z",
+            payload: [
+                "vocabularyId": .string(vocabularyID),
+                "reviewCount": .number(1)
+            ]
+        )
+        let deletion = SyncPulledChange(
+            sequence: 2,
+            entityType: OutboxEntityType.vocabulary.rawValue,
+            entityId: vocabularyID,
+            operation: OutboxOperation.delete.rawValue,
+            revision: 2,
+            changedAt: "2026-08-30T03:01:00Z",
+            payload: [:]
+        )
+
+        try AccountSyncApplicator.applyPage([progress, deletion], cursor: "2", to: store)
+
+        #expect(try store.loadCursor() == "2")
+        #expect(try store.loadVocabulary().isEmpty)
+        #expect(try store.isVocabularyTombstoned(entityID: vocabularyID))
+    }
+
     @Test("A non-UUID vocabulary tombstone deletes the original local identifier on another device")
     func legacyVocabularyDeletionRoundTripsAcrossDevices() throws {
         let url = FileManager.default.temporaryDirectory
@@ -1152,37 +1269,31 @@ struct AccountSessionFlowTests {
         #expect(try store.loadReviewEvents().isEmpty)
     }
 
-    @Test("Pulled review events append immutable history for cross-device learning statistics")
-    func pulledReviewAppendsHistory() throws {
+    @Test("Review events append immutable history for learning statistics")
+    func reviewRepositoryAppendsHistory() throws {
         let repository = InMemoryReviewEventRepository()
-        let change = SyncPulledChange(
-            sequence: 8,
-            entityType: OutboxEntityType.reviewEvent.rawValue,
-            entityId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-            operation: OutboxOperation.append.rawValue,
-            revision: 2,
-            changedAt: "2026-08-30T02:15:00Z",
-            payload: [
-                "vocabularyId": .string("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
-                "cardId": .string("study:give-up"),
-                "face": .string("recognition"),
-                "rating": .string(VocabReviewQuality.remember.rawValue),
-                "reviewedAt": .string("2026-08-30T02:14:30Z")
-            ]
+        let reviewedAt = try #require(ISO8601DateFormatter().date(from: "2026-08-30T02:14:30Z"))
+        let stored = StoredReviewEvent(
+            id: ReviewEventID(rawValue: "dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+            vocabularyID: VocabularyOccurrenceID(rawValue: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            cardID: "study:give-up",
+            face: "recognition",
+            rating: VocabReviewQuality.remember.rawValue,
+            reviewedAt: reviewedAt
         )
 
-        try AccountSyncApplicator.appendReviewHistory(change, to: repository)
-        try AccountSyncApplicator.appendReviewHistory(change, to: repository)
+        try repository.appendReviewEvent(stored)
+        try repository.appendReviewEvent(stored)
 
         let events = try repository.loadReviewEvents()
         let event = try #require(events.first)
         #expect(events.count == 1)
-        #expect(event.id.rawValue == change.entityId)
+        #expect(event.id.rawValue == "dddddddd-dddd-4ddd-8ddd-dddddddddddd")
         #expect(event.vocabularyID.rawValue == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
         #expect(event.cardID == "study:give-up")
         #expect(event.face == "recognition")
         #expect(event.rating == VocabReviewQuality.remember.rawValue)
-        #expect(event.reviewedAt == ISO8601DateFormatter().date(from: "2026-08-30T02:14:30Z"))
+        #expect(event.reviewedAt == reviewedAt)
     }
 
     @Test("Vocabulary sync carries local sentence and translation provenance additively")
@@ -2961,9 +3072,21 @@ struct AccountSessionFlowTests {
         try AccountSyncApplicator.applyPage([first], cursor: "1", to: store)
         try AccountSyncApplicator.applyPage([revision], cursor: "2", to: store)
 
-        #expect(try store.loadKnownLemmas().map(\.form) == ["read"])
-        #expect(try store.loadVersion(entityType: revision.entityType, entityID: revision.entityId)?.serverVersion == 2)
-        #expect(try store.loadCursor() == "2")
+        let deletion = SyncPulledChange(
+            sequence: 3,
+            entityType: OutboxEntityType.lexemeState.rawValue,
+            entityId: "lemma-read",
+            operation: OutboxOperation.delete.rawValue,
+            revision: 3,
+            changedAt: "2026-09-01T00:00:00Z",
+            payload: ["language": .string("en"), "lemma": .string("read"), "state": .string("unknown")]
+        )
+        try AccountSyncApplicator.applyPage([deletion], cursor: "3", to: store)
+
+        #expect(try store.loadKnownLemmas().isEmpty)
+        #expect(try store.loadDeletedKnownLemmas().map(\.form) == ["read"])
+        #expect(try store.loadVersion(entityType: deletion.entityType, entityID: deletion.entityId)?.serverVersion == 3)
+        #expect(try store.loadCursor() == "3")
     }
 
     @Test("A 7,000-record bootstrap uses bounded page transactions")
@@ -2986,6 +3109,41 @@ struct AccountSessionFlowTests {
 
         #expect(try store.loadVocabulary().count == 7_000)
         #expect(try store.loadCursor() == "7000")
+    }
+
+    @Test("A dependency update does not materialize the entire vocabulary table")
+    func dependencyUpdateUsesBoundedVocabularyQuery() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-reader-sync-page-targeted-vocabulary-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalSQLiteStore(fileURL: root.appendingPathComponent("library.sqlite"))
+        var changes = (1...1_000).map(syncVocabularyChange(index:))
+        changes[0].entityId = changes[0].entityId.uppercased()
+        for start in stride(from: 0, to: changes.count, by: 100) {
+            let page = Array(changes[start..<min(start + 100, changes.count)])
+            try AccountSyncApplicator.applyPage(page, cursor: String(start + page.count), to: store)
+        }
+        #expect(store.maximumVocabularyQueryCount <= 100)
+        store.resetVocabularyQueryMetrics()
+        let vocabularyID = changes[0].entityId.lowercased()
+        let progress = SyncPulledChange(
+            sequence: 1_001,
+            entityType: OutboxEntityType.progress.rawValue,
+            entityId: vocabularyID,
+            operation: OutboxOperation.upsert.rawValue,
+            revision: 2,
+            changedAt: "2026-08-30T01:00:00Z",
+            payload: [
+                "vocabularyId": .string(vocabularyID),
+                "reviewCount": .number(1),
+                "lastReviewedAt": .string("2026-08-30T01:00:00Z")
+            ]
+        )
+
+        try AccountSyncApplicator.applyPage([progress], cursor: "1001", to: store)
+
+        #expect(store.maximumVocabularyQueryCount <= 1)
     }
 
     @Test("A successful learning page commits vocabulary, progress, review, versions, and cursor together")

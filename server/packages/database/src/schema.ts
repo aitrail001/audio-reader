@@ -184,7 +184,7 @@ export const TRANSACTION_FUNCTIONS = [
 ] as const;
 
 /** Latest database contract that account sync must prove before it can become effective. */
-export const ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION = "20260901090000" as const;
+export const ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION = "20260903173000" as const;
 
 export const AUDIT_ACTOR_TYPES = ["user", "admin", "system"] as const;
 

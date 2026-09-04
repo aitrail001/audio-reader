@@ -2,7 +2,6 @@ import AuthenticationServices
 import CryptoKit
 import Foundation
 import OSLog
-import ZIPFoundation
 #if os(macOS)
 import AppKit
 #else
@@ -39,7 +38,16 @@ extension AccountSession {
                         to: sqlite
                     )
                 },
-                handleConflict: AccountSyncApplicator.retainSyncConflict
+                handleConflict: AccountSyncApplicator.retainSyncConflict,
+                reviewConflicts: {
+                    Array(
+                        repeating: .readerProgress,
+                        count: try sqlite.readerProgressConflictCount()
+                    ) + Array(
+                        repeating: .transcriptCorrection,
+                        count: try sqlite.transcriptOverlayConflictCount()
+                    )
+                }
             )
         )
     }
@@ -61,6 +69,7 @@ enum AccountSyncApplicator {
             settings: Persistence.loadSettings(),
             vocabulary: Persistence.loadVocab(),
             lemmas: Persistence.loadKnownLemmas(),
+            deletedLemmas: (try? sqlite.loadDeletedKnownLemmas()) ?? [],
             books: (try? sqlite.loadBooks()) ?? [],
             transcripts: (try? sqlite.loadTranscripts()) ?? [],
             overlays: (try? sqlite.loadAllTranscriptOverlays()) ?? [],
@@ -112,90 +121,11 @@ enum AccountSyncApplicator {
         return transcripts
     }
 
-    /// The server kind remains authoritative after hydration, including reading packages installed as local EPUBs.
-    static func assetUpload(
-        _ asset: StoredLocalAsset,
-        stagingDirectory: URL = FileManager.default.temporaryDirectory
-    ) throws -> SyncAssetUpload? {
-        let remoteKindName = asset.metadata["syncKind"] ?? asset.kind
-        guard let kind = SyncAssetKind(rawValue: remoteKindName), kind != .transcriptRevision else { return nil }
-        let url = URL(fileURLWithPath: asset.localMediaKey)
-            guard FileManager.default.isReadableFile(atPath: url.path) else { return nil }
-            let isDirectory = (try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-            let preparedURL = isDirectory
-                ? try deterministicReadingPackage(from: url, outputDirectory: stagingDirectory)
-                : url
-            let uploadKind: SyncAssetKind = isDirectory && kind == .epub ? .epubReadingPackage : kind
-            let digest = try SyncAssetFileIO.digest(fileURL: preparedURL)
-            let chapterID = asset.metadata["chapterID"].map {
-                syncEntityID($0, kind: "chapter")
-            }
-        return SyncAssetUpload(
-                kind: uploadKind,
-                revisionID: syncEntityID(asset.id.rawValue, kind: "asset-revision"),
-                bookID: syncEntityID(asset.bookID.rawValue, kind: "book"),
-                chapterID: chapterID,
-                contentType: asset.metadata["contentType"] ?? contentType(for: preparedURL, kind: uploadKind),
-                sha256: digest.sha256,
-                originalBytes: digest.byteCount,
-                fileURL: preparedURL,
-                compressedBytes: digest.byteCount,
-                deleteFileAfterUpload: preparedURL != url
-            )
-    }
-
-    /// ZIP entries use stable ordering, timestamp, permissions, and no compression so an expanded
-    /// EPUB directory always produces the same immutable reading-package digest.
-    static func deterministicReadingPackage(
-        from directory: URL,
-        outputDirectory: URL = FileManager.default.temporaryDirectory
-    ) throws -> URL {
-        let output = outputDirectory
-            .appendingPathComponent("AudioReader-\(UUID().uuidString).reading-package.zip")
-        let archive = try Archive(url: output, accessMode: .create)
-        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
-        let files = (FileManager.default.enumerator(
-            at: directory, includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        )?.allObjects as? [URL] ?? []).filter {
-            (try? $0.resourceValues(forKeys: keys).isRegularFile) == true
-        }.sorted {
-            $0.path.replacingOccurrences(of: directory.path + "/", with: "")
-                < $1.path.replacingOccurrences(of: directory.path + "/", with: "")
-        }
-        let fixedDate = Date(timeIntervalSince1970: 315_532_800)
-        for file in files {
-            let path = file.path.replacingOccurrences(of: directory.path + "/", with: "")
-            let size = Int64(try file.resourceValues(forKeys: keys).fileSize ?? 0)
-            let handle = try FileHandle(forReadingFrom: file)
-            defer { try? handle.close() }
-            try archive.addEntry(
-                with: path, type: .file, uncompressedSize: size,
-                modificationDate: fixedDate, permissions: 0o644, compressionMethod: .none
-            ) { position, count in
-                try handle.seek(toOffset: UInt64(position))
-                return try handle.read(upToCount: count) ?? Data()
-            }
-        }
-        return output
-    }
-
-    private static func contentType(for url: URL, kind: SyncAssetKind) -> String {
-        switch (kind, url.pathExtension.lowercased()) {
-        case (.audio, "m4b"), (.audio, "m4a"): "audio/mp4"
-        case (.audio, "mp3"): "audio/mpeg"
-        case (.epub, _): "application/epub+zip"
-        case (.epubReadingPackage, _): "application/zip"
-        case (.cover, "png"): "image/png"
-        case (.cover, _): "image/jpeg"
-        default: "application/octet-stream"
-        }
-    }
-
     static func snapshot(
         settings: AppSettings,
         vocabulary: [VocabEntry],
         lemmas: [KnownLemmaRecord],
+        deletedLemmas: [StoredKnownLemma] = [],
         books: [StoredBook] = [],
         transcripts: [StoredTranscript] = [],
         overlays: [StoredTranscriptOverlay] = [],
@@ -385,6 +315,21 @@ enum AccountSyncApplicator {
                 )
             )
         }
+        for lemma in deletedLemmas {
+            mutations.append(
+                OutboxMutation(
+                    id: MutationID.generate(),
+                    entityType: .lexemeState,
+                    entityID: uuidForLemma(language: lemma.language, form: lemma.form),
+                    operation: .delete,
+                    baseRevision: .zero,
+                    occurredAt: lemma.updatedAt,
+                    payload: try encodePayload(
+                        PortableLemma(language: lemma.language, lemma: lemma.form, state: "unknown")
+                    )
+                )
+            )
+        }
         for result in assistantResults {
             var canonicalResult = result
             canonicalResult.createdAt = syncCanonicalAssistantDate(result.createdAt)
@@ -570,7 +515,9 @@ enum AccountSyncApplicator {
                     && $0.operation != OutboxOperation.delete.rawValue
             }
             let existingVocabulary = Dictionary(
-                uniqueKeysWithValues: try sqlite.loadVocabulary().map {
+                uniqueKeysWithValues: try sqlite.loadVocabulary(
+                    ids: vocabularyUpserts.map { VocabularyOccurrenceID(rawValue: $0.entityId) }
+                ).map {
                     ($0.id.rawValue.lowercased(), VocabEntry($0))
                 }
             )
@@ -595,10 +542,23 @@ enum AccountSyncApplicator {
                         chapterIDs: transcriptChapterIDs
                     )
                 }
+                // A fresh device has no parent row to delete. Record tombstones first so
+                // later progress/review rows are ignored instead of blocking the page forever.
+                for change in applicableChanges where
+                    change.entityType == OutboxEntityType.vocabulary.rawValue
+                        && change.operation == OutboxOperation.delete.rawValue {
+                    _ = try applyLearning(change, to: sqlite)
+                    if let version = pageVersions.first(where: {
+                        $0.entityType == change.entityType
+                            && $0.entityID == change.entityId
+                            && $0.serverVersion == Int64(change.revision)
+                    }) {
+                        try sqlite.saveVersion(version)
+                    }
+                }
                 try sqlite.upsertVocabulary(vocabularyRows)
                 for change in applicableChanges {
-                    if change.entityType == OutboxEntityType.vocabulary.rawValue,
-                       change.operation != OutboxOperation.delete.rawValue {
+                    if change.entityType == OutboxEntityType.vocabulary.rawValue {
                         continue
                     }
                     try apply(change, to: sqlite)
@@ -768,7 +728,9 @@ enum AccountSyncApplicator {
                 return nil
             }
             let incoming = try vocabulary(from: change)
-            let existing = try store.loadVocabulary().first {
+            let existing = try store.loadVocabulary(
+                ids: [VocabularyOccurrenceID(rawValue: change.entityId)]
+            ).first {
                 $0.id.rawValue.caseInsensitiveCompare(change.entityId) == .orderedSame
             }.map(VocabEntry.init)
             let resolved = existing.map {
@@ -778,7 +740,9 @@ enum AccountSyncApplicator {
             return resolved
         case OutboxEntityType.progress.rawValue:
             let vocabularyID = try requiredString("vocabularyId", in: change)
-            guard let stored = try store.loadVocabulary().first(where: {
+            guard let stored = try store.loadVocabulary(
+                ids: [VocabularyOccurrenceID(rawValue: vocabularyID)]
+            ).first(where: {
                 $0.id.rawValue.caseInsensitiveCompare(vocabularyID) == .orderedSame
             }) else {
                 if try store.isVocabularyTombstoned(entityID: vocabularyID) { return nil }
@@ -790,7 +754,7 @@ enum AccountSyncApplicator {
             return entry
         case OutboxEntityType.reviewEvent.rawValue:
             let event = try reviewEvent(from: change)
-            guard let stored = try store.loadVocabulary().first(where: {
+            guard let stored = try store.loadVocabulary(ids: [event.vocabularyID]).first(where: {
                 $0.id == event.vocabularyID
             }) else {
                 if try store.isVocabularyTombstoned(entityID: event.vocabularyID.rawValue) { return nil }
@@ -963,9 +927,13 @@ enum AccountSyncApplicator {
         guard let language = change.payload["language"]?.stringValue,
               let form = change.payload["lemma"]?.stringValue ?? change.payload["form"]?.stringValue
         else { throw AccountSyncApplyError.invalidPayload(change.entityType) }
-        try sqlite.upsertKnownLemma(
-            StoredKnownLemma(language: language, form: form, updatedAt: Date())
-        )
+        if change.operation == OutboxOperation.delete.rawValue {
+            try sqlite.deleteKnownLemma(language: language, form: form)
+        } else {
+            try sqlite.upsertKnownLemma(
+                StoredKnownLemma(language: language, form: form, updatedAt: Date())
+            )
+        }
     }
 
     static func isUUID(_ value: String) -> Bool {
@@ -1322,14 +1290,6 @@ enum AccountSyncApplicator {
             rating: rating,
             reviewedAt: reviewedAt
         )
-    }
-
-    /// Pulled reviews stay append-only locally so learning statistics have the same history on every device.
-    static func appendReviewHistory(
-        _ change: SyncPulledChange,
-        to repository: any ReviewEventRepository
-    ) throws {
-        try repository.appendReviewEvent(try reviewEvent(from: change))
     }
 
     static func uuidForLemma(language: String, form: String) -> String {

@@ -491,6 +491,35 @@ struct ProductAIClientTests {
         #expect(json?["task"] as? String == "chapter_batch")
     }
 
+    @Test("server failures preserve the trace reference for support")
+    func serverFailuresPreserveTraceReference() async {
+        let http = StubHTTPClient()
+        http.enqueue(
+            status: 500,
+            json: """
+            {"type":"https://api.example.com/problems/internal_error","title":"Internal server error","status":500,"code":"internal_error","detail":"An unexpected error occurred.","traceId":"trace-translation-500","retryAfterSeconds":null,"fieldErrors":[]}
+            """
+        )
+        let client = LiveProductAIClient(http: http)
+
+        await #expect(throws: AuthClientError.problem(
+            status: 500,
+            code: "internal_error",
+            detail: "An unexpected error occurred. Reference: trace-translation-500."
+        )) {
+            _ = try await client.translateBatch(
+                accessToken: "access",
+                deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                request: ProductTranslationBatchRequest(
+                    sourceLanguage: "en",
+                    targetLanguage: "zh",
+                    learnerLevel: "intermediate",
+                    sentences: [ProductTranslationSentence(id: "s1", text: "Hello")]
+                )
+            )
+        }
+    }
+
     @Test("fake product client generates batch and summary results")
     func fakeGeneratesBatchAndSummary() async throws {
         let client = FakeProductAIClient()

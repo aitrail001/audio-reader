@@ -157,6 +157,7 @@ enum DictionaryLookup {
 #endif
     }
 
+    /// Presents Apple's controller as a resizable sheet; embedding it in reader layout causes AttributeGraph cycles.
     @MainActor
     static func lookUpInDictionary(_ raw: String) {
         let word = headword(raw)
@@ -168,7 +169,15 @@ enum DictionaryLookup {
         guard UIReferenceLibraryViewController.dictionaryHasDefinition(forTerm: word) else { return }
         Task { @MainActor in
             let controller = UIReferenceLibraryViewController(term: word)
-            guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+            controller.modalPresentationStyle = .pageSheet
+            if let sheet = controller.sheetPresentationController {
+                sheet.detents = [.medium(), .large()]
+                sheet.selectedDetentIdentifier = .medium
+                sheet.prefersGrabberVisible = true
+            }
+            guard let scene = UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene })
+                .first(where: { $0.activationState == .foregroundActive }),
                   let root = scene.keyWindow?.rootViewController
             else { return }
             var presenter = root

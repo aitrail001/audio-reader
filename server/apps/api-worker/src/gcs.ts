@@ -1,5 +1,4 @@
-import type { ReadinessStatus } from "@audio-reader/domain";
-import type { ObjectStore } from "./object-store";
+import type { ObjectStore, ReadinessStatus } from "./object-store";
 
 export type GcsServiceAccount = {
   clientEmail: string;
@@ -345,17 +344,6 @@ export function createGcsObjectStore(options: GcsStoreOptions): ObjectStore {
     },
     supportsBoundUpload: () => Promise.resolve(true),
   };
-}
-
-export async function signGcsGetUrl(input: {
-  bucket: string;
-  objectName: string;
-  account: GcsServiceAccount;
-  expiresSeconds: number;
-  now: () => number;
-  key: CryptoKey;
-}): Promise<string> {
-  return signGcsUrl({ ...input, method: "GET" });
 }
 
 async function signGcsUrl(input: {

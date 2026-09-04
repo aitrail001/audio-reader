@@ -151,6 +151,7 @@ describe("supabase object store", () => {
     await expect(store.anonymousRead("private/canary")).resolves.toBe("not_found");
     await expect(store.get("private/canary")).resolves.toBeUndefined();
     await expect(store.open("private/canary")).resolves.toBeUndefined();
+    await expect(store.delete("private/canary")).resolves.toBeUndefined();
   });
 
   it("accepts Supabase's exact legacy private-bucket concealment only for anonymous reads", async () => {
@@ -188,6 +189,7 @@ describe("supabase object store", () => {
     await expect(store.anonymousRead("private/canary")).resolves.toBe("unknown");
     await expect(store.get("private/canary")).rejects.toThrow(/download failed/i);
     await expect(store.open("private/canary")).rejects.toThrow(/download failed/i);
+    await expect(store.delete("private/canary")).rejects.toThrow(/delete failed/i);
   });
 
   it("does not create a missing bucket during a readiness ping", async () => {

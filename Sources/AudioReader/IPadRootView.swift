@@ -617,8 +617,8 @@ struct IPadRootView: View {
             let urls = try result.get()
             let added = try AudiobookImportService.addCompanionFiles(
                 urls,
-                to: URL(fileURLWithPath: book.folderPath, isDirectory: true)
-            )
+                to: book
+            ).addedFileNames
             importMessage = added.isEmpty
                 ? "Those files are already attached to \(book.title)."
                 : "Added \(added.joined(separator: ", ")) to \(book.title)."
@@ -659,7 +659,7 @@ struct IPadRootView: View {
                     }
                     let added = try await deviceLibrary.addCompanion(
                         item,
-                        to: URL(fileURLWithPath: book.folderPath, isDirectory: true)
+                        to: book
                     )
                     importMessage = added.isEmpty
                         ? "That device audiobook is already attached to \(book.title)."
@@ -831,35 +831,47 @@ private struct IPadBookList: View {
     }
 
     var body: some View {
-        List(selection: $selectedBookID) {
+        List {
             if let importMessage {
                 Section {
                     Label(importMessage, systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.secondary)
                 }
+                .listRowBackground(Palette.panel)
             }
             Section {
                 ForEach(filteredBooks) { book in
-                    HStack(spacing: 12) {
-                        IPadCover(path: book.coverPath, title: book.title, width: 48, height: 70)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(book.title)
-                                .font(.headline)
-                                .lineLimit(2)
-                            Text(book.author ?? "Unknown author")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                            Text(book.mediaAvailability == .metadataOnly
-                                ? "Local media unavailable — re-import required"
-                                : book.mediaAvailability == .ebookOnly
-                                    ? "\(book.chapters.count) readable sections"
-                                    : "\(book.chapters.lazy.filter { readyChapterIDs.contains($0.id) }.count)/\(book.chapters.count) transcribed")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                    let isSelected = selectedBookID == book.id
+                    Button {
+                        selectedBookID = book.id
+                    } label: {
+                        HStack(spacing: 12) {
+                            IPadCover(path: book.coverPath, title: book.title, width: 48, height: 70)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(book.title)
+                                    .font(.headline)
+                                    .foregroundStyle(Palette.ink)
+                                    .lineLimit(2)
+                                Text(book.author ?? "Unknown author")
+                                    .font(.subheadline)
+                                    .foregroundStyle(Palette.dim)
+                                Text(book.mediaAvailability == .metadataOnly
+                                    ? "Local media unavailable — re-import required"
+                                    : book.mediaAvailability == .ebookOnly
+                                        ? "\(book.chapters.count) readable sections"
+                                        : "\(book.chapters.lazy.filter { readyChapterIDs.contains($0.id) }.count)/\(book.chapters.count) transcribed")
+                                    .font(.caption)
+                                    .foregroundStyle(Palette.dim)
+                            }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
                     .padding(.vertical, 4)
-                    .tag(book.id)
+                    .accessibilityIdentifier("library.book.\(book.id)")
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
+                    .listRowBackground(isSelected ? Palette.terracotta.opacity(0.16) : Palette.panel)
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button(role: .destructive) {
                             onDelete(book)
@@ -869,7 +881,10 @@ private struct IPadBookList: View {
                     }
                 }
             }
+            .listRowBackground(Palette.panel)
         }
+        .scrollContentBackground(.hidden)
+        .background(Palette.bg)
         .searchable(text: $query, prompt: "Search title or author")
         .accessibilityIdentifier("library.search")
         .overlay {
@@ -901,9 +916,11 @@ private struct IPadBookDetail: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(book.title)
                             .font(.system(.largeTitle, design: .serif, weight: .semibold))
+                            .foregroundStyle(Palette.ink)
+                            .accessibilityIdentifier("library.bookTitle.\(book.id)")
                         Text(book.author ?? "Unknown author")
                             .font(.title3)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Palette.dim)
                         Label(
                             book.mediaAvailability == .metadataOnly
                                 ? "Local media unavailable — re-import required"
@@ -933,6 +950,7 @@ private struct IPadBookDetail: View {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(chapter.title)
                                         .font(.headline)
+                                        .foregroundStyle(Palette.ink)
                                     Text(chapter.hasAudio ? (chapter.duration.map(formatClock) ?? "Duration unavailable") : "Published text")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
@@ -956,6 +974,7 @@ private struct IPadBookDetail: View {
             }
             .padding(28)
         }
+        .background(Palette.bg)
         .navigationTitle(book.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -1108,6 +1127,8 @@ private struct DeviceAudiobooksView: View {
                 }
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(Palette.bg)
         .overlay {
             if library.isLoading {
                 ProgressView("Finding audiobooks…")
@@ -1149,7 +1170,7 @@ private struct IPadCover: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color(uiColor: .secondarySystemGroupedBackground))
+                .fill(Palette.panel2)
             if let path, let image = CoverImageCache.shared.image(for: path) {
                 Image(uiImage: image)
                     .resizable()

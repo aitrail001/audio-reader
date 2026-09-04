@@ -1,4 +1,3 @@
-import type { ReadinessStatus } from "@audio-reader/domain";
 import { ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION } from "./schema";
 import {
   createMemoryCatalogStore,
@@ -27,7 +26,7 @@ import {
 } from "./sync-store";
 
 export const packageId = "@audio-reader/database" as const;
-export type { ReadinessStatus };
+export type ReadinessStatus = "ok" | "unavailable";
 export {
   AUDIT_ACTOR_TYPES,
   ACCOUNT_SYNC_REQUIRED_SCHEMA_VERSION,

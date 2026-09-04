@@ -66,3 +66,47 @@ struct ListenFirstCoachView: View {
         .controlSize(.small)
     }
 }
+
+/// Read & Pause exposes only the controls needed to repeat or advance the fully visible text.
+struct ReadAndPauseCoachView: View {
+    @Bindable var state: AppState
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                title
+                Spacer(minLength: 8)
+                actions
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                title
+                HStack(spacing: 8) { actions }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Palette.goldSoft)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("reader.readAndPauseCoach")
+    }
+
+    private var title: some View {
+        Label("Sentence paused", systemImage: "pause.circle.fill")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(Palette.ink)
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        Button("Replay sentence") { state.replaySentence() }
+            .buttonStyle(.bordered)
+            .frame(minHeight: 44)
+            .accessibilityIdentifier("reader.readAndPauseReplay")
+        Button("Continue to next sentence") { state.continueDeepReading() }
+            .buttonStyle(.borderedProminent)
+            .tint(Palette.terracotta)
+            .frame(minHeight: 44)
+            .disabled(!state.canContinueDeepReading)
+            .accessibilityIdentifier("reader.readAndPauseContinue")
+    }
+}

@@ -10,10 +10,10 @@ import {
   type MemoryPasswordlessLimiterOptions,
 } from "@audio-reader/auth";
 import { createFakeDatabaseClient } from "@audio-reader/database";
-import { REQUEST_ID_HEADER } from "@audio-reader/observability";
 import { describe, expect, it, vi } from "vitest";
 import { createApiAppFromEnv, createTestApp } from "./app";
 import { createUnavailableObjectStore, type ObjectStore } from "./object-store";
+import { REQUEST_ID_HEADER } from "./observability";
 
 const DEVICE_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
 const DEVICE_B = "3fa85f64-5717-4562-b3fc-2c963f66afa7";
@@ -264,6 +264,17 @@ describe("product authentication API", () => {
   it("returns hosted GoTrue authorize URLs instead of local-complete", async () => {
     const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(() =>
+          Promise.resolve(
+            new Response(JSON.stringify({ external: { email: true, google: true, azure: true } }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }),
+          ),
+        ),
+      );
       const app = createApiAppFromEnv({
         ENVIRONMENT: "production",
         SUPABASE_URL: "https://example.supabase.co",
@@ -299,6 +310,49 @@ describe("product authentication API", () => {
       expect(complete.status).toBe(404);
     } finally {
       spy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects a hosted provider disabled in GoTrue before returning a browser URL", async () => {
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(() =>
+          Promise.resolve(
+            new Response(
+              JSON.stringify({ external: { email: true, google: false, azure: true } }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            ),
+          ),
+        ),
+      );
+      const app = createApiAppFromEnv({
+        ENVIRONMENT: "production",
+        SUPABASE_URL: "https://example.supabase.co",
+        SUPABASE_JWT_SECRET: "super-secret",
+        SUPABASE_ANON_KEY: "anon-key",
+      });
+      const pkce = await pkcePair();
+
+      const response = await app.fetch(
+        jsonPost("/v1/auth/oauth/authorize", {
+          provider: "google",
+          redirectUri: "audioreader://auth/callback",
+          codeChallenge: pkce.challenge,
+          state: "oauth-hosted-state",
+        }),
+      );
+
+      expect(response.status).toBe(503);
+      await expect(readJson(response)).resolves.toMatchObject({
+        code: "provider_not_enabled",
+        detail: "Google sign-in is not available right now. Use email sign-in or try again later.",
+      });
+    } finally {
+      spy.mockRestore();
+      vi.unstubAllGlobals();
     }
   });
 
@@ -309,6 +363,56 @@ describe("product authentication API", () => {
     expect(payload).toEqual({
       providers: [{ id: "google" }, { id: "microsoft" }, { id: "email_otp" }],
     });
+  });
+
+  it("GET /v1/auth/config uses the auth service provider availability", async () => {
+    const auth = createMemoryAuthService({ jwt: LOCAL_JWT_CONFIG });
+    auth.authConfig = () => ({ providers: [{ id: "email_otp" }] });
+    const response = await createTestApp({
+      auth,
+      authenticate: (request) => auth.authenticate(request),
+    }).fetch(new Request("http://localhost/v1/auth/config"));
+
+    expect(response.status).toBe(200);
+    await expect(readJson(response)).resolves.toEqual({ providers: [{ id: "email_otp" }] });
+  });
+
+  it("explains when an OAuth exchange no longer matches the native sign-in attempt", async () => {
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const auth = createMemoryAuthService({ jwt: LOCAL_JWT_CONFIG });
+    auth.exchangeOAuth = () => Promise.resolve({ ok: false, code: "pkce_mismatch" });
+    try {
+      const response = await createTestApp({
+        auth,
+        authenticate: (request) => auth.authenticate(request),
+      }).fetch(
+        jsonPost(
+          "/v1/auth/oauth/exchange",
+          {
+            provider: "google",
+            code: "sensitive-oauth-code",
+            codeVerifier: "v".repeat(43),
+            redirectUri: "audioreader://auth/callback",
+          },
+          { "X-Device-Id": DEVICE_ID, "X-Request-Id": "trace-pkce-mismatch" },
+        ),
+      );
+
+      expect(response.status).toBe(409);
+      await expect(readJson(response)).resolves.toMatchObject({
+        code: "oauth_session_changed",
+        title: "Restart sign-in",
+        detail:
+          "This sign-in attempt no longer matches this device. Start sign-in again, and close any older sign-in window.",
+      });
+      const logs = spy.mock.calls.flat().join("\n");
+      expect(logs).toContain("trace-pkce-mismatch");
+      expect(logs).toContain("pkce_mismatch");
+      expect(logs).not.toContain("sensitive-oauth-code");
+      expect(logs).not.toContain("v".repeat(43));
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("returns the same public OTP request response for existing and unknown emails", async () => {

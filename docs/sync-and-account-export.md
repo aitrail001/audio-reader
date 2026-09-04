@@ -16,15 +16,20 @@ books, progress, vocabulary, reviews, transcripts, and overlays—and reports
 batch/item progress plus pending or conflict counts when known. It then retains
 the last successful detail, a retryable entity-specific failure, or a conflict.
 
-Concurrent progress changes are never hidden. When two devices advance the
-same book from a common revision, AudioReader presents both positions with the
-device and timestamp and asks which position to keep. Choosing a position
-creates the next synchronized revision; it does not delete local media.
+Ordinary stale revisions are rebased and retried once in the same run; they do
+not become user-facing conflicts. Repeated contention stops before pull and
+keeps the local mutation pending for a later retry. When two devices genuinely
+advance the same book from a common revision, AudioReader presents both chapter
+positions with their device and timestamp and asks which position to keep.
+Choosing a position creates the next synchronized revision; it does not delete
+local media.
 
-Transcript overlays use the same revision contract. The immutable base
-transcript applies before its overlay. A restore is synchronized as removal of
-the overlay, and stale-fingerprint overlays remain available for provenance but
-are not rendered.
+Transcript overlays use the same revision contract. Semantically identical
+corrections are merged even when their IDs or provenance differ. Genuinely
+different corrections appear in the affected chapter with both corrected texts,
+timings, devices, and an explicit choice. The immutable base transcript applies
+before its overlay. A restore is synchronized as removal of the overlay, and
+stale-fingerprint overlays remain available for provenance but are not rendered.
 
 Vocabulary card scheduling fields and immutable review events synchronize as
 one learning contract. A device applies vocabulary parents before review

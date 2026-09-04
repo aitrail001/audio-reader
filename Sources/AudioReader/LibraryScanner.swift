@@ -94,7 +94,7 @@ enum LibraryScanner {
         let markedAuthor = textMarker(named: ".audioreader-author", in: folder)
 
         return Book(
-            id: stableID(folder.path),
+            id: textMarker(named: ".audioreader-book-id", in: folder) ?? stableID(folder.path),
             title: markedTitle ?? title,
             author: markedAuthor ?? author,
             folderPath: folder.path,
@@ -228,10 +228,6 @@ enum LibraryScanner {
             }
         }
         return path
-    }
-
-    static func containsAudio(in folder: URL) -> Bool {
-        allFiles(in: folder).contains { audioExt.contains($0.pathExtension.lowercased()) }
     }
 
     static func containsBookMedia(in folder: URL) -> Bool {

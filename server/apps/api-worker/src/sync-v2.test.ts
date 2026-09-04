@@ -1,6 +1,7 @@
 import { createFakeDatabaseClient, SyncStoreWriteError } from "@audio-reader/database";
 import { describe, expect, it, vi } from "vitest";
 import { createTestApp } from "./app";
+import { validateSyncV2Payload } from "./sync-v2-payload-policy";
 
 const DEVICE_ID = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
 const REVISION_ID = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
@@ -17,6 +18,17 @@ function headers(key?: string): Record<string, string> {
 }
 
 describe("object-backed sync v2", () => {
+  it("accepts EPUB section indices in book chapter payloads", () => {
+    expect(
+      validateSyncV2Payload("book", {
+        localId: "book",
+        title: "Book",
+        source: "files",
+        chapters: [{ localId: "chapter", index: 0, title: "One", ebookSectionIndex: 0 }],
+      }),
+    ).toBeUndefined();
+  });
+
   it("logs safe structured database context for a failed atomic push", async () => {
     const database = createFakeDatabaseClient();
     await database.ops.patchFlag("account_sync", { enabled: true });

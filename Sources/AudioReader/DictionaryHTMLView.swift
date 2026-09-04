@@ -91,13 +91,4 @@ struct DictionaryHTMLView: UIViewRepresentable {
     }
 }
 
-struct SystemDictionaryView: UIViewControllerRepresentable {
-    let term: String
-
-    func makeUIViewController(context: Context) -> UIReferenceLibraryViewController {
-        UIReferenceLibraryViewController(term: DictionaryLookup.headword(term))
-    }
-
-    func updateUIViewController(_ controller: UIReferenceLibraryViewController, context: Context) {}
-}
 #endif

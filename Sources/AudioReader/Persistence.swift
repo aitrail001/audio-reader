@@ -462,14 +462,6 @@ enum Persistence {
         ((try? store.loadVocabulary()) ?? []).map(VocabEntry.init)
     }
 
-    static func saveVocab(_ items: [VocabEntry]) {
-        try? store.saveVocabulary(items.map(StoredVocabularyOccurrence.init))
-    }
-
-    static func saveVocabUpdates(_ updates: [VocabEntry], allItems: [VocabEntry]) {
-        try? store.upsertVocabulary(updates.map(StoredVocabularyOccurrence.init))
-    }
-
     static func loadKnownLemmas() -> [KnownLemmaRecord] {
         ((try? store.loadKnownLemmas()) ?? []).map(KnownLemmaRecord.init)
     }
@@ -713,17 +705,6 @@ enum Persistence {
         }
     }
 
-    static func deleteChapterTranslationCheckpoint(
-        chapterID: String,
-        language: String,
-        database: LocalSQLiteStore = Persistence.store
-    ) throws {
-        try database.deleteTranslationCheckpoint(
-            chapterID: ChapterID(rawValue: chapterID),
-            language: language
-        )
-    }
-
     private static func storedCheckpoint(
         _ checkpoint: ChapterTranslationCheckpoint
     ) -> StoredTranslationCheckpoint {
@@ -742,11 +723,6 @@ enum Persistence {
         ((try? database.loadAssistantResults()) ?? [])
             .filter { $0.kind == .chapterSummary }
             .compactMap(chapterSummary(from:))
-    }
-
-    static func saveChapterSummaries(_ summaries: [ChapterSummaryRecord]) {
-        let durable = ((try? store.loadAssistantResults()) ?? []).filter { $0.kind != .chapterSummary }
-        try? store.replaceAssistantResults(durable + summaries.compactMap { try? storedSummary(from: $0) })
     }
 
     /// Summary lifecycle completion must not be published until this durable write succeeds.
@@ -856,6 +832,7 @@ struct AppSettings: Codable, Equatable {
     var autoTranslate: Bool
     var playOnSelect: Bool
     var deepReadingMode: Bool
+    var readAndPauseMode: Bool
     var showStudyOverlay: Bool
     var vocabReviewPrompt: String
     var appearance: String
@@ -898,6 +875,7 @@ struct AppSettings: Codable, Equatable {
             autoTranslate: false,
             playOnSelect: true,
             deepReadingMode: false,
+            readAndPauseMode: false,
             showStudyOverlay: false,
             vocabReviewPrompt: VocabReviewPrompt.recognition.rawValue,
             appearance: AppAppearance.system.rawValue,
@@ -945,6 +923,7 @@ struct AppSettings: Codable, Equatable {
         autoTranslate: Bool,
         playOnSelect: Bool,
         deepReadingMode: Bool,
+        readAndPauseMode: Bool,
         showStudyOverlay: Bool,
         vocabReviewPrompt: String,
         appearance: String,
@@ -985,6 +964,7 @@ struct AppSettings: Codable, Equatable {
         self.autoTranslate = autoTranslate
         self.playOnSelect = playOnSelect
         self.deepReadingMode = deepReadingMode
+        self.readAndPauseMode = readAndPauseMode
         self.showStudyOverlay = showStudyOverlay
         self.vocabReviewPrompt = vocabReviewPrompt
         self.appearance = appearance
@@ -1032,6 +1012,9 @@ struct AppSettings: Codable, Equatable {
         autoTranslate = try c.decodeIfPresent(Bool.self, forKey: .autoTranslate) ?? d.autoTranslate
         playOnSelect = try c.decodeIfPresent(Bool.self, forKey: .playOnSelect) ?? d.playOnSelect
         deepReadingMode = try c.decodeIfPresent(Bool.self, forKey: .deepReadingMode) ?? d.deepReadingMode
+        readAndPauseMode = deepReadingMode
+            ? false
+            : (try c.decodeIfPresent(Bool.self, forKey: .readAndPauseMode) ?? d.readAndPauseMode)
         showStudyOverlay = try c.decodeIfPresent(Bool.self, forKey: .showStudyOverlay) ?? d.showStudyOverlay
         vocabReviewPrompt = try c.decodeIfPresent(String.self, forKey: .vocabReviewPrompt) ?? d.vocabReviewPrompt
         appearance = try c.decodeIfPresent(String.self, forKey: .appearance) ?? d.appearance
@@ -1104,6 +1087,7 @@ extension StoredSettings {
             autoTranslate: settings.autoTranslate,
             playOnSelect: settings.playOnSelect,
             deepReadingMode: settings.deepReadingMode,
+            readAndPauseMode: settings.readAndPauseMode,
             showStudyOverlay: settings.showStudyOverlay,
             vocabReviewPrompt: settings.vocabReviewPrompt,
             appearance: settings.appearance,
@@ -1149,6 +1133,7 @@ extension AppSettings {
         autoTranslate = stored.autoTranslate
         playOnSelect = stored.playOnSelect
         deepReadingMode = stored.deepReadingMode
+        readAndPauseMode = stored.deepReadingMode ? false : (stored.readAndPauseMode ?? false)
         showStudyOverlay = stored.showStudyOverlay
         vocabReviewPrompt = stored.vocabReviewPrompt
         appearance = stored.appearance

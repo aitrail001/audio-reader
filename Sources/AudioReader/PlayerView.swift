@@ -20,11 +20,18 @@ struct ReaderScrollTarget: Equatable {
     }
 }
 
+#if os(iOS)
+private enum ReaderAuxiliarySheet: Identifiable {
+    case lookup
+    case chapterAI
+
+    var id: Self { self }
+}
+#endif
+
 struct PlayerView: View {
     @Bindable var state: AppState
     @State private var autoScroll = true
-    @State private var lookupWidth: CGFloat = 0
-    @State private var lookupDragStart: CGFloat?
     @State private var readerScrollTarget: ReaderScrollTarget?
     @State private var editingTranscriptSegment: TranscriptSegment?
     @State private var readerProgressError: String?
@@ -77,11 +84,18 @@ struct PlayerView: View {
             if state.readerProgressChoices.count > 1 {
                 readerProgressConflictBanner
             }
+            if !state.transcriptOverlayConflictStates.isEmpty {
+                transcriptOverlayConflictBanner
+            }
             lyricPane
             if state.selectedChapter?.hasAudio == true {
                 VStack(spacing: playbackChromeSpacing) {
-                    if state.isDeepReadingPaused, let segment = state.currentSegment {
-                        ListenFirstCoachView(state: state, segment: segment)
+                    if let segment = state.currentSegment {
+                        if state.isDeepReadingPaused {
+                            ListenFirstCoachView(state: state, segment: segment)
+                        } else if state.isReadAndPausePaused {
+                            ReadAndPauseCoachView(state: state)
+                        }
                     }
                     PlaybackChrome(state: state)
 #if os(iOS)
@@ -140,6 +154,19 @@ struct PlayerView: View {
                 state.errorMessage = error.localizedDescription
             }
         }
+        .sheet(item: iPadAuxiliarySheetBinding) { destination in
+            Group {
+                switch destination {
+                case .lookup:
+                    WordInspector(state: state, type: iPadAuxiliaryReaderType)
+                case .chapterAI:
+                    ChapterAssistantView(state: state)
+                }
+            }
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
+            .presentationSizing(.form)
+        }
 #endif
         .sheet(item: $state.shadowingSegment) { segment in
             ShadowingPracticeView(state: state, segment: segment)
@@ -155,6 +182,7 @@ struct PlayerView: View {
                 segment: segment,
                 hasStoredCorrection: state.transcriptOverlay(for: segment.id) != nil,
                 conflictChoices: state.transcriptOverlayChoices(for: segment.id),
+                deviceName: state.syncDeviceName,
                 onPreview: previewTranscriptCorrection,
                 onSave: { text, start, end in
                     try state.saveTranscriptCorrection(
@@ -220,7 +248,7 @@ struct PlayerView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(readerProgressChapterTitle(choice.chapterID.rawValue))
                         .font(.subheadline.weight(.semibold))
-                    Text("\(formatClock(choice.relativeSeconds)) · \(choice.deviceID) · \(choice.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                    Text("\(formatClock(choice.relativeSeconds)) · \(state.syncDeviceName(choice.deviceID)) · \(choice.updatedAt.formatted(date: .abbreviated, time: .shortened))")
                         .font(.caption)
                         .foregroundStyle(Palette.dim)
                 }
@@ -229,6 +257,41 @@ struct PlayerView: View {
             .buttonStyle(.bordered)
             .accessibilityIdentifier("reader.progressChoice.\(choice.id)")
         }
+    }
+
+    private var transcriptOverlayConflictBanner: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Choose a transcript correction", systemImage: "text.badge.checkmark")
+                .font(.headline)
+            Text("The same sentence was corrected differently on another device. Compare the versions before sync continues.")
+                .font(.subheadline)
+                .foregroundStyle(Palette.dim)
+            ForEach(state.transcriptOverlayConflictStates.keys.sorted(), id: \.self) { segmentID in
+                if let segment = state.presentedTranscript?.segments.first(where: { $0.id == segmentID }) {
+                    Button {
+                        editingTranscriptSegment = segment
+                    } label: {
+                        let choices = state.transcriptOverlayChoices(for: segmentID)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(choices.map { "“\($0.overlay.correctedText)”" }.joined(separator: " or "))
+                                .lineLimit(2)
+                            Text(choices.map { state.syncDeviceName($0.overlay.provenance.deviceID) }.joined(separator: " · "))
+                                .font(.caption)
+                                .foregroundStyle(Palette.dim)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityHint("Opens both corrections with their timing and device")
+                    .accessibilityIdentifier("transcript.conflictReview.\(segmentID)")
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.goldSoft)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("transcript.conflictBanner")
     }
 
     private func readerProgressChapterTitle(_ chapterID: String) -> String {
@@ -397,93 +460,6 @@ struct PlayerView: View {
         .fixedSize(horizontal: true, vertical: false)
     }
 
-    @ViewBuilder
-    private var desktopProviderControls: some View {
-        Picker("Connection", selection: llmConnectionBinding) {
-            ForEach(LLMConnectionChoice.availableOnCurrentPlatform) { connection in
-                Text(connection.menuLabel).tag(connection)
-            }
-        }
-        .frame(maxWidth: 210)
-
-        switch state.llmProvider {
-        case .managedQwen:
-            Text(state.account.mode.isSignedIn ? "Managed Qwen" : "Sign in for Managed Qwen")
-                .foregroundStyle(state.account.mode.isSignedIn ? Palette.gold : Palette.dim)
-        case .grok:
-            Picker("Model", selection: $state.settings.grokModel) {
-                ForEach(state.grokTextModels) { model in
-                    Text(model.id).tag(model.id)
-                }
-            }
-            .frame(maxWidth: 140)
-            .onChange(of: state.settings.grokModel) { _, _ in
-                state.persistSettings()
-                state.normalizeSelectedGrokEffort()
-            }
-
-            if !state.selectedGrokEfforts.isEmpty {
-                Picker("Effort", selection: $state.settings.grokEffort) {
-                    ForEach(state.selectedGrokEfforts) { effort in
-                        Text(effort.rawValue).tag(effort.rawValue)
-                    }
-                }
-                .frame(maxWidth: 110)
-                .onChange(of: state.settings.grokEffort) { _, _ in state.persistSettings() }
-            }
-        case .qwenCloud:
-            Picker("Model", selection: $state.settings.qwenModel) {
-                ForEach(state.qwenTextModels) { model in
-                    Text(model.id).tag(model.id)
-                }
-            }
-            .frame(maxWidth: 180)
-            .onChange(of: state.settings.qwenModel) { _, _ in
-                state.persistSettings()
-                state.normalizeSelectedQwenEffort()
-            }
-            if state.qwenSupportsThinkingToggle {
-                Toggle("Thinking", isOn: $state.settings.qwenThinking)
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .onChange(of: state.settings.qwenThinking) { _, _ in state.persistSettings() }
-            }
-            if !state.selectedQwenEfforts.isEmpty
-                && (!state.qwenSupportsThinkingToggle || state.settings.qwenThinking) {
-                Picker("Effort", selection: $state.settings.qwenEffort) {
-                    ForEach(state.selectedQwenEfforts) { effort in
-                        Text(effort.rawValue).tag(effort.rawValue)
-                    }
-                }
-                .frame(maxWidth: 105)
-                .onChange(of: state.settings.qwenEffort) { _, _ in state.persistSettings() }
-            }
-        case .openAI:
-            Picker("Model", selection: $state.settings.openAIModel) {
-                ForEach(state.openAITextModels) { model in
-                    Text(model.id).tag(model.id)
-                }
-            }
-            .frame(maxWidth: 180)
-            .onChange(of: state.settings.openAIModel) { _, _ in
-                state.persistSettings()
-                state.normalizeSelectedOpenAIEffort()
-            }
-            if !state.selectedOpenAIEfforts.isEmpty {
-                Picker("Effort", selection: $state.settings.openAIEffort) {
-                    ForEach(state.selectedOpenAIEfforts) { effort in
-                        Text(effort.rawValue).tag(effort.rawValue)
-                    }
-                }
-                .frame(maxWidth: 105)
-                .onChange(of: state.settings.openAIEffort) { _, _ in state.persistSettings() }
-            }
-        case .appleFoundation:
-            Text(state.appleIntelligenceAvailability.shortLabel)
-                .foregroundStyle(state.appleIntelligenceAvailability.isReady ? Palette.gold : Palette.dim)
-                .help(state.appleIntelligenceAvailability.userMessage)
-        }
-    }
 #endif
 
     private var sentenceLoopBinding: Binding<Bool> {
@@ -497,6 +473,13 @@ struct PlayerView: View {
         Binding(
             get: { state.settings.deepReadingMode },
             set: { state.setDeepReadingMode($0) }
+        )
+    }
+
+    private var readAndPauseBinding: Binding<Bool> {
+        Binding(
+            get: { state.settings.readAndPauseMode },
+            set: { state.setReadAndPauseMode($0) }
         )
     }
 
@@ -683,6 +666,10 @@ struct PlayerView: View {
             Toggle("Auto-scroll", isOn: $autoScroll)
             Toggle("Listen First", isOn: deepReadingBinding)
                 .accessibilityHint("Hides unfinished and future sentences, then pauses and reveals each completed sentence.")
+                .accessibilityLabel("Listen First")
+            Toggle("Read & Pause", isOn: readAndPauseBinding)
+                .accessibilityHint("Keeps every sentence visible and pauses after each one.")
+                .accessibilityLabel("Read and Pause")
             Toggle("Play on tap", isOn: $state.settings.playOnSelect)
                 .onChange(of: state.settings.playOnSelect) { _, _ in state.persistSettings() }
             Toggle("Study overlay", isOn: $state.settings.showStudyOverlay)
@@ -830,11 +817,11 @@ struct PlayerView: View {
         .background(Palette.goldSoft)
     }
 
+#if os(macOS)
     private var effectiveLookupWidth: CGFloat {
-        lookupWidth > 0 ? lookupWidth : CGFloat(state.settings.lookupPanelWidth)
+        CGFloat(state.settings.lookupPanelWidth)
     }
 
-#if os(macOS)
     private var inspectorPresentationBinding: Binding<Bool> {
         Binding(
             get: { state.selectedWord != nil || state.showChapterAssistant },
@@ -842,6 +829,8 @@ struct PlayerView: View {
                 guard !presented else { return }
                 state.showChapterAssistant = false
                 state.selectedWord = nil
+                state.selectedWordSegmentID = nil
+                state.selectedWordContextText = nil
                 state.definition = nil
                 state.dictionaryHits = []
             }
@@ -849,9 +838,40 @@ struct PlayerView: View {
     }
 #endif
 
+#if os(iOS)
+    private var iPadAuxiliarySheetBinding: Binding<ReaderAuxiliarySheet?> {
+        Binding(
+            get: {
+                if state.showChapterAssistant { return .chapterAI }
+                if state.selectedWord != nil { return .lookup }
+                return nil
+            },
+            set: { destination in
+                guard destination == nil else { return }
+                state.showChapterAssistant = false
+                state.selectedWord = nil
+                state.selectedWordSegmentID = nil
+                state.selectedWordContextText = nil
+                state.definition = nil
+                state.dictionaryHits = []
+            }
+        )
+    }
+
+    private var iPadAuxiliaryReaderType: ReaderType {
+        .metrics(
+            columnWidth: 520,
+            scale: state.settings.readerFontScale,
+            lineSpacing: state.settings.readerLineSpacing,
+            wordSpacing: state.settings.readerWordSpacing,
+            font: state.settings.readerFont,
+            bold: state.settings.readerBold
+        )
+    }
+#endif
+
     private var lyricPane: some View {
         GeometryReader { geo in
-#if os(macOS)
             let type = ReaderType.metrics(
                 columnWidth: geo.size.width,
                 scale: state.settings.readerFontScale,
@@ -868,134 +888,7 @@ struct PlayerView: View {
                 type: type,
                 onEditSegment: { editingTranscriptSegment = $0 }
             )
-#else
-            let lookupOpen = state.selectedWord != nil || state.showChapterAssistant
-            let split = ReaderSplitGeometry(
-                containerWidth: geo.size.width,
-                proposedLookupWidth: effectiveLookupWidth,
-                isLookupOpen: lookupOpen
-            )
-            let type = ReaderType.metrics(
-                columnWidth: split.textWidth,
-                scale: state.settings.readerFontScale,
-                lineSpacing: state.settings.readerLineSpacing,
-                wordSpacing: state.settings.readerWordSpacing,
-                font: state.settings.readerFont,
-                bold: state.settings.readerBold
-            )
-            HStack(spacing: 0) {
-                TranscriptTextColumn(
-                    state: state,
-                    autoScroll: $autoScroll,
-                    readerScrollTarget: $readerScrollTarget,
-                    proxyWidth: split.textWidth,
-                    type: type,
-                    onEditSegment: { editingTranscriptSegment = $0 }
-                )
-                    .frame(width: split.textWidth)
-                if lookupOpen {
-                    lookupSplitter(containerWidth: geo.size.width)
-                    Group {
-                        if state.showChapterAssistant {
-                            ChapterAssistantView(state: state)
-                                .frame(width: split.lookupWidth)
-                        } else {
-                            WordInspector(state: state, type: type)
-                                .frame(width: split.lookupWidth)
-                        }
-                    }
-                    .transition(.move(edge: .trailing))
-                }
-            }
-            .onChange(of: geo.size.width) { _, width in
-                lookupWidth = ReaderSplitLayout.clampedLookupWidth(
-                    proposed: effectiveLookupWidth,
-                    containerWidth: width
-                )
-            }
-#endif
         }
-        .onAppear {
-            if lookupWidth <= 0 {
-                lookupWidth = CGFloat(state.settings.lookupPanelWidth)
-            }
-        }
-    }
-
-    private func applyLookupDrag(translation: CGFloat, containerWidth: CGFloat) {
-        let start = lookupDragStart ?? effectiveLookupWidth
-        if lookupDragStart == nil { lookupDragStart = start }
-        lookupWidth = ReaderSplitLayout.clampedLookupWidth(
-            proposed: start - translation,
-            containerWidth: containerWidth
-        )
-    }
-
-    private func finishLookupDrag() {
-        lookupDragStart = nil
-        state.settings.lookupPanelWidth = Double(lookupWidth)
-        state.persistSettings()
-    }
-
-    private func lookupSplitter(containerWidth: CGFloat) -> some View {
-        ZStack {
-            Rectangle()
-                .fill(Palette.line)
-                .frame(width: 1)
-            Capsule()
-                .fill(Palette.mute.opacity(0.7))
-                .frame(width: 4, height: 44)
-        }
-        .frame(width: ReaderSplitLayout.splitterVisualWidth)
-        .contentShape(Rectangle())
-        .accessibilityLabel("Resize lookup panel")
-        .accessibilityValue("\(Int(effectiveLookupWidth.rounded())) points")
-        .accessibilityHint("Adjust to make the reading text wider or narrower")
-        .accessibilityAdjustableAction { direction in
-            let step: CGFloat = 24
-            switch direction {
-            case .increment:
-                lookupWidth = ReaderSplitLayout.clampedLookupWidth(
-                    proposed: effectiveLookupWidth + step,
-                    containerWidth: containerWidth
-                )
-            case .decrement:
-                lookupWidth = ReaderSplitLayout.clampedLookupWidth(
-                    proposed: effectiveLookupWidth - step,
-                    containerWidth: containerWidth
-                )
-            @unknown default:
-                break
-            }
-            finishLookupDrag()
-        }
-#if os(iOS)
-        .overlay {
-            SplitterPanHandle(
-                translationHandler: { translation in
-                    applyLookupDrag(translation: translation, containerWidth: containerWidth)
-                },
-                endHandler: finishLookupDrag
-            )
-        }
-#else
-        .highPriorityGesture(
-            DragGesture(minimumDistance: 1)
-                .onChanged { value in
-                    applyLookupDrag(translation: value.translation.width, containerWidth: containerWidth)
-                }
-                .onEnded { _ in
-                    finishLookupDrag()
-                }
-        )
-        .onHover { hovering in
-            if hovering {
-                NSCursor.resizeLeftRight.push()
-            } else {
-                NSCursor.pop()
-            }
-        }
-#endif
     }
 
     private var playbackChromeSpacing: CGFloat {
@@ -1087,6 +980,8 @@ struct PlayerView: View {
                     .foregroundStyle(Palette.gold)
             }
             .help("Play / Pause")
+            .accessibilityLabel(state.player.isPlaying ? "Pause" : "Play")
+            .accessibilityIdentifier("reader.playback.toggle")
 
             Button { state.skipSentence(direction: 1) } label: {
                 Image(systemName: "forward.end.fill")
@@ -1114,12 +1009,7 @@ struct PlayerView: View {
             .help("Loop current sentence")
             .foregroundStyle(state.loopSentence ? Palette.gold : Palette.ink)
 
-            Toggle(isOn: deepReadingBinding) {
-                Image(systemName: "book.closed")
-            }
-            .toggleStyle(.button)
-            .help("Listen First: hide text, then pause after each sentence")
-            .foregroundStyle(state.settings.deepReadingMode ? Palette.gold : Palette.ink)
+            readingPaceMenu
 
             Button { state.continueDeepReading() } label: {
                 Image(systemName: "forward.end.circle")
@@ -1216,6 +1106,37 @@ struct PlayerView: View {
         return "Chapter \(index + 1) of \(chapters.count)"
     }
 
+    private var readingPaceMenu: some View {
+        Menu {
+            Button {
+                state.setDeepReadingMode(false)
+                state.setReadAndPauseMode(false)
+            } label: {
+                Label("Continuous", systemImage: !state.settings.deepReadingMode && !state.settings.readAndPauseMode ? "checkmark" : "play")
+            }
+            Button {
+                state.setDeepReadingMode(true)
+            } label: {
+                Label("Listen First", systemImage: state.settings.deepReadingMode ? "checkmark" : "ear")
+            }
+            Button {
+                state.setReadAndPauseMode(true)
+            } label: {
+                Label("Read & Pause", systemImage: state.settings.readAndPauseMode ? "checkmark" : "text.alignleft")
+            }
+        } label: {
+            Image(systemName: state.settings.deepReadingMode ? "ear" : (state.settings.readAndPauseMode ? "text.alignleft" : "play"))
+#if os(iOS)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+#endif
+        }
+        .foregroundStyle(state.settings.deepReadingMode || state.settings.readAndPauseMode ? Palette.gold : Palette.ink)
+        .help("Choose continuous, Listen First, or Read & Pause playback")
+        .accessibilityLabel("Reading pace")
+        .accessibilityValue(state.settings.deepReadingMode ? "Listen First" : (state.settings.readAndPauseMode ? "Read and Pause" : "Continuous"))
+    }
+
 #if os(iOS)
     private var iPadCompactPlaybackBar: some View {
         HStack(spacing: 4) {
@@ -1257,6 +1178,7 @@ struct PlayerView: View {
                     .contentShape(Rectangle())
             }
             .accessibilityLabel(state.player.isPlaying ? "Pause" : "Play")
+            .accessibilityIdentifier("reader.playback.toggle")
 
             Button { state.skipSentence(direction: 1) } label: {
                 Image(systemName: "forward.end.fill")
@@ -1292,22 +1214,14 @@ struct PlayerView: View {
             .foregroundStyle(state.loopSentence ? Palette.gold : Palette.ink)
             .accessibilityLabel("Loop sentence")
 
-            Toggle(isOn: deepReadingBinding) {
-                Image(systemName: "book.closed")
-                    .frame(minWidth: 44, minHeight: 44)
-                    .contentShape(Rectangle())
-            }
-            .toggleStyle(.button)
-            .foregroundStyle(state.settings.deepReadingMode ? Palette.gold : Palette.ink)
-            .accessibilityLabel("Listen First")
-            .accessibilityValue(state.settings.deepReadingMode ? "On" : "Off")
+            readingPaceMenu
 
             Button { state.continueDeepReading() } label: {
                 Image(systemName: "forward.end.circle")
                     .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
-            .foregroundStyle(state.isDeepReadingPaused ? Palette.gold : Palette.ink)
+            .foregroundStyle(state.isDeepReadingPaused || state.isReadAndPausePaused ? Palette.gold : Palette.ink)
             .disabled(!state.canContinueDeepReading)
             .accessibilityLabel("Continue with next sentence")
             .keyboardShortcut(.return, modifiers: [.command])
@@ -1385,70 +1299,6 @@ struct PlayerView: View {
 }
 
 #if os(iOS)
-private struct SplitterPanHandle: UIViewRepresentable {
-    var translationHandler: (CGFloat) -> Void
-    var endHandler: () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(translationHandler: translationHandler, endHandler: endHandler)
-    }
-
-    func makeUIView(context: Context) -> SplitterPanView {
-        let view = SplitterPanView()
-        view.coordinator = context.coordinator
-        return view
-    }
-
-    func updateUIView(_ uiView: SplitterPanView, context: Context) {
-        context.coordinator.translationHandler = translationHandler
-        context.coordinator.endHandler = endHandler
-        uiView.coordinator = context.coordinator
-    }
-
-    final class Coordinator {
-        var translationHandler: (CGFloat) -> Void
-        var endHandler: () -> Void
-
-        init(translationHandler: @escaping (CGFloat) -> Void, endHandler: @escaping () -> Void) {
-            self.translationHandler = translationHandler
-            self.endHandler = endHandler
-        }
-    }
-}
-
-private final class SplitterPanView: UIView {
-    var coordinator: SplitterPanHandle.Coordinator?
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = .clear
-        isUserInteractionEnabled = true
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
-        pan.maximumNumberOfTouches = 1
-        addGestureRecognizer(pan)
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        bounds.insetBy(dx: -8, dy: 0).contains(point)
-    }
-
-    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
-        let translation = gesture.translation(in: self).x
-        switch gesture.state {
-        case .began, .changed:
-            coordinator?.translationHandler(translation)
-        case .ended, .cancelled, .failed:
-            coordinator?.endHandler()
-        default:
-            break
-        }
-    }
-}
-
 private struct IPadPlaybackSpeedPicker: View {
     @Bindable var state: AppState
     let onDismiss: () -> Void
@@ -1578,8 +1428,11 @@ private struct ChapterAssistantView: View {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 16))
                         .foregroundStyle(Palette.dim)
+                        .frame(width: 44, height: 44)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Close Chapter AI")
+                .accessibilityIdentifier("reader.chapterAI.close")
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 16)
@@ -1794,10 +1647,11 @@ private struct ChapterAssistantView: View {
                                     action: toggleDictation
                                 )
                             }
-                            .frame(width: 28, height: 28)
+                            .frame(width: 44, height: 44)
                             Button(action: sendChat) {
                                 Image(systemName: "arrow.up.circle.fill")
                                     .font(.system(size: 22))
+                                    .frame(width: 44, height: 44)
                             }
                             .buttonStyle(.plain)
                             .foregroundStyle(Palette.gold)
@@ -2319,7 +2173,7 @@ private struct TranscriptTextColumn: View {
                             currentID: cursor.segmentID,
                             currentWordID: segment.id == cursor.segmentID ? cursor.wordID : nil,
                             focusedSegmentID: state.focusedSegmentID,
-                            focusedWordID: state.focusedWordID,
+                            lookupWordID: state.selectedWord?.id,
                             textSource: state.readerTextSource,
                             gloss: state.sentenceGloss(for: segment),
                             isTranslating: state.isLLMJobActive(kind: .sentenceTranslation, targetID: segment.id),
@@ -2329,18 +2183,28 @@ private struct TranscriptTextColumn: View {
                             studyLearningLemmas: studyLearning,
                             studyKnownLemmas: studyKnown,
                             onSeek: { time in
-                                state.focusedSegmentID = segment.id
-                                state.focusedWordID = nil
-                                state.seekToSentence(segment, time: time, autoplay: state.settings.playOnSelect)
+                                state.selectPlaybackAnchor(
+                                    sentence: segment,
+                                    word: nil,
+                                    time: time,
+                                    startPlayback: state.settings.playOnSelect
+                                )
                             },
                             onPlayFrom: { time in
-                                state.focusedSegmentID = segment.id
-                                state.seekToSentence(segment, time: time, autoplay: true)
+                                state.selectPlaybackAnchor(
+                                    sentence: segment,
+                                    word: nil,
+                                    time: time,
+                                    startPlayback: true
+                                )
                             },
                             onInspect: { word in
-                                state.focusedSegmentID = segment.id
-                                state.focusedWordID = word.id
-                                state.inspect(word: word)
+                                state.selectPlaybackAnchor(
+                                    sentence: segment,
+                                    word: word,
+                                    time: word.start,
+                                    startPlayback: state.settings.playOnSelect
+                                )
                             },
                             onSave: { word in state.addVocab(word: word, segment: segment) },
                             onMarkKnown: { word in
@@ -2547,7 +2411,7 @@ private struct SentenceRow: View {
     let currentID: String?
     let currentWordID: String?
     let focusedSegmentID: String?
-    let focusedWordID: String?
+    let lookupWordID: String?
     let textSource: TextSource
     let gloss: GlossEntry?
     let isTranslating: Bool
@@ -2585,14 +2449,14 @@ private struct SentenceRow: View {
             ForEach(tokens) { word in
                 WordToken(
                     word: word,
-                    isCurrent: word.id == currentWordID || word.id == focusedWordID,
+                    isPlaybackCurrent: word.id == currentWordID,
+                    isLookupFocused: word.id == lookupWordID,
                     dimmed: dimmed,
                     fontSize: type.body,
                     font: type.font,
                     bold: type.bold,
                     studyOverlayEnabled: studyOverlayEnabled,
                     familiarity: familiarity(of: word),
-                    onSeek: MainActorAction { onSeek(word.start) },
                     onPlayFrom: MainActorAction { onPlayFrom(word.start) },
                     onInspect: MainActorAction { onInspect(word) },
                     onSave: MainActorAction { onSave(word) },
@@ -2668,7 +2532,7 @@ private struct SentenceRow: View {
                 if textSource == .original || textSource == .dual {
                     let original = segment.trustedEbookText ?? (textSource == .original ? segment.spokenText : nil)
                     if let original {
-                        if textSource == .original, studyOverlayEnabled {
+                        if textSource == .original, isSelected || studyOverlayEnabled {
                             wordTokens(
                                 StudyTokenIndex.tokens(in: segment, source: .original),
                                 dimmed: !isSelected
@@ -2735,41 +2599,17 @@ private struct SentenceRow: View {
                         .foregroundStyle(Palette.dim)
                 }
             }
-            if let glossText = presentation.glossText {
-                GlossBody(text: glossText, size: type.gloss)
-            }
             if let status = presentation.status {
-                HStack(spacing: 8) {
-                    switch status {
-                    case .draft(let model):
-                        Text("Draft · Model: \(model)")
-                            .font(.system(size: 11))
-                            .foregroundStyle(Palette.gold)
-                    case .saved(let model):
-                        Text("Saved · Model: \(model)")
-                            .font(.system(size: 11))
-                            .foregroundStyle(Palette.gold)
-                    }
-                    if presentation.actions.contains(.accept) {
-                        Button("Accept", action: onAccept)
-                            .buttonStyle(.borderedProminent)
-                            .tint(Palette.terracotta)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        translationStatus(status, fixed: true)
+                        expandedTranslationActions(presentation)
                             .controlSize(.small)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
-                    if presentation.actions.contains(.reject) {
-                        Button("Reject", action: onReject)
-                            .controlSize(.small)
-                    }
-                    if presentation.actions.contains(.edit) {
-                        Button("Edit") {
-                            editedTranslation = presentation.glossText ?? ""
-                            showTranslationEditor = true
-                        }
-                        .controlSize(.small)
-                    }
-                    if presentation.actions.contains(.retranslate) {
-                        Button("Retranslate") { showRetranslateConfirmation = true }
-                            .controlSize(.small)
+                    VStack(alignment: .leading, spacing: 6) {
+                        translationStatus(status, fixed: false)
+                        compactTranslationActions(presentation)
                     }
                 }
             } else if presentation.actions.contains(.translate) {
@@ -2777,6 +2617,9 @@ private struct SentenceRow: View {
                     Label("Translate into \(languageLabel)", systemImage: "globe")
                 }
                 .controlSize(.small)
+            }
+            if let glossText = presentation.glossText {
+                GlossBody(text: glossText, size: type.gloss)
             }
         }
         .padding(.top, 4)
@@ -2796,6 +2639,83 @@ private struct SentenceRow: View {
                 showTranslationEditor = false
             }
         }
+    }
+
+    private func translationStatus(
+        _ status: SentenceTranslationPresentation.Status,
+        fixed: Bool
+    ) -> some View {
+        let text: String
+        switch status {
+        case .draft(let model): text = "Draft · Model: \(model)"
+        case .saved(let model): text = "Saved · Model: \(model)"
+        }
+        return Text(text)
+            .font(.caption)
+            .foregroundStyle(Palette.gold)
+            .lineLimit(fixed ? 1 : 2)
+            .fixedSize(horizontal: fixed, vertical: false)
+    }
+
+    @ViewBuilder
+    private func expandedTranslationActions(_ presentation: SentenceTranslationPresentation) -> some View {
+        if presentation.actions.contains(.accept) {
+            Button("Accept", action: onAccept)
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.terracotta)
+                .accessibilityIdentifier("reader.translation.accept")
+        }
+        if presentation.actions.contains(.reject) {
+            Button("Reject", action: onReject)
+                .accessibilityIdentifier("reader.translation.reject")
+        }
+        if presentation.actions.contains(.edit) {
+            Button("Edit") { beginEditingTranslation(presentation) }
+                .accessibilityIdentifier("reader.translation.edit")
+        }
+        if presentation.actions.contains(.retranslate) {
+            Button("Retranslate") { showRetranslateConfirmation = true }
+                .accessibilityIdentifier("reader.translation.retranslate")
+        }
+    }
+
+    @ViewBuilder
+    private func compactTranslationActions(_ presentation: SentenceTranslationPresentation) -> some View {
+        if !presentation.actions.isEmpty {
+            HStack(spacing: 8) {
+                if presentation.actions.contains(.accept) {
+                    Button("Accept", action: onAccept)
+                        .buttonStyle(.borderedProminent)
+                        .tint(Palette.terracotta)
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("reader.translation.accept")
+                }
+                if presentation.actions.contains(.reject) {
+                    Button("Reject", role: .destructive, action: onReject)
+                        .buttonStyle(.bordered)
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("reader.translation.reject")
+                }
+                if presentation.actions.contains(.edit) {
+                    Button("Edit") { beginEditingTranslation(presentation) }
+                        .buttonStyle(.bordered)
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("reader.translation.edit")
+                }
+                if presentation.actions.contains(.retranslate) {
+                    Button("Retranslate") { showRetranslateConfirmation = true }
+                        .buttonStyle(.bordered)
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("reader.translation.retranslate")
+                }
+            }
+            .controlSize(.small)
+        }
+    }
+
+    private func beginEditingTranslation(_ presentation: SentenceTranslationPresentation) {
+        editedTranslation = presentation.glossText ?? ""
+        showTranslationEditor = true
     }
 }
 
@@ -2830,6 +2750,7 @@ private struct TranscriptCorrectionSheet: View {
     let segment: TranscriptSegment
     let hasStoredCorrection: Bool
     let conflictChoices: [StoredTranscriptOverlayCandidate]
+    let deviceName: (String) -> String
     let onPreview: (TimeInterval, TimeInterval) -> Void
     let onSave: (String, TimeInterval, TimeInterval) throws -> Void
     let onRestore: () throws -> Void
@@ -2844,6 +2765,7 @@ private struct TranscriptCorrectionSheet: View {
         segment: TranscriptSegment,
         hasStoredCorrection: Bool,
         conflictChoices: [StoredTranscriptOverlayCandidate],
+        deviceName: @escaping (String) -> String,
         onPreview: @escaping (TimeInterval, TimeInterval) -> Void,
         onSave: @escaping (String, TimeInterval, TimeInterval) throws -> Void,
         onRestore: @escaping () throws -> Void,
@@ -2852,6 +2774,7 @@ private struct TranscriptCorrectionSheet: View {
         self.segment = segment
         self.hasStoredCorrection = hasStoredCorrection
         self.conflictChoices = conflictChoices
+        self.deviceName = deviceName
         self.onPreview = onPreview
         self.onSave = onSave
         self.onRestore = onRestore
@@ -2921,7 +2844,7 @@ private struct TranscriptCorrectionSheet: View {
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(candidate.overlay.correctedText)
                                         .lineLimit(2)
-                                    Text("\(formatClock(candidate.overlay.correctedStart))–\(formatClock(candidate.overlay.correctedEnd)) · \(candidate.overlay.provenance.deviceID)")
+                                    Text("\(formatClock(candidate.overlay.correctedStart))–\(formatClock(candidate.overlay.correctedEnd)) · \(deviceName(candidate.overlay.provenance.deviceID)) · \(candidate.overlay.updatedAt.formatted(date: .abbreviated, time: .shortened))")
                                         .font(.caption)
                                         .foregroundStyle(Palette.dim)
                                 }
@@ -3021,7 +2944,7 @@ extension SentenceRow: Equatable {
             && lhs.currentID == rhs.currentID
             && lhs.currentWordID == rhs.currentWordID
             && lhs.focusedSegmentID == rhs.focusedSegmentID
-            && lhs.focusedWordID == rhs.focusedWordID
+            && lhs.lookupWordID == rhs.lookupWordID
             && lhs.textSource == rhs.textSource
             && lhs.gloss == rhs.gloss
             && lhs.isTranslating == rhs.isTranslating
@@ -3042,14 +2965,14 @@ extension SentenceRow: Equatable {
 
 private struct WordToken: View {
     let word: TranscriptWord
-    let isCurrent: Bool
+    let isPlaybackCurrent: Bool
+    let isLookupFocused: Bool
     let dimmed: Bool
     var fontSize: CGFloat = 22
     var font: ReaderFontChoice = .newYork
     var bold = false
     var studyOverlayEnabled = false
     var familiarity: WordFamiliarity = .unknown
-    let onSeek: MainActorAction
     let onPlayFrom: MainActorAction
     let onInspect: MainActorAction
     let onSave: MainActorAction
@@ -3060,20 +2983,24 @@ private struct WordToken: View {
             onInspect()
         } label: {
             Text(word.text)
-                .font(font.font(size: fontSize, bold: bold || isCurrent))
-                .foregroundStyle(isCurrent ? Palette.inkOnGold : (dimmed ? Palette.dim : Palette.ink))
-                .padding(.horizontal, isCurrent ? 4 : 0)
+                .font(font.font(size: fontSize, bold: bold || isPlaybackCurrent || isLookupFocused))
+                .foregroundStyle(isPlaybackCurrent ? Palette.inkOnGold : (dimmed ? Palette.dim : Palette.ink))
+                .padding(.horizontal, isPlaybackCurrent || isLookupFocused ? 4 : 0)
                 .padding(.vertical, 1)
                 .background(
                     RoundedRectangle(cornerRadius: 4)
-                        .fill(isCurrent ? Palette.gold : Color.clear)
+                        .fill(isPlaybackCurrent ? Palette.gold : (isLookupFocused ? Palette.terracotta.opacity(0.14) : Color.clear))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(isLookupFocused ? Palette.terracotta : Color.clear, lineWidth: 1.5)
                 )
                 .overlay(alignment: .bottom) {
                     if studyOverlayEnabled, familiarity != .known {
                         Rectangle()
                             .fill(Palette.terracotta)
                             .frame(height: familiarity == .learning ? 1 : 1.5)
-                            .padding(.horizontal, isCurrent ? 4 : 0)
+                            .padding(.horizontal, isPlaybackCurrent || isLookupFocused ? 4 : 0)
                             .opacity((familiarity == .learning ? 0.7 : 1) * (dimmed ? 0.7 : 1))
                     }
                 }
@@ -3083,7 +3010,7 @@ private struct WordToken: View {
         .frame(minWidth: 44, minHeight: 44)
 #endif
         .accessibilityLabel(word.text.trimmingCharacters(in: .whitespacesAndNewlines))
-        .accessibilityValue(overlayAccessibilityValue)
+        .accessibilityValue(accessibilityValue)
         .accessibilityIdentifier("reader.word.\(word.id)")
         .accessibilityAction(named: "Play from here") { onPlayFrom() }
         .accessibilityAction(named: "Look up") { onInspect() }
@@ -3097,6 +3024,14 @@ private struct WordToken: View {
         }
     }
 
+    private var accessibilityValue: String {
+        var values: [String] = []
+        if isPlaybackCurrent { values.append("current audio word") }
+        if isLookupFocused { values.append("selected for lookup") }
+        if !overlayAccessibilityValue.isEmpty { values.append(overlayAccessibilityValue) }
+        return values.joined(separator: ", ")
+    }
+
     private var overlayAccessibilityValue: String {
         guard studyOverlayEnabled else { return "" }
         switch familiarity {
@@ -3107,6 +3042,11 @@ private struct WordToken: View {
     }
 }
 
+private enum WordInspectorSection {
+    case dictionary
+    case learning
+}
+
 private struct WordInspector: View {
     @Bindable var state: AppState
     var type: ReaderType = .metrics(columnWidth: 420, scale: 1)
@@ -3115,6 +3055,7 @@ private struct WordInspector: View {
     @State private var showRetranslateConfirmation = false
     @State private var showTranslationEditor = false
     @State private var editedTranslation = ""
+    @State private var selectedSection: WordInspectorSection = .dictionary
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -3125,6 +3066,8 @@ private struct WordInspector: View {
                 Spacer()
                 Button {
                     state.selectedWord = nil
+                    state.selectedWordSegmentID = nil
+                    state.selectedWordContextText = nil
                     state.definition = nil
                     state.dictionaryHits = []
                 } label: {
@@ -3134,6 +3077,8 @@ private struct WordInspector: View {
                 }
                 .buttonStyle(.plain)
                 .help("Close")
+                .accessibilityLabel("Close Lookup")
+                .accessibilityIdentifier("reader.lookup.close")
             }
             .padding(.horizontal, 22)
             .padding(.top, 18)
@@ -3157,158 +3102,177 @@ private struct WordInspector: View {
                             }
                         }
 
-                        inspectorCard(title: "Apple Dictionary") {
 #if os(iOS)
-                            if DictionaryLookup.hasSystemDefinition(word.text) {
-                                SystemDictionaryView(term: word.text)
-                                    .id(DictionaryLookup.headword(word.text))
-                                    .frame(minHeight: 360, idealHeight: 480)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                                Text("iPadOS shows entries from its installed dictionaries. Dictionary ordering and selection are managed by iPadOS.")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(Palette.dim)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            } else {
-                                Text("No definition is currently available from the dictionaries installed in iPadOS.")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(Palette.dim)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-
-                            Button {
-                                DictionaryLookup.lookUpInDictionary(word.text)
-                            } label: {
-                                Label("Open Dictionary Full Screen", systemImage: "book")
-                                    .inspectorActionLabel()
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                            .tint(Palette.terracotta)
-#else
-                            if state.dictionaryHits.isEmpty {
-                                Text("No entries in the installed dictionaries.")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(Palette.dim)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            } else {
-                                Picker("Dictionary", selection: $state.selectedDictionaryName) {
-                                    ForEach(state.dictionaryHits) { hit in
-                                        Text(hit.name).tag(hit.name)
-                                    }
-                                }
-                                .labelsHidden()
-                                .onChange(of: state.selectedDictionaryName) { _, name in
-                                    state.settings.preferredDictionary = name
-                                    state.persistSettings()
-                                    webHeight = 180
-                                }
-
-                                if let hit = state.selectedDictionaryHit {
-                                    DictionaryHTMLView(html: hit.html, dark: colorScheme == .dark, height: $webHeight)
-                                        .frame(height: webHeight)
-                                        .frame(maxWidth: .infinity)
-                                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                                }
-                            }
-                            Button {
-                                DictionaryLookup.lookUpInDictionary(word.text)
-                            } label: {
-                                Label("Open in Dictionary.app", systemImage: "book")
-                                    .inspectorActionLabel()
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .controlSize(.small)
-#endif
+                        Picker("Lookup section", selection: $selectedSection) {
+                            Text("Dictionary").tag(WordInspectorSection.dictionary)
+                            Text("Learning").tag(WordInspectorSection.learning)
                         }
+                        .pickerStyle(.segmented)
+                        .accessibilityIdentifier("reader.lookup.tabs")
+#endif
 
-                        inspectorCard(title: "In this sentence") {
-                            if state.isLLMJobActive(kind: .wordTranslation, targetID: word.id) {
-                                HStack(spacing: 10) {
-                                    ProgressView().controlSize(.small)
-                                    Text("Asking \(state.selectedLLMModel)…")
+                        if showsDictionaryContent {
+                            inspectorCard(title: "Apple Dictionary") {
+#if os(iOS)
+                                if DictionaryLookup.hasSystemDefinition(word.text) {
+                                    Text("Open Apple Dictionary for its full entry. iPadOS does not expose Apple Dictionary text to other apps; return here and choose Learning for sentence meaning and vocabulary actions.")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(Palette.dim)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                } else {
+                                    Text("No definition is currently available from the dictionaries installed in iPadOS.")
                                         .font(.system(size: 13))
                                         .foregroundStyle(Palette.dim)
-                                }
-                                .padding(.vertical, 8)
-                            } else if let gloss = state.selectedWordGloss {
-                                GlossBody(text: gloss.text, size: type.gloss)
-                if gloss.status == .pending || gloss.status == .edited || gloss.status == .replaced {
-                                    Text("Draft from \(gloss.model). Accept to keep it in the library.")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(Palette.gold)
                                         .fixedSize(horizontal: false, vertical: true)
-                                    HStack(spacing: 10) {
-                                        Button("Accept") { state.acceptGloss(gloss) }
-                                            .buttonStyle(.borderedProminent)
-                                            .tint(Palette.terracotta)
-                                        Button("Reject") { state.rejectGloss(gloss) }
-                                        Button("Edit") {
-                                            editedTranslation = gloss.text
-                                            showTranslationEditor = true
+                                }
+
+                                Button {
+                                    DictionaryLookup.lookUpInDictionary(word.text)
+                                } label: {
+                                    Label("Open Apple Dictionary", systemImage: "book")
+                                        .inspectorActionLabel()
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .tint(Palette.terracotta)
+#else
+                                if state.dictionaryHits.isEmpty {
+                                    Text("No entries in the installed dictionaries.")
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(Palette.dim)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                } else {
+                                    Picker("Dictionary", selection: $state.selectedDictionaryName) {
+                                        ForEach(state.dictionaryHits) { hit in
+                                            Text(hit.name).tag(hit.name)
                                         }
-                                        Button("Retranslate") { showRetranslateConfirmation = true }
                                     }
-                                    .controlSize(.small)
-                                    .inspectorActionLabel()
-                                } else if gloss.status == .accepted {
-                                    Text("Saved · Model: \(gloss.model)")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(Palette.gold)
-                                    Button("Edit") {
-                                        editedTranslation = gloss.text
-                                        showTranslationEditor = true
+                                    .labelsHidden()
+                                    .onChange(of: state.selectedDictionaryName) { _, name in
+                                        state.settings.preferredDictionary = name
+                                        state.persistSettings()
+                                        webHeight = 180
+                                    }
+
+                                    if let hit = state.selectedDictionaryHit {
+                                        DictionaryHTMLView(html: hit.html, dark: colorScheme == .dark, height: $webHeight)
+                                            .frame(height: webHeight)
+                                            .frame(maxWidth: .infinity)
+                                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    }
+                                }
+                                Button {
+                                    DictionaryLookup.lookUpInDictionary(word.text)
+                                } label: {
+                                    Label("Open in Dictionary.app", systemImage: "book")
+                                        .inspectorActionLabel()
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .controlSize(.small)
+#endif
+                            }
+                        }
+
+                        if showsLearningContent {
+                            inspectorCard(title: "In this sentence") {
+                                if state.isLLMJobActive(kind: .wordTranslation, targetID: word.id) {
+                                    HStack(spacing: 10) {
+                                        ProgressView().controlSize(.small)
+                                        Text("Asking \(state.selectedLLMModel)…")
+                                            .font(.system(size: 13))
+                                            .foregroundStyle(Palette.dim)
+                                    }
+                                    .padding(.vertical, 8)
+                                } else if let gloss = state.selectedWordGloss {
+                                    GlossBody(text: gloss.text, size: type.gloss)
+                                    if gloss.status == .pending || gloss.status == .edited || gloss.status == .replaced {
+                                        Text("Draft from \(gloss.model). Accept to keep it in the library.")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(Palette.gold)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                        HStack(spacing: 10) {
+                                            Button("Accept") { state.acceptGloss(gloss) }
+                                                .buttonStyle(.borderedProminent)
+                                                .tint(Palette.terracotta)
+                                            Button("Reject") { state.rejectGloss(gloss) }
+                                            Button("Edit") {
+                                                editedTranslation = gloss.text
+                                                showTranslationEditor = true
+                                            }
+                                            Button("Retranslate") { showRetranslateConfirmation = true }
+                                        }
+                                        .controlSize(.small)
+                                        .inspectorActionLabel()
+                                    } else if gloss.status == .accepted {
+                                        Text("Saved · Model: \(gloss.model)")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(Palette.gold)
+                                        HStack(spacing: 10) {
+                                            Button("Edit") {
+                                                editedTranslation = gloss.text
+                                                showTranslationEditor = true
+                                            }
+                                            .buttonStyle(.bordered)
+                                            Button("Retranslate") { showRetranslateConfirmation = true }
+                                                .buttonStyle(.bordered)
+                                        }
+                                        .controlSize(.small)
+                                    }
+                                } else {
+                                    Button {
+                                        state.translateSelectedWord()
+                                    } label: {
+                                        Label("Sentence meaning", systemImage: "globe")
+                                            .inspectorActionLabel()
+                                            .frame(maxWidth: .infinity)
                                     }
                                     .buttonStyle(.bordered)
-                                    Button("Retranslate") { showRetranslateConfirmation = true }
-                                        .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    .accessibilityLabel("This-sentence meaning (\(state.selectedLLMModel))")
+                                    .accessibilityIdentifier("reader.lookup.meaning")
                                 }
-                            } else {
+                                if let err = state.translationError {
+                                    Text(err)
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.red.opacity(0.9))
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+
+                            if let seg = contextSegment {
+                                let isSaved = state.isInVocabulary(word: word)
+                                let isKnown = state.isMarkedKnown(word)
                                 Button {
-                                    state.translateSelectedWord()
+                                    state.markKnown(word, known: !isKnown)
                                 } label: {
-                                    Label("Sentence meaning", systemImage: "globe")
+                                    Label(isKnown ? "Mark unknown" : "Mark known", systemImage: isKnown ? "eye.slash" : "eye")
                                         .inspectorActionLabel()
                                         .frame(maxWidth: .infinity)
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
-                                .accessibilityLabel("This-sentence meaning (\(state.selectedLLMModel))")
-                            }
-                            if let err = state.translationError {
-                                Text(err)
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.red.opacity(0.9))
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
+                                .accessibilityLabel(isKnown ? "Mark \(word.text) unknown" : "Mark \(word.text) known")
 
-                        if let seg = contextSegment {
-                            let isSaved = state.isInVocabulary(word: word)
-                            let isKnown = state.isMarkedKnown(word)
-                            Button {
-                                state.markKnown(word, known: !isKnown)
-                            } label: {
-                                Label(isKnown ? "Mark unknown" : "Mark known", systemImage: isKnown ? "eye.slash" : "eye")
-                                    .inspectorActionLabel()
-                                    .frame(maxWidth: .infinity)
+                                Button {
+#if os(iOS)
+                                    state.addVocabAndRequestMeaning(word: word, segment: seg)
+#else
+                                    state.addVocab(word: word, segment: seg)
+#endif
+                                } label: {
+                                    Label(
+                                        addVocabularyTitle(isSaved: isSaved),
+                                        systemImage: isSaved ? "checkmark.circle.fill" : "bookmark"
+                                    )
+                                        .inspectorActionLabel()
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(Palette.terracotta)
+                                .controlSize(.small)
+                                .disabled(isSaved)
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .accessibilityLabel(isKnown ? "Mark \(word.text) unknown" : "Mark \(word.text) known")
-
-                            Button {
-                                state.addVocab(word: word, segment: seg)
-                            } label: {
-                                Label(isSaved ? "Already in vocabulary" : "Add to vocabulary", systemImage: isSaved ? "checkmark.circle.fill" : "bookmark")
-                                    .inspectorActionLabel()
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(Palette.terracotta)
-                            .controlSize(.small)
-                            .disabled(isSaved)
                         }
                     }
                     .padding(.horizontal, 22)
@@ -3342,10 +3306,33 @@ private struct WordInspector: View {
     }
 
     private var contextSegment: TranscriptSegment? {
-        if let id = state.focusedSegmentID {
-            return state.presentedTranscript?.segments.first { $0.id == id }
-        }
-        return state.currentSegment
+        state.selectedWordContextSegment
+    }
+
+    // Apple Dictionary must remain separately presented on iPad because its controller cannot be safely embedded.
+    private var showsDictionaryContent: Bool {
+#if os(iOS)
+        selectedSection == .dictionary
+#else
+        true
+#endif
+    }
+
+    private var showsLearningContent: Bool {
+#if os(iOS)
+        selectedSection == .learning
+#else
+        true
+#endif
+    }
+
+    private func addVocabularyTitle(isSaved: Bool) -> String {
+        if isSaved { return "Already in vocabulary" }
+#if os(iOS)
+        return state.selectedWordGloss == nil ? "Add & get meaning" : "Add to vocabulary"
+#else
+        return "Add to vocabulary"
+#endif
     }
 
     private func inspectorCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {

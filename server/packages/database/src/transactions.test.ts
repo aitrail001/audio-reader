@@ -219,6 +219,71 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
     ).toBe(before);
   });
 
+  it("accepts and preserves EPUB section indices in book chapter payloads", () => {
+    const session = requireDb(db);
+    const beforeGlobalSequence = Number(
+      scalar(session, "select coalesce(max(sequence), 0)::text from public.sync_v2_changes"),
+    );
+    const userId = "abababab-abab-4aba-8aba-ababababab01";
+    const deviceId = "abababab-abab-4aba-8aba-ababababab02";
+    const entityId = "abababab-abab-4aba-8aba-abababababab";
+    execOk(
+      session,
+      `insert into public.profiles (user_id, display_name, account_status)
+       values (${sqlString(userId)}::uuid, 'EPUB sync test', 'active');
+       insert into public.devices (id, user_id, platform, name, app_version)
+       values (
+         ${sqlString(deviceId)}::uuid, ${sqlString(userId)}::uuid,
+         'macos', 'EPUB sync device', '2.1.1'
+       );`,
+    );
+    const result = callJson(
+      session,
+      `select public.push_sync_v2_batch(
+        ${sqlString(userId)}::uuid,
+        ${sqlString(deviceId)}::uuid,
+        'bcbcbcbc-bcbc-4bcb-8bcb-bcbcbcbcbcbc'::uuid,
+        ${sqlJson([
+          {
+            mutationId: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd",
+            entityType: "book",
+            entityId,
+            operation: "upsert",
+            baseRevision: 0,
+            occurredAt: "2026-09-02T00:00:00Z",
+            payload: {
+              localId: "epub-book",
+              title: "EPUB Book",
+              source: "files",
+              chapters: [{ localId: "epub-chapter", index: 0, title: "One", ebookSectionIndex: 0 }],
+            },
+          },
+        ])}::jsonb
+      )`,
+    );
+    expect(requireJsonObjectArray(result.results)[0]?.status).toBe("applied");
+    expect(
+      scalar(
+        session,
+        `select payload #>> '{chapters,0,ebookSectionIndex}'
+         from public.sync_v2_changes
+         where user_id = ${sqlString(userId)}::uuid
+           and entity_type = 'book'
+           and entity_id = ${sqlString(entityId)}::uuid
+         order by sequence desc limit 1`,
+      ),
+    ).toBe("0");
+    execOk(
+      session,
+      `delete from public.profiles where user_id = ${sqlString(userId)}::uuid;
+       select setval(
+         pg_get_serial_sequence('public.sync_v2_changes', 'sequence'),
+         greatest(${String(beforeGlobalSequence)}, 1),
+         ${beforeGlobalSequence > 0 ? "true" : "false"}
+       );`,
+    );
+  });
+
   it("rejects an unknown v2 entity type with an empty payload without advancing its cursor", () => {
     const session = requireDb(db);
     const before = scalar(
@@ -2404,6 +2469,47 @@ describe("idempotency, cache claims, and audit transactions (postgres)", () => {
       cacheKeyRemoved: true,
       lastErrorRemoved: true,
     });
+  });
+
+  it("bootstraps vocabulary before dependent learning data across pages", () => {
+    const session = requireDb(db);
+    const userId = "91919191-9191-4919-8919-919191919191";
+    const vocabularyId = "92929292-9292-4929-8929-929292929292";
+    execOk(
+      session,
+      `insert into public.profiles (user_id, account_status)
+       values (${sqlString(userId)}::uuid, 'active');
+       insert into public.sync_v2_changes (
+         user_id, entity_type, entity_id, operation, revision, payload
+       ) values
+       (${sqlString(userId)}::uuid, 'progress', ${sqlString(vocabularyId)}::uuid,
+        'upsert', 1, ${sqlJson({ vocabularyId, reviewCount: 1 })}::jsonb),
+       (${sqlString(userId)}::uuid, 'vocabulary', ${sqlString(vocabularyId)}::uuid,
+        'upsert', 1, ${sqlJson({ surface: "loom" })}::jsonb)`,
+    );
+
+    const first = callJson(
+      session,
+      `select public.bootstrap_sync_v2_page(
+        ${sqlString(userId)}::uuid, null, 0, 1, 1048576
+      )`,
+    );
+    expect(requireJsonObjectArray(first.entities).map((entity) => entity.entity_type)).toEqual([
+      "vocabulary",
+    ]);
+    expect(first.nextOffset).toBe(1);
+    expect(first.hasMore).toBe(true);
+
+    const second = callJson(
+      session,
+      `select public.bootstrap_sync_v2_page(
+        ${sqlString(userId)}::uuid, ${String(first.cursor)}, 1, 1, 1048576
+      )`,
+    );
+    expect(requireJsonObjectArray(second.entities).map((entity) => entity.entity_type)).toEqual([
+      "progress",
+    ]);
+    expect(second.hasMore).toBe(false);
   });
 });
 

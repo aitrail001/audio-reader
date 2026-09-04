@@ -57,6 +57,7 @@ struct NativeRedesignContractTests {
     @Test("sentence corrections and progress conflicts use the shared resolved reader state")
     func correctionAndProgressPresentation() throws {
         let player = try source("Sources/AudioReader/PlayerView.swift")
+        let appState = try source("Sources/AudioReader/AppState.swift")
         let library = try source("Sources/AudioReader/LibraryView.swift")
         let iPad = try source("Sources/AudioReader/IPadRootView.swift")
 
@@ -71,6 +72,10 @@ struct NativeRedesignContractTests {
         #expect(player.contains("state.restoreTranscriptCorrection"))
         #expect(player.contains("state.readerProgressChoices"))
         #expect(player.contains("state.resolveReaderProgress"))
+        #expect(player.contains("transcript.conflictBanner"))
+        #expect(player.contains("transcript.conflictReview."))
+        #expect(appState.contains("persistCurrentPosition: false"))
+        #expect(appState.contains("Task { await account.synchronize() }"))
         #expect(library.contains("state.continueReading(book)"))
         #expect(iPad.contains("state.continueReading(book)"))
     }
@@ -81,6 +86,7 @@ struct NativeRedesignContractTests {
 
         #expect(vocabulary.contains("due in this view"))
         #expect(vocabulary.contains("words.reviewDue"))
+        #expect(vocabulary.contains("ToolbarItem(placement: .topBarTrailing) { vocabularyUtilitiesMenu }"))
         #expect(vocabulary.contains("VocabularyListFilter.allCases"))
         #expect(vocabulary.contains("VocabularyFilterProjection.make"))
         #expect(vocabulary.contains("ForEach(page.entries)"))
@@ -90,7 +96,7 @@ struct NativeRedesignContractTests {
         #expect(vocabulary.contains(".task(id: learningRefreshRequest)"))
         #expect(vocabulary.contains("withTaskCancellationHandler"))
         #expect(vocabulary.contains("learningSnapshotRequest == learningRefreshRequest"))
-        #expect(!vocabulary.contains("private var filtered"))
+        #expect(!vocabulary.contains("private var filtered:"))
         #expect(!vocabulary.contains("VocabReviewScheduler.dueEntries(in: filtered"))
         #expect(vocabulary.contains("minHeight: 44"))
     }
@@ -124,6 +130,48 @@ struct NativeRedesignContractTests {
 
         #expect(vocabulary.contains(#"Label("Review due — \(projection.due.count)""#))
         #expect(vocabulary.contains(#"Label("Choose review""#))
+    }
+
+    @Test("Vocabulary uses compact scopes and exposes editable learning and known lists")
+    func vocabularyListManagementLayout() throws {
+        let vocabulary = try source("Sources/AudioReader/VocabularyView.swift")
+
+        #expect(vocabulary.contains("enum VocabularyLibraryScope"))
+        #expect(vocabulary.contains("ForEach(VocabularyLibraryScope.allCases)"))
+        #expect(vocabulary.contains(#"case .learning: "Learning""#))
+        #expect(vocabulary.contains(#"case .myList: "My List""#))
+        #expect(vocabulary.contains(#"case .known: "Known""#))
+        #expect(vocabulary.contains("case .learning: .learning"))
+        #expect(vocabulary.contains("case .myList: .saved"))
+        #expect(vocabulary.contains("case .learning: learningSnapshot.queue.learning.count"))
+        #expect(vocabulary.contains("case .myList: state.vocab.count(where: \\.isInLearnList)"))
+        #expect(vocabulary.contains("return effectiveListFilter.symbol"))
+        #expect(vocabulary.contains("return switch effectiveListFilter"))
+        #expect(vocabulary.contains(#"Button("Add known word""#))
+        #expect(vocabulary.contains("state.addKnownWord(knownWordDraft)"))
+        #expect(vocabulary.contains("state.setVocabularyLearnList(entry.id, included: !entry.isInLearnList)"))
+        #expect(vocabulary.contains("Add to My list"))
+        #expect(!vocabulary.contains("Add to Learning"))
+        #expect(vocabulary.contains("state.markKnown(lemma: record.lemma, known: false)"))
+        #expect(vocabulary.contains("private struct VocabularyLibraryRow"))
+        #expect(!vocabulary.contains(".frame(height: 300)"))
+    }
+
+    @Test("Vocabulary lists expose sorting, bounded Known pages, and three display styles")
+    func vocabularyListPresentationControls() throws {
+        let vocabulary = try source("Sources/AudioReader/VocabularyView.swift")
+
+        #expect(vocabulary.contains("enum VocabularyDisplayStyle"))
+        #expect(vocabulary.contains("VocabularyDisplayStyle.allCases"))
+        #expect(vocabulary.contains("VocabularySortOrder.allCases"))
+        #expect(vocabulary.contains("words.sortOrder"))
+        #expect(vocabulary.contains("words.displayStyle"))
+        #expect(vocabulary.contains("VocabularyKnownWordPage("))
+        #expect(vocabulary.contains("ForEach(knownWordPage.records"))
+        #expect(vocabulary.contains("LazyVGrid"))
+        #expect(vocabulary.contains("case .list"))
+        #expect(vocabulary.contains("case .cards"))
+        #expect(vocabulary.contains("case .tags"))
     }
 
     @Test("Anki export selection is explicit, temporary, accessible, and distinct from My List")
@@ -170,6 +218,24 @@ struct NativeRedesignContractTests {
         #expect(vocabulary.contains("words.category."))
         #expect(vocabulary.contains("pendingAnkiReport"))
         #expect(vocabulary.contains("ankiReport = pendingAnkiReport"))
+    }
+
+    @Test("iPad compact navigation and study controls keep native accessibility contracts")
+    func iPadCompactPolishContracts() throws {
+        let settings = try source("Sources/AudioReader/SettingsView.swift")
+        let root = try source("Sources/AudioReader/IPadRootView.swift")
+        let player = try source("Sources/AudioReader/PlayerView.swift")
+        let shadowing = try source("Sources/AudioReader/ShadowingPracticeView.swift")
+        let review = try source("Sources/AudioReader/VocabularyReviewView.swift")
+
+        #expect(!settings.contains(".navigationBarBackButtonHidden(true)"))
+        #expect(root.contains(".scrollContentBackground(.hidden)"))
+        #expect(root.contains(".fill(Palette.panel2)"))
+        #expect(player.contains(".frame(width: 44, height: 44)"))
+        #expect(shadowing.contains(".frame(minWidth: 44, minHeight: 44)"))
+        #expect(review.contains("case .forgot, .vague: Palette.panel2"))
+        #expect(review.contains("case .remember: Palette.gold"))
+        #expect(!review.contains("case .forgot: .red"))
     }
 
     private func source(_ relativePath: String) throws -> String {

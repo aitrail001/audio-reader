@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import CoreMedia
+import OSLog
 
 enum PlaybackSpeedCatalog {
     static let values: [Double] = (0...30).map { step in
@@ -18,9 +19,15 @@ private extension Double {
 @MainActor
 @Observable
 final class PlayerEngine {
+    private static let playbackLog = Logger(
+        subsystem: "com.johnsonzhang.AudioReader",
+        category: "playback"
+    )
     private var player: AVPlayer?
     private var observer: Any?
     private var endObserver: NSObjectProtocol?
+    private var seekToken: UInt64 = 0
+    private var pendingSeekToken: UInt64?
 
     /// App-owned playback modes subscribe here so they keep working off the reader screen.
     var onTick: (@MainActor (TimeInterval) -> Void)?
@@ -88,9 +95,8 @@ final class PlayerEngine {
 
     func playClip(from start: TimeInterval, to end: TimeInterval) {
         let startTime = max(0, start)
-        seek(startTime)
+        seek(startTime, playWhenReady: true)
         clipEnd = max(end, startTime + 0.25)
-        play()
     }
 
     func play() {
@@ -111,6 +117,8 @@ final class PlayerEngine {
     }
 
     func pause() {
+        seekToken &+= 1
+        pendingSeekToken = nil
         clipEnd = nil
         player?.pause()
         isPlaying = false
@@ -120,15 +128,34 @@ final class PlayerEngine {
         isPlaying ? pause() : play()
     }
 
-    func seek(_ time: TimeInterval) {
+    /// Seeks to one chapter-relative anchor and optionally resumes only after that seek wins.
+    func seek(_ time: TimeInterval, playWhenReady: Bool? = nil) {
         clipEnd = nil
         let t = max(0, min(time, duration > 0 ? duration : time))
-        player?.seek(
+        let shouldPlay = playWhenReady ?? isPlaying
+        seekToken &+= 1
+        let token = seekToken
+        pendingSeekToken = token
+        currentTime = t
+        Self.playbackLog.info(
+            "message=playback.seek component=player outcome=requested request_id=\(token) requested_seconds=\(t) should_play=\(shouldPlay)"
+        )
+        guard let player else {
+            pendingSeekToken = nil
+            if shouldPlay { play() }
+            return
+        }
+        player.pause()
+        if shouldPlay { isPlaying = true }
+        player.seek(
             to: CMTime(seconds: mediaStart + t, preferredTimescale: 600),
             toleranceBefore: .zero,
             toleranceAfter: .zero
-        )
-        currentTime = t
+        ) { [weak self] finished in
+            Task { @MainActor [weak self] in
+                self?.finishSeek(token: token, requestedTime: t, shouldPlay: shouldPlay, finished: finished)
+            }
+        }
     }
 
     func skip(seconds: TimeInterval) {
@@ -136,6 +163,8 @@ final class PlayerEngine {
     }
 
     func tearDown() {
+        seekToken &+= 1
+        pendingSeekToken = nil
         if let observer, let player {
             player.removeTimeObserver(observer)
         }
@@ -155,6 +184,7 @@ final class PlayerEngine {
     }
 
     private func handleTick(_ time: CMTime) {
+        guard pendingSeekToken == nil else { return }
         let seconds = max(0, time.seconds - mediaStart)
         if let limit = chapterDuration, seconds >= limit - 0.02 {
             currentTime = limit
@@ -174,6 +204,37 @@ final class PlayerEngine {
         onTick?(currentTime)
     }
 
+    private func finishSeek(
+        token: UInt64,
+        requestedTime: TimeInterval,
+        shouldPlay: Bool,
+        finished: Bool
+    ) {
+        guard pendingSeekToken == token else {
+            Self.playbackLog.info(
+                "message=playback.seek component=player outcome=stale request_id=\(token) requested_seconds=\(requestedTime)"
+            )
+            return
+        }
+        pendingSeekToken = nil
+        guard finished else {
+            if shouldPlay { isPlaying = false }
+            Self.playbackLog.error(
+                "message=playback.seek component=player outcome=cancelled request_id=\(token) requested_seconds=\(requestedTime)"
+            )
+            return
+        }
+        let effectiveTime = player.map {
+            max(0, $0.currentTime().seconds - mediaStart)
+        } ?? requestedTime
+        currentTime = effectiveTime.isFinite ? effectiveTime : requestedTime
+        Self.playbackLog.info(
+            "message=playback.seek component=player outcome=finished request_id=\(token) requested_seconds=\(requestedTime) effective_seconds=\(self.currentTime) should_play=\(shouldPlay)"
+        )
+        onTick?(currentTime)
+        if shouldPlay, seekToken == token, pendingSeekToken == nil { play() }
+    }
+
     private func applyLoopIfNeeded() {
         switch loop {
         case .off:
@@ -182,8 +243,7 @@ final class PlayerEngine {
             return // handled by AppState which knows sentence bounds
         case .ab(let start, let end):
             if currentTime >= end - 0.03 {
-                seek(start)
-                if isPlaying { play() }
+                seek(start, playWhenReady: isPlaying)
             }
         }
     }

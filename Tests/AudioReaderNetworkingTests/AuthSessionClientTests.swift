@@ -317,6 +317,76 @@ struct AuthSessionClientTests {
     }
 
     @MainActor
+    @Test("OAuth sign-in ignores a second attempt while authorization is starting")
+    func overlappingOAuthSignInIsIgnored() async throws {
+        let gate = OAuthAuthorizeGate()
+        let client = FakeAuthClient()
+        client.authorizeHook = { attempt in
+            if attempt == 1 {
+                await gate.wait()
+            }
+        }
+        let session = AccountSession(
+            client: client,
+            store: InMemoryAuthSessionStore(deviceID: deviceID),
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test
+        )
+
+        let first = Task { await session.signInWithOAuth(.google) }
+        await gate.waitUntilEntered()
+        let second = Task { await session.signInWithOAuth(.google) }
+        await second.value
+        await gate.release()
+        await first.value
+
+        #expect(client.authorizeCount == 1)
+        #expect(client.exchangeCount == 1)
+        #expect(session.mode == .signedInSyncOff)
+        #expect(session.errorMessage == nil)
+    }
+
+    @MainActor
+    @Test("OAuth sign-in does not open a provider the server reports unavailable")
+    func unavailableOAuthProviderDoesNotOpen() async throws {
+        let client = FakeAuthClient()
+        client.authProviders = [AuthProvider(id: "email_otp")]
+        let session = AccountSession(
+            client: client,
+            store: InMemoryAuthSessionStore(deviceID: deviceID),
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test
+        )
+
+        await session.signInWithOAuth(.google)
+
+        #expect(client.authorizeCount == 0)
+        #expect(session.availableOAuthProviders.isEmpty)
+        #expect(session.errorMessage == "Google sign-in is not available right now. Use email sign-in or try again later.")
+    }
+
+    @MainActor
+    @Test("OAuth provider configuration can recover after a transient failure")
+    func oauthProviderConfigurationRecovers() async throws {
+        let client = FakeAuthClient()
+        client.authConfigError = URLError(.notConnectedToInternet)
+        let session = AccountSession(
+            client: client,
+            store: InMemoryAuthSessionStore(deviceID: deviceID),
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test
+        )
+
+        await session.refreshAuthConfiguration()
+        #expect(session.authConfigurationLoaded)
+        #expect(session.availableOAuthProviders.isEmpty)
+
+        client.authConfigError = nil
+        await session.refreshAuthConfiguration()
+        #expect(session.availableOAuthProviders == Set(AuthOAuthProvider.allCases))
+    }
+
+    @MainActor
     @Test("email sign-in accepts 6 to 12 digit codes")
     func emailSignInAcceptsLongerCodes() async throws {
         let client = FakeAuthClient()
@@ -551,6 +621,32 @@ struct AuthSessionClientTests {
 
     private struct NativeCallbackAuthorizeBody: Decodable {
         var redirectUri: String
+    }
+
+    private actor OAuthAuthorizeGate {
+        private var continuation: CheckedContinuation<Void, Never>?
+        private var enteredContinuation: CheckedContinuation<Void, Never>?
+        private var entered = false
+        private var released = false
+
+        func wait() async {
+            entered = true
+            enteredContinuation?.resume()
+            enteredContinuation = nil
+            guard !released else { return }
+            await withCheckedContinuation { continuation = $0 }
+        }
+
+        func waitUntilEntered() async {
+            guard !entered else { return }
+            await withCheckedContinuation { enteredContinuation = $0 }
+        }
+
+        func release() {
+            released = true
+            continuation?.resume()
+            continuation = nil
+        }
     }
 
     @MainActor
