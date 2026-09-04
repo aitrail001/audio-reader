@@ -3216,7 +3216,7 @@ private struct WordInspector: View {
                         inspectorCard(title: "Apple Dictionary") {
 #if os(iOS)
                             if DictionaryLookup.hasSystemDefinition(word.text) {
-                                Text("The iPadOS dictionary opens automatically when you select a word. Dictionary ordering and selection are managed by iPadOS.")
+                                Text("The iPadOS dictionary opens automatically when you select a word. iPadOS does not expose Apple Dictionary text to other apps, so accept the contextual meaning below to save it with this word.")
                                     .font(.system(size: 12))
                                     .foregroundStyle(Palette.dim)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -3350,9 +3350,16 @@ private struct WordInspector: View {
                             .accessibilityLabel(isKnown ? "Mark \(word.text) unknown" : "Mark \(word.text) known")
 
                             Button {
+#if os(iOS)
+                                state.addVocabAndRequestMeaning(word: word, segment: seg)
+#else
                                 state.addVocab(word: word, segment: seg)
+#endif
                             } label: {
-                                Label(isSaved ? "Already in vocabulary" : "Add to vocabulary", systemImage: isSaved ? "checkmark.circle.fill" : "bookmark")
+                                Label(
+                                    addVocabularyTitle(isSaved: isSaved),
+                                    systemImage: isSaved ? "checkmark.circle.fill" : "bookmark"
+                                )
                                     .inspectorActionLabel()
                                     .frame(maxWidth: .infinity)
                             }
@@ -3393,10 +3400,16 @@ private struct WordInspector: View {
     }
 
     private var contextSegment: TranscriptSegment? {
-        if let id = state.focusedSegmentID {
-            return state.presentedTranscript?.segments.first { $0.id == id }
-        }
-        return state.currentSegment
+        state.selectedWordContextSegment ?? state.currentSegment
+    }
+
+    private func addVocabularyTitle(isSaved: Bool) -> String {
+        if isSaved { return "Already in vocabulary" }
+#if os(iOS)
+        return state.selectedWordGloss == nil ? "Add & get meaning" : "Add to vocabulary"
+#else
+        return "Add to vocabulary"
+#endif
     }
 
     private func inspectorCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {

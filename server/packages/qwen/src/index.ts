@@ -15,6 +15,7 @@ export type QwenMessage = {
 export type QwenCompletionRequest = {
   messages: readonly QwenMessage[];
   jsonObject?: boolean;
+  enableThinking?: boolean;
   model?: string;
 };
 
@@ -131,6 +132,9 @@ export function createQwenClient(options: QwenClientOptions): QwenClient {
         };
         if (request.jsonObject === true) {
           body.response_format = { type: "json_object" };
+        }
+        if (request.enableThinking !== undefined) {
+          body.enable_thinking = request.enableThinking;
         }
         const response = await fetchImpl(`${baseUrl}/chat/completions`, {
           method: "POST",

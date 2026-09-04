@@ -1499,6 +1499,7 @@ async function completeWithPolicy(
       model: resolved.model,
       modelSource: resolved.source,
       promptVersion: resolved.promptVersion,
+      thinkingEnabled: request.enableThinking ?? false,
       systemPromptChars: resolved.systemPrompt.length,
       userPromptChars: resolved.userPrompt.length,
     },
@@ -1520,14 +1521,31 @@ async function completeWithPolicy(
     });
     return "disabled";
   }
+  const startedAt = Date.now();
+  // Managed product prompts already enforce a bounded JSON contract. Disabling Qwen's
+  // hidden reasoning path improves latency and leaves more output budget for that contract.
   const completed = await context.qwen.complete({
     ...request,
+    enableThinking: request.enableThinking ?? false,
     messages:
       assembled === undefined
         ? withPolicySystemPrompt(task, resolved.systemPrompt, request.messages)
         : request.messages,
     ...(resolved.model === "" ? {} : { model: resolved.model }),
   });
+  const durationMs = Date.now() - startedAt;
+  console.warn(
+    JSON.stringify({
+      level: completed.ok ? "info" : "warn",
+      message: "managed_qwen_response",
+      requestId: context.requestId,
+      task: eventTask,
+      outcome: completed.ok ? "ok" : completed.code,
+      model: completed.ok ? completed.model : completed.usedModel,
+      thinkingEnabled: request.enableThinking ?? false,
+      durationMs,
+    }),
+  );
   if (completed.ok && recordSuccessfulCompletion) {
     recordOperatorEvent({
       kind: "managed_qwen_ok",

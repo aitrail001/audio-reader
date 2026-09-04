@@ -44,7 +44,12 @@ describe("@audio-reader/qwen", () => {
   });
 
   it("pings and completes against the OpenAI-compatible Singapore endpoint", async () => {
-    const calls: { url: string; method: string; authorization: string | undefined }[] = [];
+    const calls: {
+      url: string;
+      method: string;
+      authorization: string | undefined;
+      body?: Record<string, unknown>;
+    }[] = [];
     const fetchImpl: QwenFetch = (input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       const headers = new Headers(init?.headers);
@@ -52,6 +57,9 @@ describe("@audio-reader/qwen", () => {
         url,
         method: init?.method ?? "GET",
         authorization: headers.get("authorization") ?? undefined,
+        ...(typeof init?.body === "string"
+          ? { body: JSON.parse(init.body) as Record<string, unknown> }
+          : {}),
       });
       if (url.endsWith("/models")) {
         return Promise.resolve(
@@ -76,6 +84,7 @@ describe("@audio-reader/qwen", () => {
     const completed = await client.complete({
       messages: [{ role: "user", content: "translate hi" }],
       jsonObject: true,
+      enableThinking: false,
     });
     expect(completed).toEqual({
       ok: true,
@@ -85,6 +94,10 @@ describe("@audio-reader/qwen", () => {
     expect(calls[0]?.url).toBe(`${DEFAULT_QWEN_BASE_URL}/models`);
     expect(calls[0]?.authorization).toBe("Bearer sk-test");
     expect(calls[1]?.url).toBe(`${DEFAULT_QWEN_BASE_URL}/chat/completions`);
+    expect(calls[1]?.body).toMatchObject({
+      enable_thinking: false,
+      response_format: { type: "json_object" },
+    });
   });
 
   it("returns ping HTTP status and redacts provider error bodies", async () => {

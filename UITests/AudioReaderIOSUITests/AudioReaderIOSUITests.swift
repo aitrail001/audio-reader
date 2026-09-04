@@ -16,6 +16,18 @@ final class AudioReaderIOSUITests: XCTestCase {
         XCTAssertTrue(element("library.search", in: app).exists)
     }
 
+    func testSelectedBookKeepsListAndDetailTextVisible() {
+        let app = launch(scenario: "library")
+
+        revealSidebar(in: app)
+        element("sidebar.library", in: app).tap()
+        let row = element("library.book.ui-book-1", in: app)
+        XCTAssertTrue(row.waitForExistence(timeout: 3))
+        row.tap()
+        XCTAssertTrue(element("library.bookTitle.ui-book-1", in: app).waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["A Clear Beginning"].exists)
+    }
+
     func testSettingsOffersOnlySupportedIPadAIConnections() {
         let app = launch(scenario: "library")
 

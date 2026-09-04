@@ -224,6 +224,24 @@ struct PlatformParityContractTests {
         #expect(app.contains(".keyboardShortcut(.return, modifiers: [.command])"))
     }
 
+    @Test("iPad book selection keeps list and detail text explicitly readable")
+    func iPadBookSelectionKeepsTextReadable() throws {
+        let iPadRoot = try source("Sources/AudioReader/IPadRootView.swift")
+
+        #expect(iPadRoot.contains("accessibilityIdentifier(\"library.book.\\(book.id)\")"))
+        #expect(iPadRoot.contains("accessibilityIdentifier(\"library.bookTitle.\\(book.id)\")"))
+        #expect(iPadRoot.contains(".listRowBackground(isSelected ? Palette.terracotta.opacity(0.16) : Palette.panel)"))
+        #expect(iPadRoot.contains(".foregroundStyle(Palette.ink)"))
+    }
+
+    @Test("iPad explains the system dictionary boundary and offers contextual meaning")
+    func iPadDictionaryMeaningFallbackIsExplicit() throws {
+        let playerView = try source("Sources/AudioReader/PlayerView.swift")
+
+        #expect(playerView.contains("iPadOS does not expose Apple Dictionary text to other apps"))
+        #expect(playerView.contains("state.addVocabAndRequestMeaning(word: word, segment: seg)"))
+    }
+
     @MainActor
     @Test("Sentence-paced modes and sentence loop stay mutually exclusive")
     func readingModesStayMutuallyExclusive() {

@@ -816,8 +816,20 @@ final class AppState {
         return lookupGloss(
             kind: .word,
             source: DictionaryLookup.headword(word.text),
-            context: currentSegment?.displayText
+            context: selectedWordContextSegment?.displayText
         )
+    }
+
+    var selectedWordContextSegment: TranscriptSegment? {
+        guard let word = selectedWord else { return nil }
+        if let focusedSegmentID,
+           let focused = presentedTranscript?.segments.first(where: { $0.id == focusedSegmentID }),
+           focused.words.contains(where: { $0.id == word.id }) {
+            return focused
+        }
+        return presentedTranscript?.segments.first { segment in
+            segment.words.contains(where: { $0.id == word.id })
+        }
     }
 
     var selectedChapterTranslationCheckpoint: ChapterTranslationCheckpoint? {
@@ -1900,6 +1912,10 @@ final class AppState {
         player.seek(max(sentence.start, sentence.end - 0.06))
         deepReadingActiveSentenceID = nil
         deepReadingPausedSentenceID = sentence.id
+        // A paced pause is a deliberate reading stop. Re-center its audio sentence even
+        // when an earlier lookup remains selected in the inspector.
+        scrollSegmentID = sentence.id
+        revealToken &+= 1
         persistCurrentReaderProgress(force: true)
     }
 
@@ -2023,6 +2039,16 @@ final class AppState {
             context: segment.displayText,
             language: sourceLanguage
         )
+    }
+
+    /// iPadOS cannot import UIReferenceLibraryViewController text, so a saved word
+    /// requests AudioReader's reviewable contextual meaning when none exists yet.
+    func addVocabAndRequestMeaning(word: TranscriptWord, segment: TranscriptSegment) {
+        let hadMeaning = selectedWordGloss != nil
+        addVocab(word: word, segment: segment)
+        if !hadMeaning {
+            translateSelectedWord()
+        }
     }
 
     /// Ambiguous offline proposals remain isolated unless the bounded managed
@@ -2596,27 +2622,29 @@ final class AppState {
 
     func translateSelectedWord() {
         guard let word = selectedWord else { return }
+        let segment = selectedWordContextSegment
         account.recordUsage(name: "ai.translation.requested", properties: ["kind": "word"])
         let head = DictionaryLookup.headword(word.text)
         translate(
             kind: .word,
             source: head,
-            context: currentSegment?.displayText,
+            context: segment?.displayText,
             timestamp: word.start,
-            segment: currentSegment,
+            segment: segment,
             targetID: word.id
         )
     }
 
     func retranslateSelectedWord() {
         guard let word = selectedWord else { return }
+        let segment = selectedWordContextSegment
         let head = DictionaryLookup.headword(word.text)
         translate(
             kind: .word,
             source: head,
-            context: currentSegment?.displayText,
+            context: segment?.displayText,
             timestamp: word.start,
-            segment: currentSegment,
+            segment: segment,
             targetID: word.id,
             force: true
         )

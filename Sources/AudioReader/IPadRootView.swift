@@ -831,7 +831,7 @@ private struct IPadBookList: View {
     }
 
     var body: some View {
-        List(selection: $selectedBookID) {
+        List {
             if let importMessage {
                 Section {
                     Label(importMessage, systemImage: "checkmark.circle.fill")
@@ -841,26 +841,37 @@ private struct IPadBookList: View {
             }
             Section {
                 ForEach(filteredBooks) { book in
-                    HStack(spacing: 12) {
-                        IPadCover(path: book.coverPath, title: book.title, width: 48, height: 70)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(book.title)
-                                .font(.headline)
-                                .lineLimit(2)
-                            Text(book.author ?? "Unknown author")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                            Text(book.mediaAvailability == .metadataOnly
-                                ? "Local media unavailable — re-import required"
-                                : book.mediaAvailability == .ebookOnly
-                                    ? "\(book.chapters.count) readable sections"
-                                    : "\(book.chapters.lazy.filter { readyChapterIDs.contains($0.id) }.count)/\(book.chapters.count) transcribed")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                    let isSelected = selectedBookID == book.id
+                    Button {
+                        selectedBookID = book.id
+                    } label: {
+                        HStack(spacing: 12) {
+                            IPadCover(path: book.coverPath, title: book.title, width: 48, height: 70)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(book.title)
+                                    .font(.headline)
+                                    .foregroundStyle(Palette.ink)
+                                    .lineLimit(2)
+                                Text(book.author ?? "Unknown author")
+                                    .font(.subheadline)
+                                    .foregroundStyle(Palette.dim)
+                                Text(book.mediaAvailability == .metadataOnly
+                                    ? "Local media unavailable — re-import required"
+                                    : book.mediaAvailability == .ebookOnly
+                                        ? "\(book.chapters.count) readable sections"
+                                        : "\(book.chapters.lazy.filter { readyChapterIDs.contains($0.id) }.count)/\(book.chapters.count) transcribed")
+                                    .font(.caption)
+                                    .foregroundStyle(Palette.dim)
+                            }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
                     .padding(.vertical, 4)
-                    .tag(book.id)
+                    .accessibilityIdentifier("library.book.\(book.id)")
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
+                    .listRowBackground(isSelected ? Palette.terracotta.opacity(0.16) : Palette.panel)
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button(role: .destructive) {
                             onDelete(book)
@@ -905,9 +916,11 @@ private struct IPadBookDetail: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(book.title)
                             .font(.system(.largeTitle, design: .serif, weight: .semibold))
+                            .foregroundStyle(Palette.ink)
+                            .accessibilityIdentifier("library.bookTitle.\(book.id)")
                         Text(book.author ?? "Unknown author")
                             .font(.title3)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Palette.dim)
                         Label(
                             book.mediaAvailability == .metadataOnly
                                 ? "Local media unavailable — re-import required"
@@ -937,6 +950,7 @@ private struct IPadBookDetail: View {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(chapter.title)
                                         .font(.headline)
+                                        .foregroundStyle(Palette.ink)
                                     Text(chapter.hasAudio ? (chapter.duration.map(formatClock) ?? "Duration unavailable") : "Published text")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)

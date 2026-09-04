@@ -642,7 +642,7 @@ export function validateManagedPromptOutput(
   } catch {
     return { valid: false, parsed: null, errors: ["$ must be valid JSON."] };
   }
-  normalizeTranslationNoteKeys(subtask, parsed);
+  normalizeManagedTranslationOutput(subtask, parsed);
   const errors: string[] = [];
   validateSchemaValue(parsed, outputSchema(subtask), "$", errors);
   if (subtask === "heard_quiz" && options.allowedSegmentIDs !== undefined) {
@@ -697,8 +697,8 @@ export function validateManagedPromptOutput(
   };
 }
 
-/** Canonicalize the one observed localized Qwen field without relaxing any other schema keys. */
-function normalizeTranslationNoteKeys(subtask: ManagedPromptSubtask, parsed: unknown): void {
+/** Canonicalize safe provider variants while retaining required learning content. */
+function normalizeManagedTranslationOutput(subtask: ManagedPromptSubtask, parsed: unknown): void {
   if (
     !["sentence", "word", "chapter_batch"].includes(subtask) ||
     typeof parsed !== "object" ||
@@ -708,6 +708,10 @@ function normalizeTranslationNoteKeys(subtask: ManagedPromptSubtask, parsed: unk
     return;
   }
   const root = parsed as Record<string, unknown>;
+  if (subtask === "word") {
+    if (!("connection" in root)) root.connection = "";
+    if (!("notes" in root)) root.notes = [];
+  }
   const noteLists =
     subtask === "chapter_batch" && Array.isArray(root.translations)
       ? root.translations.map((translation) =>

@@ -426,6 +426,18 @@ describe("assistant prompts", () => {
     });
   });
 
+  it("fills harmless empty word fields that Qwen may omit", () => {
+    const output = validateManagedPromptOutput(
+      "word",
+      '{"translation":"名词 — 冰层","examples":[{"source":"Ice covered the lake.","translation":"冰覆盖了湖面。"},{"source":"The ice began to crack.","translation":"冰开始裂开。"}]}',
+    );
+
+    expect(output).toMatchObject({
+      valid: true,
+      parsed: { connection: "", notes: [] },
+    });
+  });
+
   it("includes chapter-batch target IDs in the effective message and its fingerprint", () => {
     const fields = {
       task: "chapter_batch",

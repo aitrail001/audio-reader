@@ -112,6 +112,29 @@ struct DeepReadingModeTests {
         #expect(state.currentSegment?.id == "first")
     }
 
+    @Test("A paced pause reveals the audio sentence instead of an inspected sentence")
+    func pacedPauseRevealsCurrentAudioSentence() {
+        let state = makeState()
+        state.settings.readAndPauseMode = true
+        state.focusedSegmentID = "second"
+        state.selectedWord = state.presentedTranscript?.segments[1].words.first
+        state.scrollSegmentID = "second"
+        let previousReveal = state.revealToken
+        state.player.currentTime = 0.5
+        state.player.isPlaying = true
+
+        state.tickPlaybackModes()
+        state.player.currentTime = 2.06
+        state.tickPlaybackModes()
+
+        #expect(state.deepReadingPausedSentenceID == "first")
+        #expect(state.scrollSegmentID == "first")
+        #expect(state.revealToken == previousReveal + 1)
+        #expect(state.focusedSegmentID == "second")
+        #expect(state.selectedWord?.id == "second-word")
+        #expect(state.selectedWordContextSegment?.id == "second")
+    }
+
     @Test("Continue advances from the paused sentence and arms the next one")
     func continuesWithNextSentence() {
         let state = makeState()
