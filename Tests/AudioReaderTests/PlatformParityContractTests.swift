@@ -238,6 +238,12 @@ struct PlatformParityContractTests {
     func iPadDictionaryMeaningFallbackIsExplicit() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
 
+        #expect(playerView.contains("private enum WordInspectorSection"))
+        #expect(playerView.contains("@State private var selectedSection: WordInspectorSection = .dictionary"))
+        #expect(playerView.contains("Picker(\"Lookup section\", selection: $selectedSection)"))
+        #expect(playerView.contains(".pickerStyle(.segmented)"))
+        #expect(playerView.contains("Text(\"Dictionary\").tag(WordInspectorSection.dictionary)"))
+        #expect(playerView.contains("Text(\"Learning\").tag(WordInspectorSection.learning)"))
         #expect(playerView.contains("iPadOS does not expose Apple Dictionary text to other apps"))
         #expect(playerView.contains("state.addVocabAndRequestMeaning(word: word, segment: seg)"))
     }
@@ -715,6 +721,35 @@ struct PlatformParityContractTests {
         #expect(pendingActions.contains("Button(\"Reject\")"))
         #expect(pendingActions.contains("Button(\"Retranslate\")"))
         #expect(!pendingActions.contains("#if os("))
+
+        let acceptedActions = try section(
+            in: playerView,
+            from: "                                } else if gloss.status == .accepted {",
+            to: "                            } else {"
+        )
+        #expect(acceptedActions.contains("HStack(spacing: 10)"))
+        #expect(acceptedActions.contains("Button(\"Edit\")"))
+        #expect(acceptedActions.contains("Button(\"Retranslate\")"))
+
+        let compactSentenceActions = try section(
+            in: playerView,
+            from: "    private func compactTranslationActions",
+            to: "    private func beginEditingTranslation"
+        )
+        #expect(compactSentenceActions.contains("Button(\"Edit\")"))
+        #expect(compactSentenceActions.contains("Button(\"Retranslate\")"))
+        #expect(!compactSentenceActions.contains("Menu(\"More\")"))
+        #expect(playerView.contains(".accessibilityIdentifier(\"reader.translation.edit\")"))
+        #expect(playerView.contains(".accessibilityIdentifier(\"reader.translation.retranslate\")"))
+
+        let sentenceTranslationBlock = try section(
+            in: playerView,
+            from: "    private func translationBlock",
+            to: "    private func translationStatus"
+        )
+        let actionPosition = try #require(sentenceTranslationBlock.range(of: "if let status = presentation.status"))
+        let glossPosition = try #require(sentenceTranslationBlock.range(of: "if let glossText = presentation.glossText"))
+        #expect(actionPosition.lowerBound < glossPosition.lowerBound)
     }
 
     @Test("Chapter summaries use one structured presentation on both platforms")

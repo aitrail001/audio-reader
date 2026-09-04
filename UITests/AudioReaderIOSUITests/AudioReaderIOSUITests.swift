@@ -60,6 +60,13 @@ final class AudioReaderIOSUITests: XCTestCase {
         let lookupTitle = app.staticTexts["Lookup"]
         XCTAssertTrue(lookupTitle.waitForExistence(timeout: 3))
         XCTAssertGreaterThan(lookupTitle.frame.minY, app.frame.height * 0.35)
+        XCTAssertTrue(app.buttons["Dictionary"].isSelected)
+        XCTAssertTrue(app.buttons["Open Apple Dictionary"].waitForExistence(timeout: 3))
+        XCTAssertFalse(element("reader.lookup.meaning", in: app).exists)
+        app.buttons["Learning"].tap()
+        XCTAssertTrue(element("reader.lookup.meaning", in: app).waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["Open Apple Dictionary"].exists)
+        app.buttons["Dictionary"].tap()
         XCTAssertTrue(app.buttons["Open Apple Dictionary"].waitForExistence(timeout: 3))
         app.buttons["Open Apple Dictionary"].tap()
         let dictionaryClose = app.buttons["DDUIDone"].firstMatch
@@ -260,13 +267,14 @@ final class AudioReaderIOSUITests: XCTestCase {
         let app = launch(scenario: "translation-layout")
 
         XCTAssertTrue(app.staticTexts["Lookup"].waitForExistence(timeout: 3))
+        app.buttons["Learning"].tap()
+        element("reader.lookup.close", in: app).tap()
         XCTAssertTrue(app.staticTexts["Draft · Model: qwen3.6-flash"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.buttons["Accept"].isHittable)
-        XCTAssertTrue(app.buttons["More"].isHittable)
-        app.buttons["More"].tap()
-        XCTAssertTrue(app.buttons["Reject"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.buttons["Edit"].exists)
-        XCTAssertTrue(app.buttons["Retranslate"].exists)
+        XCTAssertTrue(element("reader.translation.accept", in: app).isHittable)
+        XCTAssertTrue(element("reader.translation.reject", in: app).isHittable)
+        XCTAssertTrue(element("reader.translation.edit", in: app).isHittable)
+        XCTAssertTrue(element("reader.translation.retranslate", in: app).isHittable)
+        XCTAssertFalse(app.buttons["More"].exists)
     }
 
     func testEPUBCoverContentsSearchAndChapterJump() {

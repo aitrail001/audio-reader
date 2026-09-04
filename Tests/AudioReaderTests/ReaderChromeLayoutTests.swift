@@ -123,7 +123,9 @@ struct ReaderChromeLayoutTests {
         #expect(!sentenceRow.contains("This chapter"))
         #expect(sentenceRow.contains("lhs.languageLabel == rhs.languageLabel"))
         #expect(sentenceRow.contains("ViewThatFits(in: .horizontal)"))
-        #expect(sentenceRow.contains("Menu(\"More\")"))
+        #expect(!sentenceRow.contains("Menu(\"More\")"))
+        #expect(sentenceRow.contains("reader.translation.edit"))
+        #expect(sentenceRow.contains("reader.translation.retranslate"))
     }
 
     private func source(_ relativePath: String) throws -> String {

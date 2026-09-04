@@ -2585,9 +2585,6 @@ private struct SentenceRow: View {
                         .foregroundStyle(Palette.dim)
                 }
             }
-            if let glossText = presentation.glossText {
-                GlossBody(text: glossText, size: type.gloss)
-            }
             if let status = presentation.status {
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 8) {
@@ -2606,6 +2603,9 @@ private struct SentenceRow: View {
                     Label("Translate into \(languageLabel)", systemImage: "globe")
                 }
                 .controlSize(.small)
+            }
+            if let glossText = presentation.glossText {
+                GlossBody(text: glossText, size: type.gloss)
             }
         }
         .padding(.top, 4)
@@ -2649,15 +2649,19 @@ private struct SentenceRow: View {
             Button("Accept", action: onAccept)
                 .buttonStyle(.borderedProminent)
                 .tint(Palette.terracotta)
+                .accessibilityIdentifier("reader.translation.accept")
         }
         if presentation.actions.contains(.reject) {
             Button("Reject", action: onReject)
+                .accessibilityIdentifier("reader.translation.reject")
         }
         if presentation.actions.contains(.edit) {
             Button("Edit") { beginEditingTranslation(presentation) }
+                .accessibilityIdentifier("reader.translation.edit")
         }
         if presentation.actions.contains(.retranslate) {
             Button("Retranslate") { showRetranslateConfirmation = true }
+                .accessibilityIdentifier("reader.translation.retranslate")
         }
     }
 
@@ -2670,24 +2674,26 @@ private struct SentenceRow: View {
                         .buttonStyle(.borderedProminent)
                         .tint(Palette.terracotta)
                         .frame(minHeight: 44)
-                } else if presentation.actions.contains(.edit) {
+                        .accessibilityIdentifier("reader.translation.accept")
+                }
+                if presentation.actions.contains(.reject) {
+                    Button("Reject", role: .destructive, action: onReject)
+                        .buttonStyle(.bordered)
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("reader.translation.reject")
+                }
+                if presentation.actions.contains(.edit) {
                     Button("Edit") { beginEditingTranslation(presentation) }
                         .buttonStyle(.bordered)
                         .frame(minHeight: 44)
+                        .accessibilityIdentifier("reader.translation.edit")
                 }
-                Menu("More") {
-                    if presentation.actions.contains(.reject) {
-                        Button("Reject", role: .destructive, action: onReject)
-                    }
-                    if presentation.actions.contains(.accept), presentation.actions.contains(.edit) {
-                        Button("Edit") { beginEditingTranslation(presentation) }
-                    }
-                    if presentation.actions.contains(.retranslate) {
-                        Button("Retranslate") { showRetranslateConfirmation = true }
-                    }
+                if presentation.actions.contains(.retranslate) {
+                    Button("Retranslate") { showRetranslateConfirmation = true }
+                        .buttonStyle(.bordered)
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("reader.translation.retranslate")
                 }
-                .buttonStyle(.bordered)
-                .frame(minHeight: 44)
             }
             .controlSize(.small)
         }
@@ -3023,6 +3029,11 @@ private struct WordToken: View {
     }
 }
 
+private enum WordInspectorSection {
+    case dictionary
+    case learning
+}
+
 private struct WordInspector: View {
     @Bindable var state: AppState
     var type: ReaderType = .metrics(columnWidth: 420, scale: 1)
@@ -3031,6 +3042,7 @@ private struct WordInspector: View {
     @State private var showRetranslateConfirmation = false
     @State private var showTranslationEditor = false
     @State private var editedTranslation = ""
+    @State private var selectedSection: WordInspectorSection = .dictionary
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -3077,161 +3089,177 @@ private struct WordInspector: View {
                             }
                         }
 
-                        inspectorCard(title: "Apple Dictionary") {
 #if os(iOS)
-                            if DictionaryLookup.hasSystemDefinition(word.text) {
-                                Text("Open Apple Dictionary for its full entry. iPadOS does not expose Apple Dictionary text to other apps, so accept the contextual meaning below to save it with this word.")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(Palette.dim)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            } else {
-                                Text("No definition is currently available from the dictionaries installed in iPadOS.")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(Palette.dim)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-
-                            Button {
-                                DictionaryLookup.lookUpInDictionary(word.text)
-                            } label: {
-                                Label("Open Apple Dictionary", systemImage: "book")
-                                    .inspectorActionLabel()
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                            .tint(Palette.terracotta)
-#else
-                            if state.dictionaryHits.isEmpty {
-                                Text("No entries in the installed dictionaries.")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(Palette.dim)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            } else {
-                                Picker("Dictionary", selection: $state.selectedDictionaryName) {
-                                    ForEach(state.dictionaryHits) { hit in
-                                        Text(hit.name).tag(hit.name)
-                                    }
-                                }
-                                .labelsHidden()
-                                .onChange(of: state.selectedDictionaryName) { _, name in
-                                    state.settings.preferredDictionary = name
-                                    state.persistSettings()
-                                    webHeight = 180
-                                }
-
-                                if let hit = state.selectedDictionaryHit {
-                                    DictionaryHTMLView(html: hit.html, dark: colorScheme == .dark, height: $webHeight)
-                                        .frame(height: webHeight)
-                                        .frame(maxWidth: .infinity)
-                                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                                }
-                            }
-                            Button {
-                                DictionaryLookup.lookUpInDictionary(word.text)
-                            } label: {
-                                Label("Open in Dictionary.app", systemImage: "book")
-                                    .inspectorActionLabel()
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .controlSize(.small)
-#endif
+                        Picker("Lookup section", selection: $selectedSection) {
+                            Text("Dictionary").tag(WordInspectorSection.dictionary)
+                            Text("Learning").tag(WordInspectorSection.learning)
                         }
+                        .pickerStyle(.segmented)
+                        .accessibilityIdentifier("reader.lookup.tabs")
+#endif
 
-                        inspectorCard(title: "In this sentence") {
-                            if state.isLLMJobActive(kind: .wordTranslation, targetID: word.id) {
-                                HStack(spacing: 10) {
-                                    ProgressView().controlSize(.small)
-                                    Text("Asking \(state.selectedLLMModel)…")
+                        if showsDictionaryContent {
+                            inspectorCard(title: "Apple Dictionary") {
+#if os(iOS)
+                                if DictionaryLookup.hasSystemDefinition(word.text) {
+                                    Text("Open Apple Dictionary for its full entry. iPadOS does not expose Apple Dictionary text to other apps; return here and choose Learning for sentence meaning and vocabulary actions.")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(Palette.dim)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                } else {
+                                    Text("No definition is currently available from the dictionaries installed in iPadOS.")
                                         .font(.system(size: 13))
                                         .foregroundStyle(Palette.dim)
-                                }
-                                .padding(.vertical, 8)
-                            } else if let gloss = state.selectedWordGloss {
-                                GlossBody(text: gloss.text, size: type.gloss)
-                if gloss.status == .pending || gloss.status == .edited || gloss.status == .replaced {
-                                    Text("Draft from \(gloss.model). Accept to keep it in the library.")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(Palette.gold)
                                         .fixedSize(horizontal: false, vertical: true)
-                                    HStack(spacing: 10) {
-                                        Button("Accept") { state.acceptGloss(gloss) }
-                                            .buttonStyle(.borderedProminent)
-                                            .tint(Palette.terracotta)
-                                        Button("Reject") { state.rejectGloss(gloss) }
-                                        Button("Edit") {
-                                            editedTranslation = gloss.text
-                                            showTranslationEditor = true
+                                }
+
+                                Button {
+                                    DictionaryLookup.lookUpInDictionary(word.text)
+                                } label: {
+                                    Label("Open Apple Dictionary", systemImage: "book")
+                                        .inspectorActionLabel()
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .tint(Palette.terracotta)
+#else
+                                if state.dictionaryHits.isEmpty {
+                                    Text("No entries in the installed dictionaries.")
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(Palette.dim)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                } else {
+                                    Picker("Dictionary", selection: $state.selectedDictionaryName) {
+                                        ForEach(state.dictionaryHits) { hit in
+                                            Text(hit.name).tag(hit.name)
                                         }
-                                        Button("Retranslate") { showRetranslateConfirmation = true }
                                     }
-                                    .controlSize(.small)
-                                    .inspectorActionLabel()
-                                } else if gloss.status == .accepted {
-                                    Text("Saved · Model: \(gloss.model)")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(Palette.gold)
-                                    Button("Edit") {
-                                        editedTranslation = gloss.text
-                                        showTranslationEditor = true
+                                    .labelsHidden()
+                                    .onChange(of: state.selectedDictionaryName) { _, name in
+                                        state.settings.preferredDictionary = name
+                                        state.persistSettings()
+                                        webHeight = 180
+                                    }
+
+                                    if let hit = state.selectedDictionaryHit {
+                                        DictionaryHTMLView(html: hit.html, dark: colorScheme == .dark, height: $webHeight)
+                                            .frame(height: webHeight)
+                                            .frame(maxWidth: .infinity)
+                                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    }
+                                }
+                                Button {
+                                    DictionaryLookup.lookUpInDictionary(word.text)
+                                } label: {
+                                    Label("Open in Dictionary.app", systemImage: "book")
+                                        .inspectorActionLabel()
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .controlSize(.small)
+#endif
+                            }
+                        }
+
+                        if showsLearningContent {
+                            inspectorCard(title: "In this sentence") {
+                                if state.isLLMJobActive(kind: .wordTranslation, targetID: word.id) {
+                                    HStack(spacing: 10) {
+                                        ProgressView().controlSize(.small)
+                                        Text("Asking \(state.selectedLLMModel)…")
+                                            .font(.system(size: 13))
+                                            .foregroundStyle(Palette.dim)
+                                    }
+                                    .padding(.vertical, 8)
+                                } else if let gloss = state.selectedWordGloss {
+                                    GlossBody(text: gloss.text, size: type.gloss)
+                                    if gloss.status == .pending || gloss.status == .edited || gloss.status == .replaced {
+                                        Text("Draft from \(gloss.model). Accept to keep it in the library.")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(Palette.gold)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                        HStack(spacing: 10) {
+                                            Button("Accept") { state.acceptGloss(gloss) }
+                                                .buttonStyle(.borderedProminent)
+                                                .tint(Palette.terracotta)
+                                            Button("Reject") { state.rejectGloss(gloss) }
+                                            Button("Edit") {
+                                                editedTranslation = gloss.text
+                                                showTranslationEditor = true
+                                            }
+                                            Button("Retranslate") { showRetranslateConfirmation = true }
+                                        }
+                                        .controlSize(.small)
+                                        .inspectorActionLabel()
+                                    } else if gloss.status == .accepted {
+                                        Text("Saved · Model: \(gloss.model)")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(Palette.gold)
+                                        HStack(spacing: 10) {
+                                            Button("Edit") {
+                                                editedTranslation = gloss.text
+                                                showTranslationEditor = true
+                                            }
+                                            .buttonStyle(.bordered)
+                                            Button("Retranslate") { showRetranslateConfirmation = true }
+                                                .buttonStyle(.bordered)
+                                        }
+                                        .controlSize(.small)
+                                    }
+                                } else {
+                                    Button {
+                                        state.translateSelectedWord()
+                                    } label: {
+                                        Label("Sentence meaning", systemImage: "globe")
+                                            .inspectorActionLabel()
+                                            .frame(maxWidth: .infinity)
                                     }
                                     .buttonStyle(.bordered)
-                                    Button("Retranslate") { showRetranslateConfirmation = true }
-                                        .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    .accessibilityLabel("This-sentence meaning (\(state.selectedLLMModel))")
+                                    .accessibilityIdentifier("reader.lookup.meaning")
                                 }
-                            } else {
+                                if let err = state.translationError {
+                                    Text(err)
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.red.opacity(0.9))
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+
+                            if let seg = contextSegment {
+                                let isSaved = state.isInVocabulary(word: word)
+                                let isKnown = state.isMarkedKnown(word)
                                 Button {
-                                    state.translateSelectedWord()
+                                    state.markKnown(word, known: !isKnown)
                                 } label: {
-                                    Label("Sentence meaning", systemImage: "globe")
+                                    Label(isKnown ? "Mark unknown" : "Mark known", systemImage: isKnown ? "eye.slash" : "eye")
                                         .inspectorActionLabel()
                                         .frame(maxWidth: .infinity)
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
-                                .accessibilityLabel("This-sentence meaning (\(state.selectedLLMModel))")
-                                .accessibilityIdentifier("reader.lookup.meaning")
-                            }
-                            if let err = state.translationError {
-                                Text(err)
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.red.opacity(0.9))
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
+                                .accessibilityLabel(isKnown ? "Mark \(word.text) unknown" : "Mark \(word.text) known")
 
-                        if let seg = contextSegment {
-                            let isSaved = state.isInVocabulary(word: word)
-                            let isKnown = state.isMarkedKnown(word)
-                            Button {
-                                state.markKnown(word, known: !isKnown)
-                            } label: {
-                                Label(isKnown ? "Mark unknown" : "Mark known", systemImage: isKnown ? "eye.slash" : "eye")
-                                    .inspectorActionLabel()
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .accessibilityLabel(isKnown ? "Mark \(word.text) unknown" : "Mark \(word.text) known")
-
-                            Button {
+                                Button {
 #if os(iOS)
-                                state.addVocabAndRequestMeaning(word: word, segment: seg)
+                                    state.addVocabAndRequestMeaning(word: word, segment: seg)
 #else
-                                state.addVocab(word: word, segment: seg)
+                                    state.addVocab(word: word, segment: seg)
 #endif
-                            } label: {
-                                Label(
-                                    addVocabularyTitle(isSaved: isSaved),
-                                    systemImage: isSaved ? "checkmark.circle.fill" : "bookmark"
-                                )
-                                    .inspectorActionLabel()
-                                    .frame(maxWidth: .infinity)
+                                } label: {
+                                    Label(
+                                        addVocabularyTitle(isSaved: isSaved),
+                                        systemImage: isSaved ? "checkmark.circle.fill" : "bookmark"
+                                    )
+                                        .inspectorActionLabel()
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(Palette.terracotta)
+                                .controlSize(.small)
+                                .disabled(isSaved)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(Palette.terracotta)
-                            .controlSize(.small)
-                            .disabled(isSaved)
                         }
                     }
                     .padding(.horizontal, 22)
@@ -3266,6 +3294,23 @@ private struct WordInspector: View {
 
     private var contextSegment: TranscriptSegment? {
         state.selectedWordContextSegment
+    }
+
+    // Apple Dictionary must remain separately presented on iPad because its controller cannot be safely embedded.
+    private var showsDictionaryContent: Bool {
+#if os(iOS)
+        selectedSection == .dictionary
+#else
+        true
+#endif
+    }
+
+    private var showsLearningContent: Bool {
+#if os(iOS)
+        selectedSection == .learning
+#else
+        true
+#endif
     }
 
     private func addVocabularyTitle(isSaved: Bool) -> String {
