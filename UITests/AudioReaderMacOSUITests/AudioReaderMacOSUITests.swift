@@ -181,6 +181,16 @@ final class AudioReaderMacOSUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Why this answer"].exists)
     }
 
+    func testReadAndPauseKeepsTextVisibleWithReplayAndContinue() {
+        let app = launch(scenario: "read-and-pause")
+
+        XCTAssertTrue(element("reader.readAndPauseCoach", in: app).waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Tomorrow brings another chapter."].exists)
+        XCTAssertTrue(element("reader.readAndPauseReplay", in: app).isHittable)
+        XCTAssertTrue(element("reader.readAndPauseContinue", in: app).isHittable)
+        XCTAssertFalse(app.staticTexts["Future sentence hidden in Listen First."].exists)
+    }
+
     func testEPUBCoverContentsSearchAndChapterJump() {
         let app = launch(scenario: "epub-reader")
 

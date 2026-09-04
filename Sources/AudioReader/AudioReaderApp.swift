@@ -81,6 +81,10 @@ struct AudioReaderApp: App {
                     set: { state.setDeepReadingMode($0) }
                 ))
                     .keyboardShortcut("d", modifiers: [.command])
+                Toggle("Read & Pause", isOn: Binding(
+                    get: { state.settings.readAndPauseMode },
+                    set: { state.setReadAndPauseMode($0) }
+                ))
                 Button("Continue with next sentence") { state.continueDeepReading() }
                     .keyboardShortcut(.return, modifiers: [.command])
                     .disabled(!state.canContinueDeepReading)
@@ -254,9 +258,39 @@ enum UITestLaunchScenario {
 
         switch scenario {
         case "reader": state.tab = .player
+        case "translation-layout":
+            state.tab = .player
+            state.focusedSegmentID = transcriptSegments[0].id
+            state.selectedWord = firstWord
+            let source = transcriptSegments[0].displayText
+            state.glosses = [GlossEntry(
+                id: GlossEntry.makeID(
+                    kind: .sentence,
+                    language: state.settings.targetLanguage,
+                    source: source,
+                    context: nil
+                ),
+                kind: .sentence,
+                language: state.settings.targetLanguage,
+                source: source,
+                context: nil,
+                text: "Listening changes the way we understand stories.",
+                status: .pending,
+                model: "qwen3.6-flash",
+                bookID: book.id,
+                bookTitle: book.title,
+                chapterID: chapter.id,
+                chapterTitle: chapter.title,
+                timestamp: 0,
+                createdAt: Date(timeIntervalSince1970: 1),
+                decidedAt: nil
+            )]
         case "listen-first":
             state.tab = .player
             state.prepareUITestListenFirstPause(segmentID: "ui-sentence-4", time: 8.74)
+        case "read-and-pause":
+            state.tab = .player
+            state.prepareUITestReadAndPause(segmentID: "ui-sentence-4", time: 8.74)
         case "words", "words-rich": state.tab = .vocab
         case "settings": state.tab = .settings
         default: state.tab = .library

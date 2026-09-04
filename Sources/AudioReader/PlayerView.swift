@@ -83,8 +83,12 @@ struct PlayerView: View {
             lyricPane
             if state.selectedChapter?.hasAudio == true {
                 VStack(spacing: playbackChromeSpacing) {
-                    if state.isDeepReadingPaused, let segment = state.currentSegment {
-                        ListenFirstCoachView(state: state, segment: segment)
+                    if let segment = state.currentSegment {
+                        if state.isDeepReadingPaused {
+                            ListenFirstCoachView(state: state, segment: segment)
+                        } else if state.isReadAndPausePaused {
+                            ReadAndPauseCoachView(state: state)
+                        }
                     }
                     PlaybackChrome(state: state)
 #if os(iOS)
@@ -452,6 +456,13 @@ struct PlayerView: View {
         )
     }
 
+    private var readAndPauseBinding: Binding<Bool> {
+        Binding(
+            get: { state.settings.readAndPauseMode },
+            set: { state.setReadAndPauseMode($0) }
+        )
+    }
+
     private var readerNavigationTitle: String {
         ReaderWindowTitle.make(
             book: state.selectedBook?.title,
@@ -635,6 +646,10 @@ struct PlayerView: View {
             Toggle("Auto-scroll", isOn: $autoScroll)
             Toggle("Listen First", isOn: deepReadingBinding)
                 .accessibilityHint("Hides unfinished and future sentences, then pauses and reveals each completed sentence.")
+                .accessibilityLabel("Listen First")
+            Toggle("Read & Pause", isOn: readAndPauseBinding)
+                .accessibilityHint("Keeps every sentence visible and pauses after each one.")
+                .accessibilityLabel("Read and Pause")
             Toggle("Play on tap", isOn: $state.settings.playOnSelect)
                 .onChange(of: state.settings.playOnSelect) { _, _ in state.persistSettings() }
             Toggle("Study overlay", isOn: $state.settings.showStudyOverlay)
@@ -1066,12 +1081,7 @@ struct PlayerView: View {
             .help("Loop current sentence")
             .foregroundStyle(state.loopSentence ? Palette.gold : Palette.ink)
 
-            Toggle(isOn: deepReadingBinding) {
-                Image(systemName: "book.closed")
-            }
-            .toggleStyle(.button)
-            .help("Listen First: hide text, then pause after each sentence")
-            .foregroundStyle(state.settings.deepReadingMode ? Palette.gold : Palette.ink)
+            readingPaceMenu
 
             Button { state.continueDeepReading() } label: {
                 Image(systemName: "forward.end.circle")
@@ -1168,6 +1178,37 @@ struct PlayerView: View {
         return "Chapter \(index + 1) of \(chapters.count)"
     }
 
+    private var readingPaceMenu: some View {
+        Menu {
+            Button {
+                state.setDeepReadingMode(false)
+                state.setReadAndPauseMode(false)
+            } label: {
+                Label("Continuous", systemImage: !state.settings.deepReadingMode && !state.settings.readAndPauseMode ? "checkmark" : "play")
+            }
+            Button {
+                state.setDeepReadingMode(true)
+            } label: {
+                Label("Listen First", systemImage: state.settings.deepReadingMode ? "checkmark" : "ear")
+            }
+            Button {
+                state.setReadAndPauseMode(true)
+            } label: {
+                Label("Read & Pause", systemImage: state.settings.readAndPauseMode ? "checkmark" : "text.alignleft")
+            }
+        } label: {
+            Image(systemName: state.settings.deepReadingMode ? "ear" : (state.settings.readAndPauseMode ? "text.alignleft" : "play"))
+#if os(iOS)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+#endif
+        }
+        .foregroundStyle(state.settings.deepReadingMode || state.settings.readAndPauseMode ? Palette.gold : Palette.ink)
+        .help("Choose continuous, Listen First, or Read & Pause playback")
+        .accessibilityLabel("Reading pace")
+        .accessibilityValue(state.settings.deepReadingMode ? "Listen First" : (state.settings.readAndPauseMode ? "Read and Pause" : "Continuous"))
+    }
+
 #if os(iOS)
     private var iPadCompactPlaybackBar: some View {
         HStack(spacing: 4) {
@@ -1244,22 +1285,14 @@ struct PlayerView: View {
             .foregroundStyle(state.loopSentence ? Palette.gold : Palette.ink)
             .accessibilityLabel("Loop sentence")
 
-            Toggle(isOn: deepReadingBinding) {
-                Image(systemName: "book.closed")
-                    .frame(minWidth: 44, minHeight: 44)
-                    .contentShape(Rectangle())
-            }
-            .toggleStyle(.button)
-            .foregroundStyle(state.settings.deepReadingMode ? Palette.gold : Palette.ink)
-            .accessibilityLabel("Listen First")
-            .accessibilityValue(state.settings.deepReadingMode ? "On" : "Off")
+            readingPaceMenu
 
             Button { state.continueDeepReading() } label: {
                 Image(systemName: "forward.end.circle")
                     .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
-            .foregroundStyle(state.isDeepReadingPaused ? Palette.gold : Palette.ink)
+            .foregroundStyle(state.isDeepReadingPaused || state.isReadAndPausePaused ? Palette.gold : Palette.ink)
             .disabled(!state.canContinueDeepReading)
             .accessibilityLabel("Continue with next sentence")
             .keyboardShortcut(.return, modifiers: [.command])
@@ -2273,7 +2306,7 @@ private struct TranscriptTextColumn: View {
                             currentID: cursor.segmentID,
                             currentWordID: segment.id == cursor.segmentID ? cursor.wordID : nil,
                             focusedSegmentID: state.focusedSegmentID,
-                            focusedWordID: state.focusedWordID,
+                            lookupWordID: state.selectedWord?.id,
                             textSource: state.readerTextSource,
                             gloss: state.sentenceGloss(for: segment),
                             isTranslating: state.isLLMJobActive(kind: .sentenceTranslation, targetID: segment.id),
@@ -2284,7 +2317,6 @@ private struct TranscriptTextColumn: View {
                             studyKnownLemmas: studyKnown,
                             onSeek: { time in
                                 state.focusedSegmentID = segment.id
-                                state.focusedWordID = nil
                                 state.seekToSentence(segment, time: time, autoplay: state.settings.playOnSelect)
                             },
                             onPlayFrom: { time in
@@ -2293,7 +2325,6 @@ private struct TranscriptTextColumn: View {
                             },
                             onInspect: { word in
                                 state.focusedSegmentID = segment.id
-                                state.focusedWordID = word.id
                                 state.inspect(word: word)
 #if os(iOS)
                                 DictionaryLookup.lookUpInDictionary(word.text)
@@ -2504,7 +2535,7 @@ private struct SentenceRow: View {
     let currentID: String?
     let currentWordID: String?
     let focusedSegmentID: String?
-    let focusedWordID: String?
+    let lookupWordID: String?
     let textSource: TextSource
     let gloss: GlossEntry?
     let isTranslating: Bool
@@ -2542,7 +2573,8 @@ private struct SentenceRow: View {
             ForEach(tokens) { word in
                 WordToken(
                     word: word,
-                    isCurrent: word.id == currentWordID || word.id == focusedWordID,
+                    isPlaybackCurrent: word.id == currentWordID,
+                    isLookupFocused: word.id == lookupWordID,
                     dimmed: dimmed,
                     fontSize: type.body,
                     font: type.font,
@@ -2696,37 +2728,16 @@ private struct SentenceRow: View {
                 GlossBody(text: glossText, size: type.gloss)
             }
             if let status = presentation.status {
-                HStack(spacing: 8) {
-                    switch status {
-                    case .draft(let model):
-                        Text("Draft · Model: \(model)")
-                            .font(.system(size: 11))
-                            .foregroundStyle(Palette.gold)
-                    case .saved(let model):
-                        Text("Saved · Model: \(model)")
-                            .font(.system(size: 11))
-                            .foregroundStyle(Palette.gold)
-                    }
-                    if presentation.actions.contains(.accept) {
-                        Button("Accept", action: onAccept)
-                            .buttonStyle(.borderedProminent)
-                            .tint(Palette.terracotta)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        translationStatus(status, fixed: true)
+                        expandedTranslationActions(presentation)
                             .controlSize(.small)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
-                    if presentation.actions.contains(.reject) {
-                        Button("Reject", action: onReject)
-                            .controlSize(.small)
-                    }
-                    if presentation.actions.contains(.edit) {
-                        Button("Edit") {
-                            editedTranslation = presentation.glossText ?? ""
-                            showTranslationEditor = true
-                        }
-                        .controlSize(.small)
-                    }
-                    if presentation.actions.contains(.retranslate) {
-                        Button("Retranslate") { showRetranslateConfirmation = true }
-                            .controlSize(.small)
+                    VStack(alignment: .leading, spacing: 6) {
+                        translationStatus(status, fixed: false)
+                        compactTranslationActions(presentation)
                     }
                 }
             } else if presentation.actions.contains(.translate) {
@@ -2753,6 +2764,77 @@ private struct SentenceRow: View {
                 showTranslationEditor = false
             }
         }
+    }
+
+    private func translationStatus(
+        _ status: SentenceTranslationPresentation.Status,
+        fixed: Bool
+    ) -> some View {
+        let text: String
+        switch status {
+        case .draft(let model): text = "Draft · Model: \(model)"
+        case .saved(let model): text = "Saved · Model: \(model)"
+        }
+        return Text(text)
+            .font(.caption)
+            .foregroundStyle(Palette.gold)
+            .lineLimit(fixed ? 1 : 2)
+            .fixedSize(horizontal: fixed, vertical: false)
+    }
+
+    @ViewBuilder
+    private func expandedTranslationActions(_ presentation: SentenceTranslationPresentation) -> some View {
+        if presentation.actions.contains(.accept) {
+            Button("Accept", action: onAccept)
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.terracotta)
+        }
+        if presentation.actions.contains(.reject) {
+            Button("Reject", action: onReject)
+        }
+        if presentation.actions.contains(.edit) {
+            Button("Edit") { beginEditingTranslation(presentation) }
+        }
+        if presentation.actions.contains(.retranslate) {
+            Button("Retranslate") { showRetranslateConfirmation = true }
+        }
+    }
+
+    @ViewBuilder
+    private func compactTranslationActions(_ presentation: SentenceTranslationPresentation) -> some View {
+        if !presentation.actions.isEmpty {
+            HStack(spacing: 8) {
+                if presentation.actions.contains(.accept) {
+                    Button("Accept", action: onAccept)
+                        .buttonStyle(.borderedProminent)
+                        .tint(Palette.terracotta)
+                        .frame(minHeight: 44)
+                } else if presentation.actions.contains(.edit) {
+                    Button("Edit") { beginEditingTranslation(presentation) }
+                        .buttonStyle(.bordered)
+                        .frame(minHeight: 44)
+                }
+                Menu("More") {
+                    if presentation.actions.contains(.reject) {
+                        Button("Reject", role: .destructive, action: onReject)
+                    }
+                    if presentation.actions.contains(.accept), presentation.actions.contains(.edit) {
+                        Button("Edit") { beginEditingTranslation(presentation) }
+                    }
+                    if presentation.actions.contains(.retranslate) {
+                        Button("Retranslate") { showRetranslateConfirmation = true }
+                    }
+                }
+                .buttonStyle(.bordered)
+                .frame(minHeight: 44)
+            }
+            .controlSize(.small)
+        }
+    }
+
+    private func beginEditingTranslation(_ presentation: SentenceTranslationPresentation) {
+        editedTranslation = presentation.glossText ?? ""
+        showTranslationEditor = true
     }
 }
 
@@ -2981,7 +3063,7 @@ extension SentenceRow: Equatable {
             && lhs.currentID == rhs.currentID
             && lhs.currentWordID == rhs.currentWordID
             && lhs.focusedSegmentID == rhs.focusedSegmentID
-            && lhs.focusedWordID == rhs.focusedWordID
+            && lhs.lookupWordID == rhs.lookupWordID
             && lhs.textSource == rhs.textSource
             && lhs.gloss == rhs.gloss
             && lhs.isTranslating == rhs.isTranslating
@@ -3002,7 +3084,8 @@ extension SentenceRow: Equatable {
 
 private struct WordToken: View {
     let word: TranscriptWord
-    let isCurrent: Bool
+    let isPlaybackCurrent: Bool
+    let isLookupFocused: Bool
     let dimmed: Bool
     var fontSize: CGFloat = 22
     var font: ReaderFontChoice = .newYork
@@ -3020,20 +3103,24 @@ private struct WordToken: View {
             onInspect()
         } label: {
             Text(word.text)
-                .font(font.font(size: fontSize, bold: bold || isCurrent))
-                .foregroundStyle(isCurrent ? Palette.inkOnGold : (dimmed ? Palette.dim : Palette.ink))
-                .padding(.horizontal, isCurrent ? 4 : 0)
+                .font(font.font(size: fontSize, bold: bold || isPlaybackCurrent || isLookupFocused))
+                .foregroundStyle(isPlaybackCurrent ? Palette.inkOnGold : (dimmed ? Palette.dim : Palette.ink))
+                .padding(.horizontal, isPlaybackCurrent || isLookupFocused ? 4 : 0)
                 .padding(.vertical, 1)
                 .background(
                     RoundedRectangle(cornerRadius: 4)
-                        .fill(isCurrent ? Palette.gold : Color.clear)
+                        .fill(isPlaybackCurrent ? Palette.gold : (isLookupFocused ? Palette.terracotta.opacity(0.14) : Color.clear))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(isLookupFocused ? Palette.terracotta : Color.clear, lineWidth: 1.5)
                 )
                 .overlay(alignment: .bottom) {
                     if studyOverlayEnabled, familiarity != .known {
                         Rectangle()
                             .fill(Palette.terracotta)
                             .frame(height: familiarity == .learning ? 1 : 1.5)
-                            .padding(.horizontal, isCurrent ? 4 : 0)
+                            .padding(.horizontal, isPlaybackCurrent || isLookupFocused ? 4 : 0)
                             .opacity((familiarity == .learning ? 0.7 : 1) * (dimmed ? 0.7 : 1))
                     }
                 }
@@ -3043,7 +3130,7 @@ private struct WordToken: View {
         .frame(minWidth: 44, minHeight: 44)
 #endif
         .accessibilityLabel(word.text.trimmingCharacters(in: .whitespacesAndNewlines))
-        .accessibilityValue(overlayAccessibilityValue)
+        .accessibilityValue(accessibilityValue)
         .accessibilityIdentifier("reader.word.\(word.id)")
         .accessibilityAction(named: "Play from here") { onPlayFrom() }
         .accessibilityAction(named: "Look up") { onInspect() }
@@ -3055,6 +3142,14 @@ private struct WordToken: View {
             Button("Add to vocabulary") { onSave() }
             Button("Mark known") { onMarkKnown() }
         }
+    }
+
+    private var accessibilityValue: String {
+        var values: [String] = []
+        if isPlaybackCurrent { values.append("current audio word") }
+        if isLookupFocused { values.append("selected for lookup") }
+        if !overlayAccessibilityValue.isEmpty { values.append(overlayAccessibilityValue) }
+        return values.joined(separator: ", ")
     }
 
     private var overlayAccessibilityValue: String {
@@ -3094,6 +3189,7 @@ private struct WordInspector: View {
                 }
                 .buttonStyle(.plain)
                 .help("Close")
+                .accessibilityIdentifier("reader.lookup.close")
             }
             .padding(.horizontal, 22)
             .padding(.top, 18)

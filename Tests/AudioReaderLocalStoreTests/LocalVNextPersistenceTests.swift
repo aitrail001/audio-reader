@@ -304,6 +304,7 @@ struct LocalVNextPersistenceTests {
         )
         var settings = StoredSettings.default
         settings.playbackRate = 1.25
+        settings.readAndPauseMode = true
 
         try store.saveAssistantResult(summary)
         try store.saveTranslationCheckpoint(checkpoint)

@@ -93,7 +93,6 @@ struct ChapterStudyListView: View {
         let tokens = StudyTokenIndex.tokens(in: segment)
         let word = tokens.first(where: { $0.id == item.wordID }) ?? tokens.first
         state.focusedSegmentID = segment.id
-        state.focusedWordID = word?.id
         if let word {
             state.inspect(word: word)
         }

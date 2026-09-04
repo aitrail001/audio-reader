@@ -48,13 +48,18 @@ final class AudioReaderIOSUITests: XCTestCase {
         let dictionaryClose = app.buttons["DDUIDone"].firstMatch
         XCTAssertTrue(dictionaryClose.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Dictionary"].exists)
+        XCTAssertGreaterThan(dictionaryClose.frame.minY, app.frame.height * 0.2)
         dictionaryClose.tap()
         XCTAssertTrue(app.staticTexts["Lookup"].waitForExistence(timeout: 3))
         XCTAssertEqual(app.state, .runningForeground)
         XCTAssertTrue(app.buttons["Open Apple Dictionary"].waitForExistence(timeout: 3))
+        XCTAssertEqual(element("reader.word.ui-word-1", in: app).value as? String, "current audio word, selected for lookup")
         element("reader.word.ui-word-2", in: app).tap()
-        XCTAssertTrue(app.staticTexts["Lookup"].waitForExistence(timeout: 3))
         XCTAssertEqual(app.state, .runningForeground)
+        XCTAssertEqual(element("reader.word.ui-word-1", in: app).value as? String, "current audio word")
+        XCTAssertEqual(element("reader.word.ui-word-2", in: app).value as? String, "selected for lookup")
+        element("reader.lookup.close", in: app).tap()
+        XCTAssertEqual(element("reader.word.ui-word-2", in: app).value as? String, "")
 
         app.terminate()
         let wordsApp = launch(scenario: "words")
@@ -209,6 +214,31 @@ final class AudioReaderIOSUITests: XCTestCase {
         app.buttons["Quick Quiz"].tap()
         XCTAssertTrue(app.staticTexts["Quick quiz"].waitForExistence(timeout: 3))
         XCTAssertFalse(app.staticTexts["Why this answer"].exists)
+    }
+
+    func testReadAndPauseKeepsTextVisibleWithReplayAndContinue() {
+        let app = launch(scenario: "read-and-pause")
+
+        XCTAssertTrue(element("reader.readAndPauseCoach", in: app).waitForExistence(timeout: 3))
+        XCTAssertTrue(element("reader.word.ui-sentence-4-word-0", in: app).exists)
+        XCTAssertTrue(app.buttons["Tomorrow brings another chapter."].exists)
+        XCTAssertTrue(element("reader.readAndPauseReplay", in: app).isHittable)
+        XCTAssertTrue(element("reader.readAndPauseContinue", in: app).isHittable)
+        XCTAssertFalse(app.staticTexts["Future sentence hidden in Listen First."].exists)
+    }
+
+    func testTranslationActionsStayCompactBesideLookup() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = launch(scenario: "translation-layout")
+
+        XCTAssertTrue(app.staticTexts["Lookup"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Draft · Model: qwen3.6-flash"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Accept"].isHittable)
+        XCTAssertTrue(app.buttons["More"].isHittable)
+        app.buttons["More"].tap()
+        XCTAssertTrue(app.buttons["Reject"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Edit"].exists)
+        XCTAssertTrue(app.buttons["Retranslate"].exists)
     }
 
     func testEPUBCoverContentsSearchAndChapterJump() {

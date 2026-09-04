@@ -832,6 +832,7 @@ struct AppSettings: Codable, Equatable {
     var autoTranslate: Bool
     var playOnSelect: Bool
     var deepReadingMode: Bool
+    var readAndPauseMode: Bool
     var showStudyOverlay: Bool
     var vocabReviewPrompt: String
     var appearance: String
@@ -874,6 +875,7 @@ struct AppSettings: Codable, Equatable {
             autoTranslate: false,
             playOnSelect: true,
             deepReadingMode: false,
+            readAndPauseMode: false,
             showStudyOverlay: false,
             vocabReviewPrompt: VocabReviewPrompt.recognition.rawValue,
             appearance: AppAppearance.system.rawValue,
@@ -921,6 +923,7 @@ struct AppSettings: Codable, Equatable {
         autoTranslate: Bool,
         playOnSelect: Bool,
         deepReadingMode: Bool,
+        readAndPauseMode: Bool,
         showStudyOverlay: Bool,
         vocabReviewPrompt: String,
         appearance: String,
@@ -961,6 +964,7 @@ struct AppSettings: Codable, Equatable {
         self.autoTranslate = autoTranslate
         self.playOnSelect = playOnSelect
         self.deepReadingMode = deepReadingMode
+        self.readAndPauseMode = readAndPauseMode
         self.showStudyOverlay = showStudyOverlay
         self.vocabReviewPrompt = vocabReviewPrompt
         self.appearance = appearance
@@ -1008,6 +1012,9 @@ struct AppSettings: Codable, Equatable {
         autoTranslate = try c.decodeIfPresent(Bool.self, forKey: .autoTranslate) ?? d.autoTranslate
         playOnSelect = try c.decodeIfPresent(Bool.self, forKey: .playOnSelect) ?? d.playOnSelect
         deepReadingMode = try c.decodeIfPresent(Bool.self, forKey: .deepReadingMode) ?? d.deepReadingMode
+        readAndPauseMode = deepReadingMode
+            ? false
+            : (try c.decodeIfPresent(Bool.self, forKey: .readAndPauseMode) ?? d.readAndPauseMode)
         showStudyOverlay = try c.decodeIfPresent(Bool.self, forKey: .showStudyOverlay) ?? d.showStudyOverlay
         vocabReviewPrompt = try c.decodeIfPresent(String.self, forKey: .vocabReviewPrompt) ?? d.vocabReviewPrompt
         appearance = try c.decodeIfPresent(String.self, forKey: .appearance) ?? d.appearance
@@ -1080,6 +1087,7 @@ extension StoredSettings {
             autoTranslate: settings.autoTranslate,
             playOnSelect: settings.playOnSelect,
             deepReadingMode: settings.deepReadingMode,
+            readAndPauseMode: settings.readAndPauseMode,
             showStudyOverlay: settings.showStudyOverlay,
             vocabReviewPrompt: settings.vocabReviewPrompt,
             appearance: settings.appearance,
@@ -1125,6 +1133,7 @@ extension AppSettings {
         autoTranslate = stored.autoTranslate
         playOnSelect = stored.playOnSelect
         deepReadingMode = stored.deepReadingMode
+        readAndPauseMode = stored.deepReadingMode ? false : (stored.readAndPauseMode ?? false)
         showStudyOverlay = stored.showStudyOverlay
         vocabReviewPrompt = stored.vocabReviewPrompt
         appearance = stored.appearance

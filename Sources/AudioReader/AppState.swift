@@ -151,7 +151,6 @@ final class AppState {
     var chapterTranslationFailed = false
     private(set) var chapterTranslationStopRequested = false
     var focusedSegmentID: String?
-    var focusedWordID: String?
     var scrollSegmentID: String?
     var revealToken: Int = 0
 
@@ -1405,7 +1404,6 @@ final class AppState {
             definition = nil
             dictionaryHits = []
             focusedSegmentID = nil
-            focusedWordID = nil
             scrollSegmentID = nil
         }
         if autoplay && chapter.hasAudio { player.play() }
@@ -1732,8 +1730,12 @@ final class AppState {
         if player.isPlaying {
             player.pause()
             persistCurrentReaderProgress(force: true)
-        } else if settings.deepReadingMode, deepReadingPausedSentenceID != nil {
-            continueDeepReading()
+        } else if isSentencePacedModeEnabled, deepReadingPausedSentenceID != nil {
+            if canContinueDeepReading {
+                continueDeepReading()
+            } else {
+                replaySentence()
+            }
         } else {
             armDeepReadingSentence()
             player.play()
@@ -1781,7 +1783,7 @@ final class AppState {
     }
 
     var canContinueDeepReading: Bool {
-        guard settings.deepReadingMode,
+        guard isSentencePacedModeEnabled,
               let transcript = presentedTranscript,
               let sentenceID = deepReadingPausedSentenceID,
               let index = transcript.segments.firstIndex(where: { $0.id == sentenceID })
@@ -1793,13 +1795,22 @@ final class AppState {
         settings.deepReadingMode && deepReadingPausedSentenceID != nil
     }
 
+    var isReadAndPausePaused: Bool {
+        settings.readAndPauseMode && deepReadingPausedSentenceID != nil
+    }
+
+    private var isSentencePacedModeEnabled: Bool {
+        settings.deepReadingMode || settings.readAndPauseMode
+    }
+
     func setDeepReadingMode(_ enabled: Bool) {
         guard settings.deepReadingMode != enabled else { return }
         settings.deepReadingMode = enabled
         if enabled {
+            settings.readAndPauseMode = false
             loopSentence = false
             if player.isPlaying { armDeepReadingSentence() }
-        } else {
+        } else if !settings.readAndPauseMode {
             deepReadingActiveSentenceID = nil
             deepReadingPausedSentenceID = nil
             listenFirstReplayRevealedSegmentID = nil
@@ -1807,10 +1818,31 @@ final class AppState {
         persistSettings()
     }
 
+    /// Read & Pause shares sentence-boundary playback with Listen First but never conceals text.
+    func setReadAndPauseMode(_ enabled: Bool) {
+        guard settings.readAndPauseMode != enabled else { return }
+        settings.readAndPauseMode = enabled
+        if enabled {
+            settings.deepReadingMode = false
+            loopSentence = false
+            listenFirstReplayRevealedSegmentID = nil
+            if player.isPlaying { armDeepReadingSentence() }
+        } else if !settings.deepReadingMode {
+            deepReadingActiveSentenceID = nil
+            deepReadingPausedSentenceID = nil
+        }
+        persistSettings()
+    }
+
     func setSentenceLoop(_ enabled: Bool) {
         loopSentence = enabled
-        if enabled, settings.deepReadingMode {
-            setDeepReadingMode(false)
+        if enabled, isSentencePacedModeEnabled {
+            settings.deepReadingMode = false
+            settings.readAndPauseMode = false
+            deepReadingActiveSentenceID = nil
+            deepReadingPausedSentenceID = nil
+            listenFirstReplayRevealedSegmentID = nil
+            persistSettings()
         }
     }
 
@@ -1834,7 +1866,7 @@ final class AppState {
     }
 
     func continueDeepReading() {
-        guard settings.deepReadingMode,
+        guard isSentencePacedModeEnabled,
               let transcript = presentedTranscript,
               let sentenceID = deepReadingPausedSentenceID,
               let index = transcript.segments.firstIndex(where: { $0.id == sentenceID }),
@@ -1856,7 +1888,7 @@ final class AppState {
             player.play()
             return
         }
-        guard settings.deepReadingMode, player.isPlaying, let transcript = presentedTranscript else { return }
+        guard isSentencePacedModeEnabled, player.isPlaying, let transcript = presentedTranscript else { return }
         if deepReadingActiveSentenceID == nil {
             armDeepReadingSentence()
         }
@@ -1884,7 +1916,7 @@ final class AppState {
     }
 
     private func armDeepReadingSentence(_ sentence: TranscriptSegment? = nil) {
-        guard settings.deepReadingMode, let sentence = sentence ?? currentSegment else {
+        guard isSentencePacedModeEnabled, let sentence = sentence ?? currentSegment else {
             deepReadingActiveSentenceID = nil
             deepReadingPausedSentenceID = nil
             return
@@ -1896,7 +1928,7 @@ final class AppState {
     private func resetDeepReadingAfterSeek() {
         deepReadingPausedSentenceID = nil
         listenFirstReplayRevealedSegmentID = nil
-        if settings.deepReadingMode, player.isPlaying {
+        if isSentencePacedModeEnabled, player.isPlaying {
             armDeepReadingSentence()
         } else {
             deepReadingActiveSentenceID = nil
@@ -4670,7 +4702,6 @@ final class AppState {
         let time = (word?.start ?? segment.start) + 0.02
         player.seek(time)
         focusedSegmentID = segment.id
-        focusedWordID = word?.id
         scrollSegmentID = segment.id
         revealToken += 1
         if let word {
@@ -4757,6 +4788,15 @@ extension AppState {
     /// Produces a completed-sentence pause without touching a user's media or provider credentials.
     func prepareUITestListenFirstPause(segmentID: String, time: TimeInterval) {
         settings.deepReadingMode = true
+        settings.readAndPauseMode = false
+        player.currentTime = time
+        deepReadingActiveSentenceID = nil
+        deepReadingPausedSentenceID = segmentID
+    }
+
+    func prepareUITestReadAndPause(segmentID: String, time: TimeInterval) {
+        settings.deepReadingMode = false
+        settings.readAndPauseMode = true
         player.currentTime = time
         deepReadingActiveSentenceID = nil
         deepReadingPausedSentenceID = segmentID

@@ -203,25 +203,29 @@ struct PlatformParityContractTests {
         #expect(sharedLogic.contains("func resetDeepReadingAfterSeek()"))
     }
 
-    @Test("Both platforms expose Listen First and a continue action")
+    @Test("Both platforms expose sentence-paced modes and a continue action")
     func bothPlatformsExposeDeepReadingControls() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
         let app = try source("Sources/AudioReader/AudioReaderApp.swift")
 
-        #expect(playerView.components(separatedBy: "Toggle(isOn: deepReadingBinding)").count - 1 == 2)
+        #expect(playerView.contains("Toggle(\"Listen First\", isOn: deepReadingBinding)"))
+        #expect(playerView.contains("Toggle(\"Read & Pause\", isOn: readAndPauseBinding)"))
+        #expect(playerView.components(separatedBy: "readingPaceMenu").count - 1 >= 2)
         #expect(playerView.components(separatedBy: "Button { state.continueDeepReading() }").count - 1 == 2)
         #expect(playerView.contains(".accessibilityLabel(\"Listen First\")"))
+        #expect(playerView.contains(".accessibilityLabel(\"Reading pace\")"))
         #expect(playerView.contains(".accessibilityLabel(\"Continue with next sentence\")"))
         #expect(playerView.contains(".keyboardShortcut(.return, modifiers: [.command])"))
 
         #expect(app.contains("Toggle(\"Listen First\""))
+        #expect(app.contains("Toggle(\"Read & Pause\""))
         #expect(app.contains(".keyboardShortcut(\"d\", modifiers: [.command])"))
         #expect(app.contains("Button(\"Continue with next sentence\") { state.continueDeepReading() }"))
         #expect(app.contains(".keyboardShortcut(.return, modifiers: [.command])"))
     }
 
     @MainActor
-    @Test("Deep Reading and sentence loop stay mutually exclusive")
+    @Test("Sentence-paced modes and sentence loop stay mutually exclusive")
     func readingModesStayMutuallyExclusive() {
         let state = AppState()
 
@@ -232,6 +236,14 @@ struct PlatformParityContractTests {
 
         state.setSentenceLoop(true)
         #expect(!state.settings.deepReadingMode)
+        #expect(state.loopSentence)
+
+        state.setReadAndPauseMode(true)
+        #expect(state.settings.readAndPauseMode)
+        #expect(!state.loopSentence)
+
+        state.setSentenceLoop(true)
+        #expect(!state.settings.readAndPauseMode)
         #expect(state.loopSentence)
     }
 
@@ -527,7 +539,7 @@ struct PlatformParityContractTests {
         #expect(!dictionarySummaryView.contains("#if os("))
     }
 
-    @Test("iPad system dictionary opens automatically outside the scrolling inspector")
+    @Test("iPad system dictionary opens automatically in a resizable sheet")
     func ipadSystemDictionaryAvoidsEmbeddedControllerLayoutCycles() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
         let dictionaryHTMLView = try source("Sources/AudioReader/DictionaryHTMLView.swift")
@@ -537,8 +549,29 @@ struct PlatformParityContractTests {
         #expect(!dictionaryHTMLView.contains("struct SystemDictionaryView"))
         #expect(playerView.contains("DictionaryLookup.lookUpInDictionary(word.text)"))
         #expect(playerView.contains("state.inspect(word: word)\n#if os(iOS)\n                                DictionaryLookup.lookUpInDictionary(word.text)"))
-        #expect(dictionaryLookup.contains("controller.modalPresentationStyle = .fullScreen"))
+        #expect(dictionaryLookup.contains("controller.modalPresentationStyle = .pageSheet"))
+        #expect(dictionaryLookup.contains("activationState == .foregroundActive"))
+        #expect(dictionaryLookup.contains("sheet.detents = [.medium(), .large()]"))
+        #expect(!dictionaryLookup.contains("controller.modalPresentationStyle = .fullScreen"))
         #expect(playerView.contains("Open Apple Dictionary"))
+    }
+
+    @Test("Reader distinguishes playback and lookup word highlights")
+    func readerWordHighlightsHaveSeparateSemantics() throws {
+        let playerView = try source("Sources/AudioReader/PlayerView.swift")
+        let wordToken = try section(
+            in: playerView,
+            from: "private struct WordToken: View",
+            to: "private struct WordInspector: View"
+        )
+
+        #expect(wordToken.contains("let isPlaybackCurrent: Bool"))
+        #expect(wordToken.contains("let isLookupFocused: Bool"))
+        #expect(playerView.contains("lookupWordID: state.selectedWord?.id"))
+        #expect(wordToken.contains("isPlaybackCurrent ? Palette.gold"))
+        #expect(wordToken.contains("isLookupFocused ? Palette.terracotta"))
+        #expect(wordToken.contains("current audio word"))
+        #expect(wordToken.contains("selected for lookup"))
     }
 
     @Test("Both platforms share the selected audiobook language end to end")

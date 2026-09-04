@@ -5,13 +5,15 @@ import Testing
 @MainActor
 @Suite("Deep Reading mode")
 struct DeepReadingModeTests {
-    @Test("Deep Reading defaults off and migrates existing settings")
+    @Test("Sentence-paced modes default off and migrate existing settings")
     func migratesExistingSettings() throws {
         #expect(AppSettings.default.deepReadingMode == false)
+        #expect(AppSettings.default.readAndPauseMode == false)
 
         let encoded = try JSONEncoder().encode(AppSettings.default)
         var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         object.removeValue(forKey: "deepReadingMode")
+        object.removeValue(forKey: "readAndPauseMode")
 
         let migrated = try JSONDecoder().decode(
             AppSettings.self,
@@ -19,6 +21,77 @@ struct DeepReadingModeTests {
         )
 
         #expect(migrated.deepReadingMode == false)
+        #expect(migrated.readAndPauseMode == false)
+    }
+
+    @Test("Read and Pause uses the same sentence boundary while keeping Listen First off")
+    func readAndPauseUsesSentenceBoundary() {
+        let state = makeState()
+        state.setReadAndPauseMode(true)
+        state.player.currentTime = 0.5
+        state.player.isPlaying = true
+
+        state.tickPlaybackModes()
+        state.player.currentTime = 2.06
+        state.tickPlaybackModes()
+
+        #expect(state.player.isPlaying == false)
+        #expect(state.deepReadingPausedSentenceID == "first")
+        #expect(state.settings.readAndPauseMode)
+        #expect(!state.settings.deepReadingMode)
+    }
+
+    @Test("Listen First and Read and Pause are mutually exclusive")
+    func sentencePacedModesStayMutuallyExclusive() {
+        let state = makeState()
+
+        state.setDeepReadingMode(true)
+        state.setReadAndPauseMode(true)
+        #expect(!state.settings.deepReadingMode)
+        #expect(state.settings.readAndPauseMode)
+
+        state.setDeepReadingMode(true)
+        #expect(state.settings.deepReadingMode)
+        #expect(!state.settings.readAndPauseMode)
+    }
+
+    @Test("Read and Pause persists and normalizes impossible dual-mode settings")
+    func readAndPausePersistence() throws {
+        var settings = AppSettings.default
+        settings.readAndPauseMode = true
+        var restored = AppSettings.default
+        restored.apply(StoredSettings(settings))
+        #expect(restored.readAndPauseMode)
+        #expect(!restored.deepReadingMode)
+
+        let encoded = try JSONEncoder().encode(settings)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object["deepReadingMode"] = true
+        object["readAndPauseMode"] = true
+        let normalized = try JSONDecoder().decode(
+            AppSettings.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+        #expect(normalized.deepReadingMode)
+        #expect(!normalized.readAndPauseMode)
+    }
+
+    @Test("Play replays the final sentence after a paced pause")
+    func playReplaysFinalPausedSentence() {
+        let state = makeState()
+        state.setReadAndPauseMode(true)
+        state.player.currentTime = 2.5
+        state.player.isPlaying = true
+        state.tickPlaybackModes()
+        state.player.currentTime = 4.06
+        state.tickPlaybackModes()
+        #expect(state.deepReadingPausedSentenceID == "second")
+        #expect(!state.canContinueDeepReading)
+
+        state.togglePlay()
+
+        #expect(state.player.currentTime == 2.0)
+        #expect(state.deepReadingActiveSentenceID == "second")
     }
 
     @Test("Playback pauses at the sentence that was armed")
@@ -90,6 +163,25 @@ struct DeepReadingModeTests {
             alignmentScore: nil
         )
         let state = AppState()
+        let chapter = Chapter(
+            id: "chapter",
+            index: 0,
+            title: "Chapter",
+            audioPath: "/tmp/deep-reading.m4b",
+            duration: 4
+        )
+        state.books = [Book(
+            id: "book",
+            title: "Book",
+            author: nil,
+            folderPath: "/tmp/deep-reading",
+            coverPath: nil,
+            ebookPath: nil,
+            chapters: [chapter],
+            source: .files
+        )]
+        state.selectedBookID = "book"
+        state.selectedChapterID = "chapter"
         state.transcript = Transcript(
             chapterID: "chapter",
             audioPath: "/tmp/deep-reading.m4b",
