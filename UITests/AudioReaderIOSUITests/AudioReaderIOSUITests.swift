@@ -57,6 +57,11 @@ final class AudioReaderIOSUITests: XCTestCase {
         element("reader.sentence.ui-sentence-1", in: app).tap()
         XCTAssertTrue(element("reader.word.ui-word-1", in: app).isHittable)
         element("reader.word.ui-word-1", in: app).tap()
+        let lookupTitle = app.staticTexts["Lookup"]
+        XCTAssertTrue(lookupTitle.waitForExistence(timeout: 3))
+        XCTAssertGreaterThan(lookupTitle.frame.minY, app.frame.height * 0.35)
+        XCTAssertTrue(app.buttons["Open Apple Dictionary"].waitForExistence(timeout: 3))
+        app.buttons["Open Apple Dictionary"].tap()
         let dictionaryClose = app.buttons["DDUIDone"].firstMatch
         XCTAssertTrue(dictionaryClose.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Dictionary"].exists)
@@ -64,14 +69,21 @@ final class AudioReaderIOSUITests: XCTestCase {
         dictionaryClose.tap()
         XCTAssertTrue(app.staticTexts["Lookup"].waitForExistence(timeout: 3))
         XCTAssertEqual(app.state, .runningForeground)
-        XCTAssertTrue(app.buttons["Open Apple Dictionary"].waitForExistence(timeout: 3))
         XCTAssertEqual(element("reader.word.ui-word-1", in: app).value as? String, "current audio word, selected for lookup")
+        element("reader.lookup.close", in: app).tap()
         element("reader.word.ui-word-2", in: app).tap()
+        XCTAssertTrue(app.staticTexts["Lookup"].waitForExistence(timeout: 3))
         XCTAssertEqual(app.state, .runningForeground)
         XCTAssertEqual(element("reader.word.ui-word-1", in: app).value as? String, "current audio word")
         XCTAssertEqual(element("reader.word.ui-word-2", in: app).value as? String, "selected for lookup")
         element("reader.lookup.close", in: app).tap()
         XCTAssertEqual(element("reader.word.ui-word-2", in: app).value as? String, "")
+
+        app.buttons["Chapter AI"].tap()
+        let chapterAITitle = app.staticTexts["Chapter AI"]
+        XCTAssertTrue(chapterAITitle.waitForExistence(timeout: 3))
+        XCTAssertGreaterThan(chapterAITitle.frame.minY, app.frame.height * 0.35)
+        element("reader.chapterAI.close", in: app).tap()
 
         app.terminate()
         let wordsApp = launch(scenario: "words")

@@ -557,7 +557,7 @@ struct PlatformParityContractTests {
         #expect(!dictionarySummaryView.contains("#if os("))
     }
 
-    @Test("iPad system dictionary opens automatically in a resizable sheet")
+    @Test("iPad system dictionary opens from AudioReader's lookup sheet")
     func ipadSystemDictionaryAvoidsEmbeddedControllerLayoutCycles() throws {
         let playerView = try source("Sources/AudioReader/PlayerView.swift")
         let dictionaryHTMLView = try source("Sources/AudioReader/DictionaryHTMLView.swift")
@@ -566,7 +566,10 @@ struct PlatformParityContractTests {
         #expect(!playerView.contains("SystemDictionaryView(term: word.text)"))
         #expect(!dictionaryHTMLView.contains("struct SystemDictionaryView"))
         #expect(playerView.contains("DictionaryLookup.lookUpInDictionary(word.text)"))
-        #expect(playerView.contains("state.inspect(word: word, in: segment)\n#if os(iOS)\n                                DictionaryLookup.lookUpInDictionary(word.text)"))
+        #expect(!playerView.contains("state.inspect(word: word, in: segment)\n#if os(iOS)\n                                DictionaryLookup.lookUpInDictionary(word.text)"))
+        #expect(playerView.contains(".sheet(item: iPadAuxiliarySheetBinding)"))
+        #expect(playerView.contains(".presentationDetents([.medium])"))
+        #expect(!playerView.contains(".presentationDetents([.medium, .large])"))
         #expect(playerView.contains(".accessibilityIdentifier(\"reader.lookup.meaning\")"))
         #expect(dictionaryLookup.contains("controller.modalPresentationStyle = .pageSheet"))
         #expect(dictionaryLookup.contains("activationState == .foregroundActive"))

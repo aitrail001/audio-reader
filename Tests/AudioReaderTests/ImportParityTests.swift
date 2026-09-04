@@ -1943,12 +1943,12 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "2.4.3")
-        #expect(plist["CFBundleVersion"] as? String == "104")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "2.4.3")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "104")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 2.4.3;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 104;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "2.4.4")
+        #expect(plist["CFBundleVersion"] as? String == "105")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "2.4.4")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "105")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 2.4.4;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 105;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
         #expect(plist["ProductAPIBaseURL"] as? String == ProductAPI.hostedProductionBaseURL.absoluteString)

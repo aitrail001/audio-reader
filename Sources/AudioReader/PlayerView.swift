@@ -20,11 +20,18 @@ struct ReaderScrollTarget: Equatable {
     }
 }
 
+#if os(iOS)
+private enum ReaderAuxiliarySheet: Identifiable {
+    case lookup
+    case chapterAI
+
+    var id: Self { self }
+}
+#endif
+
 struct PlayerView: View {
     @Bindable var state: AppState
     @State private var autoScroll = true
-    @State private var lookupWidth: CGFloat = 0
-    @State private var lookupDragStart: CGFloat?
     @State private var readerScrollTarget: ReaderScrollTarget?
     @State private var editingTranscriptSegment: TranscriptSegment?
     @State private var readerProgressError: String?
@@ -146,6 +153,19 @@ struct PlayerView: View {
             } catch {
                 state.errorMessage = error.localizedDescription
             }
+        }
+        .sheet(item: iPadAuxiliarySheetBinding) { destination in
+            Group {
+                switch destination {
+                case .lookup:
+                    WordInspector(state: state, type: iPadAuxiliaryReaderType)
+                case .chapterAI:
+                    ChapterAssistantView(state: state)
+                }
+            }
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
+            .presentationSizing(.form)
         }
 #endif
         .sheet(item: $state.shadowingSegment) { segment in
@@ -797,11 +817,11 @@ struct PlayerView: View {
         .background(Palette.goldSoft)
     }
 
+#if os(macOS)
     private var effectiveLookupWidth: CGFloat {
-        lookupWidth > 0 ? lookupWidth : CGFloat(state.settings.lookupPanelWidth)
+        CGFloat(state.settings.lookupPanelWidth)
     }
 
-#if os(macOS)
     private var inspectorPresentationBinding: Binding<Bool> {
         Binding(
             get: { state.selectedWord != nil || state.showChapterAssistant },
@@ -818,9 +838,40 @@ struct PlayerView: View {
     }
 #endif
 
+#if os(iOS)
+    private var iPadAuxiliarySheetBinding: Binding<ReaderAuxiliarySheet?> {
+        Binding(
+            get: {
+                if state.showChapterAssistant { return .chapterAI }
+                if state.selectedWord != nil { return .lookup }
+                return nil
+            },
+            set: { destination in
+                guard destination == nil else { return }
+                state.showChapterAssistant = false
+                state.selectedWord = nil
+                state.selectedWordSegmentID = nil
+                state.selectedWordContextText = nil
+                state.definition = nil
+                state.dictionaryHits = []
+            }
+        )
+    }
+
+    private var iPadAuxiliaryReaderType: ReaderType {
+        .metrics(
+            columnWidth: 520,
+            scale: state.settings.readerFontScale,
+            lineSpacing: state.settings.readerLineSpacing,
+            wordSpacing: state.settings.readerWordSpacing,
+            font: state.settings.readerFont,
+            bold: state.settings.readerBold
+        )
+    }
+#endif
+
     private var lyricPane: some View {
         GeometryReader { geo in
-#if os(macOS)
             let type = ReaderType.metrics(
                 columnWidth: geo.size.width,
                 scale: state.settings.readerFontScale,
@@ -837,134 +888,7 @@ struct PlayerView: View {
                 type: type,
                 onEditSegment: { editingTranscriptSegment = $0 }
             )
-#else
-            let lookupOpen = state.selectedWord != nil || state.showChapterAssistant
-            let split = ReaderSplitGeometry(
-                containerWidth: geo.size.width,
-                proposedLookupWidth: effectiveLookupWidth,
-                isLookupOpen: lookupOpen
-            )
-            let type = ReaderType.metrics(
-                columnWidth: split.textWidth,
-                scale: state.settings.readerFontScale,
-                lineSpacing: state.settings.readerLineSpacing,
-                wordSpacing: state.settings.readerWordSpacing,
-                font: state.settings.readerFont,
-                bold: state.settings.readerBold
-            )
-            HStack(spacing: 0) {
-                TranscriptTextColumn(
-                    state: state,
-                    autoScroll: $autoScroll,
-                    readerScrollTarget: $readerScrollTarget,
-                    proxyWidth: split.textWidth,
-                    type: type,
-                    onEditSegment: { editingTranscriptSegment = $0 }
-                )
-                    .frame(width: split.textWidth)
-                if lookupOpen {
-                    lookupSplitter(containerWidth: geo.size.width)
-                    Group {
-                        if state.showChapterAssistant {
-                            ChapterAssistantView(state: state)
-                                .frame(width: split.lookupWidth)
-                        } else {
-                            WordInspector(state: state, type: type)
-                                .frame(width: split.lookupWidth)
-                        }
-                    }
-                    .transition(.move(edge: .trailing))
-                }
-            }
-            .onChange(of: geo.size.width) { _, width in
-                lookupWidth = ReaderSplitLayout.clampedLookupWidth(
-                    proposed: effectiveLookupWidth,
-                    containerWidth: width
-                )
-            }
-#endif
         }
-        .onAppear {
-            if lookupWidth <= 0 {
-                lookupWidth = CGFloat(state.settings.lookupPanelWidth)
-            }
-        }
-    }
-
-    private func applyLookupDrag(translation: CGFloat, containerWidth: CGFloat) {
-        let start = lookupDragStart ?? effectiveLookupWidth
-        if lookupDragStart == nil { lookupDragStart = start }
-        lookupWidth = ReaderSplitLayout.clampedLookupWidth(
-            proposed: start - translation,
-            containerWidth: containerWidth
-        )
-    }
-
-    private func finishLookupDrag() {
-        lookupDragStart = nil
-        state.settings.lookupPanelWidth = Double(lookupWidth)
-        state.persistSettings()
-    }
-
-    private func lookupSplitter(containerWidth: CGFloat) -> some View {
-        ZStack {
-            Rectangle()
-                .fill(Palette.line)
-                .frame(width: 1)
-            Capsule()
-                .fill(Palette.mute.opacity(0.7))
-                .frame(width: 4, height: 44)
-        }
-        .frame(width: ReaderSplitLayout.splitterVisualWidth)
-        .contentShape(Rectangle())
-        .accessibilityLabel("Resize lookup panel")
-        .accessibilityValue("\(Int(effectiveLookupWidth.rounded())) points")
-        .accessibilityHint("Adjust to make the reading text wider or narrower")
-        .accessibilityAdjustableAction { direction in
-            let step: CGFloat = 24
-            switch direction {
-            case .increment:
-                lookupWidth = ReaderSplitLayout.clampedLookupWidth(
-                    proposed: effectiveLookupWidth + step,
-                    containerWidth: containerWidth
-                )
-            case .decrement:
-                lookupWidth = ReaderSplitLayout.clampedLookupWidth(
-                    proposed: effectiveLookupWidth - step,
-                    containerWidth: containerWidth
-                )
-            @unknown default:
-                break
-            }
-            finishLookupDrag()
-        }
-#if os(iOS)
-        .overlay {
-            SplitterPanHandle(
-                translationHandler: { translation in
-                    applyLookupDrag(translation: translation, containerWidth: containerWidth)
-                },
-                endHandler: finishLookupDrag
-            )
-        }
-#else
-        .highPriorityGesture(
-            DragGesture(minimumDistance: 1)
-                .onChanged { value in
-                    applyLookupDrag(translation: value.translation.width, containerWidth: containerWidth)
-                }
-                .onEnded { _ in
-                    finishLookupDrag()
-                }
-        )
-        .onHover { hovering in
-            if hovering {
-                NSCursor.resizeLeftRight.push()
-            } else {
-                NSCursor.pop()
-            }
-        }
-#endif
     }
 
     private var playbackChromeSpacing: CGFloat {
@@ -1372,70 +1296,6 @@ struct PlayerView: View {
 }
 
 #if os(iOS)
-private struct SplitterPanHandle: UIViewRepresentable {
-    var translationHandler: (CGFloat) -> Void
-    var endHandler: () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(translationHandler: translationHandler, endHandler: endHandler)
-    }
-
-    func makeUIView(context: Context) -> SplitterPanView {
-        let view = SplitterPanView()
-        view.coordinator = context.coordinator
-        return view
-    }
-
-    func updateUIView(_ uiView: SplitterPanView, context: Context) {
-        context.coordinator.translationHandler = translationHandler
-        context.coordinator.endHandler = endHandler
-        uiView.coordinator = context.coordinator
-    }
-
-    final class Coordinator {
-        var translationHandler: (CGFloat) -> Void
-        var endHandler: () -> Void
-
-        init(translationHandler: @escaping (CGFloat) -> Void, endHandler: @escaping () -> Void) {
-            self.translationHandler = translationHandler
-            self.endHandler = endHandler
-        }
-    }
-}
-
-private final class SplitterPanView: UIView {
-    var coordinator: SplitterPanHandle.Coordinator?
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = .clear
-        isUserInteractionEnabled = true
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
-        pan.maximumNumberOfTouches = 1
-        addGestureRecognizer(pan)
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        bounds.insetBy(dx: -8, dy: 0).contains(point)
-    }
-
-    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
-        let translation = gesture.translation(in: self).x
-        switch gesture.state {
-        case .began, .changed:
-            coordinator?.translationHandler(translation)
-        case .ended, .cancelled, .failed:
-            coordinator?.endHandler()
-        default:
-            break
-        }
-    }
-}
-
 private struct IPadPlaybackSpeedPicker: View {
     @Bindable var state: AppState
     let onDismiss: () -> Void
@@ -1568,6 +1428,8 @@ private struct ChapterAssistantView: View {
                         .frame(width: 44, height: 44)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Close Chapter AI")
+                .accessibilityIdentifier("reader.chapterAI.close")
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 16)
@@ -2328,9 +2190,6 @@ private struct TranscriptTextColumn: View {
                             onInspect: { word in
                                 state.focusedSegmentID = segment.id
                                 state.inspect(word: word, in: segment)
-#if os(iOS)
-                                DictionaryLookup.lookUpInDictionary(word.text)
-#endif
                             },
                             onSave: { word in state.addVocab(word: word, segment: segment) },
                             onMarkKnown: { word in
@@ -3193,6 +3052,7 @@ private struct WordInspector: View {
                 }
                 .buttonStyle(.plain)
                 .help("Close")
+                .accessibilityLabel("Close Lookup")
                 .accessibilityIdentifier("reader.lookup.close")
             }
             .padding(.horizontal, 22)
@@ -3220,7 +3080,7 @@ private struct WordInspector: View {
                         inspectorCard(title: "Apple Dictionary") {
 #if os(iOS)
                             if DictionaryLookup.hasSystemDefinition(word.text) {
-                                Text("The iPadOS dictionary opens automatically when you select a word. iPadOS does not expose Apple Dictionary text to other apps, so accept the contextual meaning below to save it with this word.")
+                                Text("Open Apple Dictionary for its full entry. iPadOS does not expose Apple Dictionary text to other apps, so accept the contextual meaning below to save it with this word.")
                                     .font(.system(size: 12))
                                     .foregroundStyle(Palette.dim)
                                     .fixedSize(horizontal: false, vertical: true)
