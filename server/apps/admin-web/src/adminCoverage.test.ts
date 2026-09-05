@@ -68,7 +68,7 @@ describe("operator console coverage", () => {
       "Reading text, transcripts, definitions, translations, and notes are never shown here",
       "Find in this page",
       "OperatorTable",
-      "Sentence context",
+      "Translation batch",
       "loadingPanels",
       "Loading this view",
       "Learning and reading trends",

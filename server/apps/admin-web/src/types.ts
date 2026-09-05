@@ -256,7 +256,7 @@ export type RuntimeConfig = {
     qwenEnvKeyConfigured?: boolean;
   };
   assistant: {
-    sentenceContextCount: number;
+    sentenceTranslationBatchSize: number;
   };
   updatedAt?: string;
 };

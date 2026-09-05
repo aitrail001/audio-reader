@@ -1280,6 +1280,17 @@ final class AppState {
         }
     }
 
+    /// Auth callbacks must not be treated as document imports. iPad delivers
+    /// `audioreader://auth/callback` through onOpenURL even when Safari sign-in
+    /// already looks finished to the user.
+    func handleOpenURL(_ url: URL) async {
+        if url.scheme?.lowercased() == ProductAPI.callbackScheme {
+            await account.completeOAuth(callbackURL: url)
+            return
+        }
+        await importExternalEPUB(url)
+    }
+
     /// Handles the system document-open route used by Files and Apple Books
     /// exports; copying and EPUB validation stay off the main actor.
     func importExternalEPUB(_ url: URL) async {
@@ -2983,42 +2994,34 @@ final class AppState {
         return lookupGloss(kind: kind, source: source, context: context)
     }
 
-    private func chapterTranslationBlockSize(for provider: LLMProvider) -> Int {
-        FoundationModelsPromptPolicy.chapterTranslationBlockSize(
+    var effectiveSentenceTranslationBatchSize: Int {
+        sentenceTranslationBatchSize(for: llmProvider)
+    }
+
+    /// Local providers use the app setting. Managed Qwen uses the operator Desk value from bootstrap.
+    private func sentenceTranslationBatchSize(for provider: LLMProvider) -> Int {
+        if provider == .managedQwen {
+            let requested = account.sentenceTranslationBatchSize ?? settings.chapterTranslationBlockSize
+            return min(20, max(1, requested))
+        }
+        return FoundationModelsPromptPolicy.chapterTranslationBlockSize(
             for: provider,
             requested: settings.chapterTranslationBlockSize
         )
     }
 
-    private func alignedSentenceBlock(
+    private func forwardSentenceBlock(
         around segment: TranscriptSegment,
         in transcript: Transcript
     ) -> [TranscriptSegment] {
-        ChapterTranslationBatch.alignedBlock(
-            containing: segment,
+        ChapterTranslationBatch.forwardBlock(
+            startingAt: segment,
             in: transcript.segments,
-            size: chapterTranslationBlockSize(for: llmProvider)
+            size: sentenceTranslationBatchSize(for: llmProvider)
         )
     }
 
-    private func neighborsOutside(
-        block: [TranscriptSegment],
-        in transcript: Transcript,
-        radius: Int
-    ) -> (previous: [String], next: [String]) {
-        guard let first = block.first, let last = block.last,
-              let start = transcript.segments.firstIndex(where: { $0.id == first.id }),
-              let end = transcript.segments.firstIndex(where: { $0.id == last.id })
-        else { return ([], []) }
-        let previousStart = max(transcript.segments.startIndex, start - max(0, radius))
-        let previous = Array(transcript.segments[previousStart..<start].map(\.displayText))
-        let nextStart = end + 1
-        let nextEnd = min(transcript.segments.endIndex, nextStart + max(0, radius))
-        let next = nextStart < nextEnd ? Array(transcript.segments[nextStart..<nextEnd].map(\.displayText)) : []
-        return (previous, next)
-    }
-
-    /// Translate (or hydrate from managed cache) the chapter-aligned sentence chunk.
+    /// Translate (or hydrate from managed cache) the forward sentence window from the tap.
     private func translateSentenceBlock(
         around segment: TranscriptSegment,
         forceIDs: Set<String>,
@@ -3027,7 +3030,7 @@ final class AppState {
     ) {
         guard let transcript = presentedTranscript else { return }
         let language = studyLanguage
-        let block = alignedSentenceBlock(around: segment, in: transcript)
+        let block = forwardSentenceBlock(around: segment, in: transcript)
         let missing = block.filter { candidate in
             forceIDs.contains(candidate.id) || sentenceGloss(for: candidate, language: language.rawValue) == nil
         }
@@ -3095,19 +3098,11 @@ final class AppState {
             return
         }
         do {
-            let neighbors = neighborsOutside(block: block, in: transcript, radius: settings.sentenceContextCount)
             let batch = try await ManagedProductLLM.translateBatch(
-                sentences: missing.map { ProductTranslationSentence(id: $0.id, text: $0.displayText) },
+                sentences: block.map { ProductTranslationSentence(id: $0.id, text: $0.displayText) },
                 sourceLanguage: currentAudiobookLanguage.languageCode,
                 targetLanguage: language.rawValue,
                 learnerLevel: readerLanguageLevel.rawValue,
-                contextBefore: ReadingAssistantPrompt.sentenceContext(
-                    around: missing,
-                    in: transcript,
-                    radius: settings.sentenceContextCount
-                ),
-                contextPrevious: neighbors.previous,
-                contextNext: neighbors.next,
                 editionFingerprint: origin.bookID ?? "",
                 chapterFingerprint: origin.chapterID ?? "",
                 bookTitle: origin.bookTitle,
@@ -3163,25 +3158,11 @@ final class AppState {
         let baseURL = settings.endpoint(for: provider)
         let effort = selectedLLMEffort
         let enableThinking = settings.qwenThinking
-        let sentenceContextCount = settings.sentenceContextCount
         let openAIAuthentication = self.openAIAuthentication
         let grokAuthentication = self.grokAuthentication
         let book = selectedBook
         let chapter = selectedChapter
         let metadata = bookMetadata(book: book, chapter: chapter)
-        let neighbors = neighborsOutside(block: block, in: transcript, radius: sentenceContextCount)
-        let prompt = ReadingAssistantPrompt.sentenceTranslation(
-            language: language,
-            sourceLanguage: sourceLanguage,
-            readerLevel: readerLevel,
-            metadata: metadata,
-            context: ReadingAssistantPrompt.sentenceContext(
-                around: missing,
-                in: transcript,
-                radius: sentenceContextCount
-            ),
-            targetIDs: missing.map(\.id)
-        )
         let replacementPairs: [(String, String)] = missing.compactMap { segment in
             guard forceIDs.contains(segment.id),
                   let existing = sentenceGloss(for: segment, language: language.rawValue)
@@ -3194,80 +3175,110 @@ final class AppState {
             origin: origin,
             targetID: primaryID,
             detail: "Requesting \(model)…"
-        ) { _ in
-            do {
-                let parsed: ChapterTranslationParseResult
-                if provider == .managedQwen {
-                    let batch = try await ManagedProductLLM.translateBatch(
-                        sentences: missing.map {
-                            ProductTranslationSentence(
-                                id: $0.id,
-                                text: $0.displayText,
-                                assistantResultId: replacementResultIDs[$0.id]
-                            )
-                        },
-                        sourceLanguage: sourceLanguage.languageCode,
-                        targetLanguage: language.rawValue,
-                        learnerLevel: readerLevel.rawValue,
-                        contextBefore: ReadingAssistantPrompt.sentenceContext(
-                            around: missing,
-                            in: transcript,
-                            radius: sentenceContextCount
-                        ),
-                        contextPrevious: neighbors.previous,
-                        contextNext: neighbors.next,
-                        editionFingerprint: book?.id ?? "",
-                        chapterFingerprint: chapter?.id ?? "",
-                        bookTitle: book?.title ?? "",
-                        author: book?.author ?? "",
-                        chapterTitle: chapter?.title ?? "",
-                        refreshIds: Array(forceIDs)
-                    )
-                    let results = ManagedProductLLM.chapterResults(from: batch)
-                    let found = Set(results.map(\.id))
-                    parsed = ChapterTranslationParseResult(
-                        results: results,
-                        missingIDs: missing.map(\.id).filter { !found.contains($0) }
-                    )
-                } else {
-                    let raw = try await GrokClient.shared.completeStructuredJSON(
-                        provider: provider,
-                        system: prompt.system,
-                        user: prompt.user,
-                        baseURL: baseURL,
-                        model: model,
-                        effort: effort,
-                        enableThinking: enableThinking,
-                        grokAuthentication: grokAuthentication,
-                        openAIAuthentication: openAIAuthentication,
-                        sourceLanguage: self.currentAudiobookLanguage.languageCode,
-                        targetLanguage: self.settings.targetLanguage,
-                        learnerLevel: self.readerLanguageLevel.rawValue,
-                        chapterID: origin.chapterID ?? "",
-                        bookTitle: origin.bookTitle,
-                        author: origin.author,
-                        chapterTitle: origin.chapterTitle
-                    )
-                    parsed = try ChapterTranslationBatch.parseAvailable(
-                        raw,
-                        expectedIDs: missing.map(\.id)
-                    )
-                }
-                try self.applySentenceBlockResults(
-                    parsed.results,
-                    segments: missing,
-                    language: language,
-                    model: model,
-                    origin: origin,
-                    forceIDs: forceIDs
+        ) { jobID in
+            // Same bounded retries as chapter translation: Qwen occasionally returns
+            // unusable chapter_batch JSON for a one-sentence tap, then succeeds.
+            var remaining = missing
+            var lastIssue = ChapterTranslationBatchError.missingSentences.localizedDescription
+            for attempt in 1...ChapterTranslationBatch.maximumAttempts where !remaining.isEmpty {
+                self.updateLLMJob(
+                    id: jobID,
+                    stage: "Translating sentence",
+                    detail: "Attempt \(attempt) of \(ChapterTranslationBatch.maximumAttempts)…"
                 )
-                if !parsed.missingIDs.isEmpty, self.isSelected(origin) {
-                    self.translationError = ChapterTranslationBatchError.missingSentences.localizedDescription
+                do {
+                    let parsed: ChapterTranslationParseResult
+                    if provider == .managedQwen {
+                        let requestSentences = attempt == 1 ? block : remaining
+                        let batch = try await ManagedProductLLM.translateBatch(
+                            sentences: requestSentences.map {
+                                ProductTranslationSentence(
+                                    id: $0.id,
+                                    text: $0.displayText,
+                                    assistantResultId: replacementResultIDs[$0.id]
+                                )
+                            },
+                            sourceLanguage: sourceLanguage.languageCode,
+                            targetLanguage: language.rawValue,
+                            learnerLevel: readerLevel.rawValue,
+                            editionFingerprint: book?.id ?? "",
+                            chapterFingerprint: chapter?.id ?? "",
+                            bookTitle: book?.title ?? "",
+                            author: book?.author ?? "",
+                            chapterTitle: chapter?.title ?? "",
+                            refreshIds: Array(forceIDs)
+                        )
+                        let results = ManagedProductLLM.chapterResults(from: batch)
+                        let found = Set(results.map(\.id))
+                        parsed = ChapterTranslationParseResult(
+                            results: results,
+                            missingIDs: remaining.map(\.id).filter { !found.contains($0) }
+                        )
+                    } else {
+                        let retryPrompt = ReadingAssistantPrompt.sentenceTranslation(
+                            language: language,
+                            sourceLanguage: sourceLanguage,
+                            readerLevel: readerLevel,
+                            metadata: metadata,
+                            context: ReadingAssistantPrompt.sentenceContext(
+                                around: remaining,
+                                in: transcript,
+                                radius: 0
+                            ),
+                            targetIDs: remaining.map(\.id)
+                        )
+                        let raw = try await GrokClient.shared.completeStructuredJSON(
+                            provider: provider,
+                            system: retryPrompt.system,
+                            user: retryPrompt.user,
+                            baseURL: baseURL,
+                            model: model,
+                            effort: effort,
+                            enableThinking: enableThinking,
+                            grokAuthentication: grokAuthentication,
+                            openAIAuthentication: openAIAuthentication,
+                            sourceLanguage: self.currentAudiobookLanguage.languageCode,
+                            targetLanguage: self.settings.targetLanguage,
+                            learnerLevel: self.readerLanguageLevel.rawValue,
+                            chapterID: origin.chapterID ?? "",
+                            bookTitle: origin.bookTitle,
+                            author: origin.author,
+                            chapterTitle: origin.chapterTitle
+                        )
+                        parsed = try ChapterTranslationBatch.parseAvailable(
+                            raw,
+                            expectedIDs: remaining.map(\.id)
+                        )
+                    }
+                    try self.applySentenceBlockResults(
+                        parsed.results,
+                        segments: remaining,
+                        language: language,
+                        model: model,
+                        origin: origin,
+                        forceIDs: forceIDs
+                    )
+                    remaining = remaining.filter { parsed.missingIDs.contains($0.id) }
+                    if remaining.isEmpty {
+                        lastIssue = ""
+                    } else {
+                        lastIssue = ChapterTranslationBatchError.missingSentences.localizedDescription
+                        Self.assistantLog.error(
+                            "sentence_block_incomplete message=sentence_block_incomplete attempt=\(attempt, privacy: .public) remaining=\(remaining.count, privacy: .public) maxAttempts=\(ChapterTranslationBatch.maximumAttempts, privacy: .public)"
+                        )
+                    }
+                } catch {
+                    lastIssue = error.localizedDescription
+                    Self.assistantLog.error(
+                        "sentence_block_failed message=sentence_block_failed attempt=\(attempt, privacy: .public) maxAttempts=\(ChapterTranslationBatch.maximumAttempts, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                    )
                 }
-            } catch {
-                if self.isSelected(origin) {
-                    self.translationError = error.localizedDescription
+                if !remaining.isEmpty, attempt < ChapterTranslationBatch.maximumAttempts {
+                    try? await Task.sleep(for: .milliseconds(500 * attempt))
                 }
+            }
+            if !remaining.isEmpty, self.isSelected(origin) {
+                self.translationError = lastIssue
             }
         }
     }
@@ -3367,14 +3378,17 @@ final class AppState {
         guard !llmJobQueue.jobs.contains(where: {
             $0.kind == jobKind && $0.chapterID == origin.chapterID && $0.targetID == targetID
         }) else { return }
-        let translationContext = context ?? trimmed
+        let translationContext = context?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sentenceContext = (translationContext?.isEmpty == false ? translationContext : nil)
+            ?? segment?.displayText
+            ?? trimmed
         let prompt = LLMTaskPrompt(
             system: ReadingAssistantPrompt.word(
                 language: language,
                 sourceLanguage: sourceLanguage,
                 readerLevel: readerLevel
             ),
-            user: "Word: \(trimmed)\nSentence: \(translationContext)"
+            user: "Word: \(trimmed)\nSentence: \(sentenceContext)"
         )
         enqueueLLMJob(
             kind: jobKind,
@@ -3398,7 +3412,7 @@ final class AppState {
                         targetLanguage: language.rawValue,
                         learnerLevel: readerLevel.rawValue,
                         targetID: targetID,
-                        context: context,
+                        context: sentenceContext,
                         editionFingerprint: book?.id ?? "",
                         chapterFingerprint: chapter?.id ?? "",
                         bookTitle: book?.title ?? "",
@@ -3501,17 +3515,13 @@ final class AppState {
         }
         let blocks = ChapterTranslationBatch.blocks(
             pendingSegments,
-            size: FoundationModelsPromptPolicy.chapterTranslationBlockSize(
-                for: provider,
-                requested: settings.chapterTranslationBlockSize
-            )
+            size: sentenceTranslationBatchSize(for: provider)
         )
         let total = pendingSegments.count
         let model = selectedLLMModel
         let baseURL = settings.endpoint(for: provider)
         let effort = selectedLLMEffort
         let enableThinking = settings.qwenThinking
-        let sentenceContextCount = settings.sentenceContextCount
         let openAIAuthentication = self.openAIAuthentication
         let grokAuthentication = self.grokAuthentication
         let book = selectedBook
@@ -3570,9 +3580,9 @@ final class AppState {
                         readerLevel: readerLevel,
                         metadata: metadata,
                         context: ReadingAssistantPrompt.sentenceContext(
-                            around: block,
+                            around: remaining,
                             in: transcript,
-                            radius: sentenceContextCount
+                            radius: 0
                         ),
                         targetIDs: remaining.map(\.id)
                     )
@@ -3589,13 +3599,9 @@ final class AppState {
                     do {
                         let parsed: ChapterTranslationParseResult
                         if provider == .managedQwen {
-                            let neighbors = self.neighborsOutside(
-                                block: block,
-                                in: transcript,
-                                radius: sentenceContextCount
-                            )
+                            let requestSentences = attempt == 1 ? block : remaining
                             let batch = try await ManagedProductLLM.translateBatch(
-                                sentences: remaining.map {
+                                sentences: requestSentences.map {
                                     ProductTranslationSentence(
                                         id: $0.id,
                                         text: $0.displayText,
@@ -3607,13 +3613,6 @@ final class AppState {
                                 sourceLanguage: sourceLanguage.languageCode,
                                 targetLanguage: language.rawValue,
                                 learnerLevel: readerLevel.rawValue,
-                                contextBefore: ReadingAssistantPrompt.sentenceContext(
-                                    around: remaining,
-                                    in: transcript,
-                                    radius: sentenceContextCount
-                                ),
-                                contextPrevious: neighbors.previous,
-                                contextNext: neighbors.next,
                                 editionFingerprint: book?.id ?? "",
                                 chapterFingerprint: chapter?.id ?? "",
                                 bookTitle: book?.title ?? "",

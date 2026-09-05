@@ -52,6 +52,7 @@ export function createFakeQwenClient(
   options: {
     status?: ReadinessStatus;
     text?: string;
+    texts?: string[];
     model?: string;
     delayMs?: number;
     onComplete?: () => void;
@@ -59,7 +60,9 @@ export function createFakeQwenClient(
 ): QwenClient {
   const status = options.status ?? "ok";
   const model = options.model ?? DEFAULT_QWEN_MODEL;
-  const text = options.text ?? '{"ok":true}';
+  const fallbackText = options.text ?? '{"ok":true}';
+  const texts = options.texts;
+  let textIndex = 0;
   return {
     ping: () => Promise.resolve(status),
     pingDetailed: () =>
@@ -74,6 +77,13 @@ export function createFakeQwenClient(
         await new Promise((resolve) => {
           setTimeout(resolve, options.delayMs);
         });
+      }
+      const text =
+        texts !== undefined && texts.length > 0
+          ? (texts[Math.min(textIndex, texts.length - 1)] ?? fallbackText)
+          : fallbackText;
+      if (texts !== undefined && textIndex < texts.length) {
+        textIndex += 1;
       }
       return status === "ok"
         ? { ok: true, text, model }

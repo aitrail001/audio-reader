@@ -242,19 +242,41 @@ describe("runtime config wrapping", () => {
     ).rejects.toBeInstanceOf(OperatorWrappingNotConfiguredError);
   });
 
-  it("persists Managed Qwen sentence context count on the public payload", async () => {
+  it("persists Managed Qwen sentence translation batch size on the public payload", async () => {
     const database = createFakeDatabaseClient();
     const runtime = createRuntimeConfigService({
       env: { ENVIRONMENT: "test" },
       ops: database.ops,
       wrappingSecret: "test-operator-secret-key",
     });
-    expect((await runtime.view()).assistant.sentenceContextCount).toBe(1);
+    expect((await runtime.view()).assistant.sentenceTranslationBatchSize).toBe(5);
     const saved = await runtime.put(
-      { assistant: { sentenceContextCount: 3 } },
+      { assistant: { sentenceTranslationBatchSize: 3 } },
       "00000000-0000-4000-8000-000000000002",
     );
-    expect(saved.assistant.sentenceContextCount).toBe(3);
-    expect((await runtime.view()).assistant.sentenceContextCount).toBe(3);
+    expect(saved.assistant.sentenceTranslationBatchSize).toBe(3);
+    expect((await runtime.view()).assistant.sentenceTranslationBatchSize).toBe(3);
+  });
+
+  it("defaults batch size to 5 and ignores a legacy neighbor-radius payload", async () => {
+    const database = createFakeDatabaseClient();
+    await database.ops.putOperatorSettings({
+      id: "default",
+      payload: { sentenceContextCount: 1 },
+      ciphertext: null,
+      nonce: null,
+      updatedBy: "00000000-0000-4000-8000-000000000002",
+    });
+    const runtime = createRuntimeConfigService({
+      env: { ENVIRONMENT: "test" },
+      ops: database.ops,
+      wrappingSecret: "test-operator-secret-key",
+    });
+    expect((await runtime.view()).assistant.sentenceTranslationBatchSize).toBe(5);
+    const clamped = await runtime.put(
+      { assistant: { sentenceTranslationBatchSize: 99 } },
+      "00000000-0000-4000-8000-000000000002",
+    );
+    expect(clamped.assistant.sentenceTranslationBatchSize).toBe(20);
   });
 });

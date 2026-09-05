@@ -31,6 +31,12 @@ public final class FakeAuthClient: AuthClient, @unchecked Sendable {
         withLock { applyRevocationLocked(deviceID) }
     }
 
+    /// Drops server-side device rows while leaving tokens valid, matching a
+    /// restored database that still owns this install UUID under another account.
+    public func forgetRegisteredDevices() {
+        withLock { devices.removeAll() }
+    }
+
     public func expireAccessTokens() {
         withLock { accessTokens.removeAll() }
     }

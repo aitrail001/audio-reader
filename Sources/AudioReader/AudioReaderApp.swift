@@ -45,6 +45,9 @@ struct AudioReaderApp: App {
                 .preferredColorScheme(AppAppearance(rawValue: state.settings.appearance)?.colorScheme)
                 .uiTestMotionEnvironment()
                 .onChange(of: scenePhase) { _, phase in handleScenePhase(phase) }
+                .onOpenURL { url in
+                    Task { await state.handleOpenURL(url) }
+                }
         }
         .windowStyle(.automatic)
         .defaultSize(width: 1280, height: 820)
@@ -136,7 +139,7 @@ struct AudioReaderApp: App {
                 .uiTestMotionEnvironment()
                 .onChange(of: scenePhase) { _, phase in handleScenePhase(phase) }
                 .onOpenURL { url in
-                    Task { await state.importExternalEPUB(url) }
+                    Task { await state.handleOpenURL(url) }
                 }
         }
 #endif

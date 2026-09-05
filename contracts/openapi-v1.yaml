@@ -3550,6 +3550,10 @@ components:
           type: string
         accountSyncReadiness:
           $ref: "#/components/schemas/AccountSyncReadiness"
+        sentenceTranslationBatchSize:
+          type: integer
+          minimum: 1
+          maximum: 20
     UserSettings:
       type: object
       additionalProperties: false
@@ -5960,12 +5964,12 @@ components:
           type: object
           additionalProperties: false
           required:
-            - sentenceContextCount
+            - sentenceTranslationBatchSize
           properties:
-            sentenceContextCount:
+            sentenceTranslationBatchSize:
               type: integer
-              minimum: 0
-              maximum: 10
+              minimum: 1
+              maximum: 20
         updatedAt: *id018
     OperatorEvent:
       type: object
@@ -6099,10 +6103,10 @@ components:
           type: object
           additionalProperties: false
           properties:
-            sentenceContextCount:
+            sentenceTranslationBatchSize:
               type: integer
-              minimum: 0
-              maximum: 10
+              minimum: 1
+              maximum: 20
     CacheEntry:
       type: object
       additionalProperties: false

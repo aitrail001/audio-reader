@@ -33,7 +33,11 @@ import { withIdempotency, type IdempotencyStore } from "./idempotency";
 import { requireBoundDevice } from "./route-helpers";
 import { recordOperatorEvent, SYSTEM_ACTOR_ID } from "./operator-events";
 import { captureProductEvent } from "./product-events";
-import { hostOf, type RuntimeConfigService } from "./runtime-config";
+import {
+  hostOf,
+  sentenceTranslationBatchSizeOf,
+  type RuntimeConfigService,
+} from "./runtime-config";
 
 type TranslationResult = components["schemas"]["TranslationResult"];
 type TranslationBatchResult = components["schemas"]["TranslationBatchResult"];
@@ -195,15 +199,19 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
       const author = typeof body.value.author === "string" ? body.value.author : "";
       const chapterTitle =
         typeof body.value.chapterTitle === "string" ? body.value.chapterTitle : "";
-      const sentenceContextCount =
-        (await context.runtime?.view())?.assistant.sentenceContextCount ?? 1;
-      const managedContext = formatManagedSentenceContext({
-        source,
-        previous: contextPrevious,
-        next: contextNext,
-        radius: sentenceContextCount,
-        fallback: contextBefore,
-      });
+      // Word lookup keeps native neighbors. If the app omitted the containing
+      // sentence, the looked-up word itself still satisfies the prompt contract.
+      // Sentence translation uses the batch route; extra previous/next on this
+      // path are not a translation window.
+      const managedContext = wordTask
+        ? formatManagedSentenceContext({
+            source,
+            previous: contextPrevious,
+            next: contextNext,
+            radius: 10,
+            fallback: contextBefore.trim() === "" ? source : contextBefore,
+          })
+        : "";
       const targetId = typeof body.value.targetId === "string" ? body.value.targetId : "";
       const editionFingerprint =
         typeof body.value.editionFingerprint === "string" ? body.value.editionFingerprint : "";
@@ -343,37 +351,20 @@ async function createTranslation(context: AssistantRouteContext): Promise<Respon
             wordTask,
             hasContext: managedContext !== "",
             bookTitleChars: bookTitle.length,
-            sentenceContextCount,
             managedContextChars: managedContext.length,
           }),
         );
-        const completed = await completeWithPolicy(
-          context,
-          "translation",
-          principal.accountId,
-          {
-            jsonObject: true,
-            messages: [
-              { role: "system", content: assembled.effective.system },
-              { role: "user", content: assembled.effective.user },
-            ],
-          },
-          assembled,
-          "translation",
-          false,
-        );
-        if (completed === "disabled" || !completed.ok) {
-          return qwenFailure(context, "translation", completed);
-        }
-        const parsed = await validateManagedRouteOutput(context, {
+        const validated = await completeAndValidateTranslation(context, {
           accountId: principal.accountId,
-          eventTask: "translation",
+          assembled,
           outputSubtask: wordTask ? "word" : "sentence",
-          text: completed.text,
-          model: completed.model,
           promptVersion: policy.promptVersion,
         });
-        if (parsed instanceof Response) return parsed;
+        if (!validated.ok) {
+          return validated.response;
+        }
+        const parsed = validated.parsed;
+        const completed = validated.completed;
         const translationCore = stringField(parsed, "translation") ?? completed.text;
         const connection = stringField(parsed, "connection") ?? "";
         const translation =
@@ -477,10 +468,14 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
       if (!body.ok) {
         return body.response;
       }
-      const sentences = translationSentences(body.value.sentences, context.requestId);
-      if (sentences instanceof Response) {
-        return sentences;
+      const requestedSentences = translationSentences(body.value.sentences, context.requestId);
+      if (requestedSentences instanceof Response) {
+        return requestedSentences;
       }
+      const sentenceTranslationBatchSize = sentenceTranslationBatchSizeOf(
+        (await context.runtime?.view())?.assistant ?? {},
+      );
+      const sentences = requestedSentences.slice(0, sentenceTranslationBatchSize);
       const sourceLanguage = requiredString(
         body.value.sourceLanguage,
         "sourceLanguage",
@@ -509,8 +504,6 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
         typeof body.value.chapterTitle === "string" ? body.value.chapterTitle : "";
       const contextBefore =
         typeof body.value.contextBefore === "string" ? body.value.contextBefore : "";
-      const contextPrevious = stringList(body.value.contextPrevious);
-      const contextNext = stringList(body.value.contextNext);
       const policy = await resolveAssistantPolicy(context, "translation", principal.accountId);
       const modelPolicyHash = await sha256Hex(
         `${policy.model}|${policy.systemPrompt}|${policy.userPrompt}|${SENTENCE_TRANSLATION_INSTRUCTIONS}`,
@@ -522,8 +515,6 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
             : [[sentence.id, sentence.assistantResultId] as const],
         ),
       );
-      const sentenceContextCount =
-        (await context.runtime?.view())?.assistant.sentenceContextCount ?? 1;
       const keyed = await Promise.all(
         sentences.map(async (sentence) => ({
           sentence,
@@ -563,6 +554,8 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
           message: "assistant_translation_batch_lookup",
           requestId: context.requestId,
           sentenceCount: sentences.length,
+          requestedCount: requestedSentences.length,
+          sentenceTranslationBatchSize,
           cacheHits: results.length,
           pending: pending.length,
           lookupOnly,
@@ -629,12 +622,10 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
         }
         const targetIDs = stillMissing.map((item) => item.sentence.id);
         const managedContext = formatManagedChapterBatchContext({
-          // Empty contextBefore: keep in-block cached sentences as PREVIOUS/NEXT.
-          sentences:
-            contextBefore.trim() === "" ? sentences : stillMissing.map((item) => item.sentence),
-          previous: contextPrevious,
-          next: contextNext,
-          radius: sentenceContextCount,
+          sentences,
+          previous: [],
+          next: [],
+          radius: 0,
           targetIds: targetIDs,
         });
         const promptFields = {
@@ -643,8 +634,8 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
           targetLanguage,
           learnerLevel,
           source: stillMissing.map((item) => item.sentence.text).join("\n"),
-          context: [contextBefore, managedContext].filter((part) => part.trim() !== "").join("\n"),
-          segments: contextBefore,
+          context: managedContext,
+          segments: "",
           bookTitle,
           author,
           chapterTitle,
@@ -665,39 +656,22 @@ async function createTranslationBatch(context: AssistantRouteContext): Promise<R
             requestId: context.requestId,
             task: "chapter_batch",
             pending: stillMissing.length,
-            sentenceContextCount,
+            sentenceTranslationBatchSize,
             managedContextChars: managedContext.length,
           }),
         );
-        const completed = await completeWithPolicy(
-          context,
-          "translation",
-          principal.accountId,
-          {
-            jsonObject: true,
-            messages: [
-              { role: "system", content: assembled.effective.system },
-              { role: "user", content: assembled.effective.user },
-            ],
-          },
-          assembled,
-          "translation",
-          false,
-        );
-        if (completed === "disabled" || !completed.ok) {
-          return qwenFailure(context, "translation", completed);
-        }
-        const output = await validateManagedRouteOutput(context, {
+        const validated = await completeAndValidateTranslation(context, {
           accountId: principal.accountId,
-          eventTask: "translation",
+          assembled,
           outputSubtask: "chapter_batch",
-          text: completed.text,
-          model: completed.model,
           promptVersion: policy.promptVersion,
           expectedTargetIDs: new Set(targetIDs),
         });
-        if (output instanceof Response) return output;
-        const parsedUnits = parseBatchTranslations(output, targetIDs);
+        if (!validated.ok) {
+          return validated.response;
+        }
+        const completed = validated.completed;
+        const parsedUnits = parseBatchTranslations(validated.parsed, targetIDs);
         const createdAt = new Date().toISOString();
         const generatedResults: TranslationResult[] = [...replayed];
         const missingIds: string[] = [];
@@ -1450,6 +1424,7 @@ async function completeWithPolicy(
   assembled?: ManagedPromptAssembly,
   eventTask = task,
   recordSuccessfulCompletion = true,
+  recordStartedEvent = true,
 ): Promise<QwenCompletionResult | "disabled"> {
   if (assembled !== undefined && !assembled.validation.valid) {
     const detail = `Managed prompt contract validation failed: ${Object.values(assembled.validation.fieldErrors).join(" ")}`;
@@ -1466,51 +1441,53 @@ async function completeWithPolicy(
   }
   const resolved = await resolveAssistantPolicy(context, task, accountId);
   const view = await context.runtime?.view();
-  console.warn(
-    JSON.stringify({
-      level: "warn",
-      message: "managed_qwen_request",
+  if (recordStartedEvent) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: "managed_qwen_request",
+        requestId: context.requestId,
+        task: eventTask,
+        configured: view?.qwen.apiKeyConfigured === true,
+        source: view?.qwen.source ?? "none",
+        deskModel: view?.qwen.model ?? "",
+        policyModel: resolved.source === "policy" ? resolved.model : "",
+        usedModel: resolved.model,
+        modelSource: resolved.source,
+        promptVersion: resolved.promptVersion,
+        systemPromptChars: resolved.systemPrompt.length,
+        userPromptChars: resolved.userPrompt.length,
+        disabled: resolved.disabled,
+        wrappingSource: view?.qwen.wrappingSecretSource,
+        secretsDecryptable: view?.qwen.secretsDecryptable,
+        qwenBaseUrlHost: hostOf(view?.qwen.baseUrl ?? ""),
+      }),
+    );
+    recordOperatorEvent({
+      kind: "managed_qwen_request",
       requestId: context.requestId,
       task: eventTask,
-      configured: view?.qwen.apiKeyConfigured === true,
-      source: view?.qwen.source ?? "none",
-      deskModel: view?.qwen.model ?? "",
-      policyModel: resolved.source === "policy" ? resolved.model : "",
-      usedModel: resolved.model,
-      modelSource: resolved.source,
-      promptVersion: resolved.promptVersion,
-      systemPromptChars: resolved.systemPrompt.length,
-      userPromptChars: resolved.userPrompt.length,
-      disabled: resolved.disabled,
-      wrappingSource: view?.qwen.wrappingSecretSource,
-      secretsDecryptable: view?.qwen.secretsDecryptable,
-      qwenBaseUrlHost: hostOf(view?.qwen.baseUrl ?? ""),
-    }),
-  );
-  recordOperatorEvent({
-    kind: "managed_qwen_request",
-    requestId: context.requestId,
-    task: eventTask,
-    status: resolved.disabled ? "disabled" : "started",
-    summary: resolved.disabled
-      ? `Managed Qwen ${eventTask} blocked by policy.`
-      : `Managed Qwen ${eventTask} using ${resolved.model || "default"} (${resolved.source}).`,
-    metadata: {
-      model: resolved.model,
-      modelSource: resolved.source,
-      promptVersion: resolved.promptVersion,
-      thinkingEnabled: request.enableThinking ?? false,
-      systemPromptChars: resolved.systemPrompt.length,
-      userPromptChars: resolved.userPrompt.length,
-    },
-  });
-  await captureProductEvent(context.ops, {
-    accountId,
-    name: `ai.${eventTask === "chapter_summary" ? "summary" : eventTask}.started`,
-    outcome: "started",
-    requestId: context.requestId,
-    properties: { model: resolved.model, modelSource: resolved.source },
-  });
+      status: resolved.disabled ? "disabled" : "started",
+      summary: resolved.disabled
+        ? `Managed Qwen ${eventTask} blocked by policy.`
+        : `Managed Qwen ${eventTask} using ${resolved.model || "default"} (${resolved.source}).`,
+      metadata: {
+        model: resolved.model,
+        modelSource: resolved.source,
+        promptVersion: resolved.promptVersion,
+        thinkingEnabled: request.enableThinking ?? false,
+        systemPromptChars: resolved.systemPrompt.length,
+        userPromptChars: resolved.userPrompt.length,
+      },
+    });
+    await captureProductEvent(context.ops, {
+      accountId,
+      name: `ai.${eventTask === "chapter_summary" ? "summary" : eventTask}.started`,
+      outcome: "started",
+      requestId: context.requestId,
+      properties: { model: resolved.model, modelSource: resolved.source },
+    });
+  }
   if (resolved.disabled) {
     await captureProductEvent(context.ops, {
       accountId,
@@ -1663,6 +1640,242 @@ async function qwenFailure(
   });
 }
 
+const MANAGED_TRANSLATION_OUTPUT_ATTEMPTS = 3;
+
+type ValidatedTranslationCompletion =
+  | {
+      ok: true;
+      parsed: Record<string, unknown>;
+      completed: Extract<QwenCompletionResult, { ok: true }>;
+    }
+  | { ok: false; response: Response };
+
+/** Qwen sometimes emits unusable JSON for one-sentence chapter_batch; retry before failing the tap. */
+async function completeAndValidateTranslation(
+  context: AssistantRouteContext,
+  input: {
+    accountId: string;
+    assembled: ManagedPromptAssembly;
+    outputSubtask: ManagedPromptSubtask;
+    promptVersion: string;
+    expectedTargetIDs?: ReadonlySet<string>;
+  },
+): Promise<ValidatedTranslationCompletion> {
+  const messages = {
+    jsonObject: true as const,
+    messages: [
+      { role: "system" as const, content: input.assembled.effective.system },
+      { role: "user" as const, content: input.assembled.effective.user },
+    ],
+  };
+  for (let attempt = 1; attempt <= MANAGED_TRANSLATION_OUTPUT_ATTEMPTS; attempt += 1) {
+    const completed = await completeWithPolicy(
+      context,
+      "translation",
+      input.accountId,
+      messages,
+      input.assembled,
+      "translation",
+      false,
+      attempt === 1,
+    );
+    if (completed === "disabled" || !completed.ok) {
+      return { ok: false, response: await qwenFailure(context, "translation", completed) };
+    }
+    const output = validateManagedPromptOutput(input.outputSubtask, completed.text, {
+      ...(input.expectedTargetIDs === undefined
+        ? {}
+        : { expectedTargetIDs: input.expectedTargetIDs }),
+    });
+    if (output.valid && output.parsed !== null) {
+      if (attempt > 1) {
+        console.warn(
+          JSON.stringify({
+            level: "info",
+            message: "managed_qwen_invalid_output_recovered",
+            requestId: context.requestId,
+            task: input.outputSubtask,
+            model: completed.model,
+            attempt,
+            maxAttempts: MANAGED_TRANSLATION_OUTPUT_ATTEMPTS,
+          }),
+        );
+        recordOperatorEvent({
+          kind: "managed_qwen_ok",
+          requestId: context.requestId,
+          task: input.outputSubtask,
+          status: "ok",
+          summary: `Managed Qwen ${input.outputSubtask} succeeded with ${completed.model} after ${String(attempt)} attempts.`,
+          metadata: {
+            model: completed.model,
+            promptVersion: input.promptVersion,
+            attempt,
+            maxAttempts: MANAGED_TRANSLATION_OUTPUT_ATTEMPTS,
+          },
+        });
+      } else {
+        recordOperatorEvent({
+          kind: "managed_qwen_ok",
+          requestId: context.requestId,
+          task: input.outputSubtask,
+          status: "ok",
+          summary: `Managed Qwen ${input.outputSubtask} succeeded with ${completed.model}.`,
+          metadata: { model: completed.model, promptVersion: input.promptVersion },
+        });
+      }
+      await captureProductEvent(context.ops, {
+        accountId: input.accountId,
+        name: "ai.translation.succeeded",
+        requestId: context.requestId,
+        properties: { model: completed.model, attempt, kind: input.outputSubtask },
+      });
+      return { ok: true, parsed: output.parsed, completed };
+    }
+    await logInvalidManagedOutput(context, {
+      accountId: input.accountId,
+      eventTask: "translation",
+      outputSubtask: input.outputSubtask,
+      text: completed.text,
+      model: completed.model,
+      promptVersion: input.promptVersion,
+      errors: output.errors,
+      attempt,
+      maxAttempts: MANAGED_TRANSLATION_OUTPUT_ATTEMPTS,
+      terminal: attempt === MANAGED_TRANSLATION_OUTPUT_ATTEMPTS,
+    });
+    if (attempt === MANAGED_TRANSLATION_OUTPUT_ATTEMPTS) {
+      return {
+        ok: false,
+        response: invalidManagedOutputResponse(
+          context.requestId,
+          input.outputSubtask,
+          output.errors,
+        ),
+      };
+    }
+  }
+  return {
+    ok: false,
+    response: invalidManagedOutputResponse(context.requestId, input.outputSubtask, []),
+  };
+}
+
+function managedOutputShape(text: string): {
+  outputChars: number;
+  jsonParsed: boolean;
+  topLevelKeys: string[];
+  translationCount: number;
+} {
+  const outputChars = text.length;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return { outputChars, jsonParsed: true, topLevelKeys: [], translationCount: 0 };
+    }
+    const record = parsed as Record<string, unknown>;
+    const translations = record.translations;
+    return {
+      outputChars,
+      jsonParsed: true,
+      topLevelKeys: Object.keys(record).slice(0, 12),
+      translationCount: Array.isArray(translations) ? translations.length : 0,
+    };
+  } catch {
+    return { outputChars, jsonParsed: false, topLevelKeys: [], translationCount: 0 };
+  }
+}
+
+function firstManagedOutputError(errors: string[]): string {
+  const first = errors[0]?.trim() ?? "";
+  return first === "" ? "structured output did not match the contract" : first.slice(0, 200);
+}
+
+function invalidManagedOutputResponse(
+  requestId: string,
+  outputSubtask: ManagedPromptSubtask,
+  errors: string[],
+): Response {
+  const firstError = firstManagedOutputError(errors);
+  return problemResponse({
+    status: 502,
+    code: "invalid_upstream_response",
+    title: "Invalid upstream response",
+    detail: `Managed Qwen returned invalid ${outputSubtask} output: ${firstError}`,
+    traceId: requestId,
+  });
+}
+
+async function logInvalidManagedOutput(
+  context: AssistantRouteContext,
+  input: {
+    accountId: string;
+    eventTask: string;
+    outputSubtask: ManagedPromptSubtask;
+    text: string;
+    model: string;
+    promptVersion: string;
+    errors: string[];
+    attempt: number;
+    maxAttempts: number;
+    terminal: boolean;
+  },
+): Promise<void> {
+  const shape = managedOutputShape(input.text);
+  const firstError = firstManagedOutputError(input.errors);
+  const errorCount = input.errors.length;
+  console.warn(
+    JSON.stringify({
+      level: "warn",
+      message: input.terminal ? "managed_qwen_invalid_output" : "managed_qwen_invalid_output_retry",
+      requestId: context.requestId,
+      task: input.outputSubtask,
+      model: input.model,
+      promptVersion: input.promptVersion,
+      attempt: input.attempt,
+      maxAttempts: input.maxAttempts,
+      errorCount,
+      errors: input.errors.slice(0, 8),
+      ...shape,
+    }),
+  );
+  recordOperatorEvent({
+    kind: input.terminal ? "managed_qwen_failed" : "managed_qwen_retry",
+    requestId: context.requestId,
+    task: input.outputSubtask,
+    status: "invalid_output",
+    summary: input.terminal
+      ? `Managed Qwen ${input.outputSubtask} invalid output after ${String(input.attempt)} attempts: ${firstError}`
+      : `Managed Qwen ${input.outputSubtask} invalid output on attempt ${String(input.attempt)}/${String(input.maxAttempts)}: ${firstError}`,
+    detail: input.errors.slice(0, 8).join(" | "),
+    metadata: {
+      model: input.model,
+      promptVersion: input.promptVersion,
+      attempt: input.attempt,
+      maxAttempts: input.maxAttempts,
+      errorCount,
+      ...shape,
+    },
+  });
+  if (input.terminal) {
+    await captureProductEvent(context.ops, {
+      accountId: input.accountId,
+      name: `ai.${input.eventTask === "chapter_summary" ? "summary" : input.eventTask}.failed`,
+      outcome: "failed",
+      requestId: context.requestId,
+      properties: {
+        code: "invalid_output",
+        model: input.model,
+        promptVersion: input.promptVersion,
+        kind: input.outputSubtask,
+        error: firstError,
+        errorCount,
+        outputChars: shape.outputChars,
+        attempt: input.attempt,
+      },
+    });
+  }
+}
+
 /** Reject malformed provider content before it can reach a response, cache, or chat history. */
 async function validateManagedRouteOutput(
   context: AssistantRouteContext,
@@ -1682,38 +1895,19 @@ async function validateManagedRouteOutput(
       : { expectedTargetIDs: input.expectedTargetIDs }),
   });
   if (!output.valid || output.parsed === null) {
-    recordOperatorEvent({
-      kind: "managed_qwen_failed",
-      requestId: context.requestId,
-      task: input.outputSubtask,
-      status: "invalid_output",
-      summary: `Managed Qwen ${input.outputSubtask} returned invalid structured output.`,
-      metadata: { model: input.model, promptVersion: input.promptVersion },
-    });
-    await captureProductEvent(context.ops, {
+    await logInvalidManagedOutput(context, {
       accountId: input.accountId,
-      name: `ai.${input.eventTask === "chapter_summary" ? "summary" : input.eventTask}.failed`,
-      outcome: "failed",
-      requestId: context.requestId,
-      properties: { code: "invalid_output" },
+      eventTask: input.eventTask,
+      outputSubtask: input.outputSubtask,
+      text: input.text,
+      model: input.model,
+      promptVersion: input.promptVersion,
+      errors: output.errors,
+      attempt: 1,
+      maxAttempts: 1,
+      terminal: true,
     });
-    console.warn(
-      JSON.stringify({
-        level: "warn",
-        message: "managed_qwen_invalid_output",
-        requestId: context.requestId,
-        task: input.outputSubtask,
-        model: input.model,
-        errors: output.errors,
-      }),
-    );
-    return problemResponse({
-      status: 502,
-      code: "invalid_upstream_response",
-      title: "Invalid upstream response",
-      detail: `Managed Qwen returned invalid ${input.outputSubtask} output.`,
-      traceId: context.requestId,
-    });
+    return invalidManagedOutputResponse(context.requestId, input.outputSubtask, output.errors);
   }
   recordOperatorEvent({
     kind: "managed_qwen_ok",

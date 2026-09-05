@@ -1286,12 +1286,12 @@ function parseRuntimeConfigPut(value: Record<string, unknown>): RuntimeConfigPut
     if (!isRecord(value.assistant)) {
       throw new Error("assistant must be an object.");
     }
-    const count = value.assistant.sentenceContextCount;
+    const count = value.assistant.sentenceTranslationBatchSize;
     if (count !== undefined && (typeof count !== "number" || !Number.isFinite(count))) {
-      throw new Error("assistant.sentenceContextCount must be a number.");
+      throw new Error("assistant.sentenceTranslationBatchSize must be a number.");
     }
     patch.assistant = {
-      ...(typeof count === "number" ? { sentenceContextCount: count } : {}),
+      ...(typeof count === "number" ? { sentenceTranslationBatchSize: count } : {}),
     };
   }
   return patch;

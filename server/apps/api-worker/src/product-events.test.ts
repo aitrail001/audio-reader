@@ -51,6 +51,41 @@ describe("product event privacy", () => {
     expect(visible.properties).toEqual({});
   });
 
+  it("keeps invalid-output diagnostics that do not contain book text", async () => {
+    const visible = await toProductEvent({
+      id: "00000000-0000-4000-8000-000000000097",
+      accountId: USER_ID,
+      deviceId: DEVICE_ID,
+      purpose: "learning_analytics",
+      name: "ai.translation.failed",
+      outcome: "failed",
+      requestId: "1619db05-b6ed-4651-9d8f-a564dff4183d",
+      properties: {
+        code: "invalid_output",
+        model: "qwen3.7-flash",
+        promptVersion: "qwen-managed-v1",
+        kind: "chapter_batch",
+        error: "$.translations is missing requested target s2.",
+        errorCount: 1,
+        outputChars: 84,
+        attempt: 3,
+        title: "must not leak",
+      },
+      createdAt: "2026-09-05T00:00:00.000Z",
+    });
+    expect(visible.properties).toMatchObject({
+      code: "invalid_output",
+      model: "qwen3.7-flash",
+      promptVersion: "qwen-managed-v1",
+      kind: "chapter_batch",
+      error: "$.translations is missing requested target s2.",
+      errorCount: 1,
+      outputChars: 84,
+      attempt: 3,
+    });
+    expect(JSON.stringify(visible)).not.toContain("must not leak");
+  });
+
   it("derives coarse geography and device metadata while rejecting sensitive content", async () => {
     const database = createFakeDatabaseClient();
     await database.ops.putAnalyticsPreference(USER_ID, true);

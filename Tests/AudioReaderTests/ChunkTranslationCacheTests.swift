@@ -5,37 +5,42 @@ import Testing
 
 @Suite("Chunk translation and managed cache helpers")
 struct ChunkTranslationCacheTests {
-    @Test("Aligned blocks match sequential chapter grouping including leftovers")
-    func alignedBlocksMatchChapterChunks() {
+    @Test("Forward blocks start at the tapped sentence and keep a short remainder")
+    func forwardBlocksMatchTappedWindowIncludingLeftovers() {
         let segments = (1...7).map(segment)
-        #expect(ChapterTranslationBatch.alignedBlock(
-            containing: segments[6],
+        #expect(ChapterTranslationBatch.forwardBlock(
+            startingAt: segments[6],
             in: segments,
             size: 3
         ).map(\.id) == ["segment-7"])
-        #expect(ChapterTranslationBatch.alignedBlock(
-            containing: segments[5],
+        #expect(ChapterTranslationBatch.forwardBlock(
+            startingAt: segments[5],
             in: segments,
             size: 3
-        ).map(\.id) == ["segment-4", "segment-5", "segment-6"])
+        ).map(\.id) == ["segment-6", "segment-7"])
+        #expect(ChapterTranslationBatch.forwardBlock(
+            startingAt: segments[4],
+            in: segments,
+            size: 3
+        ).map(\.id) == ["segment-5", "segment-6", "segment-7"])
         let orphan = segment(index: 99)
-        #expect(ChapterTranslationBatch.alignedBlock(
-            containing: orphan,
+        #expect(ChapterTranslationBatch.forwardBlock(
+            startingAt: orphan,
             in: segments,
             size: 3
         ).map(\.id) == ["segment-99"])
-        #expect(ChapterTranslationBatch.alignedBlock(
-            containing: orphan,
+        #expect(ChapterTranslationBatch.forwardBlock(
+            startingAt: orphan,
             in: [],
             size: 3
         ).map(\.id) == ["segment-99"])
-        #expect(ChapterTranslationBatch.alignedBlock(
-            containing: segments[0],
+        #expect(ChapterTranslationBatch.forwardBlock(
+            startingAt: segments[0],
             in: segments,
             size: 0
         ).map(\.id) == ["segment-1"])
-        #expect(ChapterTranslationBatch.alignedBlock(
-            containing: segments[0],
+        #expect(ChapterTranslationBatch.forwardBlock(
+            startingAt: segments[0],
             in: segments,
             size: 1
         ).map(\.id) == ["segment-1"])
@@ -146,8 +151,11 @@ struct ChunkTranslationCacheTests {
         #expect(appState.contains("lookupOnly: true"))
         #expect(appState.contains("if lookupOnly, llmProvider != .managedQwen"))
         #expect(appState.contains("generate: settings.autoTranslate"))
-        #expect(appState.contains("contextBefore: ReadingAssistantPrompt.sentenceContext("))
+        #expect(appState.contains("ChapterTranslationBatch.forwardBlock("))
+        #expect(!appState.contains("contextBefore: ReadingAssistantPrompt.sentenceContext("))
         #expect(appState.contains("refreshIds: Array(forceIDs)"))
+        #expect(appState.contains("for attempt in 1...ChapterTranslationBatch.maximumAttempts where !remaining.isEmpty"))
+        #expect(appState.contains("sentence_block_failed"))
         #expect(appState.contains("translateSentenceBlock(around: segment, forceIDs: [segment.id], generate: true)"))
         #expect(playerView.contains("onTranslate: { state.translateSentence(segment) }"))
         #expect(playerView.contains("state.ensureAutoTranslation()"))

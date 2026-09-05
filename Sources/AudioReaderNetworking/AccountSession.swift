@@ -22,6 +22,8 @@ public final class AccountSession {
     public private(set) var featureFlags: [FeatureFlag] = []
     public private(set) var quotas: [Quota] = []
     public private(set) var accountSyncReadiness: AccountSyncReadiness = .notConfigured
+    /// Operator Desk translation batch for Managed Qwen. Local providers keep the app setting.
+    public private(set) var sentenceTranslationBatchSize: Int?
     public private(set) var lastExportStatus: String?
     public private(set) var pendingExport: AccountExportFile?
     public private(set) var operatorLearningAnalyticsEnabled: Bool?
@@ -65,6 +67,7 @@ public final class AccountSession {
     /// Reloads in-memory learning state after a pull so a later local save cannot clobber it.
     public var onLearningDataApplied: (@MainActor () -> Void)?
     private static let syncLog = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "account-sync")
+    private static let authLog = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "account-auth")
     private static let usageLog = Logger(subsystem: "com.johnsonzhang.AudioReader", category: "product-usage")
     // A live 500-row vocabulary batch exceeded Cloudflare CPU at only 427 KB.
     // Count-bound small rows separately from the byte-bound transcript envelope.
@@ -210,10 +213,22 @@ public final class AccountSession {
         await beginOAuth(provider)
         guard let pending = pendingOAuth, let authorizationURL = pendingAuthorizationURL, errorMessage == nil else { return }
         await run(activity: "Signing in…") {
-            let callback = try await oauth.start(
-                authorizationURL: authorizationURL,
-                callbackScheme: ProductAPI.callbackScheme
-            )
+            let callback: URL
+            do {
+                callback = try await oauth.start(
+                    authorizationURL: authorizationURL,
+                    callbackScheme: ProductAPI.callbackScheme
+                )
+            } catch {
+                // iPad can finish the same callback through onOpenURL while the
+                // ASWebAuthenticationSession later reports cancel.
+                if mode.isSignedIn { return }
+                throw error
+            }
+            guard pendingOAuth != nil else {
+                if mode.isSignedIn { return }
+                throw OAuthCallbackError.missingPendingSession
+            }
             try await finishOAuth(callbackURL: callback, pending: pending)
         }
     }
@@ -235,6 +250,8 @@ public final class AccountSession {
 
     public func completeOAuth(callbackURL: URL) async {
         guard let pending = pendingOAuth else {
+            // ASWebAuthenticationSession may already have exchanged this callback.
+            if mode.isSignedIn { return }
             errorMessage = OAuthCallbackError.missingPendingSession.errorDescription
             return
         }
@@ -248,8 +265,11 @@ public final class AccountSession {
         await run(activity: activityMessage ?? "Refreshing your account…") {
             try await refreshAccessTokenKeepingSession()
             guard mode.isSignedIn else { return }
-            try await loadDevices()
+            // Bind this install before listing devices. GET /v1/me/devices 401s with
+            // "This device is not signed in for the account" until bootstrap owns the UUID.
             try await refreshProductBootstrap()
+            guard mode.isSignedIn else { return }
+            try await loadDevices()
             try? await loadAnalyticsPreference()
         }
     }
@@ -258,23 +278,12 @@ public final class AccountSession {
     /// account_sync to on after a cold start.
     private func refreshProductBootstrap() async throws {
         guard let accessToken else { return }
-        let deviceID = try store.deviceID()
-        let bootstrap = try await client.bootstrap(
-            accessToken: accessToken,
-            request: AuthBootstrapRequest(
-                deviceId: deviceID,
-                platform: environment.platform,
-                deviceName: environment.deviceName,
-                appVersion: environment.appVersion,
-                buildNumber: environment.buildNumber,
-                locale: environment.locale,
-                timeZone: environment.timeZone
-            )
-        )
+        let bootstrap = try await runBootstrap(accessToken: accessToken)
         profile = bootstrap.profile
         featureFlags = bootstrap.featureFlags
         quotas = bootstrap.quotas
         accountSyncReadiness = bootstrap.accountSyncReadiness.enforcingAppVersion(environment.appVersion)
+        sentenceTranslationBatchSize = bootstrap.sentenceTranslationBatchSize
     }
 
     public func signOut() async {
@@ -586,17 +595,27 @@ public final class AccountSession {
     }
 
     private func finishOAuth(callbackURL: URL, pending: PendingOAuth) async throws {
+        let deviceID = try store.deviceID()
+        Self.authLog.info(
+            "account_oauth_callback message=account_oauth_callback provider=\(pending.provider.rawValue, privacy: .public) deviceId=\(deviceID, privacy: .public)"
+        )
         let code = try OAuthCallbackValidator.authorizationCode(from: callbackURL, pending: pending)
+        // Consume the verifier before exchange so onOpenURL and the browser
+        // session cannot both send the same authorization code.
+        guard pendingOAuth != nil else {
+            if mode.isSignedIn { return }
+            throw OAuthCallbackError.missingPendingSession
+        }
+        pendingOAuth = nil
+        pendingAuthorizationURL = nil
         let tokens = try await client.exchangeOAuth(
             provider: pending.provider,
             code: code,
             codeVerifier: pending.pkce.verifier,
             redirectURI: pending.redirectURI,
             state: pending.state,
-            deviceID: try store.deviceID()
+            deviceID: deviceID
         )
-        pendingOAuth = nil
-        pendingAuthorizationURL = nil
         try await establishSession(tokens: tokens)
         recordUsage(name: "account.signed_in", properties: ["method": pending.provider.rawValue])
     }
@@ -604,23 +623,12 @@ public final class AccountSession {
     private func establishSession(tokens: TokenPair) async throws {
         accessToken = tokens.accessToken
         publishManagedCredentials()
-        let deviceID = try store.deviceID()
-        let bootstrap = try await client.bootstrap(
-            accessToken: tokens.accessToken,
-            request: AuthBootstrapRequest(
-                deviceId: deviceID,
-                platform: environment.platform,
-                deviceName: environment.deviceName,
-                appVersion: environment.appVersion,
-                buildNumber: environment.buildNumber,
-                locale: environment.locale,
-                timeZone: environment.timeZone
-            )
-        )
+        let bootstrap = try await runBootstrap(accessToken: tokens.accessToken)
         profile = bootstrap.profile
         featureFlags = bootstrap.featureFlags
         quotas = bootstrap.quotas
         accountSyncReadiness = bootstrap.accountSyncReadiness.enforcingAppVersion(environment.appVersion)
+        sentenceTranslationBatchSize = bootstrap.sentenceTranslationBatchSize
         mode = .signedInSyncOff
         pendingOAuth = nil
         recoveryMessage = nil
@@ -631,6 +639,38 @@ public final class AccountSession {
         }
         try await loadDevices()
         try? await loadAnalyticsPreference()
+    }
+
+    /// Registers this install's durable UUID for the signed-in account. The same
+    /// Mac/iPad can move between accounts; listing devices must not run first.
+    private func runBootstrap(accessToken: String) async throws -> BootstrapResponse {
+        let deviceID = try store.deviceID()
+        Self.authLog.info(
+            "account_bootstrap_start message=account_bootstrap_start deviceId=\(deviceID, privacy: .public)"
+        )
+        do {
+            let bootstrap = try await client.bootstrap(
+                accessToken: accessToken,
+                request: AuthBootstrapRequest(
+                    deviceId: deviceID,
+                    platform: environment.platform,
+                    deviceName: environment.deviceName,
+                    appVersion: environment.appVersion,
+                    buildNumber: environment.buildNumber,
+                    locale: environment.locale,
+                    timeZone: environment.timeZone
+                )
+            )
+            Self.authLog.info(
+                "account_bootstrap_ok message=account_bootstrap_ok deviceId=\(deviceID, privacy: .public) accountId=\(bootstrap.profile.accountId, privacy: .public) profileId=\(bootstrap.profile.id, privacy: .public) boundDeviceId=\(bootstrap.device.id, privacy: .public)"
+            )
+            return bootstrap
+        } catch {
+            Self.authLog.error(
+                "account_bootstrap_failed message=account_bootstrap_failed deviceId=\(deviceID, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+            )
+            throw error
+        }
     }
 
     private func persist(tokens: TokenPair, profile: AccountProfile, mode: AccountMode) throws {
@@ -646,15 +686,32 @@ public final class AccountSession {
 
     private func loadDevices() async throws {
         let currentID = try store.deviceID()
-        let listed = try await withAccessToken { access in
-            try await client.listDevices(accessToken: access, deviceID: currentID)
+        Self.authLog.info(
+            "account_devices_list_start message=account_devices_list_start deviceId=\(currentID, privacy: .public)"
+        )
+        let listed: [AccountDevice]
+        do {
+            listed = try await withAccessToken { access in
+                try await client.listDevices(accessToken: access, deviceID: currentID)
+            }
+        } catch {
+            Self.authLog.error(
+                "account_devices_list_failed message=account_devices_list_failed deviceId=\(currentID, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+            )
+            throw error
         }
         guard mode.isSignedIn else { return }
-        let current = listed.first { $0.id == currentID }
+        let current = listed.first { $0.id.caseInsensitiveCompare(currentID) == .orderedSame }
         if current == nil || current?.revoked == true {
+            Self.authLog.error(
+                "account_device_unbound message=account_device_unbound deviceId=\(currentID, privacy: .public) listed=\(listed.count, privacy: .public) revoked=\(current?.revoked == true, privacy: .public)"
+            )
             enterLocalAfterInvalidSession()
             return
         }
+        Self.authLog.info(
+            "account_devices_list_ok message=account_devices_list_ok deviceId=\(currentID, privacy: .public) listed=\(listed.count, privacy: .public)"
+        )
         devices = listed.filter { !$0.revoked }
     }
 
@@ -938,6 +995,14 @@ public final class AccountSession {
         }
     }
 
+    private static func isMissingRemoteAsset(_ error: Error) -> Bool {
+        guard let auth = error as? AuthClientError else { return false }
+        if case .problem(_, let code, _) = auth {
+            return code == "not_found"
+        }
+        return false
+    }
+
     /// Transcript revisions are the only consented cloud assets in this release. Explicit other or
     /// unknown kinds are skipped; a missing kind on a transcript entity retains the legacy fallback.
     private func hydrateAssetChanges(
@@ -986,22 +1051,33 @@ public final class AccountSession {
                 guard bytesValue <= maximumBytes else {
                     throw AccountSyncRunError.invalidTranscriptManifest
                 }
-                let manifest = try await withAccessToken { access in
-                    try await runtime.client.assetManifest(
-                        accessToken: access, deviceID: deviceID, assetID: assetID
+                let manifest: SyncAssetManifest
+                let downloadedURL: URL
+                do {
+                    manifest = try await withAccessToken { access in
+                        try await runtime.client.assetManifest(
+                            accessToken: access, deviceID: deviceID, assetID: assetID
+                        )
+                    }
+                    guard manifest.status == "ready", manifest.kind == kind,
+                          manifest.sha256 == sha256, manifest.compressedBytes == Int(bytesValue)
+                    else { throw AccountSyncRunError.invalidTranscriptManifest }
+                    downloadedURL = try await withAccessToken { access in
+                        try await runtime.client.downloadAsset(
+                            accessToken: access,
+                            deviceID: deviceID,
+                            assetID: assetID,
+                            sha256: sha256,
+                            compressedBytes: Int(bytesValue)
+                        )
+                    }
+                } catch {
+                    // A missing remote object must not block this device's pending uploads.
+                    guard Self.isMissingRemoteAsset(error) else { throw error }
+                    Self.syncLog.error(
+                        "sync_asset_hydration_skipped message=sync_asset_hydration_skipped entityId=\(change.entityId, privacy: .public) assetId=\(assetID, privacy: .public) outcome=not_found"
                     )
-                }
-                guard manifest.status == "ready", manifest.kind == kind,
-                      manifest.sha256 == sha256, manifest.compressedBytes == Int(bytesValue)
-                else { throw AccountSyncRunError.invalidTranscriptManifest }
-                let downloadedURL = try await withAccessToken { access in
-                    try await runtime.client.downloadAsset(
-                        accessToken: access,
-                        deviceID: deviceID,
-                        assetID: assetID,
-                        sha256: sha256,
-                        compressedBytes: Int(bytesValue)
-                    )
+                    continue
                 }
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 let url = directory.appendingPathComponent("\(change.entityId)-\(UUID().uuidString).object")
@@ -1465,6 +1541,7 @@ public final class AccountSession {
         featureFlags = []
         quotas = []
         accountSyncReadiness = .notConfigured
+        sentenceTranslationBatchSize = nil
         lastExportStatus = nil
         pendingExport = nil
         operatorLearningAnalyticsEnabled = nil
@@ -1524,6 +1601,30 @@ public final class AccountSession {
 
     private func present(_ error: Error) {
         guard recoveryMessage == nil else { return }
+        if let auth = error as? AuthClientError {
+            switch auth {
+            case .problem(let status, let code, let detail):
+                Self.authLog.error(
+                    "account_request_failed message=account_request_failed status=\(status, privacy: .public) code=\(code, privacy: .public) detail=\(detail, privacy: .public)"
+                )
+            case .unauthorized(let detail):
+                Self.authLog.error(
+                    "account_request_failed message=account_request_failed status=401 code=unauthorized detail=\(detail, privacy: .public)"
+                )
+            case .deviceRevoked(let detail):
+                Self.authLog.error(
+                    "account_request_failed message=account_request_failed status=403 code=device_revoked detail=\(detail, privacy: .public)"
+                )
+            default:
+                Self.authLog.error(
+                    "account_request_failed message=account_request_failed code=auth_client"
+                )
+            }
+        } else {
+            Self.authLog.error(
+                "account_request_failed message=account_request_failed error=\(error.localizedDescription, privacy: .public)"
+            )
+        }
         errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 }

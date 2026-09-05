@@ -525,6 +525,57 @@ describe("managed Qwen assistant API", () => {
     expect(payload.translation).toContain("frozen sea");
   });
 
+  it("uses the looked-up word as sentence context when the app omits it", async () => {
+    const users: string[] = [];
+    const inner = createFakeQwenClient({
+      text: JSON.stringify({
+        translation: "noun — ice",
+        connection: "The word itself is the only context.",
+        examples: [
+          { source: "Ice covered the lake.", translation: "冰覆盖了湖面。" },
+          { source: "The ice began to crack.", translation: "冰开始裂开。" },
+        ],
+        notes: [],
+      }),
+    });
+    const app = createTestApp({
+      qwen: {
+        ping: () => inner.ping(),
+        pingDetailed: () => inner.pingDetailed(),
+        complete: async (request) => {
+          const user = request.messages.find((message) => message.role === "user");
+          if (user !== undefined) {
+            users.push(user.content);
+          }
+          return inner.complete(request);
+        },
+      },
+    });
+    const response = await app.fetch(
+      new Request("http://localhost/v1/ai/translations", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test",
+          "content-type": "application/json",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-key-qwen-word-no-context",
+        },
+        body: JSON.stringify({
+          task: "word",
+          sourceLanguage: "en",
+          targetLanguage: "zh-Hans",
+          learnerLevel: "intermediate",
+          source: "ice",
+          editionFingerprint: "ed-word-no-ctx",
+          chapterFingerprint: "ch-word-no-ctx",
+        }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(users[0]).toContain("Sentence context (required):\nice");
+    expect(users[0]).not.toContain("context is required for the word prompt");
+  });
+
   it("accepts a complete word meaning when Qwen omits only empty optional fields", async () => {
     const app = createTestApp({
       qwen: createFakeQwenClient({
@@ -1126,8 +1177,8 @@ describe("managed Qwen assistant API", () => {
     );
     expect(response.status).toBe(200);
     const body = await readJson(response);
-    expect(users[0]).toContain("The room fell silent.");
-    expect(users[0]).toContain("Everyone relaxed.");
+    expect(users[0]).not.toContain("The room fell silent.");
+    expect(users[0]).not.toContain("Everyone relaxed.");
     const listed = await createTestApp({
       database,
       authenticate: () => createFakePrincipal({ role: "admin" }),
@@ -1147,19 +1198,10 @@ describe("managed Qwen assistant API", () => {
     expect(JSON.stringify(payload)).not.toContain("Everyone relaxed.");
   });
 
-  it("trims sentence neighbors to the operator Desk context count", async () => {
+  it("drops extra neighbors on sentence translation", async () => {
     const users: string[] = [];
     const inner = createFakeQwenClient({ text: '{"translation":"她打破了沉默。","notes":[]}' });
-    const database = createFakeDatabaseClient();
-    await database.ops.putOperatorSettings({
-      id: "default",
-      payload: { sentenceContextCount: 1 },
-      ciphertext: null,
-      nonce: null,
-      updatedBy: "00000000-0000-4000-8000-000000000002",
-    });
     const app = createTestApp({
-      database,
       qwen: {
         ping: () => inner.ping(),
         pingDetailed: () => inner.pingDetailed(),
@@ -1172,7 +1214,7 @@ describe("managed Qwen assistant API", () => {
         },
       },
     });
-    const response = await app.fetch(
+    const sentence = await app.fetch(
       new Request("http://localhost/v1/ai/translations", {
         method: "POST",
         headers: {
@@ -1194,13 +1236,81 @@ describe("managed Qwen assistant API", () => {
         }),
       }),
     );
-    expect(response.status).toBe(200);
-    expect(users[0]).toContain("PREVIOUS: Nobody spoke.");
-    expect(users[0]).toContain("TARGET: She broke the ice.");
-    expect(users[0]).toContain("NEXT: Everyone relaxed.");
+    expect(sentence.status).toBe(200);
+    expect(users[0]).not.toContain("PREVIOUS:");
     expect(users[0]).not.toContain("The room fell silent.");
-    expect(users[0]).not.toContain("Then they sat.");
+    expect(users[0]).not.toContain("Nobody spoke.");
     expect(users[0]).toContain("Simplified Chinese");
+  });
+
+  it("slices a translation batch to the operator batch size and ignores extra neighbors", async () => {
+    const users: string[] = [];
+    const inner = createFakeQwenClient({
+      text: JSON.stringify({
+        translations: [
+          { id: "s1", translation: "第一句。", notes: [] },
+          { id: "s2", translation: "第二句。", notes: [] },
+        ],
+      }),
+    });
+    const database = createFakeDatabaseClient();
+    await database.ops.putOperatorSettings({
+      id: "default",
+      payload: { sentenceTranslationBatchSize: 2 },
+      ciphertext: null,
+      nonce: null,
+      updatedBy: "00000000-0000-4000-8000-000000000002",
+    });
+    const app = createTestApp({
+      database,
+      qwen: {
+        ping: () => inner.ping(),
+        pingDetailed: () => inner.pingDetailed(),
+        complete: async (request) => {
+          const user = request.messages.find((message) => message.role === "user");
+          if (user !== undefined) {
+            users.push(user.content);
+          }
+          return inner.complete(request);
+        },
+      },
+    });
+    const response = await app.fetch(
+      new Request("http://localhost/v1/ai/translation-batches", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test",
+          "content-type": "application/json",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-key-qwen-batch-slice",
+        },
+        body: JSON.stringify({
+          task: "chapter_batch",
+          sourceLanguage: "en",
+          targetLanguage: "zh-Hans",
+          learnerLevel: "intermediate",
+          sentences: [
+            { id: "s1", text: "The room fell silent." },
+            { id: "s2", text: "She broke the ice." },
+            { id: "s3", text: "Everyone relaxed." },
+          ],
+          contextPrevious: ["Earlier."],
+          contextNext: ["Later."],
+          editionFingerprint: "ed-batch-slice",
+          chapterFingerprint: "ch-batch-slice",
+        }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = await readJson(response);
+    expect(isRecord(body) && Array.isArray(body.results) && body.results).toHaveLength(2);
+    expect(isRecord(body) && body.generatedCount).toBe(2);
+    expect(users[0]).toContain("TARGET id=s1:");
+    expect(users[0]).toContain("TARGET id=s2:");
+    expect(users[0]).not.toContain("TARGET id=s3:");
+    expect(users[0]).not.toContain("Earlier.");
+    expect(users[0]).not.toContain("Later.");
+    expect(users[0]).not.toContain("Everyone relaxed.");
   });
 
   it("does not consume quota on a translation cache hit", async () => {
@@ -1578,14 +1688,51 @@ describe("managed Qwen assistant API", () => {
     expect(isRecord(refreshedBody) && refreshedBody.provenance).toBe("generated");
   });
 
-  it("includes in-block neighbors from contextBefore without targeting them", async () => {
+  it("includes already-cached in-block sentences as neighbors without targeting them", async () => {
     const users: string[] = [];
+    const database = createFakeDatabaseClient();
+    const seed = createTestApp({
+      database,
+      qwen: createFakeQwenClient({
+        text: JSON.stringify({
+          translations: [
+            { id: "s1", translation: "房间安静了。", notes: [] },
+            { id: "s3", translation: "大家都放松了。", notes: [] },
+          ],
+        }),
+      }),
+    });
+    const seeded = await seed.fetch(
+      new Request("http://localhost/v1/ai/translation-batches", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test",
+          "content-type": "application/json",
+          "X-Device-Id": DEVICE_ID,
+          "Idempotency-Key": "idempotency-key-qwen-batch-context-seed",
+        },
+        body: JSON.stringify({
+          task: "chapter_batch",
+          sourceLanguage: "en",
+          targetLanguage: "zh-Hans",
+          learnerLevel: "intermediate",
+          sentences: [
+            { id: "s1", text: "The room fell silent." },
+            { id: "s3", text: "Everyone relaxed." },
+          ],
+          editionFingerprint: "ed-batch-ctx",
+          chapterFingerprint: "ch-batch-ctx",
+        }),
+      }),
+    );
+    expect(seeded.status).toBe(200);
     const inner = createFakeQwenClient({
       text: JSON.stringify({
         translations: [{ id: "s2", translation: "她打破了沉默。", notes: [] }],
       }),
     });
     const app = createTestApp({
+      database,
       qwen: {
         ping: () => inner.ping(),
         pingDetailed: () => inner.pingDetailed(),
@@ -1598,8 +1745,6 @@ describe("managed Qwen assistant API", () => {
         },
       },
     });
-    const neighbor = "The room fell silent.";
-    const contextBefore = `PREVIOUS: ${neighbor}\nTARGET id=s2: She broke the ice.\nNEXT: Everyone relaxed.`;
     const response = await app.fetch(
       new Request("http://localhost/v1/ai/translation-batches", {
         method: "POST",
@@ -1614,18 +1759,22 @@ describe("managed Qwen assistant API", () => {
           sourceLanguage: "en",
           targetLanguage: "zh-Hans",
           learnerLevel: "intermediate",
-          sentences: [{ id: "s2", text: "She broke the ice." }],
-          contextBefore,
+          sentences: [
+            { id: "s1", text: "The room fell silent." },
+            { id: "s2", text: "She broke the ice." },
+            { id: "s3", text: "Everyone relaxed." },
+          ],
           editionFingerprint: "ed-batch-ctx",
           chapterFingerprint: "ch-batch-ctx",
         }),
       }),
     );
     expect(response.status).toBe(200);
-    expect(users[0]).toContain(neighbor);
-    expect(users[0]).toContain("Everyone relaxed.");
+    expect(users[0]).toContain("PREVIOUS: The room fell silent.");
+    expect(users[0]).toContain("NEXT: Everyone relaxed.");
     expect(users[0]).toContain("TARGET id=s2:");
-    expect(users[0]).not.toMatch(/TARGET id=(?!s2:)/);
+    expect(users[0]).not.toContain("TARGET id=s1:");
+    expect(users[0]).not.toContain("TARGET id=s3:");
   });
 
   it("rejects an empty translation batch without calling Qwen", async () => {
@@ -2151,6 +2300,83 @@ describe("managed Qwen assistant API", () => {
     expect(response.status).toBe(502);
     const body = await readJson(response);
     expect(isRecord(body) && body.code).toBe("invalid_upstream_response");
+    expect(String(isRecord(body) ? body.detail : "")).toMatch(/invalid chapter_batch output/i);
+    expect(String(isRecord(body) ? body.detail : "")).not.toContain("One sentence.");
+  });
+
+  it("retries invalid chapter_batch output and returns a valid translation", async () => {
+    let completions = 0;
+    const app = createTestApp({
+      qwen: createFakeQwenClient({
+        texts: [
+          '{"translation":"一句。","notes":[]}',
+          '{"translations":[{"id":"s1","translation":"一句。","notes":[]}]}',
+        ],
+        onComplete: () => {
+          completions += 1;
+        },
+      }),
+    });
+    const response = await postAssistant(
+      app,
+      "/v1/ai/translation-batches",
+      batchBody([{ id: "s1", text: "One sentence." }], {
+        editionFingerprint: "ed-batch-retry",
+        chapterFingerprint: "ch-batch-retry",
+      }),
+      "idempotency-key-qwen-batch-retry",
+    );
+    expect(response.status).toBe(200);
+    expect(completions).toBe(2);
+    const payload = await readJson(response);
+    const results =
+      isRecord(payload) && Array.isArray(payload.results)
+        ? (payload.results as Record<string, unknown>[])
+        : [];
+    expect(results[0]?.translation).toBe("一句。");
+    const requestId = response.headers.get("X-Request-Id") ?? "";
+    const kinds = listOperatorEvents({ requestId }).map((event) => event.kind);
+    expect(kinds).toContain("managed_qwen_retry");
+    expect(kinds).toContain("managed_qwen_ok");
+  });
+
+  it("records invalid-output diagnostics on Activity after retries are exhausted", async () => {
+    const database = createFakeDatabaseClient();
+    await database.ops.putAnalyticsPreference("00000000-0000-4000-8000-000000000002", true);
+    const app = createTestApp({
+      database,
+      qwen: createFakeQwenClient({ text: '{"translation":"一句。","notes":[]}' }),
+    });
+    const response = await postAssistant(
+      app,
+      "/v1/ai/translation-batches",
+      batchBody([{ id: "s1", text: "One sentence." }], {
+        editionFingerprint: "ed-batch-invalid-log",
+        chapterFingerprint: "ch-batch-invalid-log",
+      }),
+      "idempotency-key-qwen-batch-invalid-log",
+    );
+    expect(response.status).toBe(502);
+    const events = await database.ops.listProductEvents();
+    const failed = events.find((event) => event.name === "ai.translation.failed");
+    expect(failed?.properties).toMatchObject({
+      code: "invalid_output",
+      kind: "chapter_batch",
+      attempt: 3,
+    });
+    expect(typeof failed?.properties.error).toBe("string");
+    expect(String(failed?.properties.error ?? "")).not.toBe("");
+    expect(JSON.stringify(events)).not.toContain("One sentence.");
+    const requestId = response.headers.get("X-Request-Id") ?? "";
+    const terminal = listOperatorEvents({ requestId }).filter(
+      (event) => event.kind === "managed_qwen_failed",
+    );
+    expect(terminal[0]?.metadata).toMatchObject({
+      attempt: 3,
+      jsonParsed: true,
+    });
+    expect(Array.isArray(terminal[0]?.metadata?.topLevelKeys)).toBe(true);
+    expect(JSON.stringify(terminal)).not.toContain("One sentence.");
   });
 
   it("does not consume summary quota on a cache hit", async () => {
@@ -2364,7 +2590,7 @@ describe("managed Qwen cache identity and batch edge cases", () => {
     expect(results[0]?.source).toBe("Hello.");
   });
 
-  it("caps a translation batch at forty sentences", async () => {
+  it("caps a translation batch at the operator batch size after the forty-sentence parser cap", async () => {
     const sentences = Array.from({ length: 41 }, (_, index) => ({
       id: `s${String(index + 1)}`,
       text: `Sentence ${String(index + 1)}.`,
@@ -2372,7 +2598,7 @@ describe("managed Qwen cache identity and batch edge cases", () => {
     const app = createTestApp({
       qwen: createFakeQwenClient({
         text: JSON.stringify({
-          translations: sentences.slice(0, 40).map((sentence) => ({
+          translations: sentences.slice(0, 5).map((sentence) => ({
             id: sentence.id,
             translation: sentence.text,
             notes: [],
@@ -2388,7 +2614,7 @@ describe("managed Qwen cache identity and batch edge cases", () => {
     );
     expect(response.status).toBe(200);
     const body = await readJson(response);
-    expect(isRecord(body) && Array.isArray(body.results) ? body.results : []).toHaveLength(40);
+    expect(isRecord(body) && Array.isArray(body.results) ? body.results : []).toHaveLength(5);
   });
 
   it("returns mixed lookupOnly hits without generating the misses", async () => {

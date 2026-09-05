@@ -299,6 +299,7 @@ describe("product authentication API", () => {
       const authorizationUrl = new URL(String(started.authorizationUrl));
       expect(authorizationUrl.pathname).toBe("/auth/v1/authorize");
       expect(authorizationUrl.searchParams.get("provider")).toBe("azure");
+      expect(authorizationUrl.searchParams.get("prompt")).toBe("select_account");
       expect(authorizationUrl.searchParams.get("code_challenge")).toBe(pkce.challenge);
       expect(String(started.authorizationUrl)).not.toContain("local-complete");
 
@@ -877,6 +878,7 @@ describe("product authentication API", () => {
     expect(
       quotas.some((item) => isRecord(item) && item.key === "devices" && item.limit === 2),
     ).toBe(true);
+    expect(boot.sentenceTranslationBatchSize).toBe(5);
   });
 
   it("returns requested and effective account sync state with a machine-readable pause reason", async () => {
@@ -903,6 +905,57 @@ describe("product authentication API", () => {
       reason: "upgrade_required",
       minAppVersion: "2.0.0",
     });
+  });
+
+  it("moves this install to a newly signed-in account so device APIs bind", async () => {
+    const database = createFakeDatabaseClient();
+    const aliceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const bobId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    await database.identity.ensureProfile({ userId: aliceId, email: ALICE_EMAIL });
+    await database.identity.ensureProfile({ userId: bobId, email: BOB_EMAIL });
+    const aliceToken = await signAccessToken(
+      { sub: aliceId, email: ALICE_EMAIL },
+      LOCAL_JWT_CONFIG,
+    );
+    const bobToken = await signAccessToken({ sub: bobId, email: BOB_EMAIL }, LOCAL_JWT_CONFIG);
+    const auth = createHostedAuthService({
+      jwt: LOCAL_JWT_CONFIG,
+      supabaseUrl: "https://example.supabase.co",
+      supabaseAnonKey: "anon-key",
+      identity: database.identity,
+      fetch: () => Promise.resolve(new Response(null, { status: 500 })),
+    });
+    const app = createTestApp({
+      database,
+      auth,
+      authenticate: (request) => auth.authenticate(request),
+    });
+    expect(
+      (await bootstrapDevice(app, aliceToken, DEVICE_ID, "idempotency-alice-bind")).status,
+    ).toBe(200);
+    expect((await bootstrapDevice(app, bobToken, DEVICE_ID, "idempotency-bob-rebind")).status).toBe(
+      200,
+    );
+    const bobDevices = await app.fetch(
+      new Request("http://localhost/v1/me/devices", {
+        headers: sessionHeaders(bobToken, DEVICE_ID),
+      }),
+    );
+    expect(bobDevices.status).toBe(200);
+    const listed = await readJson(bobDevices);
+    expect(
+      Array.isArray(listed) && listed.some((item) => isRecord(item) && item.id === DEVICE_ID),
+    ).toBe(true);
+    const aliceDevices = await app.fetch(
+      new Request("http://localhost/v1/me/devices", {
+        headers: sessionHeaders(aliceToken, DEVICE_ID),
+      }),
+    );
+    expect(aliceDevices.status).toBe(401);
+    const aliceBody = await readJson(aliceDevices);
+    expect(isRecord(aliceBody) && aliceBody.detail).toBe(
+      "This device is not signed in for the account.",
+    );
   });
 
   it("rejects a third device when the starter device quota is two", async () => {

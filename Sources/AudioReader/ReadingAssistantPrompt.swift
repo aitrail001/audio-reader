@@ -249,7 +249,10 @@ enum ReadingAssistantPrompt {
         guard !targetIndices.isEmpty else {
             return targets.map { "TARGET id=\($0.id): \($0.displayText)" }.joined(separator: "\n")
         }
-        let contextRadius = max(1, radius)
+        let contextRadius = max(0, radius)
+        if contextRadius == 0 {
+            return targets.map { "TARGET id=\($0.id): \($0.displayText)" }.joined(separator: "\n")
+        }
         var includedIndices = Set<Int>()
         for index in targetIndices {
             includedIndices.formUnion(
@@ -285,7 +288,7 @@ enum ReadingAssistantPrompt {
             user: """
             \(metadata)
 
-            Previous, target, and next sentence context:
+            Target sentences:
             \(context)
 
             Return results only for these target IDs: \(targetIDs.joined(separator: ", "))

@@ -67,8 +67,8 @@ struct ReadingAssistantPromptTests {
         #expect(!advanced.contains("explain every ordinary word"))
     }
 
-    @Test("Sentence context always includes the target's previous and next sentences")
-    func sentenceContextIncludesNeighbors() {
+    @Test("Sentence translation context at radius 0 is only the target sentences")
+    func sentenceContextOmitsNeighborsAtRadiusZero() {
         let segments = [
             segment(id: "previous", text: "The room fell silent."),
             segment(id: "target", text: "She broke the ice."),
@@ -90,9 +90,17 @@ struct ReadingAssistantPromptTests {
             radius: 0
         )
 
-        #expect(context.contains("PREVIOUS: The room fell silent."))
+        #expect(!context.contains("PREVIOUS: The room fell silent."))
         #expect(context.contains("TARGET id=target: She broke the ice."))
-        #expect(context.contains("NEXT: Everyone relaxed."))
+        #expect(!context.contains("NEXT: Everyone relaxed."))
+
+        let withNeighbors = ReadingAssistantPrompt.sentenceContext(
+            around: [segments[1]],
+            in: transcript,
+            radius: 1
+        )
+        #expect(withNeighbors.contains("PREVIOUS: The room fell silent."))
+        #expect(withNeighbors.contains("NEXT: Everyone relaxed."))
 
         let neighbors = ReadingAssistantPrompt.neighbors(around: segments[1], in: transcript)
         #expect(neighbors.previous == ["The room fell silent."])
@@ -128,7 +136,7 @@ struct ReadingAssistantPromptTests {
         #expect(appState.components(separatedBy: "completeStructuredJSON(").count - 1 == 3)
         #expect(appState.contains("structuredJSON: true"))
         #expect(appState.contains("translateSentenceBlock("))
-        #expect(appState.contains("alignedBlock("))
+        #expect(appState.contains("forwardBlock("))
         #expect(appState.contains("ManagedProductLLM.translateBatch"))
         #expect(!appState.contains("for segment in remaining"))
         #expect(!appState.contains("TranslationPrompt.sentence("))

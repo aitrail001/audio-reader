@@ -4,7 +4,7 @@ compatibility_date = "2026-08-26"
 
 [vars]
 ENVIRONMENT = "local"
-APP_VERSION = "2.0.9"
+APP_VERSION = "2.2.1"
 CORS_ALLOWED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 MAX_BODY_BYTES = "1048576"
 LOCAL_DEV_OTP = "123456"
@@ -21,12 +21,15 @@ LOCAL_DEV_OTP = "123456"
 name = "audio-reader-api-worker-staging"
 # Staging uses workers.dev until a custom hostname is attached.
 workers_dev = true
+# Run next to Singapore Supabase + Qwen (ap-southeast-1), not next to the client.
+[env.staging.placement]
+region = "aws:ap-southeast-1"
 
 [env.staging.vars]
 ENVIRONMENT = "staging"
-APP_VERSION = "2.0.9"
+APP_VERSION = "2.2.1"
 SUPABASE_STORAGE_BUCKET = "audio-reader-assets"
-CORS_ALLOWED_ORIGINS = "https://audio-reader-admin.pages.dev,https://feature-cross-device-multi-u.audio-reader-admin.pages.dev,https://feature-cross-device-multi-u-5hc5.audio-reader-admin.pages.dev,https://feature-cross-device-multi-u-v8ks.audio-reader-admin.pages.dev"
+CORS_ALLOWED_ORIGINS = "https://audio-reader-admin.pages.dev,https://staging.audio-reader-admin.pages.dev,https://e19d25fe.audio-reader-admin.pages.dev,https://feature-cross-device-multi-u.audio-reader-admin.pages.dev,https://feature-cross-device-multi-u-5hc5.audio-reader-admin.pages.dev,https://feature-cross-device-multi-u-v8ks.audio-reader-admin.pages.dev"
 ADMIN_ORIGIN = "https://audio-reader-admin.pages.dev"
 MAX_BODY_BYTES = "1048576"
 LOCAL_DEV_OTP = ""
@@ -40,10 +43,13 @@ OTP_FROM_EMAIL = "AudioReader <onboarding@resend.dev>"
 name = "audio-reader-api-worker-production"
 # Native apps call this workers.dev hostname (ProductAPIBaseURL). Keep it public.
 workers_dev = true
+# Run next to Singapore Supabase + Qwen (ap-southeast-1), not next to the client.
+[env.production.placement]
+region = "aws:ap-southeast-1"
 
 [env.production.vars]
 ENVIRONMENT = "production"
-APP_VERSION = "2.0.9"
+APP_VERSION = "2.2.1"
 SUPABASE_STORAGE_BUCKET = "audio-reader-assets"
 CORS_ALLOWED_ORIGINS = "https://audio-reader-admin.pages.dev"
 ADMIN_ORIGIN = "https://audio-reader-admin.pages.dev"

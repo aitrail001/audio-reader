@@ -1166,9 +1166,38 @@ struct ImportParityTests {
         #expect(blocks.map(\.count) == [3, 3, 1])
         #expect(blocks.flatMap { $0 }.map(\.id) == segments.map(\.id))
 
-        let aligned = ChapterTranslationBatch.alignedBlock(containing: segments[4], in: segments, size: 3)
-        #expect(aligned.map(\.id) == ["segment-4", "segment-5", "segment-6"])
-        #expect(ChapterTranslationBatch.alignedBlock(containing: segments[0], in: segments, size: 3).map(\.id) == ["segment-1", "segment-2", "segment-3"])
+        let forward = ChapterTranslationBatch.forwardBlock(startingAt: segments[4], in: segments, size: 3)
+        #expect(forward.map(\.id) == ["segment-5", "segment-6", "segment-7"])
+        #expect(ChapterTranslationBatch.forwardBlock(startingAt: segments[0], in: segments, size: 3).map(\.id) == ["segment-1", "segment-2", "segment-3"])
+        #expect(ChapterTranslationBatch.forwardBlock(startingAt: segments[6], in: segments, size: 3).map(\.id) == ["segment-7"])
+    }
+
+    @Test("Settings expose one translation batch size instead of neighbor context and chapter block")
+    func settingsExposeOneTranslationBatch() throws {
+        let settings = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/AudioReader/SettingsView.swift"),
+            encoding: .utf8
+        )
+        let appState = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/AudioReader/AppState.swift"),
+            encoding: .utf8
+        )
+        #expect(settings.contains("Translation batch"))
+        #expect(settings.contains("sentences per request"))
+        #expect(!settings.contains("Sentence context"))
+        #expect(!settings.contains("Chapter block"))
+        #expect(settings.components(separatedBy: "settingRow(\"Translation batch\")").count - 1 == 1)
+        #expect(appState.contains("sentenceTranslationBatchSize(for:"))
+        #expect(appState.contains("ChapterTranslationBatch.forwardBlock("))
+        #expect(!appState.contains("neighborsOutside("))
     }
 
     @Test("Chapter translation parses one reviewable result per sentence")
@@ -1943,12 +1972,12 @@ struct ImportParityTests {
             encoding: .utf8
         )
 
-        #expect(plist["CFBundleShortVersionString"] as? String == "2.6.0")
-        #expect(plist["CFBundleVersion"] as? String == "108")
-        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "2.6.0")
-        #expect(iPadPlist["CFBundleVersion"] as? String == "108")
-        #expect(project.components(separatedBy: "MARKETING_VERSION = 2.6.0;").count - 1 == 4)
-        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 108;").count - 1 == 4)
+        #expect(plist["CFBundleShortVersionString"] as? String == "2.7.1")
+        #expect(plist["CFBundleVersion"] as? String == "112")
+        #expect(iPadPlist["CFBundleShortVersionString"] as? String == "2.7.1")
+        #expect(iPadPlist["CFBundleVersion"] as? String == "112")
+        #expect(project.components(separatedBy: "MARKETING_VERSION = 2.7.1;").count - 1 == 4)
+        #expect(project.components(separatedBy: "CURRENT_PROJECT_VERSION = 112;").count - 1 == 4)
         #expect(plist["LSEnvironment"] == nil)
         #expect(iPadPlist["LSEnvironment"] == nil)
         #expect(plist["ProductAPIBaseURL"] as? String == ProductAPI.hostedProductionBaseURL.absoluteString)
@@ -1964,7 +1993,11 @@ struct ImportParityTests {
         })
         #expect(xcodeIOS.contains("org.idpf.epub-container"))
         #expect(appSource.contains(".onOpenURL"))
-        #expect(appSource.contains("importExternalEPUB"))
+        #expect(appSource.contains("handleOpenURL(url)"))
+        #expect(try String(
+            contentsOf: repository.appendingPathComponent("Sources/AudioReader/AppState.swift"),
+            encoding: .utf8
+        ).contains("url.scheme?.lowercased() == ProductAPI.callbackScheme"))
         let macATS = try #require(plist["NSAppTransportSecurity"] as? [String: Any])
         let iPadATS = try #require(iPadPlist["NSAppTransportSecurity"] as? [String: Any])
         #expect(macATS["NSAllowsLocalNetworking"] as? Bool == true)

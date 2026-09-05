@@ -417,6 +417,7 @@ public struct BootstrapResponse: Codable, Equatable, Sendable {
     public var featureFlags: [FeatureFlag]
     public var quotas: [Quota]
     public var accountSyncReadiness: AccountSyncReadiness
+    public var sentenceTranslationBatchSize: Int?
 
     public init(
         profile: AccountProfile,
@@ -424,7 +425,8 @@ public struct BootstrapResponse: Codable, Equatable, Sendable {
         syncCursor: String?,
         featureFlags: [FeatureFlag] = [],
         quotas: [Quota] = [],
-        accountSyncReadiness: AccountSyncReadiness = AccountSyncReadiness()
+        accountSyncReadiness: AccountSyncReadiness = AccountSyncReadiness(),
+        sentenceTranslationBatchSize: Int? = nil
     ) {
         self.profile = profile
         self.device = device
@@ -432,6 +434,7 @@ public struct BootstrapResponse: Codable, Equatable, Sendable {
         self.featureFlags = featureFlags
         self.quotas = quotas
         self.accountSyncReadiness = accountSyncReadiness
+        self.sentenceTranslationBatchSize = sentenceTranslationBatchSize
     }
 
     public init(from decoder: Decoder) throws {
@@ -442,6 +445,7 @@ public struct BootstrapResponse: Codable, Equatable, Sendable {
         featureFlags = try container.decodeIfPresent([FeatureFlag].self, forKey: .featureFlags) ?? []
         quotas = try container.decodeIfPresent([Quota].self, forKey: .quotas) ?? []
         accountSyncReadiness = try container.decode(AccountSyncReadiness.self, forKey: .accountSyncReadiness)
+        sentenceTranslationBatchSize = try container.decodeIfPresent(Int.self, forKey: .sentenceTranslationBatchSize)
     }
 }
 

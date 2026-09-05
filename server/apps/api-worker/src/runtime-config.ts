@@ -57,7 +57,7 @@ export type RuntimeConfigView = {
     qwenEnvKeyConfigured: boolean;
   };
   assistant: {
-    sentenceContextCount: number;
+    sentenceTranslationBatchSize: number;
   };
   updatedAt?: string;
 };
@@ -83,7 +83,7 @@ export type RuntimeConfigPut = {
     secretKey?: string | null;
   };
   assistant?: {
-    sentenceContextCount?: number;
+    sentenceTranslationBatchSize?: number;
   };
 };
 
@@ -92,7 +92,7 @@ export type OperatorPublicPayload = {
   qwenModel?: string;
   gcsBucket?: string;
   gcsClientEmail?: string;
-  sentenceContextCount?: number;
+  sentenceTranslationBatchSize?: number;
 };
 
 export type RuntimeConfigService = {
@@ -332,7 +332,7 @@ export function createRuntimeConfigService(input: {
         qwenEnvKeyConfigured: (input.env.QWEN_API_KEY?.trim() ?? "") !== "",
       },
       assistant: {
-        sentenceContextCount: sentenceContextCountOf(snapshot.state.publicPayload),
+        sentenceTranslationBatchSize: sentenceTranslationBatchSizeOf(snapshot.state.publicPayload),
       },
       ...(snapshot.state.updatedAt === undefined ? {} : { updatedAt: snapshot.state.updatedAt }),
     };
@@ -514,9 +514,9 @@ export function createRuntimeConfigService(input: {
         nextSecrets.turnstileSecret = patch.turnstile.secretKey.trim();
       }
 
-      if (patch.assistant?.sentenceContextCount !== undefined) {
-        nextPublic.sentenceContextCount = sentenceContextCountOf({
-          sentenceContextCount: patch.assistant.sentenceContextCount,
+      if (patch.assistant?.sentenceTranslationBatchSize !== undefined) {
+        nextPublic.sentenceTranslationBatchSize = sentenceTranslationBatchSizeOf({
+          sentenceTranslationBatchSize: patch.assistant.sentenceTranslationBatchSize,
         });
       }
 
@@ -577,6 +577,7 @@ export function createRuntimeConfigService(input: {
               : undefined,
           wrappingSource,
           ciphertextPresent: cipher.ciphertext !== null && cipher.ciphertext !== "",
+          sentenceTranslationBatchSize: nextPublic.sentenceTranslationBatchSize ?? 5,
         }),
       );
       if (saved !== undefined) {
@@ -682,14 +683,17 @@ function asPublicPayload(value: Record<string, unknown>): OperatorPublicPayload 
     ...(typeof value.qwenModel === "string" ? { qwenModel: value.qwenModel } : {}),
     ...(typeof value.gcsBucket === "string" ? { gcsBucket: value.gcsBucket } : {}),
     ...(typeof value.gcsClientEmail === "string" ? { gcsClientEmail: value.gcsClientEmail } : {}),
-    sentenceContextCount: sentenceContextCountOf(value),
+    sentenceTranslationBatchSize: sentenceTranslationBatchSizeOf(value),
   };
 }
 
-export function sentenceContextCountOf(value: { sentenceContextCount?: unknown }): number {
-  const raw = value.sentenceContextCount;
+/** Sentences per Managed Qwen translation request. Missing values default to 5; never reuse the old neighbor-radius field. */
+export function sentenceTranslationBatchSizeOf(value: {
+  sentenceTranslationBatchSize?: unknown;
+}): number {
+  const raw = value.sentenceTranslationBatchSize;
   if (typeof raw !== "number" || !Number.isFinite(raw)) {
-    return 1;
+    return 5;
   }
-  return Math.min(10, Math.max(0, Math.trunc(raw)));
+  return Math.min(20, Math.max(1, Math.trunc(raw)));
 }

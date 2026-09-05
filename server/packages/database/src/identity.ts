@@ -1,4 +1,4 @@
-import { restRow, restRows, type RestClient } from "./rest";
+import { restRow, restRows, type RestClient, type RestResponse } from "./rest";
 
 export type IdentityAccountStatus = "active" | "suspended" | "deletion_pending" | "deleted";
 
@@ -237,6 +237,18 @@ export function createMemoryIdentityStore(options: { now?: () => Date } = {}): I
       const existing = listed.find((device) => device.id === input.deviceId);
       if (existing?.revoked) {
         return { ok: false, code: "device_revoked" };
+      }
+      // One install has one device UUID. Signing in as another account (or a new
+      // user on a restored database) must take this install, not 409 on the PK.
+      for (const [owner, owned] of devices) {
+        if (owner === userId) {
+          continue;
+        }
+        const index = owned.findIndex((device) => device.id === input.deviceId);
+        if (index >= 0) {
+          owned.splice(index, 1);
+          devices.set(owner, owned);
+        }
       }
       const timestamp = currentIso();
       const device: IdentityDevice = {
@@ -607,15 +619,43 @@ export function createSupabaseIdentityStore(rest: RestClient): IdentityStore {
       }
       const response = await rest.request({
         method: "POST",
-        path: "/devices?on_conflict=user_id,id",
+        // Conflict on the device primary key, not (user_id, id). One install UUID
+        // must move to whoever just signed in; the composite unique key 409s instead.
+        path: "/devices?on_conflict=id",
         prefer: "resolution=merge-duplicates,return=representation",
         body,
       });
-      const row = restRow(response.body);
-      const device = row === undefined ? existing : deviceFromRow(row);
+      // Never treat a 4xx JSON object as a device row. A 409 still means another
+      // account holds this UUID when upsert-on-id is unavailable.
+      let device = deviceFromOkResponse(response) ?? existing;
+      let persistStatus = response.status;
+      if (device === undefined && response.status === 409) {
+        const previous = await selectDeviceById(rest, input.deviceId);
+        logIdentity("identity_device_reassign", {
+          userId,
+          deviceId: input.deviceId,
+          outcome: "conflict",
+          restStatus: response.status,
+          previousUserId: typeof previous?.user_id === "string" ? previous.user_id : undefined,
+          previousRevoked: previous?.revoked === true,
+        });
+        device = await reassignDevice(rest, userId, input, timestamp);
+        persistStatus = device === undefined ? response.status : 200;
+      }
       if (device === undefined) {
+        logIdentity("identity_device_persist_failed", {
+          userId,
+          deviceId: input.deviceId,
+          restStatus: response.status,
+        });
         throw new Error("failed to persist device");
       }
+      logIdentity("identity_device_bootstrapped", {
+        userId,
+        deviceId: device.id,
+        restStatus: persistStatus,
+        conflicted: response.status === 409,
+      });
       return {
         ok: true,
         profile,
@@ -682,10 +722,24 @@ export function createSupabaseIdentityStore(rest: RestClient): IdentityStore {
         },
       });
       if (!isRestOk(response.status)) {
+        logIdentity("identity_device_active_lookup", {
+          userId,
+          deviceId,
+          outcome: "store_error",
+          restStatus: response.status,
+        });
         return false;
       }
       const row = restRow(response.body);
-      return isDeviceRevocationRow(row ?? {}) && row?.revoked === false;
+      const active = isDeviceRevocationRow(row ?? {}) && row?.revoked === false;
+      if (!active) {
+        logIdentity("identity_device_active_lookup", {
+          userId,
+          deviceId,
+          outcome: row === undefined ? "missing" : "revoked",
+        });
+      }
+      return active;
     },
 
     async listProfiles() {
@@ -899,6 +953,73 @@ function profileFromRow(row: Record<string, unknown>): IdentityProfile {
     updatedAt: requiredString(row.updated_at, new Date().toISOString()),
     deletionPendingAt: nullableString(row.deletion_pending_at),
   };
+}
+
+function logIdentity(message: string, fields: Record<string, unknown>): void {
+  console.warn(JSON.stringify({ level: "warn", component: "identity", message, ...fields }));
+}
+
+function deviceFromOkResponse(response: RestResponse): IdentityDevice | undefined {
+  if (!isRestOk(response.status)) {
+    return undefined;
+  }
+  const row = restRow(response.body);
+  if (row === undefined || !isPersistedDeviceRow(row)) {
+    return undefined;
+  }
+  return deviceFromRow(row);
+}
+
+async function selectDeviceById(
+  rest: RestClient,
+  deviceId: string,
+): Promise<Record<string, unknown> | undefined> {
+  const response = await rest.request({
+    method: "GET",
+    path: "/devices",
+    query: { id: `eq.${deviceId}`, select: "id,user_id,revoked", limit: "1" },
+  });
+  if (!isRestOk(response.status)) {
+    return undefined;
+  }
+  return restRow(response.body);
+}
+
+async function reassignDevice(
+  rest: RestClient,
+  userId: string,
+  input: IdentityBootstrapInput,
+  timestamp: string,
+): Promise<IdentityDevice | undefined> {
+  const response = await rest.request({
+    method: "PATCH",
+    path: "/devices",
+    query: { id: `eq.${input.deviceId}` },
+    prefer: "return=representation",
+    body: {
+      user_id: userId,
+      platform: input.platform,
+      name: input.deviceName ?? null,
+      app_version: input.appVersion,
+      last_seen_at: timestamp,
+      revoked: false,
+      revoked_at: null,
+      updated_at: timestamp,
+      ...(input.buildNumber === undefined ? {} : { build_number: input.buildNumber }),
+    },
+  });
+  const device = deviceFromOkResponse(response);
+  logIdentity("identity_device_reassign", {
+    userId,
+    deviceId: input.deviceId,
+    outcome: device === undefined ? "failed" : "moved",
+    restStatus: response.status,
+  });
+  return device;
+}
+
+function isPersistedDeviceRow(row: Record<string, unknown>): boolean {
+  return typeof row.id === "string" && row.id !== "" && typeof row.user_id === "string";
 }
 
 function deviceFromRow(row: Record<string, unknown>): IdentityDevice {

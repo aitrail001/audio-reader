@@ -257,19 +257,24 @@ struct SettingsView: View {
                 settingRow("Play on selection") {
                     Toggle("Play audio when tapping a sentence or word", isOn: $draft.playOnSelect)
                 }
-                settingRow("Sentence context") {
-                    countStepper(
-                        value: $draft.sentenceContextCount,
-                        range: 0...10,
-                        suffix: "before and after"
-                    )
-                    .disabled(draft.llmProvider == LLMProvider.managedQwen.rawValue)
+                settingRow("Translation batch") {
+                    if draft.llmProvider == LLMProvider.managedQwen.rawValue {
+                        Text("\(state.effectiveSentenceTranslationBatchSize) sentences per request")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        countStepper(
+                            value: $draft.chapterTranslationBlockSize,
+                            range: 1...20,
+                            suffix: "sentences per request"
+                        )
+                    }
                 }
                 if draft.llmProvider == LLMProvider.managedQwen.rawValue {
-                    helper("Managed Qwen uses the operator Desk sentence context. Translate into on this page still chooses the language.")
-                }
-                settingRow("Chapter block") {
-                    countStepper(value: $draft.chapterTranslationBlockSize, range: 1...20, suffix: "sentences per request")
+                    helper("Managed Qwen uses the operator Desk translation batch. A tap sends that many sentences forward from the current one; a shorter remainder at the end of a chapter is sent as-is. Translate into on this page still chooses the language.")
+                } else if draft.llmProvider == LLMProvider.appleFoundation.rawValue {
+                    helper("How many sentences one translation request covers, starting from the current sentence. On-device Apple Intelligence uses at most 2. A shorter remainder at the end of a chapter is sent as-is.")
+                } else {
+                    helper("How many sentences one translation request covers, starting from the current sentence. A shorter remainder at the end of a chapter is sent as-is.")
                 }
                 settingRow("Chat context") {
                     countStepper(value: $draft.chatContextCount, range: 0...20, suffix: "before and after")

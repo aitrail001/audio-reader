@@ -3,7 +3,7 @@ main = "src/worker.ts"
 compatibility_date = "2026-08-26"
 
 [vars]
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.2.0"
 
 [triggers]
 crons = ["* * * * *"]
@@ -15,6 +15,8 @@ max_batch_timeout = 5
 
 [env.staging]
 name = "audio-reader-job-worker-staging"
+[env.staging.placement]
+region = "aws:ap-southeast-1"
 
 [env.staging.triggers]
 crons = ["* * * * *"]
@@ -25,13 +27,15 @@ max_batch_size = 16
 max_batch_timeout = 5
 
 [env.staging.vars]
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.2.0"
 SUPABASE_STORAGE_BUCKET = "audio-reader-assets"
 QWEN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 QWEN_MODEL = "qwen3.7-plus"
 
 [env.production]
 name = "audio-reader-job-worker-production"
+[env.production.placement]
+region = "aws:ap-southeast-1"
 
 [env.production.triggers]
 crons = ["* * * * *"]
@@ -42,7 +46,7 @@ max_batch_size = 16
 max_batch_timeout = 5
 
 [env.production.vars]
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.2.0"
 SUPABASE_STORAGE_BUCKET = "audio-reader-assets"
 QWEN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 QWEN_MODEL = "qwen3.7-plus"

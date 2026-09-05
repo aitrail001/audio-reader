@@ -1146,15 +1146,19 @@ enum ChapterTranslationBatch {
         }
     }
 
-    /// Same grouping as `blocks`, so tapping one sentence reuses the chapter-translation chunk.
-    static func alignedBlock(
-        containing target: TranscriptSegment,
+    /// Tapping one sentence sends that sentence plus the next ones in the batch, not a
+    /// chapter-aligned window that can start before the tap. A short remainder at the
+    /// end of the chapter is sent as-is.
+    static func forwardBlock(
+        startingAt target: TranscriptSegment,
         in segments: [TranscriptSegment],
         size: Int
     ) -> [TranscriptSegment] {
-        blocks(segments, size: size).first { block in
-            block.contains { $0.id == target.id }
-        } ?? [target]
+        guard let index = segments.firstIndex(where: { $0.id == target.id }) else {
+            return [target]
+        }
+        let end = min(segments.endIndex, index + max(1, size))
+        return Array(segments[index..<end])
     }
 
     static func parse(_ raw: String, expectedIDs: [String]) throws -> [ChapterTranslationResult] {

@@ -1594,11 +1594,14 @@ private final class WebAuthPresenter: NSObject, ASWebAuthenticationPresentationC
         NSApp.keyWindow ?? NSApp.windows.first ?? ASPresentationAnchor()
 #else
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let windows = scenes.flatMap(\.windows)
+        let orderedScenes = scenes.sorted { left, right in
+            left.activationState == .foregroundActive && right.activationState != .foregroundActive
+        }
+        let windows = orderedScenes.flatMap(\.windows)
         if let window = windows.first(where: \.isKeyWindow) ?? windows.first {
             return window
         }
-        guard let scene = scenes.first else {
+        guard let scene = orderedScenes.first else {
             // Authentication can only be presented while the app owns an active scene.
             preconditionFailure("Web authentication requested without a window scene")
         }
@@ -1683,7 +1686,9 @@ private enum WebAuthCallbacks {
             }
         }
         session.presentationContextProvider = presenter
-        session.prefersEphemeralWebBrowserSession = true
+        // Reuse the system Google session. An ephemeral sheet always shows the
+        // consent screen and cannot complete hosted GoTrue against a signed-in account.
+        session.prefersEphemeralWebBrowserSession = false
         return session
     }
 

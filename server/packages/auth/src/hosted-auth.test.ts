@@ -297,6 +297,7 @@ describe("hosted GoTrue auth service", () => {
     expect(googleUrl.pathname).toBe("/auth/v1/authorize");
     expect(googleUrl.searchParams.get("provider")).toBe("google");
     expect(googleUrl.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(googleUrl.searchParams.get("prompt")).toBe("select_account");
     expect(googleUrl.searchParams.get("redirect_to")).toBe("audioreader://auth/callback");
     expect(google.value.state).toBe("oauth-state-google");
     expect(google.value.authorizationUrl).not.toContain("local-complete");
@@ -313,6 +314,7 @@ describe("hosted GoTrue auth service", () => {
     }
     const microsoftUrl = new URL(microsoft.value.authorizationUrl);
     expect(microsoftUrl.searchParams.get("provider")).toBe("azure");
+    expect(microsoftUrl.searchParams.get("prompt")).toBe("select_account");
     expect(microsoftUrl.searchParams.get("scopes")).toBe("email");
     expect(calls.map((call) => call.url)).toEqual([
       "https://example.supabase.co/auth/v1/settings",
@@ -539,6 +541,62 @@ describe("hosted GoTrue auth service", () => {
     expect(await second.listDevices(restored)).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: DEVICE_ID, revoked: false })]),
     );
+  });
+
+  it("moves one install UUID to a newly signed-in account", async () => {
+    const aliceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const bobId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const identity = createMemoryIdentityStore();
+    const aliceToken = await signAccessToken({ sub: aliceId, email: "alice@example.com" }, JWT);
+    const bobToken = await signAccessToken({ sub: bobId, email: "bob@example.com" }, JWT);
+    const { fetch } = createFetch((call) => {
+      if (call.url.includes("/token") || call.url.includes("/user")) {
+        return jsonResponse(200, { access_token: aliceToken });
+      }
+      return jsonResponse(500, { message: "unused" });
+    });
+    const auth = createHostedAuthService({
+      jwt: JWT,
+      supabaseUrl: "https://example.supabase.co",
+      supabaseAnonKey: "anon-key",
+      fetch,
+      identity,
+    });
+    const alice = await auth.authenticate(
+      new Request("https://audio-reader.local/session", {
+        headers: { authorization: `Bearer ${aliceToken}`, "X-Device-Id": DEVICE_ID },
+      }),
+    );
+    const bob = await auth.authenticate(
+      new Request("https://audio-reader.local/session", {
+        headers: { authorization: `Bearer ${bobToken}`, "X-Device-Id": DEVICE_ID },
+      }),
+    );
+    expect(alice?.accountId).toBe(aliceId);
+    expect(bob?.accountId).toBe(bobId);
+    if (alice === null || bob === null) {
+      return;
+    }
+    expect(
+      (
+        await auth.bootstrap(alice, {
+          deviceId: DEVICE_ID,
+          platform: "macos",
+          appVersion: "1.0.0",
+        })
+      ).ok,
+    ).toBe(true);
+    expect(
+      (
+        await auth.bootstrap(bob, {
+          deviceId: DEVICE_ID,
+          platform: "macos",
+          appVersion: "2.6.1",
+        })
+      ).ok,
+    ).toBe(true);
+    expect((await auth.listDevices(alice)).map((device) => device.id)).toEqual([]);
+    expect((await auth.listDevices(bob)).map((device) => device.id)).toEqual([DEVICE_ID]);
   });
 
   it("refuses suspended accounts even with a valid access token", async () => {

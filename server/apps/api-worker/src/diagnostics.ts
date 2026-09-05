@@ -251,13 +251,6 @@ export async function buildOperatorDiagnostics(input: {
   });
   if (input.ops !== undefined) {
     const cache = await input.ops.listCache();
-    const events = await input.ops.listProductEvents({ limit: 20 });
-    notes.push(`Postgres assistant_cache_entries visible to admin: ${String(cache.length)}.`);
-    notes.push(
-      `Postgres product_events (latest page): ${String(events.length)}. Latest: ${
-        events[0]?.name ?? "none"
-      }.`,
-    );
     if (cache.length === 0) {
       notes.push(
         "Cache stays empty unless the app posts POST /v1/ai/translations, POST /v1/ai/translation-batches, or POST /v1/ai/chapter-summaries. POST /v1/ai/chat does not write cache rows.",

@@ -317,6 +317,87 @@ struct AuthSessionClientTests {
     }
 
     @MainActor
+    @Test("refresh rebinds this install before listing devices")
+    func refreshRebindsInstallBeforeListingDevices() async throws {
+        let client = FakeAuthClient()
+        let store = InMemoryAuthSessionStore(deviceID: deviceID)
+        let session = AccountSession(
+            client: client,
+            store: store,
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test
+        )
+        await session.signInWithOAuth(.google)
+        #expect(session.mode == .signedInSyncOff)
+        #expect(session.devices.contains { $0.id == deviceID })
+
+        client.forgetRegisteredDevices()
+        await session.refreshSession()
+
+        #expect(session.mode == .signedInSyncOff)
+        #expect(session.errorMessage == nil)
+        #expect(session.recoveryMessage == nil)
+        #expect(session.devices.contains { $0.id == deviceID })
+        #expect(client.bootstrapCount == 2)
+    }
+
+    @MainActor
+    @Test("an iPad auth callback after the browser session already signed in is ignored")
+    func completeOAuthAfterSignedInIsIgnored() async throws {
+        let client = FakeAuthClient()
+        let session = AccountSession(
+            client: client,
+            store: InMemoryAuthSessionStore(deviceID: deviceID),
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test
+        )
+        await session.signInWithOAuth(.google)
+        #expect(session.mode == .signedInSyncOff)
+        #expect(client.exchangeCount == 1)
+
+        var components = URLComponents(url: ProductAPI.callbackURL, resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            URLQueryItem(name: "code", value: "already-used"),
+            URLQueryItem(name: "state", value: "stale")
+        ]
+        await session.completeOAuth(callbackURL: try #require(components.url))
+
+        #expect(client.exchangeCount == 1)
+        #expect(session.mode == .signedInSyncOff)
+        #expect(session.errorMessage == nil)
+        #expect(session.recoveryMessage == nil)
+    }
+
+    @MainActor
+    @Test("an iPad onOpenURL callback keeps the session when the browser sheet later cancels")
+    func onOpenURLCallbackWinsOverCancelledBrowserSession() async throws {
+        let client = FakeAuthClient()
+        let browser = GatingOAuthBrowserSession()
+        let session = AccountSession(
+            client: client,
+            store: InMemoryAuthSessionStore(deviceID: deviceID),
+            oauth: browser,
+            environment: .test
+        )
+        let signIn = Task { await session.signInWithOAuth(.google) }
+        await browser.waitUntilStarted()
+        let authorizationURL = try #require(session.pendingAuthorizationURL)
+        var callback = URLComponents(url: ProductAPI.callbackURL, resolvingAgainstBaseURL: false)!
+        callback.queryItems = URLComponents(url: authorizationURL, resolvingAgainstBaseURL: false)?.queryItems
+        await session.completeOAuth(callbackURL: try #require(callback.url))
+        #expect(session.mode == .signedInSyncOff)
+        #expect(client.exchangeCount == 1)
+
+        await browser.finish(.failure(AuthClientError.cancelled))
+        await signIn.value
+
+        #expect(session.mode == .signedInSyncOff)
+        #expect(session.errorMessage == nil)
+        #expect(session.recoveryMessage == nil)
+        #expect(client.exchangeCount == 1)
+    }
+
+    @MainActor
     @Test("OAuth sign-in ignores a second attempt while authorization is starting")
     func overlappingOAuthSignInIsIgnored() async throws {
         let gate = OAuthAuthorizeGate()
@@ -621,6 +702,33 @@ struct AuthSessionClientTests {
 
     private struct NativeCallbackAuthorizeBody: Decodable {
         var redirectUri: String
+    }
+
+    private actor GatingOAuthBrowserSession: OAuthBrowserSession {
+        private var continuation: CheckedContinuation<URL, Error>?
+        private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+        private var started = false
+
+        func start(authorizationURL: URL, callbackScheme: String) async throws -> URL {
+            _ = authorizationURL
+            _ = callbackScheme
+            started = true
+            let waiters = startedWaiters
+            startedWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+            return try await withCheckedThrowingContinuation { continuation = $0 }
+        }
+
+        func waitUntilStarted() async {
+            guard !started else { return }
+            await withCheckedContinuation { startedWaiters.append($0) }
+        }
+
+        func finish(_ result: Result<URL, Error>) {
+            let continuation = self.continuation
+            self.continuation = nil
+            continuation?.resume(with: result)
+        }
     }
 
     private actor OAuthAuthorizeGate {

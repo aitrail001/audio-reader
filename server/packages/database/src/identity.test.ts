@@ -76,6 +76,34 @@ describe("memory identity store", () => {
     ).toEqual({ ok: false, code: "device_revoked" });
   });
 
+  it("moves an install UUID to a newly signed-in account", async () => {
+    const store = createMemoryIdentityStore();
+    await store.ensureProfile({ userId: USER_A, email: "a@example.com" });
+    await store.ensureProfile({ userId: USER_B, email: "b@example.com" });
+    const first = await store.bootstrapDevice(USER_A, {
+      deviceId: DEVICE_A,
+      platform: "macos",
+      appVersion: "1.0.0",
+    });
+    expect(first.ok).toBe(true);
+    const moved = await store.bootstrapDevice(USER_B, {
+      deviceId: DEVICE_A,
+      platform: "macos",
+      appVersion: "2.6.1",
+      deviceName: "New user Mac",
+    });
+    expect(moved.ok).toBe(true);
+    if (!moved.ok) {
+      return;
+    }
+    expect(moved.device.id).toBe(DEVICE_A);
+    expect(moved.device.appVersion).toBe("2.6.1");
+    expect((await store.listDevices(USER_A)).map((device) => device.id)).toEqual([]);
+    expect((await store.listDevices(USER_B)).map((device) => device.id)).toEqual([DEVICE_A]);
+    expect(await store.hasActiveDevice(USER_A, DEVICE_A)).toBe(false);
+    expect(await store.hasActiveDevice(USER_B, DEVICE_A)).toBe(true);
+  });
+
   it("rejects stale settings replacements", async () => {
     const store = createMemoryIdentityStore();
     await store.ensureProfile({ userId: USER_A, email: "a@example.com" });
@@ -197,6 +225,191 @@ describe("supabase identity store", () => {
     });
     const store = createSupabaseIdentityStore(rest);
     await expect(store.hasAdminRole(USER_A)).resolves.toBe(false);
+  });
+
+  it("does not treat a PostgREST 409 body as a bootstrapped device", async () => {
+    const calls: RecordedCall[] = [];
+    const fetchImpl: RestFetch = (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const headers = new Headers(init?.headers);
+      calls.push({
+        url,
+        method: init?.method ?? "GET",
+        body: typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : null,
+        authorization: headers.get("authorization") ?? undefined,
+        prefer: headers.get("prefer") ?? undefined,
+      });
+      if (url.includes("/profiles") && (init?.method ?? "GET") === "GET") {
+        return Promise.resolve(
+          jsonResponse(200, [
+            {
+              id: "11111111-1111-4111-8111-111111111111",
+              user_id: USER_A,
+              email: "a@example.com",
+              account_status: "active",
+              created_at: "2026-08-27T12:00:00.000Z",
+              updated_at: "2026-08-27T12:00:00.000Z",
+            },
+          ]),
+        );
+      }
+      if (url.includes("/user_settings")) {
+        return Promise.resolve(
+          jsonResponse(200, [
+            {
+              user_id: USER_A,
+              source_language: "en",
+              target_language: "en",
+              reader_level: "intermediate",
+              playback_rate: 1,
+              skip_seconds: 15,
+              appearance: "system",
+              server_version: 0,
+              updated_at: "2026-08-27T12:00:00.000Z",
+            },
+          ]),
+        );
+      }
+      if (url.includes("/devices") && (init?.method ?? "GET") === "GET") {
+        return Promise.resolve(jsonResponse(200, []));
+      }
+      if (url.includes("/devices") && init?.method === "POST") {
+        return Promise.resolve(
+          jsonResponse(409, { code: "23505", message: "duplicate key value violates unique constraint" }),
+        );
+      }
+      if (url.includes("/devices") && init?.method === "PATCH") {
+        return Promise.resolve(
+          jsonResponse(200, [
+            {
+              id: DEVICE_A,
+              user_id: USER_A,
+              platform: "macos",
+              name: "New user Mac",
+              app_version: "2.6.1",
+              revoked: false,
+              created_at: "2026-08-28T00:00:00.000Z",
+              last_seen_at: "2026-09-05T12:00:00.000Z",
+            },
+          ]),
+        );
+      }
+      return Promise.resolve(jsonResponse(500, { message: "unexpected" }));
+    };
+    const store = createSupabaseIdentityStore(
+      createSupabaseRestClient({
+        url: "https://example.supabase.co",
+        serviceRoleKey: "service-role-key",
+        fetch: fetchImpl,
+      }),
+    );
+    const bootstrapped = await store.bootstrapDevice(USER_A, {
+      deviceId: DEVICE_A,
+      platform: "macos",
+      appVersion: "2.6.1",
+      deviceName: "New user Mac",
+    });
+    expect(bootstrapped.ok).toBe(true);
+    if (!bootstrapped.ok) {
+      return;
+    }
+    expect(bootstrapped.device.id).toBe(DEVICE_A);
+    expect(bootstrapped.device.appVersion).toBe("2.6.1");
+    expect(
+      calls.some((call) => call.method === "POST" && call.url.includes("on_conflict=id")),
+    ).toBe(true);
+    expect(calls.some((call) => call.method === "PATCH" && call.url.includes("id=eq." + DEVICE_A))).toBe(
+      true,
+    );
+    expect(bootstrapped.device.id).not.toBe("");
+  });
+
+  it("upserts an install UUID onto the signed-in account in one PostgREST write", async () => {
+    const calls: RecordedCall[] = [];
+    const fetchImpl: RestFetch = (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const headers = new Headers(init?.headers);
+      calls.push({
+        url,
+        method: init?.method ?? "GET",
+        body: typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : null,
+        authorization: headers.get("authorization") ?? undefined,
+        prefer: headers.get("prefer") ?? undefined,
+      });
+      if (url.includes("/profiles") && (init?.method ?? "GET") === "GET") {
+        return Promise.resolve(
+          jsonResponse(200, [
+            {
+              id: "11111111-1111-4111-8111-111111111111",
+              user_id: USER_B,
+              email: "b@example.com",
+              account_status: "active",
+              created_at: "2026-08-27T12:00:00.000Z",
+              updated_at: "2026-08-27T12:00:00.000Z",
+            },
+          ]),
+        );
+      }
+      if (url.includes("/user_settings")) {
+        return Promise.resolve(
+          jsonResponse(200, [
+            {
+              user_id: USER_B,
+              source_language: "en",
+              target_language: "en",
+              reader_level: "intermediate",
+              playback_rate: 1,
+              skip_seconds: 15,
+              appearance: "system",
+              server_version: 0,
+              updated_at: "2026-08-27T12:00:00.000Z",
+            },
+          ]),
+        );
+      }
+      if (url.includes("/devices") && (init?.method ?? "GET") === "GET") {
+        return Promise.resolve(jsonResponse(200, []));
+      }
+      if (url.includes("/devices") && init?.method === "POST") {
+        return Promise.resolve(
+          jsonResponse(200, [
+            {
+              id: DEVICE_A,
+              user_id: USER_B,
+              platform: "macos",
+              name: "New user Mac",
+              app_version: "2.6.1",
+              revoked: false,
+              created_at: "2026-08-28T00:00:00.000Z",
+              last_seen_at: "2026-09-05T12:00:00.000Z",
+            },
+          ]),
+        );
+      }
+      return Promise.resolve(jsonResponse(500, { message: "unexpected" }));
+    };
+    const store = createSupabaseIdentityStore(
+      createSupabaseRestClient({
+        url: "https://example.supabase.co",
+        serviceRoleKey: "service-role-key",
+        fetch: fetchImpl,
+      }),
+    );
+    const bootstrapped = await store.bootstrapDevice(USER_B, {
+      deviceId: DEVICE_A,
+      platform: "macos",
+      appVersion: "2.6.1",
+      deviceName: "New user Mac",
+    });
+    expect(bootstrapped.ok).toBe(true);
+    if (!bootstrapped.ok) {
+      return;
+    }
+    expect(bootstrapped.device.id).toBe(DEVICE_A);
+    expect(calls.some((call) => call.method === "POST" && call.url.includes("on_conflict=id"))).toBe(
+      true,
+    );
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
   });
 
   it("treats device lookup failures as revoked", async () => {

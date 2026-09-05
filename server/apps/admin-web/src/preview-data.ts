@@ -48,7 +48,7 @@ export const PREVIEW_RUNTIME: RuntimeConfig = {
     otpFromConfigured: true,
     qwenEnvKeyConfigured: false,
   },
-  assistant: { sentenceContextCount: 1 },
+  assistant: { sentenceTranslationBatchSize: 5 },
   updatedAt: "2026-08-28T12:00:00.000Z",
 };
 

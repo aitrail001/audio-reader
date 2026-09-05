@@ -34,7 +34,7 @@ function runtime(overrides: Partial<RuntimeConfigView["qwen"]> = {}): RuntimeCon
       source: "none",
     },
     turnstile: { configured: false, source: "none" },
-    assistant: { sentenceContextCount: 1 },
+    assistant: { sentenceTranslationBatchSize: 5 },
     bootstrap: {
       supabaseUrlConfigured: true,
       supabaseAnonKeyConfigured: true,
@@ -159,6 +159,36 @@ describe("operator diagnostics cache notes", () => {
     );
     expect(diagnostics.notes.some((note) => note.includes("POST /v1/ai/chat does not write"))).toBe(
       true,
+    );
+  });
+
+  it("does not treat populated cache or product-event counts as configuration drift", async () => {
+    const database = createFakeDatabaseClient();
+    await database.ops.putCache({
+      id: "00000000-0000-4000-8000-0000000000c1",
+      cacheKey: "ck-populated",
+      task: "translation",
+      state: "active",
+      sourceLanguage: "en",
+      targetLanguage: "zh",
+      editionFingerprint: "ed-1",
+      policyVersion: "qwen-managed-v1",
+      payload: { translation: "你好" },
+    });
+    const diagnostics = await buildOperatorDiagnostics({
+      runtime: runtime(),
+      flags: [{ key: "managed_qwen", enabled: true }],
+      quotas: [{ key: "qwen_tasks_day", used: 0, limit: 50, periodEndsAt: "9999-12-31T23:59:59.000Z" }],
+      policies: [],
+      qwen: createFakeQwenClient(),
+      probeComplete: false,
+      requestId: "diag-populated-cache",
+      ops: database.ops,
+    });
+    expect(diagnostics.notes.some((note) => note.includes("visible to admin"))).toBe(false);
+    expect(diagnostics.notes.some((note) => note.includes("product_events"))).toBe(false);
+    expect(diagnostics.notes.some((note) => note.includes("POST /v1/ai/translation-batches"))).toBe(
+      false,
     );
   });
 });

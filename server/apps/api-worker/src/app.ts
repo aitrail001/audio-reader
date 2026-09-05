@@ -548,6 +548,7 @@ async function handleRequest(
       localOAuthComplete: options.environment === "local" || options.environment === "test",
       ops: options.database.ops,
       accountSyncReadiness,
+      ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
       ...(options.turnstileSiteKey === undefined || options.turnstileSiteKey === ""
         ? {}
         : { turnstileSiteKey: options.turnstileSiteKey }),

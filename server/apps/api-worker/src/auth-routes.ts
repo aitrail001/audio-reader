@@ -13,6 +13,7 @@ import { asHead, jsonResponse, problemResponse } from "./http";
 import { withIdempotency, type IdempotencyStore } from "./idempotency";
 import { requireBoundDevice } from "./route-helpers";
 import type { AccountSyncReadinessService } from "./account-sync-readiness";
+import { sentenceTranslationBatchSizeOf, type RuntimeConfigService } from "./runtime-config";
 
 type Profile = components["schemas"]["Profile"];
 type TokenPair = components["schemas"]["TokenPair"];
@@ -73,6 +74,7 @@ export type AuthRouteContext = {
   turnstileSiteKey?: string;
   ops?: OpsStore;
   accountSyncReadiness: AccountSyncReadinessService;
+  runtime?: RuntimeConfigService;
 };
 
 export function isAuthPath(path: string): boolean {
@@ -564,11 +566,35 @@ async function bootstrapSession(context: AuthRouteContext): Promise<Response> {
       const listed = await auth.listDevices(principal);
       const active = listed.filter((device) => !device.revoked);
       const alreadyRegistered = active.some((device) => device.id === deviceId);
+      console.warn(
+        JSON.stringify({
+          level: "info",
+          component: "auth",
+          message: "auth_bootstrap_start",
+          requestId: context.requestId,
+          accountId: principal.accountId,
+          deviceId,
+          alreadyRegistered,
+          activeDeviceCount: active.length,
+        }),
+      );
       if (!alreadyRegistered && context.ops !== undefined) {
         const quotas = await context.ops.quotasFor(principal.accountId);
         const devicesQuota = quotas.find((item) => item.key === "devices");
         const limit = devicesQuota?.limit ?? 2;
         if (active.length >= limit) {
+          console.warn(
+            JSON.stringify({
+              level: "warn",
+              component: "auth",
+              message: "auth_bootstrap_rejected",
+              requestId: context.requestId,
+              accountId: principal.accountId,
+              deviceId,
+              outcome: "device_limit",
+              limit,
+            }),
+          );
           return problemResponse({
             status: 409,
             code: "device_limit",
@@ -588,11 +614,34 @@ async function bootstrapSession(context: AuthRouteContext): Promise<Response> {
         ...(timeZone === undefined ? {} : { timeZone }),
       });
       if (!bootstrapped.ok) {
+        console.warn(
+          JSON.stringify({
+            level: "warn",
+            component: "auth",
+            message: "auth_bootstrap_rejected",
+            requestId: context.requestId,
+            accountId: principal.accountId,
+            deviceId,
+            outcome: bootstrapped.code,
+          }),
+        );
         if (bootstrapped.code === "device_revoked") {
           return forbidden(context.requestId, "This device has been revoked.");
         }
         return unauthorized(context.requestId, "Authentication required.");
       }
+      console.warn(
+        JSON.stringify({
+          level: "info",
+          component: "auth",
+          message: "auth_bootstrap_ok",
+          requestId: context.requestId,
+          accountId: principal.accountId,
+          deviceId: bootstrapped.value.device.id,
+          requestedDeviceId: deviceId,
+          rebound: bootstrapped.value.device.id === deviceId,
+        }),
+      );
       const flags =
         context.ops === undefined
           ? [...bootstrapped.value.featureFlags]
@@ -627,6 +676,23 @@ async function bootstrapSession(context: AuthRouteContext): Promise<Response> {
         context.ops === undefined
           ? [...bootstrapped.value.quotas]
           : await context.ops.quotasFor(principal.accountId);
+      let sentenceTranslationBatchSize = 5;
+      if (context.runtime !== undefined) {
+        try {
+          sentenceTranslationBatchSize = sentenceTranslationBatchSizeOf(
+            (await context.runtime.view()).assistant,
+          );
+        } catch {
+          console.warn(
+            JSON.stringify({
+              level: "warn",
+              message: "auth_bootstrap_batch_size_unavailable",
+              requestId: context.requestId,
+              outcome: "defaulted",
+            }),
+          );
+        }
+      }
       const payload: BootstrapResponse = {
         profile: toProfile(bootstrapped.value.profile),
         device: bootstrapped.value.device,
@@ -635,6 +701,7 @@ async function bootstrapSession(context: AuthRouteContext): Promise<Response> {
         quotas,
         syncCursor: bootstrapped.value.syncCursor,
         accountSyncReadiness,
+        sentenceTranslationBatchSize,
       };
       return jsonResponse(payload);
     },
@@ -938,7 +1005,9 @@ async function requireBoundProductPrincipal(
         return false;
       }
       const devices = await auth.listDevices(principal);
-      return devices.some((device) => device.id === deviceId && !device.revoked);
+      return devices.some(
+        (device) => device.id.toLowerCase() === deviceId.toLowerCase() && !device.revoked,
+      );
     },
   });
   if (bound instanceof Response) {

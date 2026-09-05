@@ -755,6 +755,107 @@ struct AccountSessionSyncTests {
     }
 
     @MainActor
+    @Test("a live missing-object 404 does not block bootstrap or pending uploads")
+    func liveMissingAssetDoesNotBlockPendingPush() async throws {
+        let auth = FakeAuthClient()
+        let sync = FakeSyncClient()
+        sync.missingAssetProblemCode = "not_found"
+        let bytes = Data(#"{"chapterID":"local-chapter","segments":[]}"#.utf8)
+        let sha = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let presentAssetID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        sync.seedAssetBody(assetID: presentAssetID, bytes: bytes)
+        sync.bootstrapPages = [
+            SyncBootstrapResponse(
+                entities: [
+                    SyncBootstrapEntity(
+                        sequence: 1,
+                        entityType: OutboxEntityType.transcript.rawValue,
+                        entityId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+                        operation: OutboxOperation.upsert.rawValue,
+                        revision: 1,
+                        changedAt: "2026-08-31T00:00:00Z",
+                        payload: [
+                            "assetId": .string(presentAssetID),
+                            "revisionId": .string("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1"),
+                            "chapterId": .string("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+                            "sha256": .string(sha),
+                            "encoding": .string("identity-json-v1"),
+                            "compressedBytes": .number(Double(bytes.count)),
+                            "originalBytes": .number(Double(bytes.count)),
+                            "segmentCount": .number(0),
+                        ],
+                        payloadHash: sha
+                    ),
+                    SyncBootstrapEntity(
+                        sequence: 2,
+                        entityType: OutboxEntityType.transcript.rawValue,
+                        entityId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+                        operation: OutboxOperation.upsert.rawValue,
+                        revision: 1,
+                        changedAt: "2026-08-31T00:00:00Z",
+                        payload: [
+                            "assetId": .string("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2"),
+                            "revisionId": .string("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2"),
+                            "chapterId": .string("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+                            "sha256": .string(sha),
+                            "encoding": .string("identity-json-v1"),
+                            "compressedBytes": .number(Double(bytes.count)),
+                            "originalBytes": .number(Double(bytes.count)),
+                            "segmentCount": .number(0),
+                        ],
+                        payloadHash: sha
+                    ),
+                ],
+                cursor: "2",
+                nextOffset: 2,
+                hasMore: false
+            )
+        ]
+        let outbox = InMemorySyncOutboxRepository()
+        let mutation = OutboxMutation(
+            id: MutationID(rawValue: "00000000-0000-4000-8000-000000000155"),
+            entityType: .vocabulary,
+            entityID: "10000000-0000-4000-8000-000000000155",
+            operation: .upsert,
+            baseRevision: .zero,
+            occurredAt: Date(timeIntervalSince1970: 1_777_000_000),
+            payload: Data(#"{"surface":"pending"}"#.utf8)
+        )
+        try outbox.enqueue(mutation)
+        let applied = LockingBox(false)
+        let cursor = InMemorySyncCursorStore()
+        let session = AccountSession(
+            client: auth,
+            store: InMemoryAuthSessionStore(deviceID: "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+            oauth: ScriptedOAuthBrowserSession.passthrough(),
+            environment: .test,
+            syncRuntime: AccountSyncRuntime(
+                client: sync,
+                outbox: outbox,
+                cursor: cursor,
+                snapshot: { [] },
+                applyPage: { _, _, committedCursor in
+                    applied.value = true
+                    try cursor.saveCursor(committedCursor)
+                }
+            )
+        )
+        await session.requestEmailCode("bootstrap-missing-live@example.com")
+        await session.verifyEmailCode("123456")
+        session.setSyncEnabled(true)
+
+        await session.synchronize()
+
+        #expect(session.syncStatus.phase == .completed)
+        #expect(applied.value)
+        #expect(try cursor.loadCursor() != "0")
+        #expect(try outbox.pendingMutations().isEmpty)
+        #expect(sync.pushed.contains { request in
+            request.mutations.contains { $0.mutationId == mutation.id.rawValue }
+        })
+    }
+
+    @MainActor
     @Test("a new device hydrates only transcript assets without cloud-media consent")
     func bootstrapHydratesOnlyTranscriptAssetsWithoutCloudMediaConsent() async throws {
         let auth = FakeAuthClient()

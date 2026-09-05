@@ -1649,6 +1649,7 @@ export interface components {
             quotas: components["schemas"]["Quota"][];
             syncCursor: string;
             accountSyncReadiness: components["schemas"]["AccountSyncReadiness"];
+            sentenceTranslationBatchSize?: number;
         };
         UserSettings: {
             revision: number;
@@ -2539,7 +2540,7 @@ export interface components {
                 qwenEnvKeyConfigured?: boolean;
             };
             assistant: {
-                sentenceContextCount: number;
+                sentenceTranslationBatchSize: number;
             };
             /** Format: date-time */
             updatedAt?: string;
@@ -2591,7 +2592,7 @@ export interface components {
                 secretKey?: string | null;
             };
             assistant?: {
-                sentenceContextCount?: number;
+                sentenceTranslationBatchSize?: number;
             };
         };
         CacheEntry: {

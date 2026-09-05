@@ -26,6 +26,22 @@ describe("@audio-reader/qwen", () => {
     );
   });
 
+  it("can return successive completion payloads", async () => {
+    const client = createFakeQwenClient({
+      texts: ['{"ok":false}', '{"ok":true}'],
+    });
+    await expect(client.complete({ messages: [{ role: "user", content: "hi" }] })).resolves.toEqual({
+      ok: true,
+      text: '{"ok":false}',
+      model: "qwen3.7-plus",
+    });
+    await expect(client.complete({ messages: [{ role: "user", content: "hi" }] })).resolves.toEqual({
+      ok: true,
+      text: '{"ok":true}',
+      model: "qwen3.7-plus",
+    });
+  });
+
   it("can simulate Qwen unavailability", async () => {
     const client = createFakeQwenClient({ status: "unavailable" });
     await expect(client.ping()).resolves.toBe("unavailable");

@@ -70,6 +70,7 @@ export async function requireBoundDevice(input: {
     logDeviceBinding({
       requestId: input.requestId,
       accountId: input.accountId,
+      deviceId,
       outcome: "missing_header",
     });
     return problemResponse({
@@ -85,6 +86,7 @@ export async function requireBoundDevice(input: {
     logDeviceBinding({
       requestId: input.requestId,
       accountId: input.accountId,
+      deviceId,
       outcome: "unregistered_or_revoked",
     });
     return problemResponse({
@@ -98,7 +100,12 @@ export async function requireBoundDevice(input: {
   return deviceId;
 }
 
-function logDeviceBinding(event: { requestId: string; accountId: string; outcome: string }): void {
+function logDeviceBinding(event: {
+  requestId: string;
+  accountId: string;
+  deviceId: string;
+  outcome: string;
+}): void {
   console.warn(
     JSON.stringify({
       level: "warn",
@@ -106,6 +113,7 @@ function logDeviceBinding(event: { requestId: string; accountId: string; outcome
       message: "require_bound_device",
       requestId: event.requestId,
       accountId: event.accountId,
+      deviceId: event.deviceId,
       outcome: event.outcome,
     }),
   );

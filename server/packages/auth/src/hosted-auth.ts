@@ -409,6 +409,9 @@ export function createHostedAuthService(options: HostedAuthServiceOptions): Auth
         authorizationUrl.searchParams.set("redirect_to", input.redirectUri);
         authorizationUrl.searchParams.set("code_challenge", input.codeChallenge);
         authorizationUrl.searchParams.set("code_challenge_method", "S256");
+        // Forwarded to Google/Azure. Without this, a shared Safari Google
+        // session silently re-auths the previous account after app sign-out.
+        authorizationUrl.searchParams.set("prompt", "select_account");
         if (input.provider === "microsoft") {
           authorizationUrl.searchParams.set("scopes", "email");
         }

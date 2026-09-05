@@ -348,6 +348,8 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
     public private(set) var manifestLookups: [String] = []
     public private(set) var downloadedAssetIDs: [String] = []
     public private(set) var discoveryQueryCount = 0
+    /// Live Worker 404s use `not_found`. Keep the default so FakeSyncClient still fails closed.
+    public var missingAssetProblemCode = "asset_missing"
     private var publishedAssetBodies: [String: Data] = [:]
     private var publishedAssetFiles: [String: URL] = [:]
     private var assetManifests: [String: SyncAssetManifest] = [:]
@@ -450,7 +452,7 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
             downloadedAssetIDs.append(assetID)
             if let file = publishedAssetFiles[assetID] { return file }
             guard let bytes = publishedAssetBodies[assetID] else {
-                throw AuthClientError.problem(status: 404, code: "asset_missing", detail: "Asset is missing.")
+                throw missingRemoteAssetError()
             }
             let actual = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
             guard bytes.count == compressedBytes, actual == sha256 else {
@@ -490,7 +492,7 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
         return try withLock {
             manifestLookups.append(assetID)
             guard let manifest = assetManifests[assetID] else {
-                throw AuthClientError.problem(status: 404, code: "asset_missing", detail: "Asset is missing.")
+                throw missingRemoteAssetError()
             }
             return manifest
         }
@@ -589,6 +591,16 @@ public final class FakeSyncClient: SyncClient, @unchecked Sendable {
             if !bootstrapPages.isEmpty { return bootstrapPages.removeFirst() }
             return SyncBootstrapResponse(entities: [], cursor: "0", nextOffset: 0, hasMore: false)
         }
+    }
+
+    private func missingRemoteAssetError() -> AuthClientError {
+        .problem(
+            status: 404,
+            code: missingAssetProblemCode,
+            detail: missingAssetProblemCode == "not_found"
+                ? "The requested resource does not exist."
+                : "Asset is missing."
+        )
     }
 
     private func withLock<T>(_ body: () throws -> T) rethrows -> T {

@@ -274,7 +274,7 @@ export function App() {
   const [qwenKey, setQwenKey] = useState("");
   const [qwenBaseUrl, setQwenBaseUrl] = useState("");
   const [qwenModel, setQwenModel] = useState("");
-  const [sentenceContextCount, setSentenceContextCount] = useState("1");
+  const [sentenceTranslationBatchSize, setSentenceTranslationBatchSize] = useState("5");
   const [gcsBucket, setGcsBucket] = useState("");
   const [gcsJson, setGcsJson] = useState("");
   const [turnstileSecret, setTurnstileSecret] = useState("");
@@ -457,7 +457,7 @@ export function App() {
     setQwenBaseUrl("");
     setQwenModel("");
     setGcsBucket("");
-    setSentenceContextCount("1");
+    setSentenceTranslationBatchSize("5");
     setReason("");
     setMutationPreview("");
     setArmed(null);
@@ -509,7 +509,7 @@ export function App() {
     setQwenBaseUrl(config.qwen.baseUrl);
     setQwenModel(config.qwen.model);
     setGcsBucket(config.storage.bucket ?? "");
-    setSentenceContextCount(String(config.assistant.sentenceContextCount));
+    setSentenceTranslationBatchSize(String(config.assistant.sentenceTranslationBatchSize));
   };
 
   const loadAdmin = useCallback(
@@ -873,7 +873,7 @@ export function App() {
           setQwenBaseUrl("");
           setQwenModel("");
           setGcsBucket("");
-          setSentenceContextCount("1");
+          setSentenceTranslationBatchSize("5");
         }
         setMetrics(metricsPayload);
         setAnalytics(analyticsPayload);
@@ -1049,7 +1049,7 @@ export function App() {
           ? {}
           : { turnstile: { secretKey: turnstileSecret.trim() } }),
         assistant: {
-          sentenceContextCount: Number.parseInt(sentenceContextCount, 10) || 1,
+          sentenceTranslationBatchSize: Number.parseInt(sentenceTranslationBatchSize, 10) || 5,
         },
         ...extra,
       };
@@ -1502,14 +1502,14 @@ export function App() {
               }}
               qwenBaseUrl={qwenBaseUrl}
               qwenModel={qwenModel}
-              sentenceContextCount={sentenceContextCount}
+              sentenceTranslationBatchSize={sentenceTranslationBatchSize}
               qwenKey={qwenKey}
               gcsBucket={gcsBucket}
               gcsJson={gcsJson}
               turnstileSecret={turnstileSecret}
               onQwenBaseUrl={setQwenBaseUrl}
               onQwenModel={setQwenModel}
-              onSentenceContextCount={setSentenceContextCount}
+              onSentenceTranslationBatchSize={setSentenceTranslationBatchSize}
               onQwenKey={setQwenKey}
               onGcsBucket={setGcsBucket}
               onGcsJson={setGcsJson}
@@ -2026,14 +2026,14 @@ function DeskPanel(props: {
   onProbe: () => void;
   qwenBaseUrl: string;
   qwenModel: string;
-  sentenceContextCount: string;
+  sentenceTranslationBatchSize: string;
   qwenKey: string;
   gcsBucket: string;
   gcsJson: string;
   turnstileSecret: string;
   onQwenBaseUrl: (value: string) => void;
   onQwenModel: (value: string) => void;
-  onSentenceContextCount: (value: string) => void;
+  onSentenceTranslationBatchSize: (value: string) => void;
   onQwenKey: (value: string) => void;
   onGcsBucket: (value: string) => void;
   onGcsJson: (value: string) => void;
@@ -2213,9 +2213,10 @@ function DeskPanel(props: {
                 </td>
               </tr>
               <tr>
-                <td>Sentence context</td>
+                <td>Translation batch</td>
                 <td>
-                  {String(props.runtime?.assistant.sentenceContextCount ?? 1)} before and after
+                  {String(props.runtime?.assistant.sentenceTranslationBatchSize ?? 5)} sentences per
+                  request
                 </td>
               </tr>
             </tbody>
@@ -2329,19 +2330,20 @@ function DeskPanel(props: {
           </label>
         </div>
         <label>
-          Sentence context
+          Translation batch
           <input
             inputMode="numeric"
             disabled={!props.reasonReady}
-            value={props.sentenceContextCount}
+            value={props.sentenceTranslationBatchSize}
             onChange={(event) => {
-              props.onSentenceContextCount(event.target.value);
+              props.onSentenceTranslationBatchSize(event.target.value);
             }}
           />
         </label>
         <p className="lede tight">
-          Previous and next sentences included for Managed Qwen translation. Translate into still
-          comes from the app.
+          How many sentences one Managed Qwen request covers, starting from the current sentence. A
+          shorter remainder at the end of a chapter is sent as-is. Translate into still comes from
+          the app.
         </p>
         <label>
           Qwen API key (leave blank to keep)
